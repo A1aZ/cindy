@@ -516,13 +516,17 @@ const WILDCARD_IN_DRIVE_QUALIFIER = /^[^\\/:]*[*?[][^\\/:]*:/;
  * 第一组是 about_CommonParameters 里**每个 cmdlet 都有**的带值通用参数(含官方短别名 —— `-ea`
  * 这类别名不是前缀,前缀规则匹配不到,必须逐个列)。第二组是这些写/删除 cmdlet 自己的带值参数。
  */
-const POWERSHELL_VALUE_PARAMS: readonly string[] = [
-  // 通用参数(带值):-ErrorAction/-WarningAction/-InformationAction/-ProgressAction 与
-  // -*Variable / -OutBuffer / -PipelineVariable,各带官方短别名。
+const POWERSHELL_COMMON_VALUE_PARAMS: readonly string[] = [
+  // about_CommonParameters 里带值的参数(含官方短别名)。路径枚举器也复用这张表消费参数值,
+  // 避免 `Resolve-Path -ErrorAction Stop` 把 `Stop` 冒充成枚举出来的路径。
   '-erroraction', '-ea', '-warningaction', '-wa', '-informationaction', '-ia', '-infa',
   '-progressaction', '-proga', '-errorvariable', '-ev', '-warningvariable', '-wv',
   '-informationvariable', '-iv', '-outvariable', '-ov', '-outbuffer', '-ob',
   '-pipelinevariable', '-pv',
+];
+
+const POWERSHELL_VALUE_PARAMS: readonly string[] = [
+  ...POWERSHELL_COMMON_VALUE_PARAMS,
   // cmdlet 自己的带值参数。
   '-encoding', '-value', '-itemtype', '-name', '-filter', '-include', '-exclude',
   '-width', '-delimiter', '-stream', '-credential', '-type', '-propertytype',
@@ -3055,10 +3059,14 @@ function positionalOperands(tokens: string[]): string[] {
  * 唯一的目标就贴在参数上；按 POSIX 丢掉之后删除段要么没目标、要么 provenance 落到 `.`。
  * 具名 `-Path value` 的值本身不是 `-` 开头，本来就会留下，不必再认。
  */
-function operandsIncludingAttachedPowerShellPaths(args: string[]): string[] {
+function operandsIncludingAttachedPowerShellPaths(
+  args: string[],
+  consumeCommonPowerShellValues = false,
+): string[] {
   const out: string[] = [];
   let optionsEnded = false;
-  for (const token of args) {
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
     if (!optionsEnded && token === '--') {
       optionsEnded = true;
       continue;
@@ -3066,6 +3074,20 @@ function operandsIncludingAttachedPowerShellPaths(args: string[]): string[] {
     if (!optionsEnded && token.startsWith('-') && token !== '-') {
       const attached = powerShellLocationAttachedTarget(token);
       if (attached !== undefined) out.push(attached);
+      if (consumeCommonPowerShellValues && attached === undefined) {
+        const name = token.split(/[:=]/)[0].toLowerCase();
+        const hasAttachedValue = token.length > name.length;
+        const candidates = POWERSHELL_COMMON_VALUE_PARAMS.includes(name)
+          ? [name]
+          : name.length >= 2
+            ? POWERSHELL_COMMON_VALUE_PARAMS.filter((param) => param.startsWith(name))
+            : [];
+        // 通用参数的所有候选都带值；即使全局表里前缀撞到多个名字,消费行为仍然等价。
+        if (candidates.length > 0 && !hasAttachedValue) {
+          const value = args[i + 1];
+          if (value !== undefined && !value.startsWith('-')) i++;
+        }
+      }
       continue;
     }
     out.push(token);
@@ -3657,6 +3679,8 @@ function enumeratorEmitsRelativeNames(tokens: string[]): boolean {
 }
 
 function hasExplicitPathArgument(tokens: string[]): boolean {
+  const spec = POWERSHELL_WRITE_CMDLETS.get(executableName(tokens[0] ?? ''));
+  if (!spec) return false;
   const known = [
     ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
   ];
@@ -3669,12 +3693,18 @@ function hasExplicitPathArgument(tokens: string[]): boolean {
     const candidates = known.includes(name)
       ? [name]
       : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
-    // 承载路径的具名参数(`-NewName` 只是新名字,不算)。
-    if (candidates.length === 1 && POWERSHELL_ITEM_PARAMS.includes(candidates[0])) return true;
+    const paramRole = powerShellParamRole(candidates, spec);
+    // 未知参数、或候选跨了开关/带值/目标角色时保留旧行为:不猜它是否吃值。这里不能一律
+    // fail closed,因为 Tee-Object 等 cmdlet 的 pipeline 输入是内容,`-Variable v` 也不落盘;
+    // 把它泛化为路径来源会无关收紧权限。本轮只修能够证明候选角色等价的参数。
+    if (paramRole === null) continue;
+    // 承载被操作项的候选角色全部等价才算显式项。`-Dest` 虽同时匹配 -Destination 与
+    // -DestinationPath,两者都只是落地位置、都要消费值,不等于 Move-Item 的源已显式给出。
+    if (candidates.every((candidate) => POWERSHELL_ITEM_PARAMS.includes(candidate))) return true;
     // **凡是带值的已知参数都要把值一并消费**(不只 VALUE_PARAMS —— `-NewName` 在目标参数表里
     // 但同样带值)。不消费的话 `Rename-Item -NewName x` 的 `x` 会被当成位置路径,于是
     // "目标来自 pipeline"被误判成"目标写在命令行上"(实测漏过)。
-    if (candidates.length === 1 && !attached && !POWERSHELL_SWITCH_PARAMS.includes(candidates[0])) {
+    if (paramRole.role !== 'switch' && !attached) {
       const value = args[i + 1];
       if (value !== undefined && !value.startsWith('-')) i++;
     }
@@ -3965,7 +3995,7 @@ function scopedDestructionNeedsConsent(
       if (!POWERSHELL_PATH_ENUMERATORS.has(bin) || replacesSource) {
         upstreamOperands = null;
       } else {
-        const operands = operandsIncludingAttachedPowerShellPaths(tokens.slice(1));
+        const operands = operandsIncludingAttachedPowerShellPaths(tokens.slice(1), true);
         // 没给实参:首段 = 枚举当前目录;有上游 = 项由上游喂进来,provenance 原样保留(含 `null`)。
         // 类型标注是必须的:初始化式里读了 `upstreamOperands`,而它下一行又由本变量赋值,
         // 少了标注 tsc 会判成循环推断(TS7022,desktop 的 typecheck 实测报错)。

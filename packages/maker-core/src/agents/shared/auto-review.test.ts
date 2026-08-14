@@ -3058,6 +3058,8 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       'Get-ChildItem C:\\Windows\\System32 | ? Name -eq x | Remove-Item',   // 别名
       // 显式 destination ≠ 源显式;源来自 pipeline 且会被销毁
       `Get-Item ${hosts} | Move-Item -Destination C:\\repo\\hosts`,
+      `Get-Item ${hosts} | Move-Item -Dest C:\\repo\\hosts`, // 等价缩写也只表示 destination
+      `Get-Item ${hosts} | Move-Item -Dest:C:\\repo\\hosts`, // 贴值写法同样不能遮掉 piped source
       'Get-ChildItem C:\\Windows\\System32\\* | Move-Item -Destination C:\\repo\\bak',
       `Get-Item ${hosts} | Rename-Item -NewName x`,
       `Get-Item ${hosts} | Set-Content -Value x`,
@@ -3154,6 +3156,12 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       '$env:TEMP | Resolve-Path | Remove-Item',
       // 受保护位置经枚举器透传仍必问。
       'Get-ChildItem C:\\Windows\\System32\\* | Resolve-Path | Remove-Item',
+      // 带值的通用参数不能把它的值冒充成 Resolve-Path 产出的路径、覆盖受保护上游 provenance。
+      `Get-Item ${hosts} | Resolve-Path -ErrorAction Stop | Remove-Item`,
+      `Get-Item ${hosts} | Resolve-Path -EA Stop | Remove-Item`,
+      `Get-Item ${hosts} | Resolve-Path -ErrorVariable errs | Remove-Item`,
+      `Get-Item ${hosts} | Resolve-Path -OutBuffer 1 | Remove-Item`,
+      `Get-Item ${hosts} | Resolve-Path -PipelineVariable resolved | Remove-Item`,
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
     }
@@ -3166,6 +3174,8 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       // 上游可证在区内 → 枚举器原样传递,日常清理仍是灰区。
       'Get-ChildItem C:\\repo\\build\\* | Get-Item | Remove-Item',
       'Get-ChildItem C:\\repo\\build | Resolve-Path | Remove-Item',
+      'Get-Item C:\\repo\\a.txt | Resolve-Path -ErrorAction Stop | Remove-Item',
+      'Get-Item C:\\repo\\a.txt | Resolve-Path -EA:Stop | Remove-Item',
       // 枚举器自己显式给了区内位置 → 用它,不看上游。
       `'${hosts}' | Get-ChildItem C:\\repo\\build | Remove-Item`,
     ]) {

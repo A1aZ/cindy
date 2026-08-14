@@ -1703,8 +1703,8 @@ function ExpandedView({
   // 搜索激活前持续记下列表 scrollTop:layout effect 跑时原列表已经 hidden,
   // 那时再读会被浏览器钳成 0。
   const lastListScrollTopRef = useRef(0);
-  // 「在此项目内搜索」会在 query 仍空时 focus 输入框,浏览器先把搜索行滚进视野。
-  // 这段窗口里 searchActive 仍是 false,滚动监听会把焦点滚动后的偏移当成列表位置。
+  // 列表还原位置只记用户自己滚出来的偏移,不记程序化打开 / focus 带出来的滚动。
+  // 「在此项目内搜索」先冻住再滚到顶部露出搜索行;没打字就点走 / 失焦则还原并解冻。
   const freezeListScrollOnOpenRef = useRef(false);
   const lastOpenSignalRef = useRef(openSignal);
   if (openSignal !== lastOpenSignalRef.current) {
@@ -1733,6 +1733,30 @@ function ExpandedView({
       ro?.disconnect();
     };
   }, []);
+  const restoreListScroll = useCallback(() => {
+    freezeListScrollOnOpenRef.current = false;
+    sidebarScrollRef.current?.scrollTo({ top: lastListScrollTopRef.current });
+  }, []);
+  useLayoutEffect(() => {
+    if (openSignal === 0 || searchActive || !freezeListScrollOnOpenRef.current) return;
+    sidebarScrollRef.current?.scrollTo({ top: 0 });
+  }, [openSignal, searchActive]);
+  useEffect(() => {
+    if (searchActive || !freezeListScrollOnOpenRef.current) return undefined;
+    const release = (event: Event) => {
+      const target = event.target as Element | null;
+      if (!target) return;
+      if (target.closest('[data-conversation-search-surface]')) return;
+      if (target.closest('[data-radix-popper-content-wrapper]')) return;
+      restoreListScroll();
+    };
+    document.addEventListener('pointerdown', release, true);
+    document.addEventListener('focusin', release);
+    return () => {
+      document.removeEventListener('pointerdown', release, true);
+      document.removeEventListener('focusin', release);
+    };
+  }, [openSignal, searchActive, restoreListScroll]);
   // 搜索结果替换同一滚动容器里的列表:打开 / 换词 / 换筛选时滚回顶部;
   // 清查询时还原搜索前记下的列表位置。
   const wasSearchActiveRef = useRef(false);
@@ -1745,8 +1769,7 @@ function ExpandedView({
       freezeListScrollOnOpenRef.current = false;
       el.scrollTo({ top: 0 });
     } else if (wasSearchActiveRef.current) {
-      freezeListScrollOnOpenRef.current = false;
-      el.scrollTo({ top: lastListScrollTopRef.current });
+      restoreListScroll();
     }
     wasSearchActiveRef.current = searchActive;
   }, [
@@ -1757,6 +1780,7 @@ function ExpandedView({
     search.lastActivityFilter,
     search.sortBy,
     searchProjectKey,
+    restoreListScroll,
   ]);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
   // (否则选中远程行 → 计数加了但 archive/delete 查 sessionsById 落空、静默忽略)。

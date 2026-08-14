@@ -89,13 +89,18 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(topNavSource).toContain("pinSearch && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'");
     expect(topNavSource).toContain('if (section === \'scrollable\')');
     expect(sidebarUpperSource).toContain('lastListScrollTopRef.current = el.scrollTop');
-    expect(sidebarUpperSource).toContain("el.scrollTo({ top: lastListScrollTopRef.current })");
+    expect(sidebarUpperSource).toContain(
+      'sidebarScrollRef.current?.scrollTo({ top: lastListScrollTopRef.current })',
+    );
     expect(sidebarUpperSource).toContain('search.statusFilter');
     expect(sidebarUpperSource).toContain('searchProjectKey');
     expect(sidebarUpperSource).toContain('onContextMenu={(event) => event.stopPropagation()}');
     expect(sidebarUpperSource).toContain('{searchActive ? (');
     expect(sidebarUpperSource).toContain('<div hidden={searchActive} className="flex flex-col gap-2">');
     expect(sidebarUpperSource).toContain('freezeListScrollOnOpenRef.current = true');
+    expect(sidebarUpperSource).toContain('const restoreListScroll = useCallback');
+    expect(sidebarUpperSource).toContain("document.addEventListener('pointerdown', release, true)");
+    expect(sidebarUpperSource).toContain("document.addEventListener('focusin', release)");
     const inlineSearchSource = read('features', 'cc-agent', 'sidebar', 'SidebarInlineSearch.tsx');
     expect(inlineSearchSource).toContain('inputRef.current?.focus({ preventScroll: true })');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');

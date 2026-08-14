@@ -308,6 +308,12 @@ describe('feishu group lane adapter hooks', () => {
     expect(text).toContain('new chat');
     expect(text).not.toContain('new task');
     expect(text).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
+    const attachedText = adapter.ui.error?.preDispatchFailureText?.(
+      'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits',
+      { attached: true },
+    );
+    expect(attachedText).toContain('Ask permissions / Default permissions');
+    expect(attachedText).toContain('Auto / Auto-review');
     expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();
 
     const fixFailedText = adapter.ui.cards.permissionModeFix?.failed('mock failure');

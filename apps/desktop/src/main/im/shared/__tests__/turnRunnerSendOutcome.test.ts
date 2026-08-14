@@ -1230,6 +1230,37 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     );
   });
 
+  it('does not send a permission-mode fix card when the Agent lacks channel support', async () => {
+    const h = createSessionHarness(
+      async () => {
+        throw new TurnPermissionPolicyUnsupportedError('claude-code', 'ask');
+      },
+      'feishu-session-agent-policy',
+      { capabilities: {} as Capabilities },
+    );
+    mocks.getMaker.mockReturnValue(createMakerHarness(h.session));
+
+    await getRunner().runAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'g/oc_group1/omt_t1',
+      userMessageId: 'msg-agent-policy-failure',
+      text: 'agent policy failure in group',
+      attachments: [],
+      turnPermissionPolicy: {
+        origin: { kind: 'im', channel: 'feishu', taskId: 'msg-agent-policy-failure' },
+        confirmationSurface: 'channel',
+        forceConfirmToolCall: () => false,
+      },
+    });
+
+    expect(mocks.feishuIm.sendText).toHaveBeenCalledWith(
+      'g/oc_group1/omt_t1',
+      expect.any(String),
+      expect.anything(),
+    );
+    expect(mocks.feishuIm.sendInteractiveCard).not.toHaveBeenCalled();
+  });
+
   it('uses attached recovery copy and skips the group fix card for an attached desktop session', async () => {
     setupAttachedSession(
       async () => {

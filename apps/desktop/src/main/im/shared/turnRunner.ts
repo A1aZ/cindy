@@ -2456,8 +2456,11 @@ export function createTurnRunner(
         // 私聊发一张一键修复卡(切回 auto)。只对提供 permissionModeFix 文案
         // 的渠道(飞书)与群 lane 生效 — 私聊不挂群策略, 防御性跳过; 卡片
         // 发送失败不阻塞收口(用户仍可 /permission 手动切)。
+        const permissionModeUnsupported = failure.reason.startsWith(
+          'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:',
+        );
         if (
-          policyUnsupported &&
+          permissionModeUnsupported &&
           adapter.ui.cards.permissionModeFix &&
           output.kind === 'rich-card' &&
           userId.startsWith('g/') &&

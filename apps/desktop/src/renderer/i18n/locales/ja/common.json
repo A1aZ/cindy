@@ -3146,7 +3146,7 @@
         "agentLabel": "Agent",
         "agentUnsupportedOnChannelHint": "{{agent}} Agent はこのチャンネルでメッセージごとの権限確認に対応していないため、メッセージを処理できません。Claude Code または Codex に切り替えてください。",
         "agentUnsupportedOnChannelModeHint": "Agent を切り替えて /new を送信した後、新しい Agent でも権限モードの問題が表示される場合は、/permission を送信して権限モードを調整してください。",
-        "permissionModeUnsupportedOnChannelHint": "現在の Agent はこの権限モードではこのチャンネルを利用できないため、メッセージを処理できません。/permission を送信して対応する権限モードに変更してください。",
+        "permissionModeUnsupportedOnChannelHint": "現在の Agent はこの権限モードではこのチャンネルを利用できないため、メッセージを処理できません。/permission を送信し、グループチャットで利用できる Ask permissions / Default permissions または Auto / Auto-review を選択してください。",
         "feishuAgentUnsupportedHint": "⚠️ 現在の Agent は Feishu グループに必要なメッセージごとの権限確認に対応していないため、メッセージを開始できません。\ndesktop の設定で Feishu の Agent を Claude Code または Codex に切り替え、`/new` を送信して再試行してください。",
         "feishuAgentSwitchPermissionModeHint": "新しい Agent でも権限モードの問題が表示される場合は、`/permission` を送信し、権限選択カードで Ask permissions / Default permissions または Auto / Auto-review を選んでから再試行してください。",
         "feishuPermissionModeRecoveryHint": "⚠️ 現在の権限モードは Feishu グループで安全に実行できません。\n`/permission` を送信し、権限選択カードで Ask permissions / Default permissions または Auto / Auto-review を選んでから再試行してください。それでも開始できない場合は、`/new` を送信して新しいチャットを開始してください。",

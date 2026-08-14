@@ -3146,7 +3146,7 @@
         "agentLabel": "Agent",
         "agentUnsupportedOnChannelHint": "{{agent}} Agent 不支援此渠道的逐條權限確認，訊息將無法處理。請改用 Claude Code 或 Codex。",
         "agentUnsupportedOnChannelModeHint": "切換 Agent 後傳送 /new；若新的 Agent 仍提示權限模式問題，請再傳送 /permission 調整權限模式。",
-        "permissionModeUnsupportedOnChannelHint": "目前 Agent 不支援以此權限模式在該渠道執行，訊息將無法處理。請傳送 /permission 調整權限模式。",
+        "permissionModeUnsupportedOnChannelHint": "目前 Agent 不支援以此權限模式在該渠道執行，訊息將無法處理。請傳送 /permission，並選擇群組中支援的 Ask permissions / Default permissions 或 Auto / Auto-review 模式。",
         "feishuAgentUnsupportedHint": "⚠️ 目前 Agent 不支援飛書群組所需的逐條權限確認，訊息無法啟動。\ndesktop 設定中請將飛書渠道的 Agent 切換為 Claude Code 或 Codex，然後傳送 `/new` 重試。",
         "feishuAgentSwitchPermissionModeHint": "如果新的 Agent 仍提示權限模式問題，請傳送 `/permission`，在權限選擇卡片中選擇 Ask permissions / Default permissions 或 Auto / Auto-review 後重試。",
         "feishuPermissionModeRecoveryHint": "⚠️ 目前權限模式無法在飛書群組中安全執行。\n請傳送 `/permission`，在權限選擇卡片中選擇 Ask permissions / Default permissions 或 Auto / Auto-review 後重試；如果仍無法啟動，可以傳送 `/new` 開啟新的對話。",

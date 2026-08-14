@@ -46,11 +46,6 @@ export interface ApiFetchOptions {
   /** 跳过 401 自动 refresh（避免无限循环；refresh 自身调用时禁用）。 */
   skipAutoRefresh?: boolean;
   /**
-   * 401 自动 refresh / retry 及会话失效前校验请求上下文；返回 false 时停止处理。
-   * 有账号副作用的调用可用它避免旧请求误操作或失效新账号。
-   */
-  isAuthContextCurrent?: () => boolean;
-  /**
    * 目标服务 base URL(必传;来自 clientEndpoints 的对应字段或注入方)。
    * 区域相关服务必须传 resolver：401 refresh 可能切换登录区域，重试前要重新
    * 读取端点，不能把新区域 token 发到首次请求的旧区域。
@@ -142,11 +137,10 @@ export async function serverApiFetch<T>(apiPath: string, opts: ApiFetchOptions):
     result.status === 401 &&
     !opts.skipAutoRefresh &&
     firstCode !== 'ACCOUNT_UNAVAILABLE' &&
-    isRefreshableUnauthorizedCode(firstCode) &&
-    opts.isAuthContextCurrent?.() !== false
+    isRefreshableUnauthorizedCode(firstCode)
   ) {
     const refreshed = await authManager.refresh();
-    if (refreshed && opts.isAuthContextCurrent?.() !== false) {
+    if (refreshed) {
       refreshedAndRetried = true;
       result = await rawFetch<T>(apiPath, opts);
     }
@@ -157,7 +151,6 @@ export async function serverApiFetch<T>(apiPath: string, opts: ApiFetchOptions):
     const errMsg = readErrorMessage(result.data) ?? `请求失败 (${result.status})`;
     if (
       result.status === 401 &&
-      opts.isAuthContextCurrent?.() !== false &&
       (errCode === 'ACCOUNT_UNAVAILABLE' ||
         (refreshedAndRetried && isRefreshableUnauthorizedCode(errCode)))
     ) {

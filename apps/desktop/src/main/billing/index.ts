@@ -6,7 +6,6 @@ import {
   type CreateBillingSubscriptionRequest,
   type CreateBillingTopupRequest,
 } from '../../shared/billing.js';
-import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { getClientEndpoint } from '../clientEndpointsService.js';
 import { ServerApiError, serverApiFetch, type ApiFetchOptions } from '../serverApiClient.js';
 import { requireObject, throwIpcError } from '../utils/ipcValidate.js';
@@ -373,13 +372,10 @@ export function createBillingHandlers(
       if (raw !== undefined) {
         throwIpcError('INVALID_PARAMS', 'subscription resume does not accept a payload');
       }
-      const ownerScopeKey = activeOwnerScopeKey();
       return projectResponse(
         await invoke<unknown>('/api/billing/subscription/resume', {
           method: 'POST',
           allowedRedactedErrorCodes: ['RESUME_NOT_AVAILABLE'],
-          isAuthContextCurrent: () =>
-            !isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScopeKey,
         }),
         projectBillingSubscription,
       );

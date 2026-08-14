@@ -508,7 +508,12 @@ export function getPiNativeSubscriptionHandler(
       }
       await pipeNativeResponse(response, res);
     } catch (err) {
-      if (controller.signal.aborted || res.headersSent || res.destroyed) return;
+      if (controller.signal.aborted || res.destroyed) return;
+      // Once a 200/SSE response has started, an upstream body failure cannot
+      // be converted into a structured 502. Propagate it to runLocalHandler,
+      // which destroys the client response so PI observes a transport failure
+      // instead of accepting a cleanly-ended truncated stream.
+      if (res.headersSent) throw err;
       log.warn('PI native subscription forwarding failed', {
         providerId,
         err: err instanceof Error ? err.message : String(err),

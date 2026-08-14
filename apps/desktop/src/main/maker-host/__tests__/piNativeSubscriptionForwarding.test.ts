@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
+import { createAnthropicCompatProxy } from '@cindy/anthropic-compat-proxy';
+
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/cindy-pi-native-forwarding-test' },
 }));
@@ -113,6 +115,45 @@ describe('PI native subscription forwarding', () => {
     expect(JSON.stringify(init?.headers)).not.toContain('placeholder-that-must-not-leak');
     expect(res.status).toBe(200);
     expect(Buffer.concat(res.chunks).toString('utf8')).toContain('event: done');
+  });
+
+  it('destroys the local bridge response when a native upstream stream fails after headers', async () => {
+    const upstreamError = new Error('native upstream disconnected mid-stream');
+    let sentFirstChunk = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sentFirstChunk) {
+          sentFirstChunk = true;
+          controller.enqueue(Buffer.from('event: response.output_text.delta\ndata: {"delta":"partial"}\n\n'));
+          return;
+        }
+        controller.error(upstreamError);
+      },
+    });
+    const handler = getPiNativeSubscriptionHandler('openai', 'session-stream-error', deps({
+      fetch: vi.fn(async () => new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as PiNativeSubscriptionHandlerDeps['fetch'],
+    }));
+    const proxy = await createAnthropicCompatProxy({
+      upstream: null,
+      transformRequest: [],
+      routingTransform: () => ({ localHandler: handler }),
+    });
+
+    try {
+      await expect((async () => {
+        const response = await fetch(`${proxy.url}/codex/responses`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        });
+        await response.text();
+      })()).rejects.toThrow();
+    } finally {
+      await proxy.dispose();
+    }
   });
 
   it('forwards xAI Chat Completions natively and invalidates the failed host token', async () => {

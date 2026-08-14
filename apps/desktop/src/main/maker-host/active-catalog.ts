@@ -70,6 +70,18 @@ let discoveredCodex: CatalogModel[] = [];
  * 空/坏数据绝不抹掉静态兜底。由 generic-oauth 的 models 发现流程写入。
  */
 const discoveredByProvider = new Map<string, Partial<Record<AgentKind, CatalogModel[]>>>();
+/**
+ * 供应商媒体模型动态发现快照。成功快照决定当前账号的型号存在性，静态／远端
+ * 同 id 条目只提供 first-wins 展示元数据；发现失败不写本 Map，完整回落静态目录。
+ * 媒体字段显式 `[]` 是服务端停用信号，合并时不得被本快照复活。
+ */
+const discoveredMediaByProvider = new Map<
+  string,
+  {
+    imageModels?: NonNullable<Provider['imageModels']>;
+    videoModels?: NonNullable<Provider['videoModels']>;
+  }
+>();
 /** 单 tab 能力覆盖块(shared/modelAccess ModelAccessAgentOverride 同形)。 */
 export interface XdGatewayAgentOverride {
   contextWindow?: number;
@@ -134,6 +146,12 @@ export interface XdGatewayModelInfo {
  * v3 必需字段在协议边界严格校验；这里不读取公共 Catalog，也不按模型 id 或固定常量补值。
  */
 let xdGatewayModels: XdGatewayModelInfo[] = [];
+/**
+ * XD 模型里「由客户端投影给 Codex、但走 Anthropic Messages bridge」的 id 集合。
+ * Responses → Anthropic Messages bridge，不能误用 XD 的原生 Responses 路由。
+ * Set 在模型目录刷新时一次性派生，路由热路径只做 O(1) 查询。
+ */
+let xdCodexAnthropicBridgeModelIds = new Set<string>();
 
 /**
  * Anthropic(Claude.ai 订阅)的**发现清单**:由 host 的 anthropic 发现流程注入
@@ -177,6 +195,33 @@ export function resolveXdPiGatewayWireProtocol(
   if (!gatewayModel?.agents?.includes('pi')) return undefined;
   const wireProtocol = gatewayModel.perAgent?.pi?.wireProtocol;
   return wireProtocol === 'openai-responses' ? wireProtocol : null;
+}
+
+/** 派生 XD 中「仅 claude-code 面（投影给 Claude）、无 codex 原生」的模型 id 集合。 */
+function deriveXdCodexAnthropicBridgeModelIds(models: XdGatewayModelInfo[]): Set<string> {
+  const support = new Map<string, { claudeCode: boolean; codex: boolean }>();
+  for (const model of models) {
+    const current = support.get(model.id) ?? { claudeCode: false, codex: false };
+    for (const agent of xdGatewayTargetAgents(model)) {
+      if (agent === 'claude-code') current.claudeCode = true;
+      else if (agent === 'codex') current.codex = true;
+    }
+    support.set(model.id, current);
+  }
+  return new Set(
+    [...support]
+      .filter(([, agents]) => agents.claudeCode && !agents.codex)
+      .map(([modelId]) => modelId),
+  );
+}
+
+/** 当前 XD 模型是否由客户端投影给 Codex、并应走 Anthropic Messages bridge。 */
+export function isXdCodexAnthropicBridgeModel(modelId: string): boolean {
+  // Codex 会把 1M 上下文选择编码成 wire model 后缀；目录身份仍是原始 model id。
+  // wire model 还可能带 `codex/` 前缀（视觉桥按模型前缀选面时传给路由判定的形态）；
+  // 剥到目录身份再查，否则投影特例不命中、误走 Responses 面。
+  const normalized = modelId.replace(/\[1m\]$/, '').replace(/^codex\//, '');
+  return xdCodexAnthropicBridgeModelIds.has(normalized);
 }
 
 function nonNegativeFiniteOrUndefined(value: number | undefined): number | undefined {
@@ -258,6 +303,26 @@ function augmentModels(
         .map(({ model }) => model)
     : combined;
   return { ...p, models: { ...p.models, [agent]: models } };
+}
+
+function applyMediaDiscovery(
+  provider: Provider,
+  key: 'imageModels' | 'videoModels',
+  discovered: NonNullable<Provider['imageModels']>,
+): Provider {
+  const existing = provider[key];
+  // undefined = 这份原始目录没有声明能力；正常加载路径会先由 source 用 bundled
+  // 补旧目录。[] 则是明确停用。两种情况都不能仅凭账号发现把能力凭空复活。
+  if (!existing || existing.length === 0) return provider;
+  // 官方端点成功返回空清单 = 当前账号此类媒体没有可执行型号。它与请求失败不同，
+  // 必须清掉旧快照／静态兜底，不能继续展示一个账号实际不可用的型号。
+  if (discovered.length === 0) return { ...provider, [key]: [] };
+  const discoveredById = new Map(discovered.map((model) => [model.id, model]));
+  const retained = existing.filter((model) => discoveredById.delete(model.id));
+  const next = [...retained, ...discoveredById.values()];
+  const unchanged =
+    next.length === existing.length && next.every((model, index) => model === existing[index]);
+  return unchanged ? provider : { ...provider, [key]: next };
 }
 
 /**
@@ -520,6 +585,20 @@ function computeMerged(): Catalog {
       let next = p;
       for (const [agent, additions] of Object.entries(byAgent) as [AgentKind, CatalogModel[]][]) {
         if (additions.length > 0) next = augmentModels(next, agent, additions);
+      }
+      return next;
+    });
+  }
+  if (discoveredMediaByProvider.size > 0) {
+    providers = providers.map((provider) => {
+      const snapshot = discoveredMediaByProvider.get(provider.id);
+      if (!snapshot) return provider;
+      let next = provider;
+      if (snapshot.imageModels) {
+        next = applyMediaDiscovery(next, 'imageModels', snapshot.imageModels);
+      }
+      if (snapshot.videoModels) {
+        next = applyMediaDiscovery(next, 'videoModels', snapshot.videoModels);
       }
       return next;
     });
@@ -790,11 +869,36 @@ export function setDiscoveredProviderModels(
 }
 
 /**
+ * 原子注入供应商图片／视频发现快照。成功快照决定存在性，同 id 静态元数据优先；
+ * 传 null 清空该供应商账号态快照，回到当前
+ * 静态／远端目录；失败路径不应调用，以保留同账号上次成功结果。
+ */
+export function setDiscoveredProviderMediaModels(
+  providerId: string,
+  snapshot: {
+    imageModels?: NonNullable<Provider['imageModels']>;
+    videoModels?: NonNullable<Provider['videoModels']>;
+  } | null,
+): void {
+  if (snapshot === null) discoveredMediaByProvider.delete(providerId);
+  else {
+    const previous = discoveredMediaByProvider.get(providerId) ?? {};
+    discoveredMediaByProvider.set(providerId, {
+      ...previous,
+      ...(snapshot.imageModels ? { imageModels: [...snapshot.imageModels] } : {}),
+      ...(snapshot.videoModels ? { videoModels: [...snapshot.videoModels] } : {}),
+    });
+  }
+  markChanged();
+}
+
+/**
  * 注入 XD 网关权威模型清单(model-access 拉取流程写入,重建逻辑见 computeMerged)。
  * 传空数组 = 实时清单不可用,此时 XD 供应商保留但不暴露任何模型。
  */
 export function setXdGatewayModels(models: XdGatewayModelInfo[]): void {
   xdGatewayModels = [...models];
+  xdCodexAnthropicBridgeModelIds = deriveXdCodexAnthropicBridgeModelIds(models);
   markChanged();
 }
 

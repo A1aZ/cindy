@@ -90,7 +90,10 @@ import {
   createClaudeSessionActivityResponseObserver,
   recordClaudeApiActivity,
 } from './claude-session-background-activity.js';
-import { authenticatePiProxySession } from './pi-proxy-session-auth.js';
+import {
+  authenticatePiProxySession,
+  getPiProxySessionProvider,
+} from './pi-proxy-session-auth.js';
 
 // scope = 'cc-proxy' → logger.ts 的 emit() 路由把这条流量并入统一 agent 流
 // (agent-*.ndjson, source=proxy)。child(sub) 会继续保持 'cc-proxy/sub' 前缀, routing 一致。
@@ -195,20 +198,29 @@ export function createModelRoutingTransform(): RoutingTransform {
     const piProviderId = piSessionId
       ? headerValue(ctx.headers, 'x-cindy-pi-provider-id')
       : null;
+    const registeredPiProviderId = piSessionId
+      ? getPiProxySessionProvider(piSessionId)
+      : null;
     const selectedPiProviderId = piSessionId ? getSessionProvider(piSessionId) : null;
     if (
       piSessionId
       && (
-        (piProviderId !== null && piProviderId !== selectedPiProviderId)
+        piProviderId !== registeredPiProviderId
+        || (
+          piProviderId !== null
+          && selectedPiProviderId !== null
+          && piProviderId !== selectedPiProviderId
+        )
         || (
           (selectedPiProviderId === 'openai' || selectedPiProviderId === 'xai')
           && piProviderId !== selectedPiProviderId
         )
       )
     ) {
-      // A valid loopback session token authorizes only the provider selected by
-      // that Cindy session. Do not let a child process/extension swap this
-      // internal header and borrow another connected subscription credential.
+      // A valid loopback session token authorizes only the provider that the
+      // host resolved for this exact Pi process. The persisted session choice
+      // remains a second constraint when present. Do not let a child process or
+      // extension swap this header and borrow another subscription credential.
       return {
         localHandler: async ({ res }) => {
           const payload = JSON.stringify({

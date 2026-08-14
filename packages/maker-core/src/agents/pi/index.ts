@@ -1807,7 +1807,13 @@ export class PiAgent extends BaseAgent {
             this.deps.runtimeConfig.managedExecutablePaths?.ripgrep,
           );
       if (proxySessionToken && opts.sessionId && this.deps.registerPiProxySession) {
-        const disposer = this.deps.registerPiProxySession(opts.sessionId, proxySessionToken);
+        const disposer = this.deps.registerPiProxySession(
+          opts.sessionId,
+          proxySessionToken,
+          () => mutablePiProviderId === PI_PROVIDER_ID
+            ? null
+            : resolveSourceProvider(mutablePiProviderId),
+        );
         if (typeof disposer === 'function') disposeProxySession = disposer;
       }
       // 视觉桥后端 env（层 C）：host 解析后注入，cindy-bridge 的 vision 工具读取。

@@ -464,9 +464,15 @@ export interface AgentDeps {
   /**
    * Pi-only: authenticate a child process to the host's loopback model proxy.
    * PiAgent creates a high-entropy token per session, registers it before spawn,
-   * and disposes the exact registration when startup fails or the session closes.
+   * binds the currently resolved native provider, and disposes the exact
+   * registration when startup fails or the session closes. The provider reader
+   * follows confirmed set_model changes without trusting a child-supplied header.
    */
-  registerPiProxySession?: (sessionId: string, token: string) => (() => void) | void;
+  registerPiProxySession?: (
+    sessionId: string,
+    token: string,
+    resolveProviderId: () => string | null,
+  ) => (() => void) | void;
 
   /**
    * BYOM:host 解析出当前会话可用的 pi **原生 provider**(用户自定义/本地模型)+ 需注入的

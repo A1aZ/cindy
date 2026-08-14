@@ -191,12 +191,13 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
     setProviderOAuthTokenReader((providerId, agent) =>
       providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('pi-claude-token') : null,
     );
-    registerPiProxySession('sess-pi', 'session-secret');
+    registerPiProxySession('sess-pi', 'session-secret', () => 'anthropic');
     const decision = createModelRoutingTransform()(
       { model: 'claude-opus-5' },
       ctxWith({
         'x-cindy-pi-session-id': 'sess-pi',
         'x-cindy-pi-session-token': 'session-secret',
+        'x-cindy-pi-provider-id': 'anthropic',
         'x-api-key': 'cindy-pi-provider-auth-placeholder',
       }),
     );
@@ -222,7 +223,7 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
     ['xai', '/v1/chat/completions'],
   ] as const)('routes native %s PI requests to a local raw forwarder at %s', (providerId, url) => {
     setSessionProvider('sess-pi', providerId);
-    registerPiProxySession('sess-pi', 'session-secret');
+    registerPiProxySession('sess-pi', 'session-secret', () => providerId);
     const decision = createModelRoutingTransform()(
       undefined,
       ctxWith({
@@ -235,9 +236,51 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
     expect(decision).toEqual({ localHandler: expect.any(Function) });
   });
 
+  it.each([
+    ['openai', '/codex/responses'],
+    ['xai', '/v1/responses'],
+  ] as const)('trusts the host-resolved implicit %s PI source when persistence is empty', (providerId, url) => {
+    clearSessionProvider('sess-pi');
+    registerPiProxySession('sess-pi', 'session-secret', () => providerId);
+    const decision = createModelRoutingTransform()(
+      undefined,
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'session-secret',
+        'x-cindy-pi-provider-id': providerId,
+      }, url),
+    );
+
+    expect(decision).toEqual({ localHandler: expect.any(Function) });
+  });
+
+  it('rejects an implicit native header that differs from the host-resolved PI source', async () => {
+    clearSessionProvider('sess-pi');
+    registerPiProxySession('sess-pi', 'session-secret', () => 'xai');
+    const decision = await createModelRoutingTransform()(
+      undefined,
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'session-secret',
+        'x-cindy-pi-provider-id': 'openai',
+      }, '/codex/responses'),
+    );
+    const response = {
+      status: 0,
+      body: '',
+      writeHead(status: number) { this.status = status; },
+      end(body: string) { this.body = body; },
+    };
+
+    await decision?.localHandler?.({ res: response } as never);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toContain('pi_provider_mismatch');
+  });
+
   it('rejects a native provider header that does not match the Cindy session provider', async () => {
     setSessionProvider('sess-pi', 'anthropic');
-    registerPiProxySession('sess-pi', 'session-secret');
+    registerPiProxySession('sess-pi', 'session-secret', () => 'anthropic');
     const decision = await createModelRoutingTransform()(
       undefined,
       ctxWith({
@@ -261,7 +304,7 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
 
   it('rejects a missing native provider header for an OpenAI PI session', async () => {
     setSessionProvider('sess-pi', 'openai');
-    registerPiProxySession('sess-pi', 'session-secret');
+    registerPiProxySession('sess-pi', 'session-secret', () => 'openai');
     const decision = await createModelRoutingTransform()(
       undefined,
       ctxWith({
@@ -285,7 +328,7 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
   it('does not send an authenticated Anthropic PI request through the legacy prefix bridge', async () => {
     setClaudeProxyGatewayKeyReader(() => 'sk-gw');
     setSessionProvider('sess-pi', 'anthropic');
-    registerPiProxySession('sess-pi', 'session-secret');
+    registerPiProxySession('sess-pi', 'session-secret', () => 'anthropic');
     setProviderOAuthTokenReader((providerId, agent) =>
       providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('pi-claude-token') : null,
     );
@@ -306,7 +349,7 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
 
   it('rejects a forged session id before provider credentials can be selected', async () => {
     setSessionProvider('sess-pi', 'anthropic');
-    registerPiProxySession('sess-pi', 'real-secret');
+    registerPiProxySession('sess-pi', 'real-secret', () => 'anthropic');
     const decision = await createModelRoutingTransform()(
       { model: 'claude-opus-5' },
       ctxWith({

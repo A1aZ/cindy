@@ -9,18 +9,27 @@
 
 import { timingSafeEqual } from 'node:crypto';
 
-const activeTokens = new Map<string, string>();
+interface ActivePiProxySession {
+  token: string;
+  resolveProviderId: () => string | null;
+}
 
-export function registerPiProxySession(sessionId: string, token: string): () => void {
+const activeSessions = new Map<string, ActivePiProxySession>();
+
+export function registerPiProxySession(
+  sessionId: string,
+  token: string,
+  resolveProviderId: () => string | null = () => null,
+): () => void {
   if (!sessionId || !token) throw new Error('Pi proxy session registration requires an id and token');
-  activeTokens.set(sessionId, token);
+  activeSessions.set(sessionId, { token, resolveProviderId });
   return () => {
-    if (activeTokens.get(sessionId) === token) activeTokens.delete(sessionId);
+    if (activeSessions.get(sessionId)?.token === token) activeSessions.delete(sessionId);
   };
 }
 
 export function authenticatePiProxySession(sessionId: string, candidate: string | null): boolean {
-  const expected = activeTokens.get(sessionId);
+  const expected = activeSessions.get(sessionId)?.token;
   if (!expected || !candidate) return false;
   const expectedBytes = Buffer.from(expected);
   const candidateBytes = Buffer.from(candidate);
@@ -28,7 +37,15 @@ export function authenticatePiProxySession(sessionId: string, candidate: string 
     && timingSafeEqual(expectedBytes, candidateBytes);
 }
 
+/**
+ * Host-resolved provider bound to the authenticated Pi process. Callers must
+ * authenticate the same session immediately before reading this value.
+ */
+export function getPiProxySessionProvider(sessionId: string): string | null {
+  return activeSessions.get(sessionId)?.resolveProviderId() ?? null;
+}
+
 /** Test isolation only. */
 export function resetPiProxySessionsForTest(): void {
-  activeTokens.clear();
+  activeSessions.clear();
 }

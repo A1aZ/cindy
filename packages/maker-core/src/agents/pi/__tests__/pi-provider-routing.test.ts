@@ -205,6 +205,7 @@ describe('Pi provider-aware model routing', () => {
 
   it('routes host subscriptions through PI native providers and wire model ids', async () => {
     const authProviderIds: Array<string | null | undefined> = [];
+    let resolveProxyProviderId: (() => string | null) | undefined;
     const availableModels: ModelDescriptor[] = [
       {
         id: 'chatgpt/gpt-cindy-daily-test', displayName: 'GPT Daily', contextWindow: 272_000,
@@ -239,6 +240,9 @@ describe('Pi provider-aware model routing', () => {
       capabilityAdditions: { availableModels },
       resolvePiAgentHome: () => agentHome,
       resolvePiGatewayModelApi: () => 'openai-responses',
+      registerPiProxySession: (_sessionId, _token, resolveProviderId) => {
+        resolveProxyProviderId = resolveProviderId;
+      },
       resolvePiNativeProviders: async () => ({
         providers: [
           {
@@ -280,11 +284,11 @@ describe('Pi provider-aware model routing', () => {
       sessionId: 'native-subscription-routing',
       workingDir: cwd,
       model: 'chatgpt/gpt-cindy-daily-test',
-      providerId: 'openai',
       effort: 'high',
     });
 
     expect(authProviderIds).toEqual(['openai']);
+    expect(resolveProxyProviderId?.()).toBe('openai');
     expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 4))
       .toEqual(['--provider', 'openai-codex', '--model', 'gpt-cindy-daily-test']);
     const configHome = captured.env.PI_CODING_AGENT_DIR as string;
@@ -316,6 +320,7 @@ describe('Pi provider-aware model routing', () => {
     expect(captured.requests).toContainEqual({
       type: 'set_model', provider: 'xai', modelId: 'grok-4.5',
     });
+    expect(resolveProxyProviderId?.()).toBe('xai');
     expect(JSON.parse(readFileSync(runtimeFileOf('subagent', 'native-subscription-routing'), 'utf8')))
       .toEqual({ model: 'grok-4.5', provider: 'xai' });
 
@@ -323,6 +328,7 @@ describe('Pi provider-aware model routing', () => {
     expect(captured.requests).toContainEqual({
       type: 'set_model', provider: 'anthropic', modelId: 'claude-opus-5',
     });
+    expect(resolveProxyProviderId?.()).toBe('anthropic');
     await handle.close();
   });
 

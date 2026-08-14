@@ -3579,6 +3579,21 @@ export function ChatInput({
       const ghost = ghostsForCommand.find(
         (candidate) => candidate.manifest.id === draft.pendingHostCapabilityGhostId,
       );
+      // 远程/未解析归属不恢复 Host capability 芯片(与 `+` 菜单和发送路径的
+      // fail-closed 同口径):SSH(remoteHostId)或 device-link(deviceLinkDeviceId
+      // !== null,含未解析)会话若恢复芯片,发送时会被 TARGET_UNAVAILABLE 拦截,
+      // 阻塞用户发送正文。仅已确认本机(deviceLinkDeviceId === null 且无
+      // remoteHostId)才恢复,否则静默丢弃芯片意图。
+      const dlDeviceId = deviceLinkDeviceIdRef.current;
+      const canPlaceHostCapability =
+        !remoteHostIdRef.current && dlDeviceId === null;
+      // 归属未解析(deviceLinkDeviceId === undefined)时延后决定:不清除
+      // pendingHostCapabilityGhostId,等归属解析后 effect 重跑。若此时清除,
+      // 后续解析成本机也无法恢复芯片,Host 插件(如 iOS Simulator)的"使用"
+      // handoff 会静默丢失。
+      if (dlDeviceId === undefined) {
+        return;
+      }
       saveComposerDraft(
         storageKey,
         {
@@ -3588,13 +3603,6 @@ export function ChatInput({
         },
         { silent: true },
       );
-      // 远程/未解析归属不恢复 Host capability 芯片(与 `+` 菜单和发送路径的
-      // fail-closed 同口径):SSH(remoteHostId)或 device-link(deviceLinkDeviceId
-      // !== null,含未解析)会话若恢复芯片,发送时会被 TARGET_UNAVAILABLE 拦截,
-      // 阻塞用户发送正文。仅已确认本机(deviceLinkDeviceId === null 且无
-      // remoteHostId)才恢复,否则静默丢弃芯片意图。
-      const canPlaceHostCapability =
-        !remoteHostIdRef.current && deviceLinkDeviceIdRef.current === null;
       if (ghost && canPlaceHostCapability) {
         placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
       }

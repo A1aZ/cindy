@@ -198,20 +198,38 @@ export async function generatePromptPrediction(
     {
       readSessionProviderId: readSessionProviderIdFromDb,
       listConnectedProviders: listConnectedProvidersForAgent,
-      // 派发紧前复查:会话在 drain 与 provider/凭证解析期间可能被切换 agent
-      // (sessionAgentSwitchHandler 会提交 agentKind 变更),上方 title.ts handler 里 drain 后的
-      // agentKind 复核到 provider 实际发出 HTTP 之间仍有一段异步窗口。这里在发出付费请求的紧前
-      // 再回读一次 DB agentKind,与本次预测所用 agentKind 不一致时中止,避免把新 agent 的转写
-      // 路由到切换前的 provider/账号触发付费调用。
+      // 派发紧前复查:会话在 drain 与 provider/凭证解析期间可能被切换 agent/删除/转远程。
+      // (sessionAgentSwitchHandler 会提交 agentKind 变更,deleteSession 会软删除)上方
+      // title.ts handler 里 drain 后的资格复核到 provider 实际发出 HTTP 之间仍有一段异步窗口。
+      // 这里在发出付费请求的紧前再回读一次 DB 完整资格字段:
+      //   - agentKind: 会话被切换 agent 时中止,避免路由到切换前的 provider/账号
+      //   - status: 会话被软删除时中止,避免外发已删转写
+      //   - source: 会话被转为 review 时中止
+      //   - remoteHostId: 会话被转为远程时中止
+      //   - providerId: 会话 provider 被切换时中止,避免路由到过期 provider
       beforeDispatch: async ({ sessionId, agentKind }) => {
         try {
           const [row] = await getDbClient()
-            .drizzle.select({ agentKind: sessions.agentKind })
+            .drizzle.select({
+              agentKind: sessions.agentKind,
+              status: sessions.status,
+              source: sessions.source,
+              remoteHostId: sessions.remoteHostId,
+              providerId: sessions.providerId,
+            })
             .from(sessions)
             .where(eq(sessions.id, sessionId))
             .limit(1);
           if (!row) return false;
-          return dbToMakerAgentKind(row.agentKind) === agentKind;
+          if (row.status === 'deleted') return false;
+          if (row.source === 'review') return false;
+          if (row.remoteHostId) return false;
+          if (dbToMakerAgentKind(row.agentKind) !== agentKind) return false;
+          // providerId 变更:会话在派发紧前被切换 provider 时,本次预测路由到
+          // 切换前的 provider/账号触发付费调用,应中止。
+          const currentProviderId = await readSessionProviderIdFromDb(sessionId);
+          if (currentProviderId !== row.providerId) return false;
+          return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。
           return false;

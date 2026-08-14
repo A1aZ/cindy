@@ -907,7 +907,55 @@ const POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES = new Set([
   'setlastaccesstimeutc', 'setlastwritetime', 'setlastwritetimeutc',
 ]);
 
-function powerShellDotNetStaticWriteTargets(segment: string): string[] {
+/** FileInfo / DirectoryInfo 在构造后会改变文件系统的实例方法。只读方法刻意不在表里。 */
+const POWERSHELL_DOTNET_FILEINFO_INSTANCE_WRITES = new Set([
+  'appendtext', 'copyto', 'create', 'createassymboliclink', 'createtext', 'decrypt',
+  'delete', 'encrypt', 'moveto', 'open', 'openwrite', 'replace', 'setaccesscontrol',
+]);
+
+const POWERSHELL_DOTNET_DIRECTORYINFO_INSTANCE_WRITES = new Set([
+  'create', 'createassymboliclink', 'createsubdirectory', 'delete', 'moveto',
+  'setaccesscontrol',
+]);
+
+/** FileSystemInfo / FileInfo 的可写属性；赋值与变更方法同样会修改实例指向的文件系统项。 */
+const POWERSHELL_DOTNET_INSTANCE_WRITE_PROPERTIES = new Set([
+  'attributes', 'creationtime', 'creationtimeutc', 'isreadonly', 'lastaccesstime',
+  'lastaccesstimeutc', 'lastwritetime', 'lastwritetimeutc', 'unixfilemode',
+]);
+
+/** 找到 PowerShell 调用的配对右括号；构造参数里的字符串和嵌套调用都不能提前截断。 */
+function closingPowerShellCallParen(text: string, opening: number): number | null {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = opening; i < text.length; i++) {
+    const ch = text[i];
+    if (quote !== null) {
+      if (quote === '"' && ch === '`' && i + 1 < text.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && text[i + 1] === "'") i += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '`' && i + 1 < text.length) {
+      i += 1;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')' && --depth === 0) return i;
+  }
+  return null;
+}
+
+function powerShellDotNetWriteTargets(segment: string): string[] {
   // 调用表达式不一定在段首:`$null = [IO.File]::Delete(...)`、`[void][IO.File]::WriteAllText(...)`
   // 与括号中的调用都会照常执行。只在 PowerShell 字符串**之外**扫描类型表达式，既覆盖这些前缀，
   // 又不把 `Write-Output "[IO.File]::Delete(...)"` 里的数据文字当成执行。
@@ -935,14 +983,37 @@ function powerShellDotNetStaticWriteTargets(segment: string): string[] {
       continue;
     }
     if (ch !== '[') continue;
+    const expression = segment.slice(i);
     const call = /^\[(?:system\.)?io\.(file|directory)\]\s*::\s*([a-z][a-z0-9]*)\s*\(/i
-      .exec(segment.slice(i));
-    if (!call) continue;
-    const methods = call[1].toLowerCase() === 'file'
-      ? POWERSHELL_DOTNET_STATIC_FILE_WRITES
-      : POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES;
-    if (methods.has(call[2].toLowerCase())) return [UNPROVABLE_WRITE_TARGET];
-    i += call[0].length - 1;
+      .exec(expression);
+    if (call) {
+      const methods = call[1].toLowerCase() === 'file'
+        ? POWERSHELL_DOTNET_STATIC_FILE_WRITES
+        : POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES;
+      if (methods.has(call[2].toLowerCase())) return [UNPROVABLE_WRITE_TARGET];
+      i += call[0].length - 1;
+      continue;
+    }
+
+    // FileInfo / DirectoryInfo 的实例调用也不经过 cmdlet 参数绑定。只覆盖同一表达式里可证明类型的
+    // `::new(...)` 构造；跨语句变量、反射与动态类型需要数据流/AST,不在这里猜。
+    const constructor = /^\[(?:system\.)?io\.(fileinfo|directoryinfo)\]\s*::\s*new\s*\(/i
+      .exec(expression);
+    if (!constructor) continue;
+    const closing = closingPowerShellCallParen(segment, i + constructor[0].length - 1);
+    if (closing === null) return [UNPROVABLE_WRITE_TARGET];
+    const tail = segment.slice(closing + 1);
+    const memberCall = /^\s*\)*\s*\.\s*([a-z][a-z0-9]*)\s*\(/i.exec(tail);
+    const instanceMethods = constructor[1].toLowerCase() === 'fileinfo'
+      ? POWERSHELL_DOTNET_FILEINFO_INSTANCE_WRITES
+      : POWERSHELL_DOTNET_DIRECTORYINFO_INSTANCE_WRITES;
+    if (memberCall && instanceMethods.has(memberCall[1].toLowerCase())) {
+      return [UNPROVABLE_WRITE_TARGET];
+    }
+    const propertyWrite = /^\s*\)*\s*\.\s*([a-z][a-z0-9]*)\s*=/i.exec(tail);
+    if (propertyWrite && POWERSHELL_DOTNET_INSTANCE_WRITE_PROPERTIES.has(
+      propertyWrite[1].toLowerCase(),
+    )) return [UNPROVABLE_WRITE_TARGET];
   }
   return [];
 }
@@ -3059,9 +3130,14 @@ function positionalOperands(tokens: string[]): string[] {
  * 唯一的目标就贴在参数上；按 POSIX 丢掉之后删除段要么没目标、要么 provenance 落到 `.`。
  * 具名 `-Path value` 的值本身不是 `-` 开头，本来就会留下，不必再认。
  */
+interface PowerShellOperandValueParams {
+  scalar: readonly string[];
+  list: readonly string[];
+}
+
 function operandsIncludingAttachedPowerShellPaths(
   args: string[],
-  consumeCommonPowerShellValues = false,
+  valueParams?: PowerShellOperandValueParams,
 ): string[] {
   const out: string[] = [];
   let optionsEnded = false;
@@ -3074,18 +3150,26 @@ function operandsIncludingAttachedPowerShellPaths(
     if (!optionsEnded && token.startsWith('-') && token !== '-') {
       const attached = powerShellLocationAttachedTarget(token);
       if (attached !== undefined) out.push(attached);
-      if (consumeCommonPowerShellValues && attached === undefined) {
+      if (valueParams !== undefined && attached === undefined) {
         const name = token.split(/[:=]/)[0].toLowerCase();
         const hasAttachedValue = token.length > name.length;
-        const candidates = POWERSHELL_COMMON_VALUE_PARAMS.includes(name)
+        const known = [...valueParams.scalar, ...valueParams.list];
+        const candidates = known.includes(name)
           ? [name]
           : name.length >= 2
-            ? POWERSHELL_COMMON_VALUE_PARAMS.filter((param) => param.startsWith(name))
+            ? known.filter((param) => param.startsWith(name))
             : [];
-        // 通用参数的所有候选都带值；即使全局表里前缀撞到多个名字,消费行为仍然等价。
-        if (candidates.length > 0 && !hasAttachedValue) {
+        const allList = candidates.length > 0
+          && candidates.every((param) => valueParams.list.includes(param));
+        const allScalar = candidates.length > 0
+          && candidates.every((param) => valueParams.scalar.includes(param));
+        // 只在候选的消费角色一致时前进；跨 scalar/list 的歧义前缀不猜参数边界。
+        if ((allList || allScalar) && !hasAttachedValue) {
           const value = args[i + 1];
-          if (value !== undefined && !value.startsWith('-')) i++;
+          if (value !== undefined && !value.startsWith('-')) {
+            if (allList) i = absorbPowerShellCommaList(args, i + 1).last;
+            else i++;
+          }
         }
       }
       continue;
@@ -3527,7 +3611,7 @@ function systemWriteTargetsInSegment(
   const targets = [
     ...redirectionTargets(segment).map((t) =>
       dynamicRedirectUnprovable && POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t),
-    ...(scanPowerShellDotNet ? powerShellDotNetStaticWriteTargets(segment) : []),
+    ...(scanPowerShellDotNet ? powerShellDotNetWriteTargets(segment) : []),
     ...argumentWriteTargets(tokens),
   ];
   if (targets.length === 0) return false;
@@ -3629,6 +3713,32 @@ const POWERSHELL_PIPELINE_PASSTHROUGH: ReadonlySet<string> = new Set([
  */
 const POWERSHELL_PATH_ENUMERATORS: ReadonlySet<string> = new Set([
   'get-childitem', 'gci', 'dir', 'ls', 'get-item', 'gi', 'resolve-path', 'rvpa',
+]);
+
+const PATH_ENUMERATOR_COMMON_SCALARS = [
+  ...POWERSHELL_COMMON_VALUE_PARAMS, '-credential',
+];
+const GET_CHILD_ITEM_VALUE_PARAMS: PowerShellOperandValueParams = {
+  scalar: [...PATH_ENUMERATOR_COMMON_SCALARS, '-attributes', '-depth', '-filter'],
+  list: ['-include', '-exclude'],
+};
+const GET_ITEM_VALUE_PARAMS: PowerShellOperandValueParams = {
+  scalar: [...PATH_ENUMERATOR_COMMON_SCALARS, '-filter', '-stream'],
+  list: ['-include', '-exclude'],
+};
+const RESOLVE_PATH_VALUE_PARAMS: PowerShellOperandValueParams = {
+  scalar: [...PATH_ENUMERATOR_COMMON_SCALARS, '-relativebasepath'],
+  list: [],
+};
+
+/** 各路径枚举器自己的带值参数；别名与 canonical 名共享同一份角色表。 */
+const POWERSHELL_PATH_ENUMERATOR_VALUE_PARAMS: ReadonlyMap<
+  string,
+  PowerShellOperandValueParams
+> = new Map([
+  ...['get-childitem', 'gci', 'dir', 'ls'].map((name) => [name, GET_CHILD_ITEM_VALUE_PARAMS] as const),
+  ...['get-item', 'gi'].map((name) => [name, GET_ITEM_VALUE_PARAMS] as const),
+  ...['resolve-path', 'rvpa'].map((name) => [name, RESOLVE_PATH_VALUE_PARAMS] as const),
 ]);
 
 /**
@@ -3995,7 +4105,10 @@ function scopedDestructionNeedsConsent(
       if (!POWERSHELL_PATH_ENUMERATORS.has(bin) || replacesSource) {
         upstreamOperands = null;
       } else {
-        const operands = operandsIncludingAttachedPowerShellPaths(tokens.slice(1), true);
+        const operands = operandsIncludingAttachedPowerShellPaths(
+          tokens.slice(1),
+          POWERSHELL_PATH_ENUMERATOR_VALUE_PARAMS.get(bin),
+        );
         // 没给实参:首段 = 枚举当前目录;有上游 = 项由上游喂进来,provenance 原样保留(含 `null`)。
         // 类型标注是必须的:初始化式里读了 `upstreamOperands`,而它下一行又由本变量赋值,
         // 少了标注 tsc 会判成循环推断(TS7022,desktop 的 typecheck 实测报错)。

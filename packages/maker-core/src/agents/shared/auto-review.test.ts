@@ -1264,6 +1264,16 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       'pwsh -CommandWithArgs "[IO.File]::WriteAllText(\'C:\\Windows\\System32\\x\', \'owned\')"',
       'pwsh -CommandWithArgs "$result = [IO.File]::WriteAllText(\'C:\\Windows\\System32\\x\', \'owned\')"',
       'pwsh -cwa "[System.IO.Directory]::Delete(\'C:\\Windows\\Temp\\x\', $true)"',
+      "([System.IO.FileInfo]::new('C:\\Windows\\System32\\drivers\\etc\\hosts')).Delete()",
+      "[IO.FileInfo]::new('C:\\Windows\\System32\\drivers\\etc\\hosts').OpenWrite()",
+      "$null = ([System.IO.FileInfo]::new('C:\\Windows\\System32\\x')).MoveTo('C:\\repo\\x')",
+      "[void]([IO.FileInfo]::new('C:\\Windows\\System32\\x')).Encrypt()",
+      "([System.IO.DirectoryInfo]::new('C:\\Windows\\Temp\\x')).Delete($true)",
+      "([IO.DirectoryInfo]::new('C:\\Windows\\Temp')).CreateSubdirectory('x')",
+      "([System.IO.FileInfo]::new('C:\\Windows\\System32\\x')).IsReadOnly = $false",
+      'pwsh -Command "([System.IO.FileInfo]::new(\'C:\\Windows\\System32\\x\')).Delete()"',
+      'pwsh -CommandWithArgs "([IO.DirectoryInfo]::new(\'C:\\Windows\\Temp\\x\')).Delete($true)"',
+      'pwsh -cwa "([IO.FileInfo]::new(\'C:\\Windows\\System32\\x\')).OpenWrite()"',
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
     }
@@ -1276,6 +1286,11 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       "Write-Output \"[System.IO.File]::Delete('C:\\Windows\\System32\\drivers\\etc\\hosts')\"",
       "Write-Output '[IO.File]::WriteAllText(''C:\\Windows\\System32\\x'', ''owned'')'",
       "$result = [System.IO.File]::ReadAllText('C:\\Windows\\System32\\drivers\\etc\\hosts')",
+      "([System.IO.FileInfo]::new('C:\\Windows\\System32\\drivers\\etc\\hosts')).OpenRead()",
+      "([IO.FileInfo]::new('C:\\Windows\\System32\\drivers\\etc\\hosts')).Refresh()",
+      "([System.IO.DirectoryInfo]::new('C:\\Windows\\System32')).GetFiles()",
+      "([IO.FileInfo]::new('C:\\Windows\\System32\\x')).Exists",
+      "Write-Output \"([IO.FileInfo]::new('C:\\Windows\\System32\\x')).Delete()\"",
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
     }
@@ -3162,6 +3177,15 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       `Get-Item ${hosts} | Resolve-Path -ErrorVariable errs | Remove-Item`,
       `Get-Item ${hosts} | Resolve-Path -OutBuffer 1 | Remove-Item`,
       `Get-Item ${hosts} | Resolve-Path -PipelineVariable resolved | Remove-Item`,
+      // 枚举器自己的带值参数同样必须完整消费；Filter/Include/Exclude 的值不是 emitted path。
+      `'C:\\Windows\\System32\\drivers\\etc' | Get-ChildItem -Filter hosts | Remove-Item`,
+      `'C:\\Windows\\System32\\drivers\\etc' | Get-ChildItem -Filter:hosts | Remove-Item`,
+      `'C:\\Windows\\System32\\drivers\\etc' | gci -Filt hosts | Remove-Item`,
+      `'C:\\Windows\\System32\\drivers\\etc' | dir -Include hosts, *.bak -Exclude skip | Remove-Item`,
+      `'C:\\Windows\\System32\\drivers\\etc' | Get-ChildItem -Depth 1 | Remove-Item`,
+      `'${hosts}' | Get-Item -Filter hosts | Remove-Item`,
+      `'${hosts}' | gi -Stream Zone.Identifier | Remove-Item`,
+      `'${hosts}' | Resolve-Path -RelativeBasePath C:\\repo | Remove-Item`,
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
     }
@@ -3176,6 +3200,8 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       'Get-ChildItem C:\\repo\\build | Resolve-Path | Remove-Item',
       'Get-Item C:\\repo\\a.txt | Resolve-Path -ErrorAction Stop | Remove-Item',
       'Get-Item C:\\repo\\a.txt | Resolve-Path -EA:Stop | Remove-Item',
+      'Get-Item C:\\repo\\build | Get-ChildItem -Filter *.log | Remove-Item',
+      `'${hosts}' | Get-ChildItem -Filter hosts C:\\repo\\build | Remove-Item`,
       // 枚举器自己显式给了区内位置 → 用它,不看上游。
       `'${hosts}' | Get-ChildItem C:\\repo\\build | Remove-Item`,
     ]) {

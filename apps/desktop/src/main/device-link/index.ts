@@ -631,7 +631,9 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     applyControllerDisplayNamePresence({
       deviceId: snap.deviceId,
       name: snap.deviceName,
-      selfName: snap.selfName,
+      ...(Object.prototype.hasOwnProperty.call(snap, 'selfName')
+        ? { selfName: snap.selfName }
+        : {}),
       freshness: controllerDisplayNameFreshness,
       normalizeName: normalizeCachedDeviceName,
       setDisplayName: setControllerDisplayName,

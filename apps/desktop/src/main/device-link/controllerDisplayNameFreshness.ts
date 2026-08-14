@@ -55,7 +55,8 @@ function classifyControllerDisplayName(
 
 /**
  * presence.deviceName 可能是数据库展示名，也可能是旧 relay 直接转发的主机名：
- * - 现代 presence 携带 selfName，说明 deviceName 是 relay 已解析的当前展示名；
+ * - 现代 presence 携带 selfName 字段（值可为 null），说明 deviceName 是 relay
+ *   已解析的当前展示名；
  *   即使两者恰好相同，也可能是用户刚把数据库名改成了自报名，必须权威更新；
  * - 旧 presence 缺少 selfName 时无法区分展示名与主机名，只在无目录/缓存时临时回退；
  * - 空名是显式清除，必须推进新鲜度以挡住在途旧目录响应；
@@ -73,9 +74,8 @@ export function applyControllerDisplayNamePresence(options: {
 }): void {
   const candidate = classifyControllerDisplayName(options.name, options.normalizeName);
   if (candidate.kind === 'valid') {
-    const hasResolvedSelfName =
-      typeof options.selfName === 'string' && options.selfName.trim().length > 0;
-    if (!hasResolvedSelfName) {
+    const hasSelfNameField = Object.prototype.hasOwnProperty.call(options, 'selfName');
+    if (!hasSelfNameField) {
       if (options.freshness.authoritativeNameByDevice.has(options.deviceId)) return;
       options.setDisplayName(options.deviceId, candidate.name);
       return;

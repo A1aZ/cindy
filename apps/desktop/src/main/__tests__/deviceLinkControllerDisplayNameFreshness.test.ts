@@ -241,6 +241,45 @@ describe('controller display-name directory freshness', () => {
     expect(forgetName).not.toHaveBeenCalled();
   });
 
+  it('selfName 字段存在但为 null 时，有效 deviceName 仍是权威更新', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const requestEpoch = freshness.epoch;
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    seedControllerDisplayNamesFromCache({ 'dev-1': '旧数据库名' }, freshness, setDisplayName);
+    setDisplayName.mockClear();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '新数据库名',
+      selfName: null,
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '旧数据库名' }],
+      cachedNames: { 'dev-1': '旧数据库名' },
+      freshness,
+      requestEpoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    expect(freshness.epoch).toBe(1);
+    expect(freshness.authoritativeNameByDevice.get('dev-1')).toBe('新数据库名');
+    expect(setDisplayName).toHaveBeenCalledTimes(1);
+    expect(setDisplayName).toHaveBeenCalledWith('dev-1', '新数据库名');
+    expect(rememberName).toHaveBeenCalledWith('dev-1', '新数据库名');
+    expect(forgetName).not.toHaveBeenCalled();
+  });
+
   it('无权威名时主机名 presence 仅作内存回退，不阻断后到目录名', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const requestEpoch = freshness.epoch;

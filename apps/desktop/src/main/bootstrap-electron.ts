@@ -507,6 +507,7 @@ import {
   clearDeferredCodexRestartForOwnerBoundary,
   collectAgentInputQueueScanTexts,
   createAutomationUserTurnGitBaselineHooks,
+  registerModelVisibilitySyncIpc,
   registerMakerIpc as registerMakerCoreIpc,
   isSessionTurnPendingCompletion,
   stopOrcaIdleWatcher,
@@ -7043,6 +7044,7 @@ app.on('ready', async () => {
   // invoke-registry 捕获后供控制端隧道调用,本机 renderer 不调用)。
   registerGitReviewDeviceOp();
   registerModelVisibilityOwnerClaimIpc();
+  registerModelVisibilitySyncIpc();
   registerSidebarSettingsIpc();
   registerRemotePrecreatedWorktreeLedgerIpc();
   // RSB terminal tab: PTY backend + 8 个 terminal:* IPC channels(create/write/resize/dispose/restart

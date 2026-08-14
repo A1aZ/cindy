@@ -353,6 +353,12 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('rich_output_not_supported')).toBe(true);
     expect(isSystemPermissionDenialReason('stale_route')).toBe(true);
     expect(isSystemPermissionDenialReason('wecom_interaction_disconnected')).toBe(true);
+    expect(isSystemPermissionDenialReason('wecom_interaction_timeout')).toBe(true);
+    expect(isSystemPermissionDenialReason('wecom_interaction_send_failed')).toBe(true);
+    expect(isSystemPermissionDenialReason('wecom_interaction_cancelled_by_stop')).toBe(true);
+    expect(isSystemPermissionDenialReason('wechat_interaction_timeout')).toBe(true);
+    expect(isSystemPermissionDenialReason('wechat_interaction_send_failed')).toBe(true);
+    expect(isSystemPermissionDenialReason('replaced_by_new_request')).toBe(true);
     expect(isSystemPermissionDenialReason('card send failed: slack timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('pending failed: channel closed')).toBe(true);
     expect(isSystemPermissionDenialReason('text interaction failed: socket hang up')).toBe(true);
@@ -362,6 +368,7 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('plan_mode_disabled')).toBe(true);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
+    expect(isSystemPermissionDenialReason('wecom_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason('dingtalk_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason('[destructiveGuard] rm -rf /')).toBe(false);
     expect(isSystemPermissionDenialReason(undefined)).toBe(false);

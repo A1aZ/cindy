@@ -157,7 +157,13 @@ export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'headless_interaction_unavailable',
   'no_card',
   'rich_output_not_supported',
+  'replaced_by_new_request',
   'wecom_interaction_disconnected',
+  'wecom_interaction_timeout',
+  'wecom_interaction_send_failed',
+  'wecom_interaction_cancelled_by_stop',
+  'wechat_interaction_timeout',
+  'wechat_interaction_send_failed',
 ]);
 
 /**
@@ -171,6 +177,8 @@ export const SYSTEM_PERMISSION_DENIAL_PREFIXES: readonly string[] = Object.freez
   'register failed:',
   'permission_mode_changed_to_',
   'plan_mode_',
+  'wecom_interaction_',
+  'wechat_interaction_',
 ]);
 
 export function isSystemPermissionDenialReason(reason: unknown): boolean {

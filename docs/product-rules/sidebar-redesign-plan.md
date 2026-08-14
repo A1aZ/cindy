@@ -53,7 +53,8 @@
 「按日期分组」模式删除(`DateGroupedSessionsSection` 及 `groupBy === 'date'` 分支)。
 
 **只有「新建」固定**(2026-08-12 用户裁决,对齐 Codex):列表向上滚动时,顶部导航
-其余三行跟着滚走,把纵向空间让给任务列表。实现上 `SidebarTopNav` 支持分段渲染
+其余三行跟着滚走,把纵向空间让给任务列表。搜索有查询时只额外钉住搜索行,保证
+输入框可见;自动任务 / 插件仍随结果滚走。实现上 `SidebarTopNav` 支持分段渲染
 (`pinned` / `scrollable`),Shell 画固定段、任务列表页在自己的滚动容器最上方画可滚动段;
 归属由功能槽经 `useOwnTopNavScrollableRows` 声明,**Shell 不判路由**(维持"外壳不感知
 路由"的架构不变量)。没有长列表的视图(插件页等)与 rail 态仍由 Shell 整块渲染四行。

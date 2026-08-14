@@ -1714,6 +1714,13 @@ function ExpandedView({
       ro?.disconnect();
     };
   }, []);
+  // 搜索结果替换同一滚动容器里的列表,打开查询时滚回顶部,避免沿用旧 scrollTop
+  // 从结果中间开始看。后续改查询字不重复复位。
+  const searchActive = Boolean(search.trimmed);
+  useEffect(() => {
+    if (!searchActive) return;
+    sidebarScrollRef.current?.scrollTo({ top: 0 });
+  }, [searchActive]);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
   // (否则选中远程行 → 计数加了但 archive/delete 查 sessionsById 落空、静默忽略)。
   const sessionsById = useMemo(
@@ -3067,7 +3074,7 @@ function ExpandedView({
 
       {/* 侧栏内容区:单一滚动容器(顶部导航的可滚动段 + 置顶 + 项目 + 对话一起滚动)。
          「新建」仍固定在 shell 顶部;自动任务 / 插件 / 搜索随列表滚走
-         (2026-08-12 用户裁决,对齐 Codex)。搜索有查询时同一份顶部导航就地 sticky,
+         (2026-08-12 用户裁决,对齐 Codex)。搜索有查询时只钉搜索行,
          结果替换下方列表 —— 输入框不卸载、也不会被结果盖住。 */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div
@@ -3091,15 +3098,9 @@ function ExpandedView({
             } as React.CSSProperties
           }
         >
-          {/* 顶部导航可滚动段:置于列表最上方,一起滚动。搜索打开时 sticky 钉在顶部,
-              输入框保持同一份实例,结果替换下方列表。 */}
-          <div
-            className={cn(
-              search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]',
-            )}
-          >
-            <SidebarTopNav section="scrollable" />
-          </div>
+          {/* 顶部导航可滚动段:置于列表最上方,一起滚动。搜索打开时由 TopNav
+              只钉搜索行,输入框保持同一份实例,结果替换下方列表。 */}
+          <SidebarTopNav section="scrollable" />
           {search.trimmed ? (
             <div data-conversation-search-surface>
               <SearchResultsBody

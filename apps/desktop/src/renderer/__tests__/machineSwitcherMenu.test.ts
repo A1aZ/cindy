@@ -83,10 +83,16 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     const scrollableRowsIdx = sidebarUpperSource.indexOf('<SidebarTopNav section="scrollable" />');
     expect(scrollRefIdx).toBeGreaterThanOrEqual(0);
     expect(scrollableRowsIdx).toBeGreaterThan(scrollRefIdx);
-    // 搜索打开时同一份顶部导航 sticky 钉住,结果替换列表;不再用 overlay 盖住输入框。
-    expect(sidebarUpperSource).toContain("search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'");
+    // 搜索打开时只钉搜索行,结果替换列表;打开查询时滚回顶部,不再用 overlay 盖住输入框。
+    expect(topNavSource).toContain(
+      "section === 'scrollable' &&\n                search.query.trim().length > 0 &&\n                'sticky top-0 z-30 -mx-3 bg-[var(--cmd-palette-bg)] px-3'",
+    );
+    expect(sidebarUpperSource).toContain('sidebarScrollRef.current?.scrollTo({ top: 0 })');
     expect(sidebarUpperSource).toContain('{search.trimmed ? (');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');
+    expect(sidebarUpperSource).not.toContain(
+      "search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'",
+    );
 
     // 声明语义与 useRegisterSidebarUpper 一致:卸载不复位,避免切到 /settings 时闪变。
     expect(featureContextSource).toContain('export function useOwnTopNavScrollableRows');

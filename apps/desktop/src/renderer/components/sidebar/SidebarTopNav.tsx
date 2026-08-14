@@ -153,13 +153,22 @@ export function SidebarTopNav({
             {hasGhostUnread && <AttentionDot size={6} className="ml-auto mr-0.5" />}
           </button>
 
-          {/* 4. 搜索 —— 静息态与上面三行同款;hover / 聚焦就地展开成搜索框 */}
-          <SidebarInlineSearch
-            search={search}
-            allKnownProjects={allKnownProjects}
-            openSignal={openSignal}
-            onSearchActive={ensureConversationView}
-          />
+          {/* 4. 搜索 —— 静息态与上面三行同款;hover / 聚焦就地展开成搜索框。
+              有查询时只钉这一行:自动任务 / 插件仍随结果滚走,输入框不卸载。 */}
+          <div
+            className={cn(
+              section === 'scrollable' &&
+                search.query.trim().length > 0 &&
+                'sticky top-0 z-30 -mx-3 bg-[var(--cmd-palette-bg)] px-3',
+            )}
+          >
+            <SidebarInlineSearch
+              search={search}
+              allKnownProjects={allKnownProjects}
+              openSignal={openSignal}
+              onSearchActive={ensureConversationView}
+            />
+          </div>
         </>
       )}
     </div>

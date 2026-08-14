@@ -776,6 +776,7 @@ export function SessionCard({
                   )}
                   {sourceLabel ? (
                     <span
+                      title={sourceLabel}
                       className={cn(
                         'min-w-0 truncate text-xs font-normal',
                         isActive

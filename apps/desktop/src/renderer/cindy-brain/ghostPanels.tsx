@@ -6,7 +6,7 @@ import { ghostPanelKind, type GhostManifest, type InstalledGhost } from '../../s
 import { minimizeGhostPanel, reconcileGhostPanelBubbles } from '../lib/ghostPanelBubbleState';
 import { toast } from '../lib/toast';
 import { usePanelMaximize } from '../layout/panelMaximize';
-import { usePaneFill } from '../layout/panePlacement';
+import { usePaneAtWindowTop, usePaneFill } from '../layout/panePlacement';
 import { usePanelWidth } from '../layout/paneWidths';
 import { PanelChrome } from '../panels/PanelChrome';
 import {
@@ -57,6 +57,7 @@ const PANEL_EXIT_MS = 180;
 function GhostPanel({ manifest }: PanelComponentProps & { manifest: GhostManifest }): ReactNode {
   const kind = ghostPanelKind(manifest.id);
   const fillContainer = usePaneFill();
+  const atWindowTop = usePaneAtWindowTop();
   // 宽度由引擎下发(fraction × 可用宽,缝把手可拖);兜底用清单 minWidth。
   const width = usePanelWidth(kind) ?? manifest.panel?.minWidth ?? 300;
   // 撑满态(引擎视图态):固定宽让位给 flex-1,树上的 fraction 账本不动。
@@ -138,6 +139,7 @@ function GhostPanel({ manifest }: PanelComponentProps & { manifest: GhostManifes
       >
         <PanelChrome
           title={manifest.panel?.title ?? manifest.name}
+          showWindowSpacer={atWindowTop}
           panelKind={maximizeEnabled ? kind : undefined}
           onMinimize={minimizeEnabled ? beginMinimize : undefined}
           onDetach={

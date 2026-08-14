@@ -15,7 +15,7 @@ import { registerBuiltinPanels } from '../panels/builtinPanels';
 import { getPanelKind } from '../panels/registry';
 import { installLayoutDevTools } from './layoutDevTools';
 import { PanelMaximizeContext, type PanelMaximizeState } from './panelMaximize';
-import { PaneFillProvider } from './panePlacement';
+import { PaneAtWindowTopProvider, PaneFillProvider } from './panePlacement';
 import { PaneWidthProvider, useContentAvailableWidth } from './paneWidths';
 
 /**
@@ -72,14 +72,24 @@ function isPanelKindVisible(kind: string): boolean {
 }
 
 /** 单个 pane 的挂载点:查注册表渲染;不可见 kind = 隐藏(数据保留在树里)。 */
-function PanelHost({ node, fill = false }: { node: PaneNode; fill?: boolean }): ReactNode {
+function PanelHost({
+  node,
+  fill = false,
+  atWindowTop = true,
+}: {
+  node: PaneNode;
+  fill?: boolean;
+  atWindowTop?: boolean;
+}): ReactNode {
   const def = getPanelKind(node.panelKind);
   if (!def || !isPanelKindVisible(node.panelKind)) return null;
   const Component = def.Component;
   return (
-    <PaneFillProvider value={fill}>
-      <Component paneId={node.id} />
-    </PaneFillProvider>
+    <PaneAtWindowTopProvider value={atWindowTop}>
+      <PaneFillProvider value={fill}>
+        <Component paneId={node.id} />
+      </PaneFillProvider>
+    </PaneAtWindowTopProvider>
   );
 }
 
@@ -257,6 +267,7 @@ function containsPanelKind(node: LayoutNode, kind: string): boolean {
 interface NodeViewProps {
   node: LayoutNode;
   fillPane?: boolean;
+  atWindowTop?: boolean;
   liveFractions: Record<string, number> | null;
   maximizedKind: string | null;
   onLive: (live: Record<string, number> | null) => void;
@@ -267,13 +278,16 @@ interface NodeViewProps {
 function NodeView({
   node,
   fillPane = false,
+  atWindowTop = true,
   liveFractions,
   maximizedKind,
   onLive,
   onCommitted,
 }: NodeViewProps): ReactNode {
   const splitRef = useRef<HTMLDivElement>(null);
-  if (node.type === 'pane') return <PanelHost node={node} fill={fillPane} />;
+  if (node.type === 'pane') {
+    return <PanelHost node={node} fill={fillPane} atWindowTop={atWindowTop} />;
+  }
   const ledger = activeSplitLedger(node.children);
   const visible = ledger.entries;
   const items: ReactNode[] = [];
@@ -305,6 +319,10 @@ function NodeView({
     }
     const share = liveFractions?.[entry.node.id] ?? entry.share;
     const hiddenByMaximize = maximizedKind !== null && !entryHasMaximized;
+    const childAtWindowTop =
+      atWindowTop &&
+      (node.direction === 'row' ||
+        (maximizedKind !== null ? entryHasMaximized : i === 0));
     items.push(
       <div
         key={entry.node.id}
@@ -325,6 +343,7 @@ function NodeView({
         <NodeView
           node={entry.node}
           fillPane
+          atWindowTop={childAtWindowTop}
           liveFractions={liveFractions}
           maximizedKind={maximizedKind}
           onLive={onLive}

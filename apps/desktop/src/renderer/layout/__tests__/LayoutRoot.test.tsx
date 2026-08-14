@@ -11,7 +11,7 @@ import {
 import { __resetBuiltinPanelsForTest } from '../../panels/builtinPanels';
 import { __resetPanelRegistryForTest, registerPanelKind } from '../../panels/registry';
 import { LayoutRoot, normalizeSubMinFractions } from '../LayoutRoot';
-import { usePaneFill } from '../panePlacement';
+import { usePaneAtWindowTop, usePaneFill } from '../panePlacement';
 
 const ghostPanelSyncMock = vi.hoisted(() => ({ version: 0 }));
 
@@ -139,7 +139,11 @@ describe('LayoutRoot · 树驱动的顺序与在场', () => {
 
   it('根级 column split 渲染为插件 grid，两个 pane 填满各自格并带横向分割线', () => {
     const GridPane = ({ name }: { name: string }) => (
-      <div data-testid={`grid-${name}`} data-fill={String(usePaneFill())} />
+      <div
+        data-testid={`grid-${name}`}
+        data-fill={String(usePaneFill())}
+        data-window-top={String(usePaneAtWindowTop())}
+      />
     );
     registerPanelKind({
       kind: 'ghost:alpha',
@@ -183,6 +187,8 @@ describe('LayoutRoot · 树驱动的顺序与在场', () => {
 
     expect(screen.getByTestId('grid-alpha').getAttribute('data-fill')).toBe('true');
     expect(screen.getByTestId('grid-beta').getAttribute('data-fill')).toBe('true');
+    expect(screen.getByTestId('grid-alpha').getAttribute('data-window-top')).toBe('true');
+    expect(screen.getByTestId('grid-beta').getAttribute('data-window-top')).toBe('false');
     expect(document.querySelector('[data-layout-root-child-id="grid-alpha"]')).not.toBeNull();
     expect(screen.getAllByTestId('layout-divider')).toHaveLength(3);
   });

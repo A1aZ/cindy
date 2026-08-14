@@ -986,10 +986,10 @@ export function buildPiNativeProvidersFromConfigs(
             : m.supportsImageInput === true
               ? { input: ['text', 'image'] as Array<'text' | 'image'> }
               : {}),
-          ...(bundledModel?.reasoning
+          ...(bundledModel
             ? {
-                reasoning: true,
-                ...(bundledModel.thinkingLevelMap
+                reasoning: bundledModel.reasoning,
+                ...(bundledModel.reasoning && bundledModel.thinkingLevelMap
                   ? { thinkingLevelMap: { ...bundledModel.thinkingLevelMap } }
                   : {}),
               }

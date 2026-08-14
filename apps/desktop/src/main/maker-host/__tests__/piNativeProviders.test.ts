@@ -916,6 +916,80 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(providers[0]?.models[0]?.compat).toBeUndefined();
   });
 
+  it('uses matched bundled reasoning true/false and falls back only when metadata is absent', () => {
+    const baseUrl = 'https://same-origin.example/v1';
+    const bundled = new Map([
+      [
+        'same-origin',
+        new Map([
+          [
+            'bundled-reasoning-on',
+            piBundledModel('bundled-reasoning-on', 'openai-completions', {
+              baseUrl,
+              reasoning: true,
+              thinkingLevelMap: { low: 'low', high: null },
+            }),
+          ],
+          [
+            'bundled-reasoning-off',
+            piBundledModel('bundled-reasoning-off', 'openai-completions', {
+              baseUrl,
+              reasoning: false,
+              // A stale/defensive map must not survive an authoritative false.
+              thinkingLevelMap: { high: 'high' },
+            }),
+          ],
+        ]),
+      ],
+    ]);
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'same-origin-provider',
+          name: 'Same Origin Provider',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl,
+              models: [
+                { id: 'bundled-reasoning-on', reasoning: false },
+                {
+                  id: 'bundled-reasoning-off',
+                  reasoning: true,
+                  reasoningEfforts: ['high'],
+                },
+                {
+                  id: 'configured-only',
+                  reasoning: true,
+                  reasoningEfforts: ['high'],
+                },
+              ],
+            }),
+          },
+        },
+      ],
+      () => null,
+      undefined,
+      bundled,
+    );
+
+    expect(providers[0]?.models[0]).toMatchObject({
+      id: 'bundled-reasoning-on',
+      reasoning: true,
+      thinkingLevelMap: { low: 'low', high: null },
+    });
+    expect(providers[0]?.models[1]).toMatchObject({
+      id: 'bundled-reasoning-off',
+      reasoning: false,
+    });
+    expect(providers[0]?.models[1]).not.toHaveProperty('thinkingLevelMap');
+    expect(providers[0]?.models[2]).toMatchObject({
+      id: 'configured-only',
+      reasoning: true,
+      thinkingLevelMap: { high: 'high' },
+    });
+  });
+
   it('keeps an explicit BYOM protocol and endpoint isolated from bundled model metadata', () => {
     const { providers } = buildPiNativeProvidersFromConfigs(
       [

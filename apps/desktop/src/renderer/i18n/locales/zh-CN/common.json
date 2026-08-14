@@ -4820,7 +4820,10 @@
         "localOnly": "本条消息的精确变更暂不支持远程任务。",
         "partialNotice": "本条消息包含无法精确追踪的命令或工具写入；以下仅展示已精确捕获的部分，不能视为完整补丁。",
         "emptyTitle": "没有已记录的变更",
-        "emptyDesc": "这条消息记录的补丁中没有可显示的文件变更。"
+        "emptyDesc": "这条消息记录的补丁中没有可显示的文件变更。",
+        "crossSessionSwitchDisabled": "正在审查协作任务中的这条消息，不能在当前任务中切换来源。",
+        "previewUnavailable": "这条消息记录的是历史变更，无法可靠预览当前磁盘中的文件内容。",
+        "snapshotPatchUnavailable": "历史变更快照不能生成面向当前 worktree 的 git apply 命令。"
       },
       "fileCount_one": "{{count}} 个文件",
       "fileCount_other": "{{count}} 个文件",
@@ -4878,6 +4881,7 @@
         "in-progress": "git 操作进行中",
         "agent-running": "Agent 正在运行",
         "disabled": "审查不可用",
+        "historical-snapshot": "历史变更快照为只读",
         "remote-device": "远程设备任务仅支持查看",
         "remote-ssh": "SSH 工作区审查仅支持查看"
       },

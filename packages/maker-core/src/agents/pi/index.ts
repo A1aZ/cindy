@@ -409,8 +409,15 @@ async function buildPiPrompt(
           // 避免 turn 被接受但附件静默丢失,或远端同路径文件被误读。
           let data: Buffer;
           try {
+            const stat = await fs.stat(block.path);
+            if (stat.size > REMOTE_PI_ATTACHMENT_MAX_BYTES) {
+              throw new Error(
+                `pi: remote file attachment ${block.path} is ${stat.size} bytes (limit ${REMOTE_PI_ATTACHMENT_MAX_BYTES}) — upload to the remote host or send a smaller file`,
+              );
+            }
             data = await fs.readFile(block.path);
           } catch (err) {
+            if (err instanceof Error && err.message.startsWith('pi: remote file attachment')) throw err;
             throw new Error(
               `pi: failed to read file attachment ${block.path}: ${err instanceof Error ? err.message : String(err)}`,
             );
@@ -1189,29 +1196,8 @@ export class PiAgent extends BaseAgent {
     // 轮 20-V1 HIGH:远端路径必须 POSIX join —— path.join 在 Windows 本地会把
     // runtimeDir 与文件名拼成反斜杠(远端 shell 不认, 权限文件/子代理 runtime
     // 写不进删不掉, 破坏权限门与子代理路由)。runtimeDir 已是 posix(956 行)。
-    const permissionFile = joinRemotePosixPath(
-      runtimeDir,
-      `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}.json`,
-    );
-    // 子代理运行期快照(model + provider)。与权限档同机制:文件而非 env —— env 在 spawn
-    // 时定型,会话中途 setModel 后子代理会继续用启动时的旧模型(greptile P1),而 BYOM /
-    // 本地 provider 不一起传还会让同名模型落到错误 endpoint(codex P2,pi-harness §3 要求
-    // BYOM 直连原生 provider)。扩展每次派子代理现读本文件。
-    const subagentRuntimeFile = joinRemotePosixPath(
-      runtimeDir,
-      `subagent-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}.json`,
-    );
-    let runtimeFilesCleaned = false;
-    /**
-     * 回收本运行时的两个 runtime 文件(幂等)。带 nonce 之后它们不再按 sessionId 复用,
-     * 不回收就会随每次 startSession 无界堆积在 runtimeDir 里。
-     */
-    const cleanupRuntimeFiles = (): void => {
-      if (runtimeFilesCleaned) return;
-      runtimeFilesCleaned = true;
-      void rmPath(permissionFile);
-      void rmPath(subagentRuntimeFile);
-    };
+    // 远端权限/子代理文件名带启动快照 hash:startSession 在 pi/ensure 之前就会写文件,
+    // 若复用旧路径, 另一实例的更宽档位会先覆盖仍在跑的 Pi 热读文件。
     // auto 保留(Cindy 侧 dispatcher 用);bridge 只特判 bypassPermissions,auto 在
     // 桥内行为同 ask(非只读全部冒泡)。其余档(default/acceptEdits/plan)归 ask 最严。
     const normalizePermissionMode = (mode: string | undefined): 'ask' | 'auto' | 'bypassPermissions' =>
@@ -1247,6 +1233,33 @@ export class PiAgent extends BaseAgent {
       mode: permissionMode,
       readOnlyRoots: [...mutableExtraDirs],
       ...reviewPathSnapshot,
+    };
+    const permissionSnapshotHash = createHash('sha256')
+      .update(JSON.stringify(requestedPermissionSnapshot))
+      .digest('hex')
+      .slice(0, 16);
+    const permissionFile = joinRemotePosixPath(
+      runtimeDir,
+      `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}${remote ? `-${permissionSnapshotHash}` : ''}.json`,
+    );
+    // 子代理运行期快照(model + provider)。与权限档同机制:文件而非 env —— env 在 spawn
+    // 时定型,会话中途 setModel 后子代理会继续用启动时的旧模型(greptile P1),而 BYOM /
+    // 本地 provider 不一起传还会让同名模型落到错误 endpoint(codex P2,pi-harness §3 要求
+    // BYOM 直连原生 provider)。扩展每次派子代理现读本文件。
+    const subagentRuntimeFile = joinRemotePosixPath(
+      runtimeDir,
+      `subagent-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}${remote ? `-${permissionSnapshotHash}` : ''}.json`,
+    );
+    let runtimeFilesCleaned = false;
+    /**
+     * 回收本运行时的两个 runtime 文件(幂等)。带 nonce 之后它们不再按 sessionId 复用,
+     * 不回收就会随每次 startSession 无界堆积在 runtimeDir 里。
+     */
+    const cleanupRuntimeFiles = (): void => {
+      if (runtimeFilesCleaned) return;
+      runtimeFilesCleaned = true;
+      void rmPath(permissionFile);
+      void rmPath(subagentRuntimeFile);
     };
     // 权限档写入串行化 + 代际跳过。并发/连续切档(本地与远程控制端同时切,或用户快速连点)时,
     // 无串行的 fs.writeFile 可能让较早的 Full-access 写在较新的 Ask 写之后落盘 —— bridge 每次
@@ -1811,10 +1824,7 @@ export class PiAgent extends BaseAgent {
       // 仅远端注入(本地无 envHash 机制); 值本身无凭证(只是内容指纹)。
       if (remote) {
         spawnEnv[PI_MODELS_JSON_HASH_ENV] = modelsJsonHash;
-        spawnEnv[PI_PERMISSION_HASH_ENV] = createHash('sha256')
-          .update(JSON.stringify(requestedPermissionSnapshot))
-          .digest('hex')
-          .slice(0, 16);
+        spawnEnv[PI_PERMISSION_HASH_ENV] = permissionSnapshotHash;
       }
       mergeLoopbackNoProxy(spawnEnv);
       const { transport } = await this.createTransport(

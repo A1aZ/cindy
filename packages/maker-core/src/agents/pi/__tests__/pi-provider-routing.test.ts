@@ -1312,7 +1312,11 @@ describe('Pi provider-aware model routing', () => {
     expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_HASH)
       .not.toBe(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH);
     expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_FILE)
-      .toBe(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_FILE);
+      .not.toBe(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_FILE);
+    expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_FILE)
+      .toContain(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_HASH);
+    expect(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_FILE)
+      .toContain(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH);
   });
 
   it('inlines remote text attachments and rejects local path mentions before dispatch', async () => {

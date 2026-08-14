@@ -48,10 +48,7 @@ describe('RolePillDropdown collaboration settings entry', () => {
         workers={[current]}
         selectedWorkerId={current.workerId}
         activeWorkerCount={5}
-        softLimit={5}
-        hardLimit={8}
         onSwitchFocus={vi.fn()}
-        onOpenCreate={vi.fn()}
         onArchiveWorker={vi.fn()}
       />,
     );

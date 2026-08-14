@@ -123,6 +123,7 @@ import {
 } from './authCheck';
 import {
   FBOT_DRAFT_TITLE,
+  FBOT_TITLE_PREFIX,
   generateAndPersistFbotTitle,
   generateImSessionTitleText,
   persistGeneratedSessionTitle,
@@ -787,6 +788,8 @@ export function createTurnRunner(
 
     const item: QueuedSend = {
       turn,
+      // contextAttachments 只进模型消息(跟在用户自己附件后面), 不进
+      // item.attachments —— persistUserMessage 落库的只有触发用户发的附件。
       userMessage: buildImUserMessage(
         args.agentText ?? text,
         [...attachments, ...(args.contextAttachments ?? [])],
@@ -1587,6 +1590,22 @@ export function createTurnRunner(
     }
 
     try {
+      // 授权卡已转投 owner 私聊 — 立刻在原群/话题 lane 留指路提示
+      // (与 handleInteractionFor 同款; 私聊 lane 卡片就在原地, 不需要)。
+      if (
+        req.kind === 'permission' &&
+        userId.startsWith('g/') &&
+        adapter.ui.cards.permission.dmRoutedNotice
+      ) {
+        try {
+          await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+            threadTs: scopeKey,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
+        }
+      }
       registerPendingExternal(
         req.requestId,
         req.kind as InteractionDecision['kind'],
@@ -1622,8 +1641,38 @@ export function createTurnRunner(
   }
 
   /**
+   * 标题拼装的公共路径: 渠道自定义拼装优先(飞书话题 lane → [飞书·{群名}·
+   * {话题简介}] {threadId}), 拼装不适用(飞书 DM)回落 fallbackPrefix +
+   * oneshot 简介。没有渠道拼装的渠道直接走 fallbackPrefix。
+   */
+  async function composeOrGenerateTitle(
+    sessionId: string,
+    userId: string,
+    scopeKey: string | undefined,
+    text: string,
+    fallbackPrefix: string,
+  ): Promise<string | null> {
+    const composeTitle = adapter.sessions.composeGeneratedTitle;
+    if (!composeTitle) {
+      return generateAndPersistFbotTitle(sessionId, text, fallbackPrefix);
+    }
+    const generated = await generateImSessionTitleText(sessionId, text);
+    if (!generated) return null;
+    const title = await composeTitle(userId, scopeKey, generated, sessionId);
+    if (title) {
+      await persistGeneratedSessionTitle(sessionId, title);
+      return title;
+    }
+    return generateAndPersistFbotTitle(sessionId, text, fallbackPrefix);
+  }
+
+  /**
    * 接管 session 首条消息触发的 title 生成 — 仅当当前 title 还是 'FBot · New'
    * 草稿占位时执行, 否则 noop (说明已经生成过了)。
+   *
+   * 命名与渠道默认会话对齐: 有 composeGeneratedTitle 的渠道(feishu)走同一条
+   * 拼装路径(话题 lane 与普通话题会话同名族), compose 不适用(DM)回落渠道
+   * generatedTitlePrefix([飞书·DM] {简介}); 其它渠道保持 'FBot · {简介}'。
    *
    * 用 drizzle 查 title 而不是从 row 里带 — row 来自 resolveRouteTarget 早一步,
    * 几十毫秒内 title 不会变, 但显式查一次更稳 (避免读到已被并发更新的旧值, 虽然
@@ -1649,7 +1698,18 @@ export function createTurnRunner(
         .where(eq(sessionsTable.id, sessionId))
         .limit(1);
       if (rows[0]?.title !== FBOT_DRAFT_TITLE) return;
-      const title = await generateAndPersistFbotTitle(sessionId, text);
+      const configuredPrefix = adapter.sessions.generatedTitlePrefix;
+      const fallbackPrefix =
+        typeof configuredPrefix === 'function' ? configuredPrefix() : configuredPrefix;
+      const title = ctx
+        ? await composeOrGenerateTitle(
+            sessionId,
+            ctx.userId,
+            ctx.scopeKey,
+            text,
+            fallbackPrefix ?? FBOT_TITLE_PREFIX,
+          )
+        : await generateAndPersistFbotTitle(sessionId, text);
 
       // thread 模型的"新建+接管": 标题生成后把锚点/root 卡也升级成正式标题
       // (此前是「新会话(刚建好)」占位), 顶层一眼能看出 thread 对应哪条会话。
@@ -1708,19 +1768,16 @@ export function createTurnRunner(
       return;
     const prefix = typeof configuredPrefix === 'function' ? configuredPrefix() : configuredPrefix;
     try {
-      let title: string | null;
-      if (composeTitle) {
-        const generated = await generateImSessionTitleText(sessionId, text);
-        if (!generated) return;
-        title = await composeTitle(userId, scopeKey, generated, sessionId);
-        if (title) {
-          await persistGeneratedSessionTitle(sessionId, title);
-        } else {
-          title = await generateAndPersistFbotTitle(sessionId, text, prefix);
-        }
-      } else {
-        title = await generateAndPersistFbotTitle(sessionId, text, prefix);
-      }
+      // 渠道自定义拼装(feishu 话题 lane → [飞书·{群名}·{简介}] {threadId 后 6 位}):
+      // oneshot 只负责出「话题简介」文本, 完整标题由渠道按 lane 拼; compose
+      // 不适用(feishu DM)回落渠道前缀。无 compose 的渠道直接前缀 + 简介。
+      const title = await composeOrGenerateTitle(
+        sessionId,
+        userId,
+        scopeKey,
+        text,
+        prefix ?? FBOT_TITLE_PREFIX,
+      );
       if (!richIm || !title || !headerCardId || !threadUiPack) return;
       await richIm.updateInteractiveCard(headerCardId, {
         ...threadUiPack.sessionHeaderTitled(title),
@@ -2908,12 +2965,30 @@ export function createTurnRunner(
       }
 
       try {
+        // 授权卡已转投 owner 私聊 — 立刻在原群/话题 lane 留一句指路(不能等
+        // registerPending: 它要等用户点完卡才返回, 那提示就变成"事后"的了)。
+        // 私聊 lane 的卡片就落在当前会话里, 不需要指路。
+        if (
+          req.kind === 'permission' &&
+          userId.startsWith('g/') &&
+          adapter.ui.cards.permission.dmRoutedNotice
+        ) {
+          try {
+            await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+              threadTs: scopeKey,
+            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
+          }
+        }
         const decision = await registerPending(
           req.requestId,
           req.kind as InteractionDecision['kind'],
           messageId,
           // Stash toolName for permission requests so cardActionHandler can
           // build permissionUpdates when the user picks 'allow:always'.
+          // permissionCard 留着收口时恢复原始正文(工具名 + 参数预览)。
           req.kind === 'permission'
             ? {
                 toolName: req.toolName,

@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from '@testing-library/react';
 import { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDefaultLayout, type Layout } from '../../../shared/layoutTree';
-import { BuiltinPanelBridgeProvider, type BuiltinPanelBridge } from '../../panels/BuiltinPanelBridge';
+import {
+  BuiltinPanelBridgeProvider,
+  type BuiltinPanelBridge,
+} from '../../panels/BuiltinPanelBridge';
 import { __resetBuiltinPanelsForTest } from '../../panels/builtinPanels';
-import { __resetPanelRegistryForTest } from '../../panels/registry';
+import { __resetPanelRegistryForTest, registerPanelKind } from '../../panels/registry';
 import { LayoutRoot } from '../LayoutRoot';
+import { usePaneFill } from '../panePlacement';
 
 /** stub electronAPI.layout:同步返回给定树 + 可手动触发 onChanged。 */
 let currentLayout: Layout;
@@ -93,8 +97,9 @@ describe('LayoutRoot · 树驱动的顺序与在场', () => {
 
   it('未注册 panelKind(未安装意识残留)整个 pane 隐藏,不留孤儿分割线', () => {
     const withGhost = createDefaultLayout();
-    (withGhost.content as { children: { node: { panelKind: string } }[] }).children[1].node.panelKind =
-      'ghost:not-installed';
+    (
+      withGhost.content as { children: { node: { panelKind: string } }[] }
+    ).children[1].node.panelKind = 'ghost:not-installed';
     currentLayout = withGhost;
     renderLayoutRoot();
     expect(rowChildTestIds()).toEqual(['p-chat']);
@@ -119,5 +124,55 @@ describe('LayoutRoot · 树驱动的顺序与在场', () => {
     expect(changedListeners).toHaveLength(1);
     unmount();
     expect(changedListeners).toHaveLength(0);
+  });
+
+  it('根级 column split 渲染为插件 grid，两个 pane 填满各自格并带横向分割线', () => {
+    const GridPane = ({ name }: { name: string }) => (
+      <div data-testid={`grid-${name}`} data-fill={String(usePaneFill())} />
+    );
+    registerPanelKind({
+      kind: 'ghost:alpha',
+      Component: () => <GridPane name="alpha" />,
+      collapseMemory: 'global',
+    });
+    registerPanelKind({
+      kind: 'ghost:beta',
+      Component: () => <GridPane name="beta" />,
+      collapseMemory: 'global',
+    });
+    currentLayout = {
+      ...createDefaultLayout(),
+      content: {
+        type: 'split',
+        id: 'root',
+        direction: 'row',
+        children: [
+          {
+            fraction: 0.35,
+            node: { type: 'pane', id: 'chat', panelKind: 'chat-main', minWidth: 400 },
+          },
+          {
+            fraction: 0.35,
+            node: {
+              type: 'split',
+              id: 'grid-alpha',
+              direction: 'column',
+              children: [
+                { fraction: 0.5, node: { type: 'pane', id: 'alpha', panelKind: 'ghost:alpha' } },
+                { fraction: 0.5, node: { type: 'pane', id: 'beta', panelKind: 'ghost:beta' } },
+              ],
+            },
+          },
+          { fraction: 0.3, node: { type: 'pane', id: 'right', panelKind: 'right-tabs' } },
+        ],
+      },
+    };
+
+    renderLayoutRoot();
+
+    expect(screen.getByTestId('grid-alpha').getAttribute('data-fill')).toBe('true');
+    expect(screen.getByTestId('grid-beta').getAttribute('data-fill')).toBe('true');
+    expect(document.querySelector('[data-layout-root-child-id="grid-alpha"]')).not.toBeNull();
+    expect(screen.getAllByTestId('layout-divider')).toHaveLength(3);
   });
 });

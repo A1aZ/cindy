@@ -1,6 +1,5 @@
 export interface ControllerDisplayNameFreshnessTracker {
   epoch: number;
-  resetEpoch: number;
   epochByDevice: Map<string, number>;
   authoritativeNameByDevice: Map<string, string>;
 }
@@ -21,7 +20,6 @@ type ControllerDisplayNameCandidate =
 export function createControllerDisplayNameFreshnessTracker(): ControllerDisplayNameFreshnessTracker {
   return {
     epoch: 0,
-    resetEpoch: 0,
     epochByDevice: new Map(),
     authoritativeNameByDevice: new Map(),
   };
@@ -39,7 +37,6 @@ export function resetControllerDisplayNameFreshness(
   tracker: ControllerDisplayNameFreshnessTracker,
 ): void {
   tracker.epoch += 1;
-  tracker.resetEpoch = tracker.epoch;
   tracker.epochByDevice.clear();
   tracker.authoritativeNameByDevice.clear();
 }
@@ -61,9 +58,7 @@ export function getControllerDisplayNameFreshnessSince(
   requestEpoch: number,
 ): ControllerDisplayNameFreshnessSince {
   return {
-    changedAfterRequest:
-      tracker.resetEpoch > requestEpoch
-      || (tracker.epochByDevice.get(deviceId) ?? 0) > requestEpoch,
+    changedAfterRequest: (tracker.epochByDevice.get(deviceId) ?? 0) > requestEpoch,
     authoritativeName: tracker.authoritativeNameByDevice.get(deviceId) ?? null,
   };
 }

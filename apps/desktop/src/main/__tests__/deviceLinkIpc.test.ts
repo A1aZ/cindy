@@ -512,6 +512,44 @@ describe('device-link IPC handlers', () => {
     expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
   });
 
+  it('listDevices:仅发生 relay reset 时仍采用并缓存有效数据库展示名', async () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const rememberLastKnownDeviceName = vi.fn(async () => true);
+    const forgetLastKnownDeviceName = vi.fn(async () => true);
+    const apiFetch: DeviceLinkIpcDeps['apiFetch'] = async <T>() => {
+      resetControllerDisplayNameFreshness(freshness);
+      return {
+        devices: [
+          {
+            deviceId: 'dev-1',
+            name: '数据库展示名',
+            selfName: 'Host.local',
+            platform: 'darwin',
+            lastSeenAt: '2026-06-23T00:00:00.000Z',
+            online: false,
+            busy: false,
+            remoteControlEnabled: true,
+            controlEnabled: true,
+            isSelf: false,
+          },
+        ],
+      } as T;
+    };
+    const deps = makeDeps({
+      apiFetch,
+      rememberLastKnownDeviceName,
+      forgetLastKnownDeviceName,
+      captureControllerDisplayNameRequestEpoch: () => freshness.epoch,
+      readControllerDisplayNameFreshnessSince: (deviceId, requestEpoch) =>
+        getControllerDisplayNameFreshnessSince(freshness, deviceId, requestEpoch),
+    });
+
+    const result = await handleListDevices(deps);
+    expect(result.devices[0]?.name).toBe('数据库展示名');
+    expect(rememberLastKnownDeviceName).toHaveBeenCalledWith('dev-1', '数据库展示名');
+    expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['旧目录名', '新数据库名', 'remember', '新数据库名'],
     ['', '新数据库名', 'forget', '新数据库名'],

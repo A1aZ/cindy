@@ -15,6 +15,19 @@ const normalizeName = (name: string): string | null => {
 };
 
 describe('controller display-name directory freshness', () => {
+  it('仅 reset 时保持全局代次单调，但不把连接变化误判为设备名称更新', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const requestEpoch = freshness.epoch;
+
+    resetControllerDisplayNameFreshness(freshness);
+
+    expect(freshness.epoch).toBeGreaterThan(requestEpoch);
+    expect(getControllerDisplayNameFreshnessSince(freshness, 'dev-1', requestEpoch)).toEqual({
+      changedAfterRequest: false,
+      authoritativeName: null,
+    });
+  });
+
   it('列表请求跨断线重连时 freshness 代次保持单调，旧响应不得回写', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const setDisplayName = vi.fn();

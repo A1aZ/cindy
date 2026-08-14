@@ -46,6 +46,8 @@ type IOSSimulatorViewerRouteRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorViewerRouteRequest;
 type IOSSimulatorViewerVisibilityRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorViewerVisibilityRequest;
+type IOSSimulatorRetryNativeRouteRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorRetryNativeRouteRequest;
 type IOSSimulatorStreamProfileRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorStreamProfileRequest;
 type ProviderRoutingPayload = import('@cindy/model-providers').Provider['routing'];
@@ -5951,6 +5953,9 @@ interface ElectronAPI {
       ) => Promise<IOSSimulatorToolResponse>;
       setViewerVisibility: (
         request: IOSSimulatorViewerVisibilityRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      retryNativeRoute: (
+        request: IOSSimulatorRetryNativeRouteRequest,
       ) => Promise<IOSSimulatorToolResponse>;
       latestFrame: (request: IOSSimulatorViewerRouteRequest) => Promise<IOSSimulatorToolResponse>;
       setStreamProfile: (

@@ -4758,6 +4758,13 @@
           "unavailable": "Unavailable"
         }
       },
+      "nativeRecovery": {
+        "available": "Native acceleration is unavailable. WDA stays active while you try again.",
+        "action": "Restore Native",
+        "recovering": "Restoring Native acceleration. The current WDA view and controls stay active.",
+        "recoveringAction": "Restoring Native…",
+        "failed": "Native acceleration could not be restored. WDA is still active; try again later."
+      },
       "stream": {
         "idle": "Idle",
         "connecting": "Connecting",

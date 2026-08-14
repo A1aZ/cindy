@@ -281,6 +281,12 @@ export interface IOSSimulatorHost {
     viewerWebContentsId?: number,
     viewerToken?: string,
   ): Promise<IOSSimulatorHostResult>;
+  retryNativeRoute(
+    sessionId: string,
+    route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+    viewerWebContentsId: number,
+    viewerToken: string,
+  ): Promise<IOSSimulatorHostResult>;
   getLatestFrame(
     sessionId: string,
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
@@ -4089,6 +4095,116 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         removalBarrierOperation?.finish();
       }
     },
+    async retryNativeRoute(sessionId, route, viewerWebContentsId, viewerToken) {
+      let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
+      try {
+        assertHostActive();
+        const resolved = await resolveSession(sessionId, { registerRemovalBarrier: true });
+        if (!resolved.ok) return resolved;
+        removalBarrierOperation = resolved.removalBarrierOperation ?? null;
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+        assertHostActive();
+        assertCurrentViewer(resolved.sessionId, route.instanceId, viewerWebContentsId, viewerToken);
+        let instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
+        instance = await reconcileLiveDevice(instance);
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+        assertHostActive();
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
+        if (instance.lifecycleState !== 'ready') return viewerRouteRefreshResult(instance);
+
+        const driverManager = getDriverManager();
+        let running = await getHealthyDriver(instance.instanceId);
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+        assertHostActive();
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
+        let current = currentReadyGeneration(instance);
+        if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
+        instance = current;
+        if (!running) {
+          throw new IOSSimulatorInstanceError(
+            'INVALID_INSTANCE_STATE',
+            'The simulator automation driver is unavailable.',
+            true,
+          );
+        }
+
+        if (!nativeH264Driver(running) && driverManager.recoverNativeSidecar) {
+          running =
+            (await driverManager.recoverNativeSidecar(instance.instanceId, { rearm: true })) ??
+            running;
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+          assertHostActive();
+          assertCurrentViewer(
+            resolved.sessionId,
+            instance.instanceId,
+            viewerWebContentsId,
+            viewerToken,
+          );
+          current = currentReadyGeneration(instance);
+          if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
+          instance = current;
+        }
+
+        const nativeRecovered = nativeH264Driver(running) !== null;
+        const preferredEncoding =
+          viewerPreferredEncodings.get(instance.instanceId) ??
+          viewerEncodings.get(instance.instanceId) ??
+          'jpeg';
+        const viewport = viewports.get(instance.instanceId) ?? (await readViewport(running));
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+        assertHostActive();
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
+        current = currentReadyGeneration(instance);
+        if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
+        instance = actor.heartbeatOwned(resolved.sessionId, current.instanceId);
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
+        const stream = startViewerStream(
+          instance,
+          running,
+          preferredEncoding,
+          viewport.orientation,
+          null,
+          viewerWebContentsId,
+          viewerToken,
+        );
+        return {
+          ok: true,
+          data: {
+            nativeRecovered,
+            ...(instance.generation !== route.generation || instance.lease.id !== route.leaseId
+              ? { instance: publicInstance(instance) }
+              : {}),
+            stream,
+            viewport: viewports.get(instance.instanceId) ?? viewport,
+            mutation: actor.mutationState(instance.instanceId),
+          },
+        };
+      } catch (error) {
+        return safeHostError(error, sessionId, 'retry_native_route');
+      } finally {
+        removalBarrierOperation?.finish();
+      }
+    },
     async getLatestFrame(sessionId, route, viewerWebContentsId) {
       let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
@@ -6595,6 +6711,20 @@ export function setIOSSimulatorViewerVisibility(
     visible,
     preferredEncoding,
     fallbackReason,
+    viewerWebContentsId,
+    viewerToken,
+  );
+}
+
+export function retryIOSSimulatorNativeRoute(
+  sessionId: string,
+  route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+  viewerWebContentsId: number,
+  viewerToken: string,
+): Promise<IOSSimulatorHostResult> {
+  return initializeIOSSimulatorHost().retryNativeRoute(
+    sessionId,
+    route,
     viewerWebContentsId,
     viewerToken,
   );

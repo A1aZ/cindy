@@ -38,6 +38,7 @@ describe('iOS Simulator IPC handlers', () => {
     MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL,
     MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL,
     MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY,
+    MAKER_INVOKE.IOS_SIMULATOR_RETRY_NATIVE_ROUTE,
     MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME,
     MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE,
     MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH,
@@ -624,8 +625,12 @@ describe('iOS Simulator IPC handlers', () => {
   it('validates exact frame routes before forwarding visibility and frame reads', async () => {
     const harness = new IpcHarness();
     const setViewerVisibility = vi.fn(async () => ({ ok: true as const, data: {} }));
+    const retryNativeRoute = vi.fn(async () => ({
+      ok: true as const,
+      data: { nativeRecovered: true },
+    }));
     const getLatestFrame = vi.fn(async () => ({ ok: true as const, data: { stream: null } }));
-    registerTrusted(harness, { setViewerVisibility, getLatestFrame });
+    registerTrusted(harness, { setViewerVisibility, retryNativeRoute, getLatestFrame });
     const route = {
       sessionId: 'session-a',
       instanceId: 'instance-a',
@@ -650,6 +655,10 @@ describe('iOS Simulator IPC handlers', () => {
       fallbackReason: 'native-decoder-fallback',
     });
     await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route);
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_RETRY_NATIVE_ROUTE, {
+      ...route,
+      viewerToken: 'viewer-a',
+    });
 
     expect(setViewerVisibility).toHaveBeenCalledWith(
       'session-a',
@@ -687,6 +696,16 @@ describe('iOS Simulator IPC handlers', () => {
       },
       17,
     );
+    expect(retryNativeRoute).toHaveBeenCalledWith(
+      'session-a',
+      {
+        instanceId: 'instance-a',
+        generation: 3,
+        leaseId: 'lease-a',
+      },
+      17,
+      'viewer-a',
+    );
     await expect(
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
@@ -721,6 +740,12 @@ describe('iOS Simulator IPC handlers', () => {
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
         ...route,
         visible: true,
+        viewerToken: '',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_RETRY_NATIVE_ROUTE, {
+        ...route,
         viewerToken: '',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });

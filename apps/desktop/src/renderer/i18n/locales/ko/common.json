@@ -4756,6 +4756,13 @@
           "unavailable": "사용할 수 없음"
         }
       },
+      "nativeRecovery": {
+        "available": "현재 Native 가속을 사용할 수 없습니다. 다시 시도하는 동안에도 WDA 화면과 제어는 계속 사용할 수 있습니다.",
+        "action": "Native 복구 시도",
+        "recovering": "Native 가속을 복구하는 중입니다. 현재 WDA 화면과 제어는 계속 사용할 수 있습니다.",
+        "recoveringAction": "Native 복구 중…",
+        "failed": "Native 가속을 복구하지 못했습니다. WDA는 계속 사용할 수 있으니 나중에 다시 시도하세요."
+      },
       "stream": {
         "idle": "대기 중",
         "connecting": "연결 중",

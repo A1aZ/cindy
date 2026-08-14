@@ -4756,6 +4756,13 @@
           "unavailable": "不可用"
         }
       },
+      "nativeRecovery": {
+        "available": "Native 加速目前無法使用。重試期間，WDA 畫面和控制會保持可用。",
+        "action": "嘗試恢復 Native",
+        "recovering": "正在恢復 Native 加速，目前的 WDA 畫面和控制會保持可用。",
+        "recoveringAction": "正在恢復 Native…",
+        "failed": "暫時無法恢復 Native 加速，WDA 仍可正常使用。請稍後再試。"
+      },
       "stream": {
         "idle": "待連線",
         "connecting": "連線中",

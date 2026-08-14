@@ -12,6 +12,7 @@ import {
   callIOSSimulatorHostTool,
   getIOSSimulatorLatestFrame,
   getIOSSimulatorSessionStatus,
+  retryIOSSimulatorNativeRoute,
   setIOSSimulatorAgentControlGrant,
   setIOSSimulatorAgentMutationPaused,
   setIOSSimulatorViewerVisibility,
@@ -43,6 +44,7 @@ type IOSSimulatorIpcOperation =
   | 'call-tool'
   | 'set-agent-control'
   | 'set-viewer-visibility'
+  | 'retry-native-route'
   | 'set-mutation-control'
   | 'latest-frame'
   | 'set-stream-profile'
@@ -54,6 +56,7 @@ const IOS_SIMULATOR_SAFE_IPC_MESSAGES: Record<IOSSimulatorIpcOperation, string> 
   'call-tool': 'iOS Simulator operation failed.',
   'set-agent-control': 'iOS Simulator control permission could not be updated.',
   'set-viewer-visibility': 'iOS Simulator viewer state could not be updated.',
+  'retry-native-route': 'iOS Simulator Native acceleration could not be restored.',
   'set-mutation-control': 'iOS Simulator control state could not be updated.',
   'latest-frame': 'iOS Simulator frame is temporarily unavailable.',
   'set-stream-profile': 'iOS Simulator stream settings could not be updated.',
@@ -112,6 +115,12 @@ export interface IOSSimulatorHandlerDeps {
     viewerWebContentsId?: number,
     viewerToken?: string,
   ): Promise<IOSSimulatorToolResponse>;
+  retryNativeRoute(
+    sessionId: string,
+    route: { instanceId: string; generation: number; leaseId: string },
+    viewerWebContentsId: number,
+    viewerToken: string,
+  ): Promise<IOSSimulatorToolResponse>;
   setViewerStreamProfile(
     sessionId: string,
     route: { instanceId: string; generation: number; leaseId: string },
@@ -159,6 +168,7 @@ const defaultDeps: IOSSimulatorHandlerDeps = {
   setAgentControlGrant: setIOSSimulatorAgentControlGrant,
   setAgentMutationPaused: setIOSSimulatorAgentMutationPaused,
   setViewerVisibility: setIOSSimulatorViewerVisibility,
+  retryNativeRoute: retryIOSSimulatorNativeRoute,
   setViewerStreamProfile: setIOSSimulatorViewerStreamProfile,
   getLatestFrame: getIOSSimulatorLatestFrame,
   updateViewerTouch: updateIOSSimulatorViewerTouch,
@@ -476,6 +486,31 @@ export function registerIOSSimulatorHandlers(
         fallbackReason,
         viewerWebContentsId,
         viewerToken?.trim(),
+      ),
+    );
+  });
+  handle(MAKER_INVOKE.IOS_SIMULATOR_RETRY_NATIVE_ROUTE, async (event, payload) => {
+    const record = readRecord(payload);
+    const sessionId = readSessionId(record);
+    const viewerWebContentsId = assertSenderSession(event, sessionId);
+    const viewerToken = record.viewerToken;
+    if (
+      typeof viewerToken !== 'string' ||
+      !viewerToken.trim() ||
+      viewerToken.length > 128
+    ) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'viewerToken must be a non-empty string of at most 128 chars',
+      );
+    }
+    const route = readViewerRoute(record);
+    return callIOSSimulatorHostForSession(event, sessionId, 'retry-native-route', () =>
+      resolved.retryNativeRoute(
+        sessionId,
+        route,
+        viewerWebContentsId,
+        viewerToken.trim(),
       ),
     );
   });

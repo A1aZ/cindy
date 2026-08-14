@@ -160,6 +160,7 @@ import type {
   IOSSimulatorRouteStatusPush,
   IOSSimulatorLiveTouchRequest,
   IOSSimulatorMutationControlRequest,
+  IOSSimulatorRetryNativeRouteRequest,
   IOSSimulatorStatusRequest,
   IOSSimulatorToolRequest,
   IOSSimulatorToolResponse,
@@ -6503,6 +6504,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         request: IOSSimulatorViewerVisibilityRequest,
       ): Promise<IOSSimulatorToolResponse> =>
         ipcRenderer.invoke('maker:ios-simulator:set-viewer-visibility', request),
+      retryNativeRoute: (
+        request: IOSSimulatorRetryNativeRouteRequest,
+      ): Promise<IOSSimulatorToolResponse> =>
+        ipcRenderer.invoke('maker:ios-simulator:retry-native-route', request),
       latestFrame: (request: IOSSimulatorViewerRouteRequest): Promise<IOSSimulatorToolResponse> =>
         ipcRenderer.invoke('maker:ios-simulator:latest-frame', request),
       setStreamProfile: (

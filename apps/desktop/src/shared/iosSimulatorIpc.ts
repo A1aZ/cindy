@@ -183,6 +183,11 @@ export interface IOSSimulatorViewerVisibilityRequest extends IOSSimulatorViewerR
   fallbackReason?: 'native-decoder-fallback';
 }
 
+export interface IOSSimulatorRetryNativeRouteRequest extends IOSSimulatorViewerRouteRequest {
+  /** Exact viewer effect lifetime that is allowed to re-arm Native acceleration. */
+  viewerToken: string;
+}
+
 export type IOSSimulatorNativeH264StreamProfileRequest = Pick<
   IOSSimulatorNativeStreamProfile,
   'framesPerSecond' | 'scalingPercent'

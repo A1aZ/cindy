@@ -4756,6 +4756,13 @@
           "unavailable": "不可用"
         }
       },
+      "nativeRecovery": {
+        "available": "Native 加速当前不可用。重试期间，WDA 画面和控制会保持可用。",
+        "action": "尝试恢复 Native",
+        "recovering": "正在恢复 Native 加速，当前 WDA 画面和控制会保持可用。",
+        "recoveringAction": "正在恢复 Native…",
+        "failed": "暂未恢复 Native 加速，WDA 仍可正常使用。请稍后重试。"
+      },
       "stream": {
         "idle": "待连接",
         "connecting": "连接中",

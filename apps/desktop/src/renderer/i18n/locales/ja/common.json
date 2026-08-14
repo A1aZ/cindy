@@ -4756,6 +4756,13 @@
           "unavailable": "利用不可"
         }
       },
+      "nativeRecovery": {
+        "available": "Native アクセラレーションは現在利用できません。再試行中も WDA の画面と操作は利用できます。",
+        "action": "Native を復旧",
+        "recovering": "Native アクセラレーションを復旧しています。現在の WDA の画面と操作は引き続き利用できます。",
+        "recoveringAction": "Native を復旧中…",
+        "failed": "Native アクセラレーションを復旧できませんでした。WDA は引き続き利用できます。しばらくしてから再試行してください。"
+      },
       "stream": {
         "idle": "待機中",
         "connecting": "接続中",

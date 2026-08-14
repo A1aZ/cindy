@@ -181,7 +181,7 @@ describe('SessionCard review regressions', () => {
     expect(automationGroupSource).toContain(
       "!menuOpen && 'hidden group-hover:block group-focus-within/slot:block'",
     );
-    expect(sessionCardSource).toContain('grid h-5 grid-cols-[max-content] items-center justify-items-end');
+    expect(sessionCardSource).toContain('grid h-[22px] grid-cols-[max-content] items-center justify-items-end');
     expect(sessionCardSource).toContain(
       "!menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex'",
     );

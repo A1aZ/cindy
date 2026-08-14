@@ -1223,6 +1223,9 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       'powershell -Command "Format-Volume -DriveLetter C"',
       'powershell -Command "Remove-Partition -DriveLetter D -Confirm:$false"',
       'pwsh -Command "Remove-Partition -DiskNumber 5 -PartitionNumber 2"',
+      'pwsh -CommandWithArgs "Remove-Partition -DriveLetter D -Confirm:$false"',
+      'pwsh -cwa "Remove-Partition -DiskNumber 5 -PartitionNumber 2"',
+      'pwsh -CommandWithArgs "Set-Content C:\\Windows\\System32\\drivers\\etc\\hosts owned"',
     ]) {
       expect(classifyShellCommand(c, roots), c).toBe('prompt-each-time');
     }
@@ -1231,6 +1234,11 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
     // 只移除盘符/挂载路径，不删除分区；不能被 `Remove-Partition` 的前缀误伤。
     expect(classifyShellCommand(
       'powershell -Command "Remove-PartitionAccessPath -DriveLetter D -AccessPath C:\\mount"',
+      roots,
+    )).toBe('prompt');
+    expect(classifyShellCommand('pwsh -cwa "Get-Location"', roots)).toBe('prompt');
+    expect(classifyShellCommand(
+      'pwsh -CommandWithArgs "Remove-PartitionAccessPath -DriveLetter D -AccessPath C:\\mount"',
       roots,
     )).toBe('prompt');
   });

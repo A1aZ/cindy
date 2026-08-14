@@ -2840,6 +2840,13 @@ const POWERSHELL_DANGER_PATTERNS: readonly RegExp[] = [
   /\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[\s\S]*\|\s*(?:iex|invoke-expression)\b/i, // 下载 | iex
 ];
 
+/** PowerShell 明文命令载荷的 launcher flag；`-cwa` 是 `-CommandWithArgs` 的官方别名。 */
+function isPowerShellCommandPayloadFlag(name: string): boolean {
+  return (name.length >= 2 && '-command'.startsWith(name))
+    || name === '-commandwithargs'
+    || name === '-cwa';
+}
+
 function powerShellNeedsConsent(tokens: string[]): boolean {
   if (!/^(?:pwsh|powershell)$/.test(executableName(tokens[0] ?? ''))) return false;
   let payload: string | null = null;
@@ -2848,10 +2855,11 @@ function powerShellNeedsConsent(tokens: string[]): boolean {
     const name = raw.split('=')[0].toLowerCase();
     // -EncodedCommand(-e/-ec/-enc/…):base64 静态不可读 → 必问(不可只当灰区)。
     if (name.length >= 2 && '-encodedcommand'.startsWith(name)) return true;
-    // -Command(-c/-co/…)后的**全部**剩余 token 构成待执行命令(PowerShell 语义),不能只取紧邻一个:
+    // -Command(-c/-co/…)或 -CommandWithArgs/-cwa 后的**全部**剩余 token 构成待执行命令
+    // (PowerShell 语义),不能只取紧邻一个:
     // 非引号形态 `-Command Remove-Item -Recurse -Force C:\Users` 的 `-Recurse/-Force` 在后续 token 里
     // (codex 报,现有回归都把载荷包成单引号 token 才命中)→ 拼接全部剩余 token 再交危险模式扫描。
-    if (name.length >= 2 && '-command'.startsWith(name)) {
+    if (isPowerShellCommandPayloadFlag(name)) {
       payload = raw.includes('=')
         ? [raw.slice(raw.indexOf('=') + 1), ...tokens.slice(i + 1)].join(' ')
         : tokens.slice(i + 1).join(' ');
@@ -3132,11 +3140,13 @@ function dumpsFullEnvironmentCommand(tokens: string[]): boolean {
 
 /** cmd.exe `/c`/`/k`/`/r` 后的载荷命令(其余全部构成待执行命令);非 cmd 启动器返回 null。 */
 /**
- * PowerShell `-Command` 的载荷,供破坏面判定下探 —— 与 `sh -c`(`shellCommandPayload`)、
+ * PowerShell `-Command` / `-CommandWithArgs` 的载荷,供破坏面判定下探 —— 与
+ * `sh -c`(`shellCommandPayload`)、
  * `cmd /c`(`cmdCommandPayload`)同一形态,此前只漏了 PowerShell:`pwsh -Command 'Set-Content
  * C:\Windows\…\hosts owned'` 的写目标取不到,而 `sh -c 'cp payload /etc/hosts'` 取得到
  * (codex 报)。`-Command` 后的**全部**剩余 token 构成待执行命令(PowerShell 语义),
- * 与 `powerShellNeedsConsent` 用同一套唯一前缀缩写判据(`-c` / `-co` / … = -Command)。
+ * 与 `powerShellNeedsConsent` 用同一套判据(`-c` / `-co` / … = -Command;
+ * `-cwa` = -CommandWithArgs)。
  *
  * `-EncodedCommand` 不在此列:base64 静态不可读,已由 `powerShellNeedsConsent` 直接判必问。
  */
@@ -3145,7 +3155,7 @@ function powerShellCommandPayload(tokens: string[]): string | null {
   for (let i = 1; i < tokens.length; i++) {
     const name = tokens[i].split('=')[0].toLowerCase();
     if (name.length >= 2 && '-encodedcommand'.startsWith(name)) return null;
-    if (name.length >= 2 && '-command'.startsWith(name)) {
+    if (isPowerShellCommandPayloadFlag(name)) {
       return tokens[i].includes('=')
         ? [tokens[i].slice(tokens[i].indexOf('=') + 1), ...tokens.slice(i + 1)].join(' ')
         : tokens.slice(i + 1).join(' ');

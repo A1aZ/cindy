@@ -1348,7 +1348,7 @@ function ExpandedView({
 
   // 内联会话搜索:输入行在 SidebarTopNav 的第 4 行,状态经 ConversationSearchProvider 共享;
   // query 非空时同一份顶部导航 sticky 钉住,结果替换下方列表,不再用 overlay 盖输入框。
-  const { search } = useConversationSearchContext();
+  const { search, openSignal } = useConversationSearchContext();
   const gcProjectKeys = useMemo(
     () => projectUniverse.projects.map((p) => p.projectKey),
     [projectUniverse.projects],
@@ -1703,11 +1703,21 @@ function ExpandedView({
   // 搜索激活前持续记下列表 scrollTop:layout effect 跑时原列表已经 hidden,
   // 那时再读会被浏览器钳成 0。
   const lastListScrollTopRef = useRef(0);
+  // 「在此项目内搜索」会在 query 仍空时 focus 输入框,浏览器先把搜索行滚进视野。
+  // 这段窗口里 searchActive 仍是 false,滚动监听会把焦点滚动后的偏移当成列表位置。
+  const freezeListScrollOnOpenRef = useRef(false);
+  const lastOpenSignalRef = useRef(openSignal);
+  if (openSignal !== lastOpenSignalRef.current) {
+    lastOpenSignalRef.current = openSignal;
+    if (openSignal > 0 && !searchActive) {
+      freezeListScrollOnOpenRef.current = true;
+    }
+  }
   useEffect(() => {
     const el = sidebarScrollRef.current;
     if (!el) return undefined;
     const update = () => {
-      if (!searchActiveRef.current) {
+      if (!searchActiveRef.current && !freezeListScrollOnOpenRef.current) {
         lastListScrollTopRef.current = el.scrollTop;
       }
       const next = el.scrollTop > 1;
@@ -1732,8 +1742,10 @@ function ExpandedView({
     const el = sidebarScrollRef.current;
     if (!el) return;
     if (searchActive) {
+      freezeListScrollOnOpenRef.current = false;
       el.scrollTo({ top: 0 });
     } else if (wasSearchActiveRef.current) {
+      freezeListScrollOnOpenRef.current = false;
       el.scrollTo({ top: lastListScrollTopRef.current });
     }
     wasSearchActiveRef.current = searchActive;
@@ -3140,7 +3152,7 @@ function ExpandedView({
             </div>
           ) : null}
           {/* 搜索时原列表只隐藏、不卸载:置顶段折叠等本地 state 才能保住。 */}
-          <div hidden={searchActive}>
+          <div hidden={searchActive} className="flex flex-col gap-2">
           {remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
             <>
               <MainListScopeHeader

@@ -94,7 +94,10 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).toContain('searchProjectKey');
     expect(sidebarUpperSource).toContain('onContextMenu={(event) => event.stopPropagation()}');
     expect(sidebarUpperSource).toContain('{searchActive ? (');
-    expect(sidebarUpperSource).toContain('<div hidden={searchActive}>');
+    expect(sidebarUpperSource).toContain('<div hidden={searchActive} className="flex flex-col gap-2">');
+    expect(sidebarUpperSource).toContain('freezeListScrollOnOpenRef.current = true');
+    const inlineSearchSource = read('features', 'cc-agent', 'sidebar', 'SidebarInlineSearch.tsx');
+    expect(inlineSearchSource).toContain('inputRef.current?.focus({ preventScroll: true })');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');
     expect(sidebarUpperSource).not.toContain(
       "search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'",

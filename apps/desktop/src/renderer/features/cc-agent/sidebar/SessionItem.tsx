@@ -1051,8 +1051,9 @@ export const SessionItem = memo(function SessionItem({
           archive 快捷按钮 hover/focus 时覆盖整个槽位,避免右侧拥挤;完整菜单仍走右键。
           槽宽跟可见内容走:状态点 / worktree / 任务信息有多宽占多宽,「任务信息 =
           无」且无状态、无 worktree 时宽度归零,把行宽还给标题。hover / 菜单打开 /
-          二次确认时,不可见操作钮进入文档流撑开真实按钮宽,标题被挤回 truncate,
-          可见按钮仍绝对定位叠在同一槽上——不再常驻 56px,也不叠到标题上。 */}
+          二次确认时,信息层与操作占位叠在同一格,槽宽取两者较大值,标题走 truncate,
+          可见按钮仍绝对定位叠在同一槽上——不再常驻 56px,也不叠到标题上,更不把
+          信息宽和按钮宽相加。 */}
       {!isEditing && (
         <div className="group/slot relative ml-auto flex h-6 shrink-0 items-center justify-end">
           {/* WorktreeBadge + time 同步 fade-out:hover/菜单打开/archivePending 时
@@ -1062,9 +1063,10 @@ export const SessionItem = memo(function SessionItem({
               role="button" tabIndex=0,点击选中后焦点常驻行内,若用整行的
               group-focus-within,选中态(非 hover)时间会被永久隐藏而 action
               buttons 又不显示,右侧变空白。 */}
+          <div className="grid h-6 grid-cols-[max-content] items-center justify-items-end">
           <div
             className={cn(
-              'flex items-center gap-1',
+              'col-start-1 row-start-1 flex items-center gap-1',
               // duration 与 action 按钮组的渐显同拍(120ms),让位/回归一进一出同步。
               'transition-opacity duration-[120ms]',
               !archivePending && 'group-hover:opacity-0 group-focus-within/slot:opacity-0',
@@ -1085,7 +1087,7 @@ export const SessionItem = memo(function SessionItem({
           </div>
 
           {canQuickArchive && archivePending && (
-            <span aria-hidden className="invisible inline-block h-6 w-14 shrink-0" />
+            <span aria-hidden className="invisible col-start-1 row-start-1 inline-block h-6 w-14" />
           )}
           {canQuickArchive && archivePending && (
             <button
@@ -1124,7 +1126,7 @@ export const SessionItem = memo(function SessionItem({
               <div
                 aria-hidden
                 className={cn(
-                  'invisible flex h-6 items-center gap-0.5',
+                  'invisible col-start-1 row-start-1 flex h-6 items-center gap-0.5',
                   menuPos === null && 'hidden group-hover:flex group-focus-within/slot:flex',
                 )}
               >
@@ -1153,6 +1155,7 @@ export const SessionItem = memo(function SessionItem({
               </div>
             </>
           )}
+          </div>
         </div>
       )}
 

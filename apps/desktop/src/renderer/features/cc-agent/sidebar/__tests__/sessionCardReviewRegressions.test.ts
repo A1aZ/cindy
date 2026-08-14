@@ -171,12 +171,17 @@ describe('SessionCard review regressions', () => {
     expect(automationGroupSource).toContain(
       'group/slot relative ml-auto flex h-6 max-w-[96px] shrink-0 items-center justify-end',
     );
+    expect(sessionItemSource).toContain('grid h-6 grid-cols-[max-content] items-center justify-items-end');
     expect(sessionItemSource).toContain(
       "menuPos === null && 'hidden group-hover:flex group-focus-within/slot:flex'",
     );
     expect(automationGroupSource).toContain(
+      'grid h-6 max-w-[96px] grid-cols-[max-content] items-center justify-items-end',
+    );
+    expect(automationGroupSource).toContain(
       "!menuOpen && 'hidden group-hover:block group-focus-within/slot:block'",
     );
+    expect(sessionCardSource).toContain('grid h-5 grid-cols-[max-content] items-center justify-items-end');
     expect(sessionCardSource).toContain(
       "!menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex'",
     );

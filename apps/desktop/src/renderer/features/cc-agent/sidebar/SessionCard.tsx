@@ -1225,11 +1225,12 @@ function TimeActionsSlot({
   );
   return (
     <div className="group/slot relative ml-auto flex h-[22px] shrink-0 items-center justify-end">
+      <div className="grid h-[22px] grid-cols-[max-content] items-center justify-items-end">
       {/* 默认内容:worktree + 信息槽;hover / 菜单打开 / archivePending 时淡出让位给操作钮。 */}
       <div
         className={cn(
           // duration 与操作钮的渐显同拍(120ms),让位/回归一进一出同步。
-          'flex items-center gap-1 transition-opacity duration-[120ms]',
+          'col-start-1 row-start-1 flex items-center gap-1 transition-opacity duration-[120ms]',
           !archivePending && 'group-hover/card:opacity-0 group-focus-within/slot:opacity-0',
           (menuOpen || yieldToOrdinalBadge) && 'opacity-0',
           // 确认胶囊覆盖同一槽位时立即隐藏日期，避免 120ms 淡出期间文字叠在一起。
@@ -1246,7 +1247,7 @@ function TimeActionsSlot({
       </div>
 
       {canQuickArchive && archivePending && (
-        <span aria-hidden className="invisible inline-block h-[22px] w-14 shrink-0" />
+        <span aria-hidden className="invisible col-start-1 row-start-1 inline-block h-[22px] w-14" />
       )}
       {canQuickArchive && archivePending && (
         <button
@@ -1277,7 +1278,7 @@ function TimeActionsSlot({
           <div
             aria-hidden
             className={cn(
-              'invisible flex h-5 items-center gap-0.5',
+              'invisible col-start-1 row-start-1 flex h-[22px] items-center gap-0.5',
               !menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex',
             )}
           >
@@ -1325,6 +1326,7 @@ function TimeActionsSlot({
           </div>
         </>
       )}
+      </div>
     </div>
   );
 }

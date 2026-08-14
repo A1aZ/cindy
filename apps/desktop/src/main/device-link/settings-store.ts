@@ -281,6 +281,25 @@ export function writeLastKnownDeviceNames(names: Record<string, string>): Promis
   return writeDeviceLinkSetting('lastKnownDeviceNames', { ...names });
 }
 
+/** 同一设备的名称判重与写入必须同序，避免旧删除覆盖紧随其后的同名恢复。 */
+const lastKnownDeviceNameMutationByDevice = new Map<string, Promise<unknown>>();
+
+function enqueueLastKnownDeviceNameMutation<T>(
+  deviceId: string,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  const previous = lastKnownDeviceNameMutationByDevice.get(deviceId) ?? Promise.resolve();
+  const task = previous.catch(() => undefined).then(mutation);
+  lastKnownDeviceNameMutationByDevice.set(deviceId, task);
+  const cleanup = (): void => {
+    if (lastKnownDeviceNameMutationByDevice.get(deviceId) === task) {
+      lastKnownDeviceNameMutationByDevice.delete(deviceId);
+    }
+  };
+  void task.then(cleanup, cleanup);
+  return task;
+}
+
 export async function setDeviceControlEnabled(
   deviceId: string,
   enabled: boolean,
@@ -304,43 +323,47 @@ export async function setDeviceControlEnabled(
 export async function rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean> {
   const normalizedName = normalizeCachedDeviceName(name);
   if (!deviceId.trim() || !normalizedName) return false;
-  const settings = readDeviceLinkSettings();
-  if (settings.lastKnownDeviceNames[deviceId] === normalizedName) return false;
-  try {
-    // 锁内基于盘上最新 map 合并单条,避免用旧 map 整体覆盖并发写入的其它条目
-    await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) =>
-      latest[deviceId] === normalizedName ? latest : { ...latest, [deviceId]: normalizedName },
-    );
-  } catch (err) {
-    log.warn('remember last-known device name failed, continuing without cache update', {
-      deviceId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-  return true;
+  return enqueueLastKnownDeviceNameMutation(deviceId, async () => {
+    const settings = readDeviceLinkSettings();
+    if (settings.lastKnownDeviceNames[deviceId] === normalizedName) return false;
+    try {
+      // 锁内基于盘上最新 map 合并单条,避免用旧 map 整体覆盖并发写入的其它条目
+      await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) =>
+        latest[deviceId] === normalizedName ? latest : { ...latest, [deviceId]: normalizedName },
+      );
+    } catch (err) {
+      log.warn('remember last-known device name failed, continuing without cache update', {
+        deviceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    return true;
+  });
 }
 
 export async function forgetLastKnownDeviceName(deviceId: string): Promise<boolean> {
   const normalizedDeviceId = deviceId.trim();
   if (!normalizedDeviceId) return false;
-  let removed = false;
-  try {
-    await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) => {
-      if (!(normalizedDeviceId in latest)) return latest;
-      const next = { ...latest };
-      delete next[normalizedDeviceId];
-      removed = true;
-      return next;
-    });
-  } catch (err) {
-    log.warn('forget last-known device name failed, continuing with in-memory fallback', {
-      deviceId: normalizedDeviceId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-  return removed;
+  return enqueueLastKnownDeviceNameMutation(normalizedDeviceId, async () => {
+    let removed = false;
+    try {
+      await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) => {
+        if (!(normalizedDeviceId in latest)) return latest;
+        const next = { ...latest };
+        delete next[normalizedDeviceId];
+        removed = true;
+        return next;
+      });
+    } catch (err) {
+      log.warn('forget last-known device name failed, continuing with in-memory fallback', {
+        deviceId: normalizedDeviceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    return removed;
+  });
 }
 
 export function normalizeCachedDeviceName(name: string): string | null {

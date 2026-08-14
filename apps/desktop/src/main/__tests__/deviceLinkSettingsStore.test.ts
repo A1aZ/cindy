@@ -256,6 +256,20 @@ describe('writeDeviceLinkSetting', () => {
     expect(readDeviceLinkSettings().lastKnownDeviceNames).toEqual({});
   });
 
+  it('空名删除尚未完成时，同名有效名称恢复会排在删除后重新写回', async () => {
+    h.seed(SETTINGS_PATH, JSON.stringify({ lastKnownDeviceNames: { 'dev-1': 'MacBook' } }));
+    const {
+      forgetLastKnownDeviceName,
+      readDeviceLinkSettings,
+      rememberLastKnownDeviceName,
+    } = await load();
+
+    const forget = forgetLastKnownDeviceName('dev-1');
+    const remember = rememberLastKnownDeviceName('dev-1', 'MacBook');
+    await expect(Promise.all([forget, remember])).resolves.toEqual([true, true]);
+    expect(readDeviceLinkSettings().lastKnownDeviceNames).toEqual({ 'dev-1': 'MacBook' });
+  });
+
   it('rememberLastKnownDeviceName 写缓存失败时不影响调用方', async () => {
     h.writeFileSync.mockImplementationOnce(() => {
       throw new Error('disk full');

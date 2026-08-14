@@ -124,6 +124,7 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
     broadcast: vi.fn(),
     readLastKnownDeviceNames: vi.fn(() => ({})),
     rememberLastKnownDeviceName: vi.fn(async () => false),
+    forgetLastKnownDeviceName: vi.fn(async () => false),
     ...overrides,
   };
 }
@@ -348,6 +349,43 @@ describe('device-link IPC handlers', () => {
       ],
     });
   });
+
+  it.each([
+    ['Host.local', 'Host.local'],
+    [null, '12345678'],
+  ] as const)(
+    'listDevices:数据库空名清除 last-known，并回退 selfName/设备短 ID(%s)',
+    async (selfName, expectedName) => {
+      const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const rememberLastKnownDeviceName = vi.fn(async () => false);
+      const deps = makeDeps({
+        apiFetch: vi.fn().mockResolvedValue({
+          devices: [
+            {
+              deviceId: '1234567890abcdef',
+              name: '',
+              selfName,
+              platform: 'darwin',
+              lastSeenAt: '2026-06-23T00:00:00.000Z',
+              online: false,
+              busy: false,
+              remoteControlEnabled: false,
+              controlEnabled: true,
+              isSelf: false,
+            },
+          ],
+        }),
+        readLastKnownDeviceNames: vi.fn(() => ({ '1234567890abcdef': '旧缓存名' })),
+        rememberLastKnownDeviceName,
+        forgetLastKnownDeviceName,
+      });
+
+      const result = await handleListDevices(deps);
+      expect(result.devices[0]?.name).toBe(expectedName);
+      expect(forgetLastKnownDeviceName).toHaveBeenCalledWith('1234567890abcdef');
+      expect(rememberLastKnownDeviceName).not.toHaveBeenCalled();
+    },
+  );
 
   it('listDevices:按本机 disabledControlDeviceIds 合成 controlEnabled=false', async () => {
     const deps = makeDeps({

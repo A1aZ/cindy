@@ -50,7 +50,9 @@ import {
   stripOutboundSessionReferenceSideChannels,
 } from './outboundSessionReferences';
 import {
+  forgetLastKnownDeviceName,
   isPlaceholderDeviceName,
+  normalizeCachedDeviceName,
   readDeviceLinkSettings,
   readLastKnownDeviceNames,
   rememberLastKnownDeviceName,
@@ -106,6 +108,7 @@ export interface DeviceLinkIpcDeps {
   broadcast(channel: string, payload: unknown): void;
   readLastKnownDeviceNames(): Record<string, string>;
   rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean>;
+  forgetLastKnownDeviceName(deviceId: string): Promise<boolean>;
   /**
    * 出方向附件改写:把消息里的本机附件上传 OSS、替换成引用串(仅 send/steer/enqueue 生效)。
    * 可选 —— 测试可不注入(跳过改写,行为同旧版纯透传)。
@@ -150,6 +153,7 @@ export function defaultDeps(): DeviceLinkIpcDeps {
     broadcast,
     readLastKnownDeviceNames,
     rememberLastKnownDeviceName,
+    forgetLastKnownDeviceName,
     rewriteOutboundMedia,
     rewriteOutboundSessionReferences,
   };
@@ -306,7 +310,10 @@ function reconcileDeviceNames(
   result: { devices: DeviceLinkServerDeviceView[] },
   deps: Pick<
     DeviceLinkIpcDeps,
-    'getState' | 'readLastKnownDeviceNames' | 'rememberLastKnownDeviceName'
+    | 'getState'
+    | 'readLastKnownDeviceNames'
+    | 'rememberLastKnownDeviceName'
+    | 'forgetLastKnownDeviceName'
   >,
 ): { devices: DeviceLinkDeviceView[] } {
   const cachedNames = deps.readLastKnownDeviceNames();
@@ -321,6 +328,12 @@ function reconcileDeviceNames(
       if (device.name !== trimmedName) {
         name = trimmedName;
       }
+    } else if (!trimmedName) {
+      void deps.forgetLastKnownDeviceName(device.deviceId); // 显式清空与后台目录刷新保持同义
+      const selfName = typeof device.selfName === 'string'
+        ? normalizeCachedDeviceName(device.selfName)
+        : null;
+      name = selfName ?? device.deviceId.slice(0, 8);
     } else if (cachedNames[device.deviceId]) {
       name = cachedNames[device.deviceId];
     }

@@ -98,7 +98,9 @@ vi.mock('../outboundSessionReferences', () => ({
   rewriteOutboundSessionReferences: vi.fn(async (_c, a) => a),
 }));
 vi.mock('../settings-store', () => ({
+  forgetLastKnownDeviceName: vi.fn(),
   isPlaceholderDeviceName: () => false,
+  normalizeCachedDeviceName: (name: string) => name.trim() || null,
   readDeviceLinkSettings: () => ({
     remoteControlEnabled: true,
     keepAwake: false,

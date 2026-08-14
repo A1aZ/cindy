@@ -321,6 +321,7 @@ async function fetchCodexTitle(
   signal: AbortSignal,
   instructions: string = CODEX_TITLE_INSTRUCTIONS,
   systemPrompt?: string,
+  maxTokens?: number,
 ): Promise<string> {
   const effectiveInstructions = systemPrompt
     ? `${systemPrompt}\n\n${instructions}`
@@ -336,6 +337,7 @@ async function fetchCodexTitle(
     stream: true,
   };
   if (effort) body.reasoning = { effort };
+  if (maxTokens != null) body.max_output_tokens = maxTokens;
 
   const res = await fetchImpl(`${trimTrailingSlash(upstream)}/responses`, {
     method: 'POST',
@@ -602,6 +604,16 @@ export async function generateTitleViaProviderResult(
         if (!(await preDispatchEligible('after-credential-refresh'))) {
           return { status: 'failed' };
         }
+        // 紧前复查：preDispatchEligible 内部的 async 操作（listConnectedProviders
+        // 等）期间用户可能登出/切换账号/轮换凭证，旧 OAuth token 仍指向切换前的账号。
+        // 重新读取当前凭证并与捕获值比对，不一致则中止，避免向旧账号外发付费调用。
+        const oauthRecheck = await readAnthropicOAuth();
+        if (oauthRecheck?.accessToken !== oauth.accessToken) {
+          log.debug('title oneShot skipped: credential changed during eligibility check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchAnthropicTitle(
           target.upstream,
           target.model,
@@ -623,6 +635,20 @@ export async function generateTitleViaProviderResult(
         if (!(await preDispatchEligible('after-credential-read'))) {
           return { status: 'failed' };
         }
+        // 紧前复查：preDispatchEligible 内部的 async 操作期间用户可能切换 ChatGPT
+        // workspace/账号或轮换 token，旧 creds 仍指向切换前的账号。重新读取并与
+        // 捕获值比对（accountId + accessToken），不一致则中止。
+        const credsRecheck = readCodexCreds();
+        if (
+          !credsRecheck ||
+          credsRecheck.accountId !== creds.accountId ||
+          credsRecheck.accessToken !== creds.accessToken
+        ) {
+          log.debug('title oneShot skipped: credential changed during eligibility check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchCodexTitle(
           target.upstream,
           target.model,
@@ -633,6 +659,7 @@ export async function generateTitleViaProviderResult(
           controller.signal,
           codexInstructions,
           opts?.systemPrompt,
+          maxTokens,
         );
         break;
       }
@@ -643,6 +670,14 @@ export async function generateTitleViaProviderResult(
           return { status: 'failed' };
         }
         if (!(await preDispatchEligible('after-credential-read'))) {
+          return { status: 'failed' };
+        }
+        // 紧前复查：preDispatchEligible 内部的 async 操作期间用户可能轮换 XD 网关
+        // key，旧 key 仍指向切换前的租户。重新读取并与捕获值比对，不一致则中止。
+        if (readGatewayKey() !== key) {
+          log.debug('title oneShot skipped: credential changed during eligibility check', {
+            providerId,
+          });
           return { status: 'failed' };
         }
         text = await fetchGatewayTitle(

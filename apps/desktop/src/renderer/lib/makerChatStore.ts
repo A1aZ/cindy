@@ -2550,7 +2550,7 @@ export interface SessionChatState {
    *   isRunning:true)/ stopSession / session closed 兜底 / clearSession /
    *   reloadMessages。
    */
-  pendingTaskWake: boolean;
+  pendingTaskWake: number;
   /**
    * 唤醒桥接的「跨主 turn」标记:记录 pendingTaskWake 是否是在主 turn 仍 running
    * (agentStatus.isRunning === true)时置位的。
@@ -2571,7 +2571,7 @@ export interface SessionChatState {
    * 会把主轮自己的 Done 误判成 wake 失败、提前撤销桥接,导致 ChatInput 在 wake 最终
    * 回复到达前就用不完整上下文发起一次付费预测。
    */
-  pendingTaskWakeDuringTurn: boolean;
+  pendingTaskWakeDuringTurn: number;
   /**
    * 用户主动 Stop 标记:会话级(非组件级),确保同一 session 在多窗口打开时
    * 任一窗口的 Stop 都能阻止其他窗口触发预测等后续行为。
@@ -2693,8 +2693,8 @@ function createInitialState(): SessionChatState {
     planModeEnabled: false,
     planModeRev: 0,
     lastStopWasSideTask: false,
-    pendingTaskWake: false,
-    pendingTaskWakeDuringTurn: false,
+    pendingTaskWake: 0,
+    pendingTaskWakeDuringTurn: 0,
     turnStoppedByUser: false,
     lastAgentMeta: null,
   };
@@ -2763,8 +2763,8 @@ export const EMPTY_SESSION_STATE: SessionChatState = Object.freeze({
   planModeEnabled: false,
   planModeRev: 0,
   lastStopWasSideTask: false,
-  pendingTaskWake: false,
-  pendingTaskWakeDuringTurn: false,
+  pendingTaskWake: 0,
+  pendingTaskWakeDuringTurn: 0,
   turnStoppedByUser: false,
   lastAgentMeta: null,
 }) as SessionChatState;
@@ -4416,7 +4416,7 @@ function hasRunningWakeTask(state: SessionChatState): boolean {
  * 换确定性;被控端本机的 sidebar 折算不受影响。
  */
 function hasBackgroundAgentWork(sessionId: string, state: SessionChatState): boolean {
-  if (!state.pendingTaskWake && !hasRunningWakeTask(state)) return false;
+  if (state.pendingTaskWake === 0 && !hasRunningWakeTask(state)) return false;
   return !isRemoteSessionSticky(sessionId) && !state.remoteHostId;
 }
 
@@ -4895,7 +4895,7 @@ export function handleStreamEvent(
         !wasAlreadyTerminal &&
         (merged.status === 'completed' || merged.status === 'failed') &&
         isWakeAgentTask(merged);
-      const nextWake = state.pendingTaskWake || wakesAfterTerminal;
+      const nextWake = state.pendingTaskWake + (wakesAfterTerminal ? 1 : 0);
       // 主 turn 的终态 Done 是否尚未越过:仍 running,或已进入「pre-Done 空闲」
       // (isRunning 已提前翻 false 但 status 还不是 'Done')。只有在这个窗口内到达
       // 的 wake 终态才算「跨主 turn」——紧接着的 Done 是主轮自己的 Done,桥接必须
@@ -4917,8 +4917,9 @@ export function handleStreamEvent(
         // 跨主 turn 标记:桥接一旦在主 turn 仍 running 或 pre-Done 空闲里被置位就保持,
         // 直到唤醒桥接整体被清除。
         pendingTaskWakeDuringTurn:
-          nextWake &&
-          (state.pendingTaskWakeDuringTurn || (wakesAfterTerminal && mainTurnDoneNotCrossed)),
+          nextWake > 0
+          ? (state.pendingTaskWakeDuringTurn + (wakesAfterTerminal && mainTurnDoneNotCrossed ? 1 : 0))
+          : 0,
       };
     }
 
@@ -5706,7 +5707,7 @@ function forceFinalizeOnSessionClosed(state: SessionChatState): SessionChatState
     !state.queueAbortPending &&
     state.steeringQueueClientIds.length === 0 &&
     state.continuationTurnClientId === null &&
-    !state.pendingTaskWake &&
+    state.pendingTaskWake === 0 &&
     !state.messages.some(
       (message) =>
         message.clientId === CODEX_RECONNECT_PENDING_CLIENT_ID ||
@@ -5761,8 +5762,8 @@ function forceFinalizeOnSessionClosed(state: SessionChatState): SessionChatState
     // session 都关了,后台任务事件流已断:running 残留任务标 stopped、唤醒桥接
     // 清零,否则 running 快照(折算了后台任务)会让 spinner 永久转下去。
     taskUpdates: stoppedTasks,
-    pendingTaskWake: false,
-    pendingTaskWakeDuringTurn: false,
+    pendingTaskWake: 0,
+    pendingTaskWakeDuringTurn: 0,
     turnStoppedByUser: false,
     agentStatus: {
       ...finalized.agentStatus,
@@ -5856,16 +5857,16 @@ function handleStatusUpdate(
     // (pendingTaskWakeDuringTurn),不清除:桥接必须跨过主 turn 自己的 Done 继续
     // 存活,直到 wake turn 启动或失败。仅靠 agentStatus.isRunning 判断会把「主轮
     // Done 前 SDK 先推了 isRunning=false 的中间 status」误判成 wake 失败。
-    pendingTaskWake: isTurnStart ? false :
-      (isTurnComplete && state.pendingTaskWake && !state.agentStatus.isRunning && !state.pendingTaskWakeDuringTurn) ? false :
+    pendingTaskWake: isTurnStart ? Math.max(0, state.pendingTaskWake - 1) :
+      (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0) ? 0 :
       state.pendingTaskWake,
     // 跨主 turn 标记:主 turn 自己的 Done 越过(标记仍为 true 时到达的首个 Done)后,
     // 标记使命已尽、立即退休。否则 wake turn 失败(从未 isRunning:true、无 isTurnStart)
     // 时,终态 Done 会因 !pendingTaskWakeDuringTurn 恒为 false 而永远无法清除
     // pendingTaskWake,会话永久卡在 running/Stop 态。退休只清标记、不清桥接:
     // 桥接(pendingTaskWake)仍存活,直到 wake turn 真正启动或失败。
-    pendingTaskWakeDuringTurn: isTurnStart ? false :
-      (isTurnComplete && state.pendingTaskWakeDuringTurn) ? false :
+    pendingTaskWakeDuringTurn: isTurnStart ? Math.max(0, state.pendingTaskWakeDuringTurn - 1) :
+      (isTurnComplete && state.pendingTaskWakeDuringTurn > 0) ? 0 :
       state.pendingTaskWakeDuringTurn,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {
@@ -9834,8 +9835,8 @@ function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean 
       // the authoritative history window resets.
       messages: optimisticMessages,
       taskUpdates: new Map(),
-      pendingTaskWake: false,
-      pendingTaskWakeDuringTurn: false,
+      pendingTaskWake: 0,
+      pendingTaskWakeDuringTurn: 0,
       turnStoppedByUser: false,
       historyLoaded: false,
       hasMoreMessages: false,
@@ -12462,8 +12463,8 @@ function stopSession(
       // 全标会造成 tasks 面板窗口期显示错(review P2)。若 SDK 侧任务实际还活着,
       // 后续 task_progress 会把条目翻回 running,状态自愈。
       taskUpdates: stopRunningAgentTasks(s.taskUpdates, 'wake'),
-      pendingTaskWake: false,
-      pendingTaskWakeDuringTurn: false,
+      pendingTaskWake: 0,
+      pendingTaskWakeDuringTurn: 0,
       turnStoppedByUser: true,
       agentStatus: {
         status: 'Idle',
@@ -12868,8 +12869,8 @@ async function clearSessionAfterGuardImpl(sessionId: string, clearedAt: string):
         (message) => message.isPendingPersist && postClearOptimisticClientIds.has(message.clientId),
       ),
       taskUpdates: new Map(),
-      pendingTaskWake: false,
-      pendingTaskWakeDuringTurn: false,
+      pendingTaskWake: 0,
+      pendingTaskWakeDuringTurn: 0,
       turnStoppedByUser: false,
       streamingClientId: null,
       streamingText: '',

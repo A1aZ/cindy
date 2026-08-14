@@ -252,6 +252,29 @@ export async function generatePromptPrediction(
           // 此时 buildPredictionPrompt 已嵌入旧 params.workingDir，继续派发
           // 会向 provider 外发过期本地路径。按 fail-closed 中止。
           if (row.workingDir !== (params.workingDir ?? null)) return false;
+          // 终末复查：上方 listConnectedProvidersForAgent 是异步调用（实时读取
+          // 凭证连接态且允许副作用），等待期间用户仍可能删除会话、切换 agent/provider、
+          // 修改工作目录或把会话转为远程/review。在最后一个 await 之后再做一次无后续
+          // await 的 DB 复核，把 TOCTOU 窗口缩到最小。
+          const [finalRow] = await getDbClient()
+            .drizzle.select({
+              agentKind: sessions.agentKind,
+              status: sessions.status,
+              source: sessions.source,
+              remoteHostId: sessions.remoteHostId,
+              providerId: sessions.providerId,
+              workingDir: sessions.workingDir,
+            })
+            .from(sessions)
+            .where(eq(sessions.id, sessionId))
+            .limit(1);
+          if (!finalRow) return false;
+          if (finalRow.status === 'deleted') return false;
+          if (finalRow.source === 'review') return false;
+          if (finalRow.remoteHostId) return false;
+          if (dbToMakerAgentKind(finalRow.agentKind) !== agentKind) return false;
+          if (finalRow.providerId != null && finalRow.providerId !== resolvedProviderId) return false;
+          if (finalRow.workingDir !== (params.workingDir ?? null)) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

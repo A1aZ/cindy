@@ -214,8 +214,24 @@ export interface ImChannelAdapter {
    * 该轮(fail-closed), 不会静默放开。
    */
   turnPermissionPolicyFor?(event: IMMessageEvent): TurnPermissionPolicy | undefined;
+  /**
+   * 群轮次强确认策略对指定权限档「可选」的渠道判定 — 返回 true 的档位在
+   * dispatch 时不挂 turnPermissionPolicy(maker 不再 fail-closed, 按用户显式
+   * 选择直接执行)。飞书用它在用户于渠道设置中显式选择「完全访问」后取缔
+   * 群护栏; 群上下文的防注入过滤/包裹独立于权限档, 照常生效。其它渠道
+   * 不实现即保持 fail-closed。
+   */
+  turnPolicyOptionalForMode?(permissionMode: PermissionMode): boolean;
   /** Telegram 每轮的群历史检索授权；其它渠道不实现即 fail closed。 */
   groupHistoryAccessFor?(event: IMMessageEvent): GroupHistoryAccessScope | undefined;
+  /**
+   * slash 命令事件的渠道钩子 — 在 handleSlashCommand 之前调用。飞书用它记住
+   * 「群主流 @ 开话题」事件带的群主流取数 lane(groupContextLane): /ctr 等
+   * slash 不经过 prepareAgentTurnText, 开话题那条事件攒下的 thread 前上下文
+   * 会丢失; 记住后由话题里第一条 agent 消息领走(见 adapter 实现)。
+   * 其它渠道不实现即 no-op。
+   */
+  onSlashCommandEvent?(event: IMMessageEvent): void;
 }
 
 // ── UI 文案包 ─────────────────────────────────────────────────────────────────
@@ -289,7 +305,8 @@ export interface ImUiTextPack {
    */
   error?: {
     agentUnsupported: string;
-    permissionModeUnsupported: string;
+    /** 函数形态接收 maker 拒绝时的权限档 id(如 acceptEdits), 报错能点名档位。 */
+    permissionModeUnsupported: string | ((permissionMode: string) => string);
     /** 换 Agent 后仍可能不兼容的权限模式(bypassPermissions / acceptEdits)时附加。 */
     agentSwitchAlsoCheckPermissionMode?: string;
   };
@@ -305,9 +322,21 @@ export interface ImUiTextPack {
       resolvedDeny: string;
       /**
        * 授权卡转投 owner 私聊(deliverToOwnerDm)后, 在原群/话题 lane 里发的
-       * 指路提示 — 否则群里的人不知道卡片去了哪。缺省不发。
+       * 指路提示 — 否则群里的人不知道卡片去了哪。缺省不发。函数形态接收
+       * toolName, 提示里能点出「具体是什么操作」。
        */
-      dmRoutedNotice?: string;
+      dmRoutedNotice?: string | ((toolName: string) => string);
+    };
+    /**
+     * 「群会话不能用完全访问」失败时的私聊修复卡 — 一键把本会话切回
+     * 自动审批(auto)。仅飞书提供; 缺省渠道不发卡只发报错文案。
+     */
+    permissionModeFix?: {
+      title: string;
+      body: (sessionTitle: string) => string;
+      btnFix: string;
+      resolved: string;
+      failed: (reason: string) => string;
     };
     ask: {
       title: (header: string) => string;

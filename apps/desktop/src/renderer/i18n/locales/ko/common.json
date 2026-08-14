@@ -3155,7 +3155,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "그룹 /ctr 새 세션 권한 모드",
+        "groupCtrPermissionDescription": "그룹 채팅에서 @bot /ctr로 새 세션을 만들 때 적용되는 권한 모드입니다. 기본값은 자동 승인입니다. 그룹 컨텍스트에는 멤버가 조작할 수 있는 내용이 포함되므로 전체 액세스를 선택하면 확인 없이 바로 실행됩니다. 신뢰할 수 있는 그룹에서만 선택하세요."
       }
     },
     "shortcuts": {
@@ -5580,6 +5582,7 @@
         "context": "컨텍스트 {{value}}",
         "codexCompatibilityMode": "Codex 호환 모드",
         "price": "{{input}}/{{output}} / 100만",
+        "subscriptionBadgeCompact": "구독",
         "fastBadge": "고속"
       },
       "source": {

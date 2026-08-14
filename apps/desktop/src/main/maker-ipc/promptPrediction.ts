@@ -233,13 +233,19 @@ export async function generatePromptPrediction(
           // 导致付费请求路由到过期 provider/账号。
           if (row.providerId != null) {
             if (row.providerId !== resolvedProviderId) return false;
+            // 额外复查：显式 provider 是否仍在已连接列表中。用户在凭证解析后
+            // 断开/登出该显式 provider 时，DB providerId 仍等于 resolvedProviderId，
+            // 但 connected-provider rail 已不含该 provider，继续派发会用过期凭证
+            // 外发付费调用。按 fail-closed 中止。
+            const providers = await listConnectedProvidersForAgent(agentKind);
+            if (!providers.some((p) => p.id === resolvedProviderId)) return false;
           } else {
             // provider_id 为 null 表示使用默认 provider。若用户在凭证解析后
             // 断开/切换了默认 provider，resolvedProviderId 仍指向旧 provider，
             // 继续派发会外发到过期 provider/账号。重新计算当前有效默认 provider
             // 并与 resolvedProviderId 比对。
             const providers = await listConnectedProvidersForAgent(agentKind);
-            if (providers.length > 0 && providers[0].id !== resolvedProviderId) return false;
+            if (providers.length === 0 || providers[0].id !== resolvedProviderId) return false;
           }
           // 紧前复查 workingDir：用户在 provider/凭证解析期间切换了工作目录，
           // 此时 buildPredictionPrompt 已嵌入旧 params.workingDir，继续派发

@@ -121,5 +121,9 @@ describe('SessionItem activity time', () => {
       'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
     );
     expect(sessionItemSource).toContain('absolute right-0 top-0 flex h-6 items-center gap-0.5');
+    // hover / 菜单打开时不可见操作钮进入文档流,把槽宽撑到真实按钮宽,避免叠到标题上。
+    expect(sessionItemSource).toContain(
+      "menuPos === null && 'hidden group-hover:flex group-focus-within/slot:flex'",
+    );
   });
 });

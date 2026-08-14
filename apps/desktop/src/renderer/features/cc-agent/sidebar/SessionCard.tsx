@@ -1246,6 +1246,9 @@ function TimeActionsSlot({
       </div>
 
       {canQuickArchive && archivePending && (
+        <span aria-hidden className="invisible inline-block h-[22px] w-14 shrink-0" />
+      )}
+      {canQuickArchive && archivePending && (
         <button
           ref={confirmPillRef}
           type="button"
@@ -1270,45 +1273,57 @@ function TimeActionsSlot({
       )}
 
       {!archivePending && (
-        <div
-          // 渐显(120ms)配 pointer-events 守卫:淡出期间按钮不占鼠标位置,
-          // 不会拦下卡片点击;键盘焦点不受 pointer-events 影响。
-          className={cn(
-            'absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5',
-            'transition-opacity duration-[120ms]',
-            menuOpen
-              ? 'opacity-100'
-              : 'pointer-events-none opacity-0 group-hover/card:pointer-events-auto group-hover/card:opacity-100 group-focus-within/slot:pointer-events-auto group-focus-within/slot:opacity-100',
-          )}
-        >
-          <CardAction
-            variant="list"
-            isActive={isActive}
-            label={t('ccAgent.sidebar.sessionMenu.moreActions')}
-            onClick={onOpenMenu}
+        <>
+          <div
+            aria-hidden
+            className={cn(
+              'invisible flex h-5 items-center gap-0.5',
+              !menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex',
+            )}
           >
-            <EllipsisVertical size={14} strokeWidth={2} />
-          </CardAction>
-          {isArchived && canUnarchive ? (
+            <span className="size-5 shrink-0" />
+            {(isArchived && canUnarchive) || canQuickArchive ? <span className="size-5 shrink-0" /> : null}
+          </div>
+          <div
+            // 渐显(120ms)配 pointer-events 守卫:淡出期间按钮不占鼠标位置,
+            // 不会拦下卡片点击;键盘焦点不受 pointer-events 影响。
+            className={cn(
+              'absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5',
+              'transition-opacity duration-[120ms]',
+              menuOpen
+                ? 'opacity-100'
+                : 'pointer-events-none opacity-0 group-hover/card:pointer-events-auto group-hover/card:opacity-100 group-focus-within/slot:pointer-events-auto group-focus-within/slot:opacity-100',
+            )}
+          >
             <CardAction
               variant="list"
               isActive={isActive}
-              label={t('ccAgent.sidebar.sessionMenu.unarchive')}
-              onClick={() => onUnarchive()}
+              label={t('ccAgent.sidebar.sessionMenu.moreActions')}
+              onClick={onOpenMenu}
             >
-              <Undo size={14} strokeWidth={2} />
+              <EllipsisVertical size={14} strokeWidth={2} />
             </CardAction>
-          ) : canQuickArchive ? (
-            <CardAction
-              variant="list"
-              isActive={isActive}
-              label={t('ccAgent.sidebar.sessionMenu.archived')}
-              onClick={() => setArchivePending(true)}
-            >
-              <Archive size={14} strokeWidth={2} />
-            </CardAction>
-          ) : null}
-        </div>
+            {isArchived && canUnarchive ? (
+              <CardAction
+                variant="list"
+                isActive={isActive}
+                label={t('ccAgent.sidebar.sessionMenu.unarchive')}
+                onClick={() => onUnarchive()}
+              >
+                <Undo size={14} strokeWidth={2} />
+              </CardAction>
+            ) : canQuickArchive ? (
+              <CardAction
+                variant="list"
+                isActive={isActive}
+                label={t('ccAgent.sidebar.sessionMenu.archived')}
+                onClick={() => setArchivePending(true)}
+              >
+                <Archive size={14} strokeWidth={2} />
+              </CardAction>
+            ) : null}
+          </div>
+        </>
       )}
     </div>
   );

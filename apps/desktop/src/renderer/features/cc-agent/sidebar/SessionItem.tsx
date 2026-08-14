@@ -800,6 +800,66 @@ export const SessionItem = memo(function SessionItem({
     </DropdownMenuSub>
   ) : null;
 
+  const showAutomationRunAction =
+    isAutomationGenerated &&
+    !insideAutomationGroup &&
+    !isArchived &&
+    !isEmpty &&
+    !remoteWritesBlocked &&
+    Boolean(effectiveScheduleId);
+  const sessionActionButtons = (
+    <>
+      {/* 自动化会话专属 Run 直点按钮:仅顶层散落(insideAutomationGroup
+          为 false)的 automation-generated 会话可见 —— 分组内 (SessionEntryList
+          展开的子行) 组头已经暴露过同链路操作,再挂一份纯属视觉噪音。其它硬边界:
+          未归档 + 非 draft + 非远程只读。Edit 与左侧 Timer chip 同链路,不再重复
+          暴露;Run 走 main.maker.schedule.runNow,与 AutomationSessionGroupItem
+          组头 [Run ▶️][More ⋮] 保持高频直点、低频收纳的同构。 */}
+      {showAutomationRunAction && (
+        <SessionAction
+          label={t('ccAgent.sidebar.automationGroup.menu.runNow')}
+          onClick={() => void handleAutomationRunClick()}
+          isActive={isActive}
+        >
+          <Play size={14} strokeWidth={2} />
+        </SessionAction>
+      )}
+      <SessionAction
+        label={t('ccAgent.sidebar.sessionMenu.moreActions')}
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          prefetchRemovalPreflight();
+          setMenuPos({ x: rect.left, y: rect.bottom + 2 });
+        }}
+        isActive={isActive}
+      >
+        <EllipsisVertical size={14} strokeWidth={2} />
+      </SessionAction>
+      {isArchived && !remoteWritesBlocked ? (
+        <SessionAction
+          label={t('ccAgent.sidebar.sessionMenu.unarchive')}
+          onClick={() => handleUnarchiveSelect()}
+          isActive={isActive}
+        >
+          <Undo size={14} strokeWidth={2} />
+        </SessionAction>
+      ) : canQuickArchive ? (
+        <SessionAction
+          label={t('ccAgent.sidebar.sessionMenu.archived')}
+          onClick={() => {
+            // 第一步:亮出 Confirm 胶囊,同时把 dirty 预检发出去。用户抬手
+            // 再点第二下的间隔足够那次 git status 跑完 → 归档零等待。
+            prefetchRemovalPreflight();
+            setArchivePending(true);
+          }}
+          isActive={isActive}
+        >
+          <Archive size={14} strokeWidth={2} />
+        </SessionAction>
+      ) : null}
+    </>
+  );
+
   const row = (
     // biome-ignore lint/a11y/useSemanticElements: 行内包含菜单和快捷操作按钮，不能改成原生 button。
     <div
@@ -990,8 +1050,9 @@ export const SessionItem = memo(function SessionItem({
           视觉元素, 不和 action buttons 共存。
           archive 快捷按钮 hover/focus 时覆盖整个槽位,避免右侧拥挤;完整菜单仍走右键。
           槽宽跟可见内容走:状态点 / worktree / 任务信息有多宽占多宽,「任务信息 =
-          无」且无状态、无 worktree 时宽度归零,把行宽还给标题。操作钮绝对定位叠在
-          槽上,不靠预留 56px 空位当锚点——否则短时间(「刚刚」)和无信息都会挤标题。 */}
+          无」且无状态、无 worktree 时宽度归零,把行宽还给标题。hover / 菜单打开 /
+          二次确认时,不可见操作钮进入文档流撑开真实按钮宽,标题被挤回 truncate,
+          可见按钮仍绝对定位叠在同一槽上——不再常驻 56px,也不叠到标题上。 */}
       {!isEditing && (
         <div className="group/slot relative ml-auto flex h-6 shrink-0 items-center justify-end">
           {/* WorktreeBadge + time 同步 fade-out:hover/菜单打开/archivePending 时
@@ -1023,6 +1084,9 @@ export const SessionItem = memo(function SessionItem({
             )}
           </div>
 
+          {canQuickArchive && archivePending && (
+            <span aria-hidden className="invisible inline-block h-6 w-14 shrink-0" />
+          )}
           {canQuickArchive && archivePending && (
             <button
               ref={confirmPillRef}
@@ -1056,73 +1120,38 @@ export const SessionItem = memo(function SessionItem({
                 - archived：More + Undo（lucide Undo），单击直接走 unarchive，
                   不像 Archive 那样需要二次确认 pill（unarchive 非破坏性）。 */}
           {!archivePending && (
-            <div
-              // 渐显(120ms)配 pointer-events 守卫:淡出期间按钮不再占据鼠标位置,
-              // 解决了旧注释"渐变让按钮在 fade 期间仍占着鼠标位置、Radix Tooltip
-              // 收不到 pointerleave 导致 tip 挂着"的问题(当年因此禁用了
-              // transition-opacity);键盘焦点不受 pointer-events 影响,focus 路径不变。
-              className={cn(
-                'absolute right-0 top-0 flex h-6 items-center gap-0.5',
-                'transition-opacity duration-[120ms]',
-                menuPos !== null
-                  ? 'opacity-100'
-                  : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
-              )}
-            >
-              {/* 自动化会话专属 Run 直点按钮:仅顶层散落(insideAutomationGroup
-                  为 false)的 automation-generated 会话可见 —— 分组内 (SessionEntryList
-                  展开的子行) 组头已经暴露过同链路操作,再挂一份纯属视觉噪音。其它硬边界:
-                  未归档 + 非 draft + 非远程只读。Edit 与左侧 Timer chip 同链路,不再重复
-                  暴露;Run 走 main.maker.schedule.runNow,与 AutomationSessionGroupItem
-                  组头 [Run ▶️][More ⋮] 保持高频直点、低频收纳的同构。 */}
-              {isAutomationGenerated &&
-                !insideAutomationGroup &&
-                !isArchived &&
-                !isEmpty &&
-                !remoteWritesBlocked &&
-                effectiveScheduleId && (
-                  <SessionAction
-                    label={t('ccAgent.sidebar.automationGroup.menu.runNow')}
-                    onClick={() => void handleAutomationRunClick()}
-                    isActive={isActive}
-                  >
-                    <Play size={14} strokeWidth={2} />
-                  </SessionAction>
+            <>
+              <div
+                aria-hidden
+                className={cn(
+                  'invisible flex h-6 items-center gap-0.5',
+                  menuPos === null && 'hidden group-hover:flex group-focus-within/slot:flex',
                 )}
-              <SessionAction
-                label={t('ccAgent.sidebar.sessionMenu.moreActions')}
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  prefetchRemovalPreflight();
-                  setMenuPos({ x: rect.left, y: rect.bottom + 2 });
-                }}
-                isActive={isActive}
               >
-                <EllipsisVertical size={14} strokeWidth={2} />
-              </SessionAction>
-              {isArchived && !remoteWritesBlocked ? (
-                <SessionAction
-                  label={t('ccAgent.sidebar.sessionMenu.unarchive')}
-                  onClick={() => handleUnarchiveSelect()}
-                  isActive={isActive}
-                >
-                  <Undo size={14} strokeWidth={2} />
-                </SessionAction>
-              ) : canQuickArchive ? (
-                <SessionAction
-                  label={t('ccAgent.sidebar.sessionMenu.archived')}
-                  onClick={() => {
-                    // 第一步:亮出 Confirm 胶囊,同时把 dirty 预检发出去。用户抬手
-                    // 再点第二下的间隔足够那次 git status 跑完 → 归档零等待。
-                    prefetchRemovalPreflight();
-                    setArchivePending(true);
-                  }}
-                  isActive={isActive}
-                >
-                  <Archive size={14} strokeWidth={2} />
-                </SessionAction>
-              ) : null}
-            </div>
+                {showAutomationRunAction ? <span className="size-5 shrink-0" /> : null}
+                <span className="size-5 shrink-0" />
+                {isArchived && !remoteWritesBlocked ? (
+                  <span className="size-5 shrink-0" />
+                ) : canQuickArchive ? (
+                  <span className="size-5 shrink-0" />
+                ) : null}
+              </div>
+              <div
+                // 渐显(120ms)配 pointer-events 守卫:淡出期间按钮不再占据鼠标位置,
+                // 解决了旧注释"渐变让按钮在 fade 期间仍占着鼠标位置、Radix Tooltip
+                // 收不到 pointerleave 导致 tip 挂着"的问题(当年因此禁用了
+                // transition-opacity);键盘焦点不受 pointer-events 影响,focus 路径不变。
+                className={cn(
+                  'absolute right-0 top-0 flex h-6 items-center gap-0.5',
+                  'transition-opacity duration-[120ms]',
+                  menuPos !== null
+                    ? 'opacity-100'
+                    : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
+                )}
+              >
+                {sessionActionButtons}
+              </div>
+            </>
           )}
         </div>
       )}

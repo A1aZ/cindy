@@ -514,6 +514,14 @@ export function AutomationSessionGroupItem({
               )}
             </div>
             {scheduleId && (
+              <>
+              <div
+                aria-hidden
+                className={cn(
+                  'invisible h-6 w-[42px] shrink-0',
+                  !menuOpen && 'hidden group-hover:block group-focus-within/slot:block',
+                )}
+              />
               <div
                 className={cn(
                   'absolute right-0 top-0 flex h-6 items-center gap-0.5',
@@ -601,6 +609,7 @@ export function AutomationSessionGroupItem({
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
+              </>
             )}
           </div>
         </div>

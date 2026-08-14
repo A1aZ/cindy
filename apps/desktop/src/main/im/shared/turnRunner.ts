@@ -1598,7 +1598,9 @@ export function createTurnRunner(
         adapter.ui.cards.permission.dmRoutedNotice
       ) {
         try {
-          await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+          const notice = adapter.ui.cards.permission.dmRoutedNotice;
+          const text = typeof notice === 'function' ? notice(req.toolName) : notice;
+          await im.sendText(userId, text, {
             threadTs: scopeKey,
           });
         } catch (err) {
@@ -2409,6 +2411,40 @@ export function createTurnRunner(
             threadTs: state.scopeKey,
           });
         }
+        // 群会话「完全访问」档被强确认策略拒绝: 报错文案之外, 再给 owner
+        // 私聊发一张一键修复卡(切回 auto)。只对提供 permissionModeFix 文案
+        // 的渠道(飞书)与群 lane 生效 — 私聊不挂群策略, 防御性跳过; 卡片
+        // 发送失败不阻塞收口(用户仍可 /permission 手动切)。
+        if (
+          policyUnsupported &&
+          adapter.ui.cards.permissionModeFix &&
+          output.kind === 'rich-card' &&
+          userId.startsWith('g/')
+        ) {
+          try {
+            // 动态 import: 保持 turnRunner 静态依赖链不因修复卡拖进 controlProjects
+            // (列表扫描是重模块, 单测 harness 不 mock 它)。
+            const [{ readSessionTitle }] = await Promise.all([import('./controlProjects')]);
+            let sessionTitle = '';
+            try {
+              sessionTitle = (await readSessionTitle(state.makerSession.id)) ?? '';
+            } catch {
+              /* title 查不到就省略, 卡片 body 回落 sessionId 尾号 */
+            }
+            const fixSpec = cards.buildPermissionModeFixCard({
+              sessionId: state.makerSession.id,
+              agentKind: state.makerSession.agentKind,
+              sessionTitle: sessionTitle || state.makerSession.id.slice(-8),
+            });
+            await output.im.sendInteractiveCard(userId, fixSpec, { deliverToOwnerDm: true });
+            log.info(
+              `permissionModeFix card sent to owner DM for session=...${state.makerSession.id.slice(-8)}`,
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`permissionModeFix card send failed (non-fatal): ${msg}`);
+          }
+        }
       } catch {
         /* 忽略失败：派发失败提示不能再阻塞收口。 */
       }
@@ -2973,7 +3009,9 @@ export function createTurnRunner(
           adapter.ui.cards.permission.dmRoutedNotice
         ) {
           try {
-            await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+            const notice = adapter.ui.cards.permission.dmRoutedNotice;
+            const text = typeof notice === 'function' ? notice(req.toolName) : notice;
+            await im.sendText(userId, text, {
               threadTs: scopeKey,
             });
           } catch (err) {

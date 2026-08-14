@@ -313,9 +313,21 @@ export interface ImUiTextPack {
       resolvedDeny: string;
       /**
        * 授权卡转投 owner 私聊(deliverToOwnerDm)后, 在原群/话题 lane 里发的
-       * 指路提示 — 否则群里的人不知道卡片去了哪。缺省不发。
+       * 指路提示 — 否则群里的人不知道卡片去了哪。缺省不发。函数形态接收
+       * toolName, 提示里能点出「具体是什么操作」。
        */
-      dmRoutedNotice?: string;
+      dmRoutedNotice?: string | ((toolName: string) => string);
+    };
+    /**
+     * 「群会话不能用完全访问」失败时的私聊修复卡 — 一键把本会话切回
+     * 自动审批(auto)。仅飞书提供; 缺省渠道不发卡只发报错文案。
+     */
+    permissionModeFix?: {
+      title: string;
+      body: (sessionTitle: string) => string;
+      btnFix: string;
+      resolved: string;
+      failed: (reason: string) => string;
     };
     ask: {
       title: (header: string) => string;

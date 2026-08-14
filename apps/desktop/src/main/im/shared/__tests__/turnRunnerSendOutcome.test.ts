@@ -293,6 +293,7 @@ const fakeCards = {
   buildControlPickerCard: vi.fn(),
   buildControlSessionPickerCard: vi.fn(),
   buildResolvedCard: vi.fn(),
+  buildPermissionModeFixCard: vi.fn(() => ({ title: 'fix', body: 'fix', buttons: [] })),
 } as unknown as ImCardBuilders;
 
 const fakeAdapter: ImChannelAdapter = {
@@ -1081,6 +1082,49 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       });
     },
   );
+
+  it('sends a private fix card to the owner DM when a group turn is rejected for Full access', async () => {
+    const h = createSessionHarness(
+      async () => {
+        throw new TurnPermissionPolicyUnsupportedError('claude-code', 'bypassPermissions');
+      },
+      'feishu-session',
+      {
+        capabilities: {
+          turnPermissionPolicy: {
+            supported: { supported: true },
+            unsupportedPermissionModes: ['bypassPermissions'],
+          },
+        } as unknown as Capabilities,
+      },
+    );
+    mocks.getMaker.mockReturnValue(createMakerHarness(h.session));
+
+    await getRunner().runAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'g/oc_group1/omt_t1',
+      userMessageId: 'msg-fix-card',
+      text: 'policy failure in group',
+      attachments: [],
+      turnPermissionPolicy: {
+        origin: { kind: 'im', channel: 'feishu', taskId: 'msg-fix-card' },
+        confirmationSurface: 'channel',
+        forceConfirmToolCall: () => false,
+      },
+    });
+
+    // 群 lane 报错文案之外, 再发一张一键修复卡到 owner 私聊。
+    expect(mocks.feishuIm.sendText).toHaveBeenCalledWith(
+      'g/oc_group1/omt_t1',
+      expect.stringContaining('完全访问'),
+      expect.anything(),
+    );
+    expect(mocks.feishuIm.sendInteractiveCard).toHaveBeenCalledWith(
+      'g/oc_group1/omt_t1',
+      expect.objectContaining({ title: expect.any(String) }),
+      { deliverToOwnerDm: true },
+    );
+  });
 
   it('does not suppress a requested close during no-op switch acquisition', async () => {
     const oldSession = createSessionHarness(async () => ({ accepted: true }));

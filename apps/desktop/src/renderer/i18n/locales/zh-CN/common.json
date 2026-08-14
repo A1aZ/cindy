@@ -3155,7 +3155,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "群聊 /ctr 新建任务权限档",
+        "groupCtrPermissionDescription": "群里 @bot 用 /ctr 新建任务时使用的权限档，默认「自动审批」。群上下文里有成员可控的内容，设成「完全访问」后群里的消息会被拒绝，并引导你切回「自动审批」。"
       }
     },
     "shortcuts": {

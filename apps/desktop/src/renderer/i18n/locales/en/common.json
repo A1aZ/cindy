@@ -3156,7 +3156,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "Permission mode for group /ctr sessions",
+        "groupCtrPermissionDescription": "Permission mode applied when creating a session via /ctr in a group chat. Defaults to Auto approval. Group context can contain member-controlled content, so Full access sessions will reject group messages and guide you back to Auto approval."
       }
     },
     "shortcuts": {

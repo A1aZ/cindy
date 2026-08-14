@@ -81,11 +81,17 @@ function tWithValues(key: string, values: Record<string, string>): string {
 }
 
 const permissionModeFixText: NonNullable<ImUiTextPack['cards']['permissionModeFix']> = {
-  title: t(PERMISSION_MODE_FIX_KEYS.title),
+  get title() {
+    return t(PERMISSION_MODE_FIX_KEYS.title);
+  },
   body: (sessionTitle: string) =>
     tWithValues(PERMISSION_MODE_FIX_KEYS.body, { sessionTitle }),
-  btnFix: t(PERMISSION_MODE_FIX_KEYS.btnFix),
-  resolved: t(PERMISSION_MODE_FIX_KEYS.resolved),
+  get btnFix() {
+    return t(PERMISSION_MODE_FIX_KEYS.btnFix);
+  },
+  get resolved() {
+    return t(PERMISSION_MODE_FIX_KEYS.resolved);
+  },
   failed: (reason: string) => tWithValues(PERMISSION_MODE_FIX_KEYS.failed, { reason }),
 };
 

@@ -52,6 +52,7 @@ import type {
 import { buildFeishuAdapter } from '../adapter';
 import { formatHistoryTime } from '../groupContext';
 import { createFeishuPreDispatchFailureText } from '../uiText';
+import { setMainLocale } from '../../../i18n';
 
 const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
 const fetchChatHistoryPage = vi.fn<
@@ -295,6 +296,24 @@ describe('feishu group lane adapter hooks', () => {
     const fixBody = adapter.ui.cards.permissionModeFix?.body('Recovered session') ?? '';
     expect(fixBody).toContain('Recovered session');
     expect(fixBody).not.toContain('Full access');
+  });
+
+  it('权限修复卡在读取时跟随 main 进程当前语言', () => {
+    const fixUi = adapter.ui.cards.permissionModeFix;
+    expect(fixUi).toBeDefined();
+    try {
+      setMainLocale('en');
+      expect(fixUi?.title).toBe('Switch Group Chat to Auto Approval');
+      expect(fixUi?.btnFix).toBe('✅ Switch to Auto Approval');
+      expect(fixUi?.resolved).toContain('Switched to Auto approval');
+
+      setMainLocale('zh-CN');
+      expect(fixUi?.title).toBe('将群聊权限档切换为「自动审批」');
+      expect(fixUi?.btnFix).toBe('✅ 切换为自动审批');
+      expect(fixUi?.resolved).toContain('已切换为「自动审批」');
+    } finally {
+      setMainLocale('en');
+    }
   });
 
   it('派发前错误提示通过注入翻译器按当前语言生成', () => {

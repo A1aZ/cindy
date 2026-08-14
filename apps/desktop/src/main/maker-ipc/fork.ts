@@ -16,7 +16,6 @@ import { ipcMain, BrowserWindow } from 'electron';
 
 import { createLogger } from '../logger.js';
 import { forkSessionAtMessage, forkSessionStripEncrypted } from '../maker-orchestration/fork.js';
-import { assertReviewSessionMutationAllowed } from '../reviewer/reviewSessionMutationPolicy.js';
 import { requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 
@@ -42,15 +41,7 @@ function broadcastSessionCreated(sessionId: string): void {
   }
 }
 
-export interface MakerForkIpcDeps {
-  assertSessionMutationAllowed: (sessionId: string) => Promise<void>;
-}
-
-export function registerMakerForkIpc(
-  deps: MakerForkIpcDeps = {
-    assertSessionMutationAllowed: assertReviewSessionMutationAllowed,
-  },
-): void {
+export function registerMakerForkIpc(): void {
   ipcMain.handle(
     MAKER_INVOKE.FORK,
     async (
@@ -61,7 +52,6 @@ export function registerMakerForkIpc(
       const sid = requireString(sourceSessionId, 'sourceSessionId');
       const mid = requireString(messageClientId, 'messageClientId');
       try {
-        await deps.assertSessionMutationAllowed(sid);
         const session = await forkSessionAtMessage(sid, mid);
         broadcastSessionCreated(session.id);
         return session;
@@ -101,7 +91,6 @@ export function registerMakerForkIpc(
     async (_event: Electron.IpcMainInvokeEvent, sourceSessionId: unknown) => {
       const sid = requireString(sourceSessionId, 'sourceSessionId');
       try {
-        await deps.assertSessionMutationAllowed(sid);
         const session = await forkSessionStripEncrypted(sid);
         broadcastSessionCreated(session.id);
         return session;

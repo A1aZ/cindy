@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
   finishSubagentRewindFence: vi.fn(),
   primeSubagentRewindFence: vi.fn(),
   listVisibleSubagentObservationIdentities: vi.fn(),
-  assertSessionMutationAllowed: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -82,24 +81,7 @@ describe('maker rewind IPC stop-then-rewind', () => {
       token: Symbol('rewind'),
     });
     mocks.listVisibleSubagentObservationIdentities.mockResolvedValue([]);
-    mocks.assertSessionMutationAllowed.mockResolvedValue(undefined);
-    registerMakerRewindIpc({
-      assertSessionMutationAllowed: mocks.assertSessionMutationAllowed,
-    });
-  });
-
-  it('rejects forged Review rewind requests before opening a mutation fence', async () => {
-    mocks.assertSessionMutationAllowed.mockRejectedValueOnce(
-      new Error('[UNSUPPORTED_CAPABILITY] Review audit details are read-only'),
-    );
-    const handler = mocks.handlers.get(MAKER_INVOKE.REWIND_COMMIT);
-    if (!handler) throw new Error('rewind commit handler not registered');
-
-    await expect(handler({}, 'review-1', 'message-1')).rejects.toThrow(
-      /Review audit details are read-only/,
-    );
-    expect(mocks.beginSubagentRewindFence).not.toHaveBeenCalled();
-    expect(mocks.commitRewindAtMessage).not.toHaveBeenCalled();
+    registerMakerRewindIpc();
   });
 
   it('runs normal rewind inside the stopped input boundary when requested', async () => {

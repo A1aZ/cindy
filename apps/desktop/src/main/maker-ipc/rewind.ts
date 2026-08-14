@@ -32,7 +32,6 @@ import { requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
 import { withSessionInputStoppedForRewind } from './register.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
-import { assertReviewSessionMutationAllowed } from '../reviewer/reviewSessionMutationPolicy.js';
 
 const log = createLogger('maker-ipc/rewind');
 const STOPPED_REWIND_RETRY_MS = 100;
@@ -76,15 +75,7 @@ function wrapErr(err: unknown): never {
   throwIpcError(code, msg);
 }
 
-export interface MakerRewindIpcDeps {
-  assertSessionMutationAllowed(sessionId: string): Promise<void>;
-}
-
-export function registerMakerRewindIpc(
-  deps: MakerRewindIpcDeps = {
-    assertSessionMutationAllowed: assertReviewSessionMutationAllowed,
-  },
-): void {
+export function registerMakerRewindIpc(): void {
   ipcMain.handle(
     MAKER_INVOKE.REWIND_PREVIEW,
     async (
@@ -95,7 +86,6 @@ export function registerMakerRewindIpc(
       const sid = requireString(sessionId, 'sessionId');
       const cid = requireString(clientId, 'clientId');
       try {
-        await deps.assertSessionMutationAllowed(sid);
         return await previewRewindAtMessage(sid, cid);
       } catch (err) {
         log.warn('rewind:preview failed', { sid, cid, error: String(err) });
@@ -130,7 +120,6 @@ export function registerMakerRewindIpc(
       let fenceCommitted = false;
       let visibleSubagentIdentitiesAfterCommit: VisibleSubagentObservationIdentity[] = [];
       try {
-        await deps.assertSessionMutationAllowed(sid);
         subagentFence = beginSubagentRewindFence(sid);
         primeSubagentRewindFence(
           subagentFence,

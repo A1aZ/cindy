@@ -31,8 +31,7 @@ export function isReviewSessionSource(source: unknown): source is 'review' {
 // (2026-07-06 曾加入后按 Lizi 要求回退;2026-07-16 按 Lizi 要求重新加入,
 //  这次带 dialogue 归组,不再以 im-working-dir 聚成假项目组。)
 // scheduler / learn: 本机自动化会话,可见可点开看过程。
-// review: /review 创建的本机只读内部任务。它保留完整审计记录,但不进入普通任务
-// 侧栏 / 最近任务 / 搜索；用户只从来源任务的 Review 卡片进入详情。
+// review: /review 创建的本机只读独立审查任务,可从来源卡片或侧边栏打开。
 // shared: .xdtshare 导入的分享会话,按 workingDir 归组。
 // plugin: 插件经 workspace 槽创建的工作区会话入口(空 draft,用户确认后建;
 //         projectGrouping 对零消息的 plugin 会话豁免草稿判定,直接落项目分组)。
@@ -48,6 +47,7 @@ export const DESKTOP_VISIBLE_SESSION_SOURCES: SessionSource[] = [
   'wecom',
   'scheduler',
   'learn',
+  'review',
   'shared',
   'plugin',
 ];

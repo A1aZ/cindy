@@ -632,6 +632,25 @@ describe('被控端控制链路生命周期', () => {
     expect(getActiveControllers()).toEqual([{ deviceId, name: '12345678' }]);
   });
 
+  it.each([
+    ['topics 为空', []],
+    ['topics 全被过滤', ['*', 'invalid-topic']],
+  ] as const)('%s 的 subscribe 自报名也会在整体断开时清理', (_label, topics) => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    const deviceId = '1234567890abcdef';
+
+    feed(subFrame(deviceId, SUB, [...topics], 'Old-Host.local'));
+    expect(getActiveControllers()).toEqual([]);
+
+    dropAllControllers(client, 'user');
+    expect(calls.closed).toContainEqual({ dst: deviceId, reason: 'user' });
+
+    feed(subFrame(deviceId, SUB, ['session:s1']));
+    expect(getActiveControllers()).toEqual([{ deviceId, name: '12345678' }]);
+  });
+
   it('link-open(开关关)→ 不 accept、不记录', () => {
     remoteControlEnabled = false;
     const { client, calls, feed } = makeFakeClient();

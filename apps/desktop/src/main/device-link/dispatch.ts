@@ -1484,6 +1484,7 @@ export function dropAllControllers(
     ...subscriptions.getControllerIds(),
     ...topicSubscriptionControllers,
     ...acceptedLinkControllers,
+    ...reportedControllerNameByDevice.keys(),
   ]);
   for (const dst of controllerIds) {
     try {
@@ -1498,6 +1499,7 @@ export function dropAllControllers(
   subscriptions.clearAll();
   topicSubscriptionControllers.clear();
   acceptedLinkControllers.clear();
+  reportedControllerNameByDevice.clear();
   offlinePushQueue.clear();
   clearAllSessionActivityStages();
   clearAllMakerEventBatchStages();

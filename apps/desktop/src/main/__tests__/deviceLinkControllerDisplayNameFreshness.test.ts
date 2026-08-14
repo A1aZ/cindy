@@ -30,6 +30,7 @@ describe('controller display-name directory freshness', () => {
     applyControllerDisplayNamePresence({
       deviceId: 'dev-1',
       name: '新名称',
+      selfName: 'Host.local',
       freshness,
       normalizeName,
       setDisplayName,
@@ -58,9 +59,13 @@ describe('controller display-name directory freshness', () => {
 
     // 下一次 relay 连接走真实种入 helper，仍从 last-known 得到新名称。
     displayedName = '';
-    seedControllerDisplayNamesFromCache({ 'dev-1': persistedName }, (_deviceId, name) => {
-      displayedName = name;
-    });
+    seedControllerDisplayNamesFromCache(
+      { 'dev-1': persistedName },
+      freshness,
+      (_deviceId, name) => {
+        displayedName = name;
+      },
+    );
     expect(displayedName).toBe('新名称');
   });
 
@@ -86,8 +91,8 @@ describe('controller display-name directory freshness', () => {
     expect(forgetName).not.toHaveBeenCalled();
   });
 
-  it.each(['unknown', 'no', '   '])(
-    '首次连接在目录请求期间收到占位/空 presence(%s)时仍应用有效目录名',
+  it.each(['unknown', 'no'])(
+    '首次连接在目录请求期间收到占位 presence(%s)时仍应用有效目录名',
     (presenceName) => {
       const freshness = createControllerDisplayNameFreshnessTracker();
       const requestEpoch = freshness.epoch;
@@ -128,6 +133,110 @@ describe('controller display-name directory freshness', () => {
       expect(persistedName).toBe('数据库名称');
     },
   );
+
+  it('显式空 presence 推进新鲜度，在途旧目录响应不得恢复旧名', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const requestEpoch = freshness.epoch;
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '旧数据库名' }],
+      cachedNames: { 'dev-1': '旧数据库名' },
+      freshness,
+      requestEpoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    expect(freshness.epoch).toBe(1);
+    expect(setDisplayName).toHaveBeenCalledTimes(1);
+    expect(setDisplayName).toHaveBeenCalledWith('dev-1', '');
+    expect(forgetName).toHaveBeenCalledWith('dev-1');
+    expect(rememberName).not.toHaveBeenCalled();
+  });
+
+  it('目录权威名不被后到的主机名 presence 覆盖或反写缓存', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '数据库展示名' }],
+      cachedNames: {},
+      freshness,
+      requestEpoch: freshness.epoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    setDisplayName.mockClear();
+    rememberName.mockClear();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: 'Host.local',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    expect(setDisplayName).not.toHaveBeenCalled();
+    expect(rememberName).not.toHaveBeenCalled();
+    expect(forgetName).not.toHaveBeenCalled();
+  });
+
+  it('无权威名时主机名 presence 仅作内存回退，不阻断后到目录名', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const requestEpoch = freshness.epoch;
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: 'Host.local',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    expect(setDisplayName).toHaveBeenLastCalledWith('dev-1', 'Host.local');
+    expect(rememberName).not.toHaveBeenCalled();
+    expect(freshness.epoch).toBe(0);
+
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '数据库展示名' }],
+      cachedNames: {},
+      freshness,
+      requestEpoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    expect(setDisplayName).toHaveBeenLastCalledWith('dev-1', '数据库展示名');
+    expect(rememberName).toHaveBeenCalledWith('dev-1', '数据库展示名');
+  });
 
   it.each(['presence', 'directory'] as const)(
     '空数据库名经 %s 路径清除旧展示名与 last-known，并回退当前链路自报名',
@@ -174,7 +283,7 @@ describe('controller display-name directory freshness', () => {
       expect(persistedName).toBeUndefined();
 
       setDisplayName.mockClear();
-      seedControllerDisplayNamesFromCache({}, setDisplayName);
+      seedControllerDisplayNamesFromCache({}, freshness, setDisplayName);
       expect(setDisplayName).not.toHaveBeenCalled();
     },
   );

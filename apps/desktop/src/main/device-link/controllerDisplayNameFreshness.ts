@@ -1,6 +1,7 @@
 export interface ControllerDisplayNameFreshnessTracker {
   epoch: number;
   epochByDevice: Map<string, number>;
+  authoritativeNameByDevice: Map<string, string>;
 }
 
 export interface ControllerDisplayNameDirectoryDevice {
@@ -14,7 +15,7 @@ type ControllerDisplayNameCandidate =
   | { kind: 'placeholder' };
 
 export function createControllerDisplayNameFreshnessTracker(): ControllerDisplayNameFreshnessTracker {
-  return { epoch: 0, epochByDevice: new Map() };
+  return { epoch: 0, epochByDevice: new Map(), authoritativeNameByDevice: new Map() };
 }
 
 function markControllerDisplayNamePresenceFresh(
@@ -30,13 +31,16 @@ export function resetControllerDisplayNameFreshness(
 ): void {
   tracker.epoch = 0;
   tracker.epochByDevice.clear();
+  tracker.authoritativeNameByDevice.clear();
 }
 
 export function seedControllerDisplayNamesFromCache(
   cachedNames: Readonly<Record<string, string>>,
+  freshness: ControllerDisplayNameFreshnessTracker,
   setDisplayName: (deviceId: string, name: string) => void,
 ): void {
   for (const [deviceId, name] of Object.entries(cachedNames)) {
+    freshness.authoritativeNameByDevice.set(deviceId, name);
     setDisplayName(deviceId, name);
   }
 }
@@ -54,12 +58,16 @@ function classifyControllerDisplayName(
 }
 
 /**
- * presence 只在携带有效名称时参与目录竞态的新鲜度判定。空名是显式清除，立即
- * 让展示回退并删除 last-known；unknown/no 等占位值不改缓存，也不阻断目录补齐。
+ * presence.deviceName 可能是数据库展示名，也可能只是 hello 自报的系统主机名：
+ * - 与 selfName 不同的有效值视为服务端已解析出的权威展示名；
+ * - 与 selfName 相同（或旧协议没有 selfName）的值只作临时回退，不能覆盖目录/缓存；
+ * - 空名是显式清除，必须推进新鲜度以挡住在途旧目录响应；
+ * - unknown/no 等占位值不改状态，也不阻断目录补齐。
  */
 export function applyControllerDisplayNamePresence(options: {
   deviceId: string;
   name: unknown;
+  selfName?: unknown;
   freshness: ControllerDisplayNameFreshnessTracker;
   normalizeName: (name: string) => string | null;
   setDisplayName: (deviceId: string, name: string) => void;
@@ -68,10 +76,21 @@ export function applyControllerDisplayNamePresence(options: {
 }): void {
   const candidate = classifyControllerDisplayName(options.name, options.normalizeName);
   if (candidate.kind === 'valid') {
+    const selfCandidate = classifyControllerDisplayName(options.selfName, options.normalizeName);
+    const isSelfReportedFallback = selfCandidate.kind !== 'valid'
+      || selfCandidate.name === candidate.name;
+    if (isSelfReportedFallback) {
+      if (options.freshness.authoritativeNameByDevice.has(options.deviceId)) return;
+      options.setDisplayName(options.deviceId, candidate.name);
+      return;
+    }
     markControllerDisplayNamePresenceFresh(options.freshness, options.deviceId);
+    options.freshness.authoritativeNameByDevice.set(options.deviceId, candidate.name);
     options.setDisplayName(options.deviceId, candidate.name);
     options.rememberName(options.deviceId, candidate.name);
   } else if (candidate.kind === 'empty') {
+    markControllerDisplayNamePresenceFresh(options.freshness, options.deviceId);
+    options.freshness.authoritativeNameByDevice.delete(options.deviceId);
     options.setDisplayName(options.deviceId, '');
     options.forgetName(options.deviceId);
   }
@@ -98,14 +117,19 @@ export function applyControllerDisplayNameDirectorySnapshot(options: {
 
     const candidate = classifyControllerDisplayName(device.name, options.normalizeName);
     if (candidate.kind === 'valid') {
+      options.freshness.authoritativeNameByDevice.set(deviceId, candidate.name);
       options.setDisplayName(deviceId, candidate.name);
       options.rememberName(deviceId, candidate.name);
     } else if (candidate.kind === 'empty') {
+      options.freshness.authoritativeNameByDevice.delete(deviceId);
       options.setDisplayName(deviceId, '');
       options.forgetName(deviceId);
     } else {
       const cachedName = options.cachedNames[deviceId];
-      if (cachedName) options.setDisplayName(deviceId, cachedName);
+      if (cachedName) {
+        options.freshness.authoritativeNameByDevice.set(deviceId, cachedName);
+        options.setDisplayName(deviceId, cachedName);
+      }
     }
   }
 }

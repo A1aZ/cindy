@@ -75,6 +75,7 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
     expect(deviceLinkHost).toContain(
       'applyControllerDisplayNamePresence({',
     );
+    expect(deviceLinkHost).toContain('selfName: snap.selfName,');
     expect(deviceLinkHost).toContain('applyControllerDisplayNameDirectorySnapshot({');
   });
 

@@ -156,7 +156,11 @@ let controllerDisplayNameRefreshGeneration = 0;
 const controllerDisplayNameFreshness = createControllerDisplayNameFreshnessTracker();
 
 function seedControllerDisplayNamesFromLastKnown(): void {
-  seedControllerDisplayNamesFromCache(readLastKnownDeviceNames(), setControllerDisplayName);
+  seedControllerDisplayNamesFromCache(
+    readLastKnownDeviceNames(),
+    controllerDisplayNameFreshness,
+    setControllerDisplayName,
+  );
 }
 
 /**
@@ -627,6 +631,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     applyControllerDisplayNamePresence({
       deviceId: snap.deviceId,
       name: snap.deviceName,
+      selfName: snap.selfName,
       freshness: controllerDisplayNameFreshness,
       normalizeName: normalizeCachedDeviceName,
       setDisplayName: setControllerDisplayName,

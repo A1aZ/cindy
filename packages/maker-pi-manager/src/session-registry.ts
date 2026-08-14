@@ -97,7 +97,7 @@ export class PiSessionRegistry {
   /** 关停中:拒绝新 ensure, 防孤儿子进程(自审轮 2 HIGH)。 */
   private shuttingDown = false;
   /** shutdownAll 收集 close-handler teardown 的异步 rm, 避免 process.exit 抢在凭证文件删除前。 */
-  private shutdownCleanupBatch: Array<(p: Promise<void>) => void> | null = null;
+  private shutdownCleanupBatch: ((p: Promise<void>) => void) | null = null;
 
   constructor(opts: PiSessionRegistryOptions) {
     this.sockDir = opts.sockDir;
@@ -322,11 +322,14 @@ export class PiSessionRegistry {
   /** Kill all sessions (daemon shutdown). */
   async shutdownAll(reason: 'killed' | 'completed' = 'killed'): Promise<void> {
     this.shuttingDown = true;
+    // collector 必须在 drain pending spawn **之前**挂上 —— 等待期间已注册
+    // 的 child 可能自然退出, close-handler teardown 否则无人收集, daemon
+    // process.exit 会抢在 env-file rm 前。
+    const cleanupBatch: Promise<void>[] = [];
+    this.shutdownCleanupBatch = (p) => { cleanupBatch.push(p); };
     // 先等 in-flight spawn 完成(否则 spawnSession 会在关停后注册孤儿 —— 自审轮 2 HIGH)。
     await Promise.allSettled([...this.pendingSpawns.values()]);
     // 二次扫描:spawn 完成后可能注册了新 entry, 一并收掉。
-    const cleanupBatch: Promise<void>[] = [];
-    this.shutdownCleanupBatch = (p) => { cleanupBatch.push(p); };
     // 轮 40-w4-t3 CRITICAL:杀不死的 entry 不得 teardown —— 否则删了 registry
     // 状态/env-file/socket 但进程仍活着, 残留持凭证进程不受管理, 与 kill()/
     // recycleIdle() 的「杀不死保留 entry 防双 spawn」不变量冲突。收集并最后抛出,

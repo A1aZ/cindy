@@ -551,6 +551,35 @@ describe('list / shutdownAll / teardown identity', () => {
     expect(fs.existsSync(envFile)).toBe(false);
   });
 
+  it('collects natural-exit teardown while shutdownAll drains pending spawns', async () => {
+    const { registry, tmpDir } = await createRegistry();
+    cleanupFns.push(() => { registry.close(); fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+    const live = makeChild();
+    mockSpawn.mockReturnValueOnce(live);
+    mockCreateServer.mockReturnValueOnce(makeServer());
+    await registry.ensure('live-exit', 'cmd', { CINDY_PI_API_KEY: 'gateway-secret' }, 'h1', false);
+    const envFile = path.join(tmpDir, 'envs', 'env-live-exit');
+    expect(fs.existsSync(envFile)).toBe(true);
+
+    let resolveListen: () => void;
+    const gate = new Promise<void>((r) => { resolveListen = r; });
+    const pendingServer = makeServer();
+    pendingServer.listen.mockImplementation((_p: string, cb?: () => void) => {
+      gate.then(() => { if (cb) cb(); });
+    });
+    mockSpawn.mockReturnValueOnce(makeChild());
+    mockCreateServer.mockReturnValueOnce(pendingServer);
+    const pending = registry.ensure('pending', 'cmd', { K: 'v' }, 'h2', false);
+
+    const shutdownPromise = registry.shutdownAll();
+    live.emit('close', 0, null);
+    resolveListen!();
+    await expect(pending).rejects.toThrow(/shutting down/);
+    await shutdownPromise;
+    expect(fs.existsSync(envFile)).toBe(false);
+  });
+
   // 轮 40-w4-t3 CRITICAL:shutdownAll 遇杀不死的 session 不得 teardown ——
   // 保留 entry(防凭证进程残留不受管理)并聚合抛出 SESSION_KILL_SURVIVED。
   it('shutdownAll keeps survivor entry and rejects (round 40-w4-t3 CRITICAL)', async () => {

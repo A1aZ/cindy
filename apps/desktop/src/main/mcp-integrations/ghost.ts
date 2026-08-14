@@ -82,7 +82,6 @@ import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import { handleIncomingCindyFile } from '../cindy-brain/openFileInstall.js';
 import * as blobStore from '../cindy-media/blobStore.js';
 import { commitMessageMediaRefs } from '../cindy-media/chatAttachments.js';
-import { callCindyMedia } from '../cindy-media/invocationService.js';
 import * as ledger from '../cindy-media/ledger.js';
 import { chatAttachmentOrigin } from '../cindy-media/attachmentGrantGate.js';
 import { resolveGhostAttachmentUrl } from './ghostAttachmentResolve.js';
@@ -980,6 +979,7 @@ export function getCindyGhostsMcpDeps(
     getLiziMcpSessionContext() ?? sessionCtx;
   return {
     callMedia: async (request) => {
+      const { callCindyMedia } = await import('../cindy-media/invocationService.js');
       const result = await callCindyMedia(request);
       const sessionId = resolveSessionContext()?.sessionId;
       if (result.ok !== false && sessionId) {

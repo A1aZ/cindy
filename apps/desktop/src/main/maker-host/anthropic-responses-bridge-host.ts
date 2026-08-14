@@ -22,6 +22,7 @@ import { app } from 'electron';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import type { LocalRequestHandler } from '@cindy/anthropic-compat-proxy';
 import { createResponsesHandler, type BridgeProviderConfig, type ResponsesBridgeHandler } from '@cindy/anthropic-responses-bridge';
 
 import { createMakerLogger } from './logger-adapter.js';
@@ -323,4 +324,207 @@ export function getResponsesBridgeHandler(): ResponsesBridgeHandler | null {
     log.error('responses bridge handler 装配失败', { err: err instanceof Error ? err.message : String(err) });
   }
   return _handler;
+}
+
+type PiNativeSubscriptionProvider = 'openai' | 'xai';
+
+export interface PiNativeSubscriptionHandlerDeps {
+  fetch: typeof outboundFetch;
+  getChatgptAuth: typeof getChatgptBridgeAuth;
+  getGrokToken: typeof getGrokAccessToken;
+  invalidateChatgpt: typeof invalidateChatgptBridgeAuth;
+  invalidateXai: typeof invalidateXaiBridgeAuth;
+  recordXaiRateLimit: typeof recordXaiRateLimitSnapshot;
+}
+
+const defaultPiNativeSubscriptionHandlerDeps: PiNativeSubscriptionHandlerDeps = {
+  fetch: outboundFetch,
+  getChatgptAuth: getChatgptBridgeAuth,
+  getGrokToken: getGrokAccessToken,
+  invalidateChatgpt: invalidateChatgptBridgeAuth,
+  invalidateXai: invalidateXaiBridgeAuth,
+  recordXaiRateLimit: recordXaiRateLimitSnapshot,
+};
+
+function piNativeUpstreamUrl(
+  providerId: PiNativeSubscriptionProvider,
+  requestUrl: string,
+): string | null {
+  let pathname: string;
+  try {
+    pathname = new URL(requestUrl, 'http://127.0.0.1').pathname;
+  } catch {
+    return null;
+  }
+  if (providerId === 'openai') {
+    return pathname === '/codex/responses'
+      ? 'https://chatgpt.com/backend-api/codex/responses'
+      : null;
+  }
+  const normalized = pathname.startsWith('/v1/') ? pathname : `/v1${pathname}`;
+  return normalized === '/v1/responses' || normalized === '/v1/chat/completions'
+    ? `https://api.x.ai${normalized}`
+    : null;
+}
+
+function nativeResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (
+      lower === 'content-type'
+      || lower === 'cache-control'
+      || lower === 'retry-after'
+      || lower === 'x-request-id'
+      || lower.startsWith('x-ratelimit-')
+      || lower.startsWith('openai-')
+    ) {
+      headers[lower] = value;
+    }
+  });
+  return headers;
+}
+
+function finiteRateLimitHeader(headers: Headers, name: string): number | undefined {
+  const raw = headers.get(name);
+  if (raw === null || raw.trim().length === 0) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function recordNativeXaiRateLimit(
+  headers: Headers,
+  record: typeof recordXaiRateLimitSnapshot,
+): void {
+  const info = {
+    limitRequests: finiteRateLimitHeader(headers, 'x-ratelimit-limit-requests'),
+    remainingRequests: finiteRateLimitHeader(headers, 'x-ratelimit-remaining-requests'),
+    limitTokens: finiteRateLimitHeader(headers, 'x-ratelimit-limit-tokens'),
+    remainingTokens: finiteRateLimitHeader(headers, 'x-ratelimit-remaining-tokens'),
+  };
+  if (Object.values(info).some((value) => value !== undefined)) {
+    record(info);
+  }
+}
+
+async function pipeNativeResponse(response: Response, res: Parameters<LocalRequestHandler>[0]['res']): Promise<void> {
+  res.writeHead(response.status, nativeResponseHeaders(response));
+  if (!response.body) {
+    res.end();
+    return;
+  }
+  const reader = response.body.getReader();
+  try {
+    while (!res.destroyed) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (!res.write(Buffer.from(chunk.value))) {
+        await new Promise<void>((resolve) => {
+          const done = (): void => {
+            res.off('drain', done);
+            res.off('close', done);
+            resolve();
+          };
+          res.once('drain', done);
+          res.once('close', done);
+        });
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  if (!res.destroyed) res.end();
+}
+
+/**
+ * Forward an already-native PI request. Unlike getResponsesBridgeHandler this
+ * performs no Messages/Responses conversion: PI constructs the provider's
+ * native payload, while the host only swaps placeholder loopback credentials
+ * for the connected account credential.
+ */
+export function getPiNativeSubscriptionHandler(
+  providerId: PiNativeSubscriptionProvider,
+  sessionId: string,
+  deps: PiNativeSubscriptionHandlerDeps = defaultPiNativeSubscriptionHandlerDeps,
+): LocalRequestHandler {
+  return async ({ rawBody, ctx, res }) => {
+    const upstreamUrl = piNativeUpstreamUrl(providerId, ctx.url);
+    if (ctx.method !== 'POST' || !upstreamUrl) {
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: { message: 'Unsupported PI subscription endpoint.' } }));
+      return;
+    }
+    const controller = new AbortController();
+    const abortOnClose = (): void => controller.abort();
+    res.once('close', abortOnClose);
+    try {
+      let accessToken: string;
+      let headers: Record<string, string>;
+      if (providerId === 'openai') {
+        const auth = await deps.getChatgptAuth();
+        accessToken = auth.accessToken;
+        headers = buildChatgptBridgeHeaders({
+          accessToken,
+          accountId: auth.accountId,
+          sessionId,
+        });
+      } else {
+        accessToken = await deps.getGrokToken();
+        headers = { authorization: `Bearer ${accessToken}` };
+      }
+      headers['content-type'] = ctx.headers['content-type'] ?? 'application/json';
+      headers.accept = ctx.headers.accept ?? 'text/event-stream';
+      const contentEncoding = ctx.headers['content-encoding'];
+      if (contentEncoding) headers['content-encoding'] = contentEncoding;
+
+      const response = await deps.fetch(upstreamUrl, {
+        method: 'POST',
+        headers,
+        body: new Uint8Array(rawBody),
+        signal: controller.signal,
+      });
+      if (providerId === 'xai' && response.ok) {
+        recordNativeXaiRateLimit(response.headers, deps.recordXaiRateLimit);
+      }
+      if (!response.ok) {
+        const errorBody = Buffer.from(await response.arrayBuffer());
+        const errorText = errorBody.toString('utf8');
+        if (providerId === 'openai') {
+          await deps.invalidateChatgpt({
+            status: response.status,
+            body: errorText,
+            failedAccessToken: accessToken,
+          });
+        } else {
+          await deps.invalidateXai({
+            status: response.status,
+            body: errorText,
+            failedAccessToken: accessToken,
+          });
+        }
+        res.writeHead(response.status, nativeResponseHeaders(response));
+        res.end(errorBody);
+        return;
+      }
+      await pipeNativeResponse(response, res);
+    } catch (err) {
+      if (controller.signal.aborted || res.headersSent || res.destroyed) return;
+      log.warn('PI native subscription forwarding failed', {
+        providerId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      res.writeHead(502, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(JSON.stringify({
+        error: {
+          type: 'upstream_error',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      }));
+    } finally {
+      res.off('close', abortOnClose);
+    }
+  };
 }

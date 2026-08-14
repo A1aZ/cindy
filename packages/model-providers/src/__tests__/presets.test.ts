@@ -45,6 +45,31 @@ const VALID_PRESET = {
 };
 
 describe('sanitizePresets', () => {
+  it('preserves valid per-model piApi only for supported PI protocol names', () => {
+    const valid = {
+      ...VALID_PRESET,
+      id: 'pi-api',
+      runtimes: {
+        pi: {
+          baseUrl: 'https://example.com/v1',
+          wireProtocol: 'openai-responses',
+          models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', piApi: 'openai-responses' }],
+        },
+      },
+    };
+    expect(sanitizePresets([valid])).toEqual([valid]);
+    expect(sanitizePresets([{
+      ...valid,
+      id: 'bad-pi-api',
+      runtimes: {
+        pi: {
+          ...valid.runtimes.pi,
+          models: [{ id: 'x', name: 'X', piApi: 'claude-v1' }],
+        },
+      },
+    }])).toEqual([]);
+  });
+
   it('accepts explicit Pi reasoning metadata and rejects ambiguous capability declarations', () => {
     const piReasoning = {
       ...VALID_PRESET,

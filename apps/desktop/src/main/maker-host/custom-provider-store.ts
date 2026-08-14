@@ -21,6 +21,7 @@ import type {
   CustomProviderRuntimeConfig,
   OAuthProviderDescriptor,
   PiReasoningEffort,
+  PiModelApi,
   ProviderRuntimeModelConfig,
 } from '@cindy/model-providers';
 import {
@@ -28,6 +29,7 @@ import {
   isLoopbackProviderUrl,
   isProviderRequestPath,
   PI_REASONING_EFFORTS,
+  PI_MODEL_APIS,
 } from '@cindy/model-providers';
 
 import { getDbClient } from '../localDb/client/current.js';
@@ -57,6 +59,10 @@ function isPiReasoningEffort(value: unknown): value is PiReasoningEffort {
     typeof value === 'string' &&
     (PI_REASONING_EFFORTS as readonly string[]).includes(value)
   );
+}
+
+function isPiModelApi(value: unknown): value is PiModelApi {
+  return typeof value === 'string' && (PI_MODEL_APIS as readonly string[]).includes(value);
 }
 
 function parseStoredPiReasoningCapability(
@@ -142,6 +148,9 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
     }
     if (mm.supportsImageInput !== undefined && typeof mm.supportsImageInput !== 'boolean') {
       return invalid(`runtime '${agent}' model.supportsImageInput must be a boolean`);
+    }
+    if (mm.piApi !== undefined && (agent !== 'pi' || !isPiModelApi(mm.piApi))) {
+      return invalid(`runtime '${agent}' model.piApi invalid`);
     }
     const hasReasoningCapability = mm.reasoning !== undefined || mm.reasoningEfforts !== undefined;
     if (hasReasoningCapability && agent !== 'pi') {
@@ -376,6 +385,7 @@ function normalizeRuntime(
     .map((m) => ({
       id: m.id.trim(),
       name: m.name.trim(),
+      ...(agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
       ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
       ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
       ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
@@ -517,6 +527,7 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
           .map((m) => ({
             id: String(m.id),
             name: String(m.name ?? ''),
+            ...(agent === 'pi' && isPiModelApi(m.piApi) ? { piApi: m.piApi } : {}),
             ...(typeof m.contextWindow === 'number'
               && Number.isFinite(m.contextWindow)
               && m.contextWindow > 0

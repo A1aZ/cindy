@@ -1108,6 +1108,7 @@ export function CustomProviderDialog({
           .map((m) => ({
             id: m.id.trim(),
             name: m.name.trim(),
+            ...(agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
             ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
             ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
             ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
@@ -1132,6 +1133,7 @@ export function CustomProviderDialog({
             return {
               id: m.id,
               name: cur?.name || m.name,
+              ...(agent === 'pi' && cur?.piApi ? { piApi: cur.piApi } : {}),
               ...(contextWindow !== undefined ? { contextWindow } : {}),
               ...(cur?.defaultEnabled === false ? { defaultEnabled: false } : {}),
               ...(cur?.supportsImageInput === true ? { supportsImageInput: true } : {}),
@@ -1196,9 +1198,11 @@ export function CustomProviderDialog({
       const supportsImageInput = latest ? latest.supportsImageInput : m.supportsImageInput;
       const reasoning = latest ? latest.reasoning : m.reasoning;
       const reasoningEfforts = latest ? latest.reasoningEfforts : m.reasoningEfforts;
+      const piApi = latest ? latest.piApi : m.piApi;
       return {
         id: m.id,
         name: latest?.name.trim() ? latest.name.trim() : m.name,
+        ...(picker.agent === 'pi' && piApi ? { piApi } : {}),
         ...(contextWindow !== undefined ? { contextWindow } : {}),
         ...(defaultEnabled === false ? { defaultEnabled: false } : {}),
         ...(supportsImageInput === true ? { supportsImageInput: true } : {}),
@@ -1213,6 +1217,7 @@ export function CustomProviderDialog({
         merged.push({
           id,
           name: m.name.trim() || id,
+          ...(picker.agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
           ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
           ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
           ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
@@ -1341,6 +1346,7 @@ export function CustomProviderDialog({
         .map((m) => ({
           id: m.id.trim(),
           name: m.name.trim(),
+          ...(a === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
           ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
           ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
           ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),

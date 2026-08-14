@@ -41,7 +41,10 @@ import {
 
 import { ANTHROPIC_DIRECT_UPSTREAM, CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY, anthropicCatalogModelIds, isAnthropicWireModel } from './claude-gateway-config.js';
 import { getActiveCatalog } from './active-catalog.js';
-import { getResponsesBridgeHandler } from './anthropic-responses-bridge-host.js';
+import {
+  getPiNativeSubscriptionHandler,
+  getResponsesBridgeHandler,
+} from './anthropic-responses-bridge-host.js';
 import { getSessionEffort, getSessionFastMode } from './session-effort-store.js';
 import { isSubscriptionDirectModel } from '../../shared/subscriptionModels.js';
 import {
@@ -187,6 +190,48 @@ export function createModelRoutingTransform(): RoutingTransform {
       };
     }
     const piSessionId = claimedPiSessionId;
+    const piProviderId = piSessionId
+      ? headerValue(ctx.headers, 'x-cindy-pi-provider-id')
+      : null;
+    const selectedPiProviderId = piSessionId ? getSessionProvider(piSessionId) : null;
+    if (
+      piSessionId
+      && (
+        (piProviderId !== null && piProviderId !== selectedPiProviderId)
+        || (
+          (selectedPiProviderId === 'openai' || selectedPiProviderId === 'xai')
+          && piProviderId !== selectedPiProviderId
+        )
+      )
+    ) {
+      // A valid loopback session token authorizes only the provider selected by
+      // that Cindy session. Do not let a child process/extension swap this
+      // internal header and borrow another connected subscription credential.
+      return {
+        localHandler: async ({ res }) => {
+          const payload = JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'authorization_error',
+              code: 'pi_provider_mismatch',
+              message: 'PI proxy provider does not match the session provider.',
+            },
+          });
+          res.writeHead(403, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(payload);
+        },
+      };
+    }
+    if (piSessionId && (piProviderId === 'openai' || piProviderId === 'xai')) {
+      return {
+        // PI has already built the provider-native request. The local handler
+        // only authenticates and forwards it; no Claude protocol bridge runs.
+        localHandler: getPiNativeSubscriptionHandler(piProviderId, piSessionId),
+      };
+    }
     const requestAgent = piSessionId ? 'pi' : 'claude-code';
     // 后台活动检测(claude-session-background-activity):凡带 cc 会话标头的请求
     // 都记一笔活动时刻。routingTransform 会处理无 body 控制面请求与 JSON 请求；
@@ -215,7 +260,7 @@ export function createModelRoutingTransform(): RoutingTransform {
     //    放在最前:优先级高于 per-session 供应商与 spawn 默认路由。
     //    ⚠ 本分支是订阅直连的**唯一注册点**:整块摘掉 = 订阅前缀请求 passthrough 到默认上游
     //    (预期 400/502,fail-open),不需要 revert 其它代码。
-    if (isSubscriptionDirectModel(wireModel)) {
+    if (!piSessionId && isSubscriptionDirectModel(wireModel)) {
       const bridgeHandler = getResponsesBridgeHandler();
       if (!bridgeHandler) {
         log.warn('订阅前缀模型但 responses handler 不可用,passthrough(该请求预期会 400)', { wireModel });
@@ -319,7 +364,8 @@ export function createModelRoutingTransform(): RoutingTransform {
     const decision = route(body, ctx);
     const hasInternalPiHeader =
       headerValue(ctx.headers, 'x-cindy-pi-session-id') !== null
-      || headerValue(ctx.headers, 'x-cindy-pi-session-token') !== null;
+      || headerValue(ctx.headers, 'x-cindy-pi-session-token') !== null
+      || headerValue(ctx.headers, 'x-cindy-pi-provider-id') !== null;
     if (!hasInternalPiHeader) return decision;
     const stripInternalPiHeaders = (
       resolved: RoutingDecision | null,
@@ -332,6 +378,7 @@ export function createModelRoutingTransform(): RoutingTransform {
             ...(resolved?.headerDelete ?? []),
             'x-cindy-pi-session-id',
             'x-cindy-pi-session-token',
+            'x-cindy-pi-provider-id',
           ]),
         ],
       };

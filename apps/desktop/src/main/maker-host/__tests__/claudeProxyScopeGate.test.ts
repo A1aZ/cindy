@@ -61,8 +61,8 @@ import {
 
 const SESSION_HEADER = { 'x-claude-code-session-id': 'sdk-grok' };
 
-function ctxWith(headers: Record<string, string>) {
-  return { reqId: 1, method: 'POST', url: '/v1/messages', headers } as never;
+function ctxWith(headers: Record<string, string>, url = '/v1/messages') {
+  return { reqId: 1, method: 'POST', url, headers } as never;
 }
 
 describe('cc routingTransform — xAI 会话的辅助请求回落默认路由 (issue #886)', () => {
@@ -188,7 +188,96 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
         'x-api-key',
         'x-cindy-pi-session-id',
         'x-cindy-pi-session-token',
+        'x-cindy-pi-provider-id',
       ],
+    });
+  });
+
+  it.each([
+    ['openai', '/codex/responses'],
+    ['xai', '/v1/responses'],
+    ['xai', '/v1/chat/completions'],
+  ] as const)('routes native %s PI requests to a local raw forwarder at %s', (providerId, url) => {
+    setSessionProvider('sess-pi', providerId);
+    registerPiProxySession('sess-pi', 'session-secret');
+    const decision = createModelRoutingTransform()(
+      undefined,
+      ctxWith({
+          'x-cindy-pi-session-id': 'sess-pi',
+          'x-cindy-pi-session-token': 'session-secret',
+          'x-cindy-pi-provider-id': providerId,
+      }, url),
+    );
+
+    expect(decision).toEqual({ localHandler: expect.any(Function) });
+  });
+
+  it('rejects a native provider header that does not match the Cindy session provider', async () => {
+    setSessionProvider('sess-pi', 'anthropic');
+    registerPiProxySession('sess-pi', 'session-secret');
+    const decision = await createModelRoutingTransform()(
+      undefined,
+      ctxWith({
+          'x-cindy-pi-session-id': 'sess-pi',
+          'x-cindy-pi-session-token': 'session-secret',
+          'x-cindy-pi-provider-id': 'openai',
+      }, '/codex/responses'),
+    );
+    const response = {
+      status: 0,
+      body: '',
+      writeHead(status: number) { this.status = status; },
+      end(body: string) { this.body = body; },
+    };
+
+    await decision?.localHandler?.({ res: response } as never);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toContain('pi_provider_mismatch');
+  });
+
+  it('rejects a missing native provider header for an OpenAI PI session', async () => {
+    setSessionProvider('sess-pi', 'openai');
+    registerPiProxySession('sess-pi', 'session-secret');
+    const decision = await createModelRoutingTransform()(
+      undefined,
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'session-secret',
+      }, '/codex/responses'),
+    );
+    const response = {
+      status: 0,
+      body: '',
+      writeHead(status: number) { this.status = status; },
+      end(body: string) { this.body = body; },
+    };
+
+    await decision?.localHandler?.({ res: response } as never);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toContain('pi_provider_mismatch');
+  });
+
+  it('does not send an authenticated Anthropic PI request through the legacy prefix bridge', async () => {
+    setClaudeProxyGatewayKeyReader(() => 'sk-gw');
+    setSessionProvider('sess-pi', 'anthropic');
+    registerPiProxySession('sess-pi', 'session-secret');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('pi-claude-token') : null,
+    );
+    const decision = createModelRoutingTransform()(
+      { model: 'chatgpt/gpt-5.6-sol' },
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'session-secret',
+        'x-cindy-pi-provider-id': 'anthropic',
+        'x-api-key': 'cindy-pi-provider-auth-placeholder',
+      }),
+    );
+
+    await expect(Promise.resolve(decision)).resolves.toMatchObject({
+      upstreamOverride: 'https://api.anthropic.com',
     });
   });
 
@@ -221,7 +310,11 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
       ctxWith({ 'x-cindy-pi-session-token': 'orphaned-secret' }),
     ));
     expect(decision).toMatchObject({
-      headerDelete: ['x-cindy-pi-session-id', 'x-cindy-pi-session-token'],
+      headerDelete: [
+        'x-cindy-pi-session-id',
+        'x-cindy-pi-session-token',
+        'x-cindy-pi-provider-id',
+      ],
     });
     expect(decision?.headerOverride).not.toHaveProperty('x-cindy-pi-session-token');
   });

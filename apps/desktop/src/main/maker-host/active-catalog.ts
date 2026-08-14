@@ -466,6 +466,40 @@ function withEmptyModels(p: Provider): Provider {
 
 function computeMerged(): Catalog {
   const b = base ?? BUNDLED_CATALOG;
+  // Dynamic OpenAI/Anthropic roots are rebuilt from discovery/registry below,
+  // but the daily OSS catalog may carry sparse PI protocol annotations. Keep
+  // only that metadata and apply it after existence has been independently
+  // proven; these entries never create a selectable model by themselves.
+  const piApiByProvider = new Map<string, Map<string, NonNullable<CatalogModel['piApi']>>>();
+  for (const provider of b.providers) {
+    const annotationSources = [
+      ...(provider.models.pi ?? []),
+      ...(provider.id === 'xai' ? (provider.models['claude-code'] ?? []) : []),
+    ];
+    for (const model of annotationSources) {
+      if (!model.piApi) continue;
+      const byModel = piApiByProvider.get(provider.id) ?? new Map();
+      byModel.set(model.id, model.piApi);
+      if (provider.id === 'openai' && model.id.startsWith(CHATGPT_MODEL_PREFIX)) {
+        byModel.set(model.id.slice(CHATGPT_MODEL_PREFIX.length), model.piApi);
+      }
+      piApiByProvider.set(provider.id, byModel);
+    }
+  }
+  const applyPiApiAnnotations = (
+    providerId: string,
+    models: CatalogModel[],
+  ): CatalogModel[] => {
+    const annotations = piApiByProvider.get(providerId);
+    if (!annotations || annotations.size === 0) return models;
+    return models.map((model) => {
+      const rawId = providerId === 'openai' && model.id.startsWith(CHATGPT_MODEL_PREFIX)
+        ? model.id.slice(CHATGPT_MODEL_PREFIX.length)
+        : model.id;
+      const piApi = annotations.get(model.id) ?? annotations.get(rawId);
+      return piApi && model.piApi !== piApi ? { ...model, piApi } : model;
+    });
+  };
   // registry 消费计划(实体化/overlay/retired/bridge 门控)一次算好;单 route 的
   // 作者错误隔离进 warnings,由刷新路径读走打日志,不拖垮其余条目。
   const plan = planRegistryRoots(b.modelRegistry);
@@ -551,7 +585,14 @@ function computeMerged(): Catalog {
           localOverrides,
           plan.warnings,
         );
-      return projectCodexModelsToBridges(withRoot, excluded, prepareClaudeModel);
+      const projected = projectCodexModelsToBridges(withRoot, excluded, prepareClaudeModel);
+      return {
+        ...projected,
+        models: {
+          ...projected.models,
+          pi: applyPiApiAnnotations('openai', projected.models.pi ?? []),
+        },
+      };
     }
     if (p.id === 'anthropic') {
       const seed = anthropicModels.length > 0 ? anthropicModels : (p.models['claude-code'] ?? []);
@@ -579,7 +620,15 @@ function computeMerged(): Catalog {
           ),
         )
         .map((model) => ({ ...model, supportsFastMode: false }));
-      return { ...p, models: { ...p.models, 'claude-code': root, codex: codexBridge, pi: root } };
+      return {
+        ...p,
+        models: {
+          ...p.models,
+          'claude-code': root,
+          codex: codexBridge,
+          pi: applyPiApiAnnotations('anthropic', root),
+        },
+      };
     }
     if (p.id === 'xai') {
       const claudeRoot = assembleRoot(
@@ -590,14 +639,22 @@ function computeMerged(): Catalog {
         true,
       );
       const codexRoot = assembleRoot('xai', 'codex', p.models.codex ?? [], plan, true);
+      const stripPiApi = (model: CatalogModel): CatalogModel => {
+        if (model.piApi === undefined) return model;
+        const rest = { ...model };
+        delete rest.piApi;
+        return rest;
+      };
       return {
         ...p,
         models: {
           ...p.models,
-          'claude-code': claudeRoot,
-          codex: codexRoot,
+          'claude-code': claudeRoot.map(stripPiApi),
+          codex: codexRoot.map(stripPiApi),
           // Pi 恒定镜像 claude-code root(拿满 root 能力,如 grok-4.20 的 xhigh 档)。
-          ...(p.agents.includes('pi') ? { pi: claudeRoot } : {}),
+          ...(p.agents.includes('pi')
+            ? { pi: applyPiApiAnnotations('xai', claudeRoot) }
+            : {}),
         },
       };
     }

@@ -99,12 +99,39 @@ describe('active-catalog discovered augment', () => {
     expect(openaiIds('pi')).toContain('chatgpt/gpt-5.7');
   });
 
+  it('applies a daily PI protocol annotation only after OpenAI discovery proves the model exists', () => {
+    const catalog = bundledWithoutRegistry();
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    openai.models.pi = [
+      {
+        ...fake('chatgpt/gpt-5.7'),
+        piApi: 'openai-responses',
+      },
+    ];
+    setActiveCatalog(catalog);
+
+    expect(openaiIds('pi')).not.toContain('chatgpt/gpt-5.7');
+
+    setDiscoveredCodexModels([fake('gpt-5.7')]);
+    const projected = getActiveCatalog().providers.find((provider) => provider.id === 'openai')
+      ?.models.pi?.find((candidate) => candidate.id === 'chatgpt/gpt-5.7');
+    expect(projected).toMatchObject({ piApi: 'openai-responses' });
+  });
+
   it('SuperGrok 静态清单投影到独立 Pi 通道', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     const xai = getActiveCatalog().providers.find((provider) => provider.id === 'xai');
     expect(xai?.agents).toContain('pi');
     expect(xai?.routing.pi?.modelPrefixes).toEqual(['xai/']);
-    expect(xai?.models.pi).toEqual(xai?.models['claude-code']);
+    expect(xai?.models.pi?.map((model) => {
+      const copy = { ...model };
+      delete copy.piApi;
+      return copy;
+    })).toEqual(xai?.models['claude-code']);
+    expect(xai?.models.pi?.find((model) => model.id === 'xai/grok-4.20')?.piApi)
+      .toBe('openai-responses');
+    expect(xai?.models.pi?.find((model) => model.id === 'xai/grok-code-fast')?.piApi)
+      .toBe('openai-completions');
   });
 
   it('bridge 投影剔除 max/ultra:codex 侧保留、claude-code 侧封顶 xhigh(issue #352)', () => {

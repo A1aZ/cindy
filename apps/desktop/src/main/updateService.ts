@@ -885,11 +885,15 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       cleanOldFiles(fileName);
     }
 
-    // 下载期间用户 opt-out(渠道代际已变):放弃这次下载的产物,不写 patch-info。
-    // 否则会重新落盘一份 beta patch,用户关掉开关后仍被呈现 beta 更新。
+    // 下载期间用户切渠道(渠道代际已变):放弃这次下载的产物,不写 patch-info。
+    // 否则会重新落盘一份旧渠道 patch,用户切渠道后仍被呈现旧版本更新。
     if (channelEpochAtStart !== updateChannelEpoch) {
       log.info('update channel changed during download — discarding patch v%s', latestVersion);
       try { fs.unlinkSync(destPath); } catch { /* ignore */ }
+      // 必须 setStatus:切渠道可能发生在请求仍在 checking 阶段时(clearStagedPatch
+      // 不覆盖 checking),本分支之前已被 setStatus('downloading'),不归位的话
+      // update-check-now 会一直 short-circuit 返回 downloading。
+      setStatus('idle');
       return 'idle';
     }
 
@@ -926,9 +930,10 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
     // readyFilePath 全都没动过,直接重新广播 ready 让 banner 按钮从 loading 恢复成可点。
     // 下一次 30min 轮询会再次尝试 b。
     if (wasReady) {
-      // 下载期间用户 opt-out:旧 patch 已被 clearStagedPatch 清掉,不能恢复。
+      // 下载期间用户切渠道:旧 patch 已被 clearStagedPatch 清掉,不能恢复。
       if (channelEpochAtStart !== updateChannelEpoch) {
         log.info('update channel changed during superseding download — not restoring stale patch');
+        setStatus('idle');
         return 'idle';
       }
       log.info('Superseding download failed — rolling back to ready v%s', previousReadyVersion);

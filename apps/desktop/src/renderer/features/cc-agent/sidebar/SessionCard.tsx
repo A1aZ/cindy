@@ -1258,11 +1258,8 @@ function TimeActionsSlot({
         </span>
       )}
       {yieldToOrdinalBadge && ordinalBadgeLabel ? (
-        <span
-          aria-hidden
-          className="invisible col-start-1 row-start-1 inline-flex h-5 items-center px-1.5 py-[2px] text-11 leading-none"
-        >
-          {ordinalBadgeLabel}
+        <span aria-hidden className="invisible col-start-1 row-start-1 inline-flex">
+          <SessionOrdinalBadgeKbd label={ordinalBadgeLabel} />
         </span>
       ) : null}
       {canQuickArchive && archivePending && (

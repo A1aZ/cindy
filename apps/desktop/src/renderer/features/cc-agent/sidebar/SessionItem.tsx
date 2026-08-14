@@ -1090,11 +1090,8 @@ export const SessionItem = memo(function SessionItem({
             <span aria-hidden className="invisible col-start-1 row-start-1 inline-block h-6 w-14" />
           )}
           {ordinalBadgeLabel != null && (
-            <span
-              aria-hidden
-              className="invisible col-start-1 row-start-1 inline-flex h-6 items-center px-1.5 py-[2px] text-11 leading-none"
-            >
-              {ordinalBadgeLabel}
+            <span aria-hidden className="invisible col-start-1 row-start-1 inline-flex">
+              <SessionOrdinalBadgeKbd label={ordinalBadgeLabel} />
             </span>
           )}
           {canQuickArchive && archivePending && (

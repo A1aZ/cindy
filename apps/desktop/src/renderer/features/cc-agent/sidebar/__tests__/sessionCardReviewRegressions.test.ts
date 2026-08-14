@@ -186,9 +186,21 @@ describe('SessionCard review regressions', () => {
       "!menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex'",
     );
     expect(sessionItemSource).toContain(
-      'invisible col-start-1 row-start-1 inline-flex h-6 items-center px-1.5 py-[2px] text-11 leading-none',
+      'invisible col-start-1 row-start-1 inline-flex',
+    );
+    expect(sessionItemSource).toContain(
+      '<SessionOrdinalBadgeKbd label={ordinalBadgeLabel} />',
     );
     expect(sessionCardSource).toContain(
+      'invisible col-start-1 row-start-1 inline-flex',
+    );
+    expect(sessionCardSource).toContain(
+      '<SessionOrdinalBadgeKbd label={ordinalBadgeLabel} />',
+    );
+    expect(sessionItemSource).not.toContain(
+      'invisible col-start-1 row-start-1 inline-flex h-6 items-center px-1.5 py-[2px] text-11 leading-none',
+    );
+    expect(sessionCardSource).not.toContain(
       'invisible col-start-1 row-start-1 inline-flex h-5 items-center px-1.5 py-[2px] text-11 leading-none',
     );
   });

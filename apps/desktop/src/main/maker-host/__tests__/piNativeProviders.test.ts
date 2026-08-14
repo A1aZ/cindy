@@ -159,14 +159,6 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     });
     expect(providers[1]?.models[0]?.api).toBeUndefined();
     expect(providers[1]?.models[0]?.catalogAddition).toBeUndefined();
-    const withoutProbe = buildPiSubscriptionNativeProviders(
-      catalog,
-      'http://127.0.0.1:4567/',
-    ).providers;
-    expect(withoutProbe.find((provider) => provider.id === 'openai-codex')
-      ?.models.every((model) => model.catalogAddition === undefined)).toBe(true);
-    expect(withoutProbe.find((provider) => provider.id === 'xai')
-      ?.models.every((model) => model.api === undefined)).toBe(true);
     expect(providers[2]).toMatchObject({
       sourceProviderId: 'xai',
       baseUrl: 'http://127.0.0.1:4567/v1',
@@ -187,6 +179,67 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         'x-cindy-pi-provider-id': provider.sourceProviderId,
       });
     }
+  });
+
+  it('preserves daily additions and protocol annotations when PI probing fails or is empty', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const anthropic = catalog.providers.find((provider) => provider.id === 'anthropic')!;
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
+    anthropic.models.pi = [{
+      id: 'claude-daily', name: 'Claude Daily', contextWindow: 200_000,
+      efforts: [], defaultEffort: null, piApi: 'anthropic-messages',
+    }];
+    openai.models.pi = [{
+      id: 'chatgpt/gpt-daily', name: 'GPT Daily', contextWindow: 200_000,
+      efforts: [], defaultEffort: null, piApi: 'openai-responses',
+    }];
+    xai.models.pi = [{
+      id: 'xai/grok-daily', name: 'Grok Daily', contextWindow: 200_000,
+      efforts: [], defaultEffort: null, piApi: 'openai-responses',
+    }];
+
+    for (const bundled of [undefined, new Map()] as const) {
+      const providers = buildPiSubscriptionNativeProviders(
+        catalog,
+        'http://127.0.0.1:4567/',
+        bundled,
+      ).providers;
+      expect(providers.find((provider) => provider.id === 'anthropic')?.models[0])
+        .toMatchObject({ wireId: 'claude-daily', api: 'anthropic-messages' });
+      expect(providers.find((provider) => provider.id === 'openai-codex')?.models[0])
+        .toMatchObject({ wireId: 'gpt-daily', catalogAddition: true });
+      expect(providers.find((provider) => provider.id === 'xai')?.models[0])
+        .toMatchObject({ wireId: 'grok-daily', api: 'openai-responses' });
+    }
+  });
+
+  it('keeps missing daily rows while respecting models returned by a partial PI probe', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
+    xai.models.pi = [
+      {
+        id: 'xai/grok-known', name: 'Grok Known', contextWindow: 200_000,
+        efforts: [], defaultEffort: null, piApi: 'openai-responses',
+      },
+      {
+        id: 'xai/grok-added', name: 'Grok Added', contextWindow: 200_000,
+        efforts: [], defaultEffort: null, piApi: 'openai-responses',
+      },
+    ];
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['xai', new Map([
+        ['grok-known', piBundledModel('grok-known', 'openai-responses')],
+      ])]]),
+    ).providers.find((candidate) => candidate.id === 'xai');
+
+    expect(provider?.models).toEqual([
+      expect.objectContaining({ wireId: 'grok-known' }),
+      expect.objectContaining({ wireId: 'grok-added', api: 'openai-responses' }),
+    ]);
+    expect(provider?.models[0]?.api).toBeUndefined();
   });
 
   it('preserves PI bundled metadata when a daily annotation corrects an existing protocol', () => {
@@ -275,6 +328,18 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     }
   });
 
+  it('fails closed for an unknown custom-provider wire protocol', () => {
+    expect(() => buildPiNativeProvidersFromConfigs(
+      [{
+        id: 'future',
+        name: 'Future',
+        auth: { method: 'none' },
+        runtimes: { pi: piRuntime({ wireProtocol: 'future-protocol' as never }) },
+      }],
+      () => null,
+    )).toThrow('Unsupported PI wire protocol: future-protocol');
+  });
+
   it('uses PI bundled protocol knowledge before the legacy unknown-BYOM default', () => {
     const bundled = new Map([
       ['zai', new Map([
@@ -338,6 +403,109 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       ])],
     ]);
     expect(resolvePiBundledApiByModelId(bundled, 'same-id')).toBeUndefined();
+  });
+
+  it('does not copy a unique same-named PI model across BYOM origins', () => {
+    const bundledModel = piBundledModel('shared-model', 'anthropic-messages', {
+      baseUrl: 'https://official.example/v1/messages',
+      name: 'Official Name',
+      compat: { supportsStrictTools: true },
+    });
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [{
+        id: 'local-provider',
+        name: 'Local Provider',
+        auth: { method: 'none' },
+        runtimes: {
+          pi: piRuntime({
+            baseUrl: 'http://127.0.0.1:9000/v1',
+            models: [{ id: 'shared-model', name: 'Local Name' }],
+          }),
+        },
+      }],
+      () => null,
+      undefined,
+      new Map([['official-provider', new Map([['shared-model', bundledModel]])]]),
+    );
+
+    expect(providers[0]).toMatchObject({
+      baseUrl: 'http://127.0.0.1:9000/v1',
+      api: 'openai-completions',
+      models: [{ id: 'shared-model', name: 'Local Name' }],
+    });
+    expect(providers[0]?.models[0]?.baseUrl).toBeUndefined();
+    expect(providers[0]?.models[0]?.compat).toBeUndefined();
+  });
+
+  it('keeps an explicit BYOM protocol and endpoint isolated from bundled model metadata', () => {
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [{
+        id: 'explicit-provider',
+        name: 'Explicit Provider',
+        auth: { method: 'none' },
+        runtimes: {
+          pi: piRuntime({
+            baseUrl: 'https://custom.example/v1',
+            wireProtocol: 'openai-responses',
+            models: [{ id: 'same-id', name: 'Custom Name' }],
+          }),
+        },
+      }],
+      () => null,
+      undefined,
+      new Map([['bundled', new Map([
+        ['same-id', piBundledModel('same-id', 'anthropic-messages', {
+          baseUrl: 'https://other.example/v1',
+          name: 'Bundled Name',
+        })],
+      ])]]),
+    );
+
+    expect(providers[0]).toMatchObject({
+      baseUrl: 'https://custom.example/v1',
+      api: 'openai-responses',
+      models: [{ id: 'same-id', name: 'Custom Name' }],
+    });
+    expect(providers[0]?.models[0]?.baseUrl).toBeUndefined();
+  });
+
+  it('falls back to completions when no unique same-origin PI candidate exists', () => {
+    const bundled = new Map([
+      ['provider-a', new Map([
+        ['same-id', piBundledModel('same-id', 'anthropic-messages', {
+          baseUrl: 'https://same.example/anthropic',
+        })],
+      ])],
+      ['provider-b', new Map([
+        ['same-id', piBundledModel('same-id', 'openai-responses', {
+          baseUrl: 'https://same.example/openai',
+        })],
+      ])],
+    ]);
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [{
+        id: 'ambiguous-provider',
+        name: 'Ambiguous Provider',
+        auth: { method: 'none' },
+        runtimes: {
+          pi: piRuntime({
+            baseUrl: 'https://same.example/proxy',
+            models: [{ id: 'same-id', name: 'Configured Name' }],
+          }),
+        },
+      }],
+      () => null,
+      undefined,
+      bundled,
+    );
+
+    expect(resolvePiBundledModelById(bundled, 'same-id', 'https://same.example/proxy'))
+      .toBeUndefined();
+    expect(providers[0]).toMatchObject({
+      api: 'openai-completions',
+      models: [{ id: 'same-id', name: 'Configured Name' }],
+    });
+    expect(providers[0]?.models[0]?.baseUrl).toBeUndefined();
   });
 
   it('keyless (none) → no env, no apiKeyEnvVar (models.json writes dummy)', () => {

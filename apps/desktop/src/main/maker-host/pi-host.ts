@@ -353,7 +353,7 @@ export async function readPiBundledModels(
       );
       return catalog.size > 0 ? catalog : null;
     } catch (err) {
-      log.warn('readPiBundledModels: PI catalog probe failed; daily PI annotations disabled', {
+      log.warn('readPiBundledModels: PI catalog probe failed; using daily PI annotations without bundled baseline', {
         message: err instanceof Error ? err.message : String(err),
       });
       return null;
@@ -404,7 +404,10 @@ export function buildPiSubscriptionNativeProviders(
           : model.id;
         const bundledModels = bundledModelsByProvider?.get(piProviderId);
         const bundledModel = bundledModels?.get(wireId);
-        const isAnnotatedAddition = !!model.piApi && !!bundledModels && !bundledModel;
+        // A missing/empty/partial PI probe is not evidence that the daily
+        // catalog annotation is wrong. Keep annotated rows in the overlay so
+        // inheritModels cannot filter out a confirmed addition or correction.
+        const isAnnotatedAddition = !!model.piApi && !bundledModel;
         const isProtocolCorrection = sourceProviderId !== 'openai'
           && !!model.piApi
           && !!bundledModel
@@ -646,17 +649,18 @@ function wireProtocolToPiApi(wp: ProviderWireProtocol | undefined): PiNativeApi 
       return 'openai-responses';
     case 'openai-chat':
     case undefined:
-    default:
       // 缺省 openai-completions:BYOM 本地端点(Ollama/vLLM 的 /v1/chat/completions)最常见。
       return 'openai-completions';
+    default:
+      throw new Error(`Unsupported PI wire protocol: ${String(wp)}`);
   }
 }
 
 /**
- * Resolve the protocol already known by the exact bundled PI build. Presets use
- * Cindy provider ids, which intentionally do not have to match PI provider ids,
- * so the stable join key here is the model id. Conflicting duplicate ids are
- * ambiguous and must fall through to an explicit catalog/runtime declaration.
+ * Inspect the protocol already known by the exact bundled PI build. This helper
+ * is intentionally global and therefore only suitable for diagnostics/tests;
+ * BYOM routing must additionally prove that the candidate belongs to the same
+ * upstream origin before inheriting any protocol or metadata.
  */
 export function resolvePiBundledApiByModelId(
   catalog: PiBundledModelCatalog | undefined,
@@ -698,16 +702,11 @@ export function resolvePiBundledModelById(
   }
   if (candidates.length === 0) return undefined;
   const sourceOrigin = urlOrigin(sourceBaseUrl);
-  if (sourceOrigin) {
-    const sameOrigin = candidates.filter((model) => urlOrigin(model.baseUrl) === sourceOrigin);
-    if (sameOrigin.length === 1) return sameOrigin[0];
-    const exactBaseUrl = sameOrigin.filter((model) => model.baseUrl === sourceBaseUrl);
-    if (exactBaseUrl.length === 1) return exactBaseUrl[0];
-  }
-  const first = candidates[0]!;
-  return candidates.every((model) => model.api === first.api && model.baseUrl === first.baseUrl)
-    ? first
-    : undefined;
+  if (!sourceOrigin) return undefined;
+  const sameOrigin = candidates.filter((model) => urlOrigin(model.baseUrl) === sourceOrigin);
+  const exactBaseUrl = sameOrigin.filter((model) => model.baseUrl === sourceBaseUrl);
+  if (exactBaseUrl.length === 1) return exactBaseUrl[0];
+  return sameOrigin.length === 1 ? sameOrigin[0] : undefined;
 }
 
 /** env 变量名(该 provider 的 api key):CINDY_PI_KEY_<ID>,ID 规整成 [A-Z0-9_]。 */
@@ -800,14 +799,13 @@ export function buildPiNativeProvidersFromConfigs(
         env[apiKeyEnvVar] = key;
       }
     }
-    const runtimeApi = rt.wireProtocol
-      ? wireProtocolToPiApi(rt.wireProtocol)
-      : undefined;
+    const runtimeApi = rt.wireProtocol === undefined
+      ? undefined
+      : wireProtocolToPiApi(rt.wireProtocol);
     // Protocol authority, in order: per-model daily correction/addition,
-    // explicit endpoint protocol, exact PI bundled model knowledge, then the
-    // legacy BYOM default for genuinely unknown hand-written models. This keeps
-    // unannotated existing preset models on PI's own table instead of silently
-    // absorbing them into OpenAI Chat Completions.
+    // explicit endpoint protocol, strictly same-origin PI bundled knowledge,
+    // then the legacy BYOM default. A same-named model from another provider is
+    // not evidence about this user endpoint and must never rewrite its route.
     const bundledModels = rt.models.map((model) =>
       !model.piApi && !runtimeApi
         ? resolvePiBundledModelById(bundledModelsByProvider, model.id, rt.baseUrl)
@@ -816,7 +814,6 @@ export function buildPiNativeProvidersFromConfigs(
       model.piApi
       ?? runtimeApi
       ?? bundledModels[index]?.api
-      ?? resolvePiBundledApiByModelId(bundledModelsByProvider, model.id)
       ?? 'openai-completions');
     const providerApi = runtimeApi ?? modelApis[0] ?? 'openai-completions';
     providers.push({

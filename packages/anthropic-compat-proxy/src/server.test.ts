@@ -1919,11 +1919,17 @@ describe('anthropic-compat-proxy localHandler(路由决策交本地 handler,不�
           if (reachTimeout) clearTimeout(reachTimeout);
         }
 
-        expect(seen).not.toBeNull();
-        expect(seen?.url).toBe('/codex/responses');
-        expect(seen?.encoding).toBe('zstd');
-        expect(seen?.parsed).toBeUndefined();
-        expect([...seen!.raw.subarray(0, 4)]).toEqual([0x28, 0xb5, 0x2f, 0xfd]);
+        const observed = seen as {
+          raw: Buffer;
+          encoding: string | undefined;
+          parsed: unknown;
+          url: string;
+        } | null;
+        expect(observed).not.toBeNull();
+        expect(observed?.url).toBe('/codex/responses');
+        expect(observed?.encoding).toBe('zstd');
+        expect(observed?.parsed).toBeUndefined();
+        expect([...observed!.raw.subarray(0, 4)]).toEqual([0x28, 0xb5, 0x2f, 0xfd]);
         expect(gateway.bodies).toHaveLength(0);
       } finally {
         if (child && child.exitCode === null && child.signalCode === null) {

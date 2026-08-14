@@ -50,6 +50,27 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
     expect(deviceLinkHost).toContain('replayActiveSubscriptions(`presence-online:${snap.deviceId.slice(0, 8)}`, snap.deviceId);');
   });
 
+  it('每个 relay 连接代上线时从设备目录补齐已在线控制端展示名', () => {
+    const deviceLinkHost = readFileSync(resolve(mainRoot, 'device-link/index.ts'), 'utf8');
+
+    expect(deviceLinkHost).toContain("serverApiFetch<DeviceDirectoryResponse>('/api/device-link/devices'");
+    const onlineBranch = deviceLinkHost.indexOf("if (status === 'online') {");
+    const seedCachedNames = deviceLinkHost.indexOf(
+      'seedControllerDisplayNamesFromLastKnown();',
+      onlineBranch,
+    );
+    const refreshDirectory = deviceLinkHost.indexOf(
+      'void refreshControllerDisplayNamesFromDirectory(displayNameGeneration);',
+      onlineBranch,
+    );
+    expect(onlineBranch).toBeGreaterThanOrEqual(0);
+    expect(seedCachedNames).toBeGreaterThan(onlineBranch);
+    expect(refreshDirectory).toBeGreaterThan(seedCachedNames);
+    expect(deviceLinkHost).toContain(
+      'generation !== controllerDisplayNameRefreshGeneration',
+    );
+  });
+
   it('keeps device-link:voice:credential-sync matched but rejected (feature removed, readable error for old mobile)', () => {
     const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8');
 

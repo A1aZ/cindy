@@ -449,6 +449,7 @@ import {
   setRemoteInvokeBusyChangedListener,
   setSessionsSubscribedListener,
   setControllerDisplayName,
+  purgeRevokedController,
   getActiveControllers,
   getUpdateRelaunchControllers,
   hasInFlightRemoteInvokes,
@@ -584,6 +585,51 @@ describe('被控端控制链路生命周期', () => {
       deviceId: '1234567890abcdef',
       name: '12345678',
     });
+  });
+
+  it('没有历史 presence 时先显示自报名，设备目录补齐后立即切换到数据库展示名', () => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    feed(subFrame('ctrl-late-directory', SUB, ['session:s1'], 'Host.local'));
+    expect(getActiveControllers()).toEqual([
+      { deviceId: 'ctrl-late-directory', name: 'Host.local' },
+    ]);
+
+    setControllerDisplayName('ctrl-late-directory', '数据库展示名');
+    expect(getActiveControllers()).toEqual([
+      { deviceId: 'ctrl-late-directory', name: '数据库展示名' },
+    ]);
+  });
+
+  it.each([
+    ['显式断链', (feed: (env: Envelope) => unknown, deviceId: string) => feed({
+      v: 1,
+      kind: 'link-close',
+      src: deviceId,
+      payload: { reason: 'user' },
+    })],
+    ['presence 离线', (_feed: (env: Envelope) => unknown, deviceId: string) => {
+      handleControllerOffline(deviceId);
+    }],
+    ['撤销访问', (_feed: (env: Envelope) => unknown, deviceId: string) => {
+      purgeRevokedController(deviceId);
+    }],
+  ] as const)('%s 会清掉旧链路自报名，新链路缺名时回退设备 ID 短码', (_label, close) => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    const deviceId = '1234567890abcdef';
+
+    setControllerDisplayName(deviceId, '数据库展示名');
+    feed(subFrame(deviceId, SUB, ['session:s1'], 'Old-Host.local'));
+    setControllerDisplayName(deviceId, '');
+    expect(getActiveControllers()).toEqual([{ deviceId, name: 'Old-Host.local' }]);
+
+    close(feed, deviceId);
+    feed(subFrame(deviceId, SUB, ['session:s2']));
+    expect(getActiveControllers()).toEqual([{ deviceId, name: '12345678' }]);
   });
 
   it('link-open(开关关)→ 不 accept、不记录', () => {

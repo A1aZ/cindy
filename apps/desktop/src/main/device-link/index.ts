@@ -42,6 +42,7 @@ import { createLogger } from '../logger';
 import { onQuit } from '../lifecycle';
 import { tryGetDbClient } from '../localDb/client/current';
 import { createOutboundHttpAgent } from '../maker-host/outbound-fetch';
+import { serverApiFetch } from '../serverApiClient';
 import {
   DeviceLinkOwnershipArbiter,
   createDbClientOwnershipStore,
@@ -54,7 +55,9 @@ import {
   shouldAbortTransportTimeoutReopen,
 } from './transportTimeoutReopen';
 import {
+  isPlaceholderDeviceName,
   readDeviceLinkSettings,
+  readLastKnownDeviceNames,
   rememberLastKnownDeviceName,
   updateDeviceLinkSetting,
   writeDeviceLinkSetting,
@@ -136,6 +139,51 @@ const WS_PATH = '/api/device-link/ws';
 /** relay REST base(media presign / devices 等);供 mediaTransfer / ipc 复用。 */
 export function deviceLinkApiBase(): string {
   return getClientEndpoint('deviceLinkApiBaseUrl');
+}
+
+type DeviceDirectoryResponse = {
+  devices?: Array<{ deviceId?: unknown; name?: unknown }>;
+};
+let controllerDisplayNameRefreshGeneration = 0;
+
+function seedControllerDisplayNamesFromLastKnown(): void {
+  for (const [deviceId, name] of Object.entries(readLastKnownDeviceNames())) {
+    setControllerDisplayName(deviceId, name);
+  }
+}
+
+/**
+ * presence 是增量流，新建连接不会收到已在线设备的历史快照；每个 relay 连接代
+ * 上线时从现有设备目录补齐展示名，避免 link-open 抢先时长期停在主机名回退。
+ */
+async function refreshControllerDisplayNamesFromDirectory(generation: number): Promise<void> {
+  try {
+    const result = await serverApiFetch<DeviceDirectoryResponse>('/api/device-link/devices', {
+      baseUrl: deviceLinkApiBase,
+      timeoutMs: 10_000,
+    });
+    if (
+      generation !== controllerDisplayNameRefreshGeneration
+      || linkTornDown
+      || client?.getStatus() !== 'online'
+    ) {
+      return;
+    }
+    const cachedNames = readLastKnownDeviceNames();
+    for (const device of result.devices ?? []) {
+      if (typeof device.deviceId !== 'string' || !device.deviceId.trim()) continue;
+      const deviceId = device.deviceId.trim();
+      const serverName = typeof device.name === 'string' ? device.name.trim() : '';
+      const hasDisplayName = !!serverName && !isPlaceholderDeviceName(serverName);
+      const displayName = hasDisplayName ? serverName : cachedNames[deviceId];
+      if (!displayName) continue;
+      setControllerDisplayName(deviceId, displayName);
+      if (hasDisplayName) void rememberLastKnownDeviceName(deviceId, serverName);
+    }
+  } catch (err) {
+    // 目录补齐是展示层 best-effort；失败时保留控制帧自报名 / 短 ID 回退，不影响建链。
+    log.warn(`device directory display-name refresh failed (non-fatal): ${String(err)}`);
+  }
 }
 
 let client: DeviceLinkClient | null = null;
@@ -487,6 +535,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
 
   client.onStatusChange((status) => {
     if (status !== 'online') {
+      controllerDisplayNameRefreshGeneration += 1;
       // 不清 openLinkInFlight:登记生命周期的唯一判据是 promise settle(每个
       // 请求 settle 时自清理,closeRemoteLink 的显式删除有取消代次兜底)。建链
       // 可能正 park 在上线等待里,状态抖动时提前删登记会让同设备的下一次调用
@@ -510,6 +559,11 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     broadcast(DEVICE_LINK_PUSH.STATUS_CHANGED, { status });
     handleContactsDeviceLinkStatusChanged(status === 'online');
     if (status === 'online') {
+      // 本地 last-known 先同步种入，覆盖 REST 返回前的 link-open 竞态；随后用
+      // 当前设备目录刷新，补齐本连接代没有历史 presence 的已在线设备。
+      seedControllerDisplayNamesFromLastKnown();
+      const displayNameGeneration = ++controllerDisplayNameRefreshGeneration;
+      void refreshControllerDisplayNamesFromDirectory(displayNameGeneration);
       // 断线前攒的 maker:event 批最先出去:它在时间上早于离线积压与重连后的
       // 一切新推送,晚发会让控制端在终态之后又收到旧文本(见 dispatch 注释)。
       flushMakerEventBatchesOnReconnect();
@@ -933,6 +987,7 @@ export function getMobileNotifyGeneration(): number {
 function teardownActiveLink(): void {
   if (!client || linkTornDown) return;
   linkTornDown = true;
+  controllerDisplayNameRefreshGeneration += 1;
   mobileNotifyGeneration += 1;
   if (relayAuthRecoveryRetryTimer !== null) {
     clearTimeout(relayAuthRecoveryRetryTimer);

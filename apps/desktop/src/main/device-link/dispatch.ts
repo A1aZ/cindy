@@ -598,6 +598,10 @@ function resolveControllerName(deviceId: string, reportedName: unknown): string 
     ?? reportedControllerNameByDevice.get(deviceId);
 }
 
+function clearReportedControllerName(deviceId: string): void {
+  reportedControllerNameByDevice.delete(deviceId);
+}
+
 /**
  * presence 设备名变化(含设置页重命名)时更新展示真相；已有活跃订阅立即重发
  * controlled-state，让横幅不用等下一次 subscribe / 重连才改名。
@@ -1488,6 +1492,7 @@ export function dropAllControllers(
       // 本地授权/订阅清理不能依赖弱网下 link-close 真正写进 socket。
       log.warn(`closeLink to ${shortId(dst)} failed during ${reason}: ${String(err)}`);
     }
+    clearReportedControllerName(dst);
   }
   clearAllRemoteInvokeState();
   subscriptions.clearAll();
@@ -1508,6 +1513,7 @@ export function dropAllControllers(
  */
 export function handleControllerOffline(deviceId: string): void {
   acceptedLinkControllers.delete(deviceId);
+  clearReportedControllerName(deviceId);
   clearSessionActivityStage(deviceId);
   clearMakerEventBatchStage(deviceId);
   cancelLinkAcceptRetry(deviceId);
@@ -1523,6 +1529,7 @@ export function forgetControllerInvokeState(deviceId: string): void {
 
 /** 显式撤销时清理短时离线队列与 remembered topic，避免恢复后重放撤权期间数据。 */
 export function purgeRevokedController(deviceId: string): void {
+  clearReportedControllerName(deviceId);
   offlinePushQueue.clear(deviceId);
   clearSessionActivityStage(deviceId);
   clearMakerEventBatchStage(deviceId);
@@ -1575,6 +1582,7 @@ async function handleFrame(client: DeviceLinkClient, env: Envelope): Promise<voi
       clearMakerEventBatchStage(src);
       cancelLinkAcceptRetry(src);
       acceptedLinkControllers.delete(src);
+      clearReportedControllerName(src);
       // Keep the protocol-capability marker, but discard all remembered routing.
       // A modern controller must reconnect and explicitly subscribe; restoring the
       // legacy wildcard here would silently re-enable broad delivery.

@@ -108,6 +108,13 @@ export interface TitleOneShotDeps {
     Promise<{ accessToken: string } | null> | { accessToken: string } | null;
   readCodexCreds?: () => { accessToken: string; accountId: string } | null;
   readGatewayKey?: () => string | null;
+  /**
+   * 派发紧前复查(异步):凭证到手、请求发出的紧前,回读会话归属 / agent 是否仍与本次
+   * one-shot 的解析口径一致。返回 false 则中止本次 one-shot(回落失败,不发出付费请求)。
+   * prompt prediction 用它防「等待期间会话被切换 agent,仍把转写路由到切换前的 provider /
+   * 账号」的 TOCTOU 竞态;标题场景无此竞态,缺省不复查。
+   */
+  beforeDispatch?: (args: { sessionId: string; agentKind: AgentKind }) => Promise<boolean>;
 }
 
 const EFFORT_RANK: Record<Effort, number> = {
@@ -553,6 +560,24 @@ export async function generateTitleViaProviderResult(
     });
     return false;
   };
+  // 派发紧前复查:同步的 route 可用性(canDispatchNow)之外,再叠加可选的异步会话归属
+  // 复查(beforeDispatch)。凭证获取是可能数秒的 await,期间会话可能被切换 agent / 转远程,
+  // 仅在发出付费请求的紧前复查才能把窗口缩到最小。
+  const preDispatchEligible = async (stage: string): Promise<boolean> => {
+    if (!canDispatchNow(stage)) return false;
+    if (
+      deps.beforeDispatch &&
+      !(await deps.beforeDispatch({ sessionId: args.sessionId, agentKind: args.agentKind }))
+    ) {
+      log.debug('title oneShot skipped: pre-dispatch eligibility check failed', {
+        providerId,
+        model: target.model,
+        stage,
+      });
+      return false;
+    }
+    return true;
+  };
   // 非标题场景(如 prompt prediction)可覆盖 token 数/校验规则。
   const maxTokens = opts?.maxTokens ?? TITLE_MAX_TOKENS;
   const codexInstructions = opts?.codexInstructions ?? CODEX_TITLE_INSTRUCTIONS;
@@ -567,7 +592,7 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no anthropic OAuth', { providerId });
           return { status: 'failed' };
         }
-        if (!canDispatchNow('after-credential-refresh')) {
+        if (!(await preDispatchEligible('after-credential-refresh'))) {
           return { status: 'failed' };
         }
         text = await fetchAnthropicTitle(
@@ -588,7 +613,7 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no codex creds', { providerId });
           return { status: 'failed' };
         }
-        if (!canDispatchNow('after-credential-read')) {
+        if (!(await preDispatchEligible('after-credential-read'))) {
           return { status: 'failed' };
         }
         text = await fetchCodexTitle(
@@ -610,7 +635,7 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no gateway key', { providerId });
           return { status: 'failed' };
         }
-        if (!canDispatchNow('after-credential-read')) {
+        if (!(await preDispatchEligible('after-credential-read'))) {
           return { status: 'failed' };
         }
         text = await fetchGatewayTitle(

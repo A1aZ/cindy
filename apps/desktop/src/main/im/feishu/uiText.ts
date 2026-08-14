@@ -287,6 +287,11 @@ export const ui = {
       resolvedNewSession: (workspaceName: string) =>
         `✨ 新存档已建 + 接管完成（在 **${workspaceName}** 里）\n直接发指令开聊；想退就 \`/exctr\``,
       attachFailed: (reason: string) => `❌ 没接上：${reason}`,
+      // 群卡认不出自己在哪条话题(应用重启过, 卡片和话题的对应关系只存在内存里)。
+      // 这时候按回调身份接管会把绑定挂到私聊上, 所以宁可不接, 让用户重发一次。
+      staleGroupCard:
+        '❌ 没接上：这张卡片是应用重启前发的，已经认不出它属于哪条话题了。\n' +
+        '请在你想接管的那条话题里重新发一次 `/ctr`（绑定只跟话题走，不会串到别处）',
       /** 旧卡片(被点了 busy session 那张)被 freeze 时的占位文字, 让用户知道这张
        *  卡片不再活跃, 下面会新发一张可重选的卡片。 */
       sessionBusyOldCardPlaceholder: '⏳ 那个任务还在跑——下方给你刷了张新卡片，重选一下吧',

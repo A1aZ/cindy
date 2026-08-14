@@ -382,6 +382,16 @@ export interface ImRunAgentTurnArgs {
    */
   protectedContent?: boolean;
   groupHistoryAccess?: GroupHistoryAccessScope;
+  /**
+   * 调用方已经打好的「已收到」表情句柄 —— 传了就由本 turn 接管(不再重复打),
+   * turn 收口时照常撤掉/换成结果表情。
+   *
+   * 给 messageHandler 用: 群上下文拼装(回翻群历史, 可能翻页并调轻量模型)排在
+   * runAgentTurn **之前**, 慢的时候用户几十秒看不到任何反应, 会以为 bot 挂了。
+   * 由调用方在拼装前先打表情、把句柄交进来, 反馈就不再被拼装时间挡住。
+   * 缺省(undefined)= turn 自己打, 与老行为一致。
+   */
+  ackReactionIdPromise?: Promise<string | null> | null;
 }
 
 export interface ImTurnTerminal {
@@ -628,6 +638,7 @@ export function createTurnRunner(
         if (args.queueMode === 'internal') {
           await replyMissingAuth(userId, created.missingAuth, scopeKey);
         }
+        await discardHandedOverAck(userMessageId, args.ackReactionIdPromise);
         return { kind: 'rejected', reason: 'missing_auth' };
       }
       target = created.target;
@@ -644,6 +655,7 @@ export function createTurnRunner(
             target.attached,
           );
         }
+        await discardHandedOverAck(userMessageId, args.ackReactionIdPromise);
         return { kind: 'rejected', reason: 'missing_auth' };
       }
     }
@@ -679,9 +691,14 @@ export function createTurnRunner(
     // session wiring; promise is parked on the turn so completeTurnCallback can
     // await it and remove the reaction once the turn finishes (regardless of
     // whether ack resolved before or after).
-    const ackReactionIdPromise: Promise<string | null> | null = userMessageId
-      ? ackProcessing(userMessageId)
-      : null;
+    // 调用方已经打过 ack 就接管它的句柄, 不再补打一个(飞书 reactToMessage 会
+    // 叠出第二个同款表情)。args 里显式给了 null = 调用方打失败, 同样不补。
+    const ackReactionIdPromise: Promise<string | null> | null =
+      args.ackReactionIdPromise !== undefined
+        ? args.ackReactionIdPromise
+        : userMessageId
+          ? ackProcessing(userMessageId)
+          : null;
 
     let resolveTerminal!: (terminal: ImTurnTerminal) => void;
     const terminalPromise = new Promise<ImTurnTerminal>((resolve) => {
@@ -1833,6 +1850,24 @@ export function createTurnRunner(
       return (await im.reactToMessage?.(messageId, adapter.processingEmoji)) ?? null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 撤掉**调用方交进来的** ack 表情 —— 只用在 TurnState 还没建起来就 rejected
+   * 的路径上(missing_auth)。那个表情是调用方在 dispatch 之前打的, 这里不撤就
+   * 永久卡在用户消息上。turn 建起来之后的清理照旧走 cancelAckReaction。
+   */
+  async function discardHandedOverAck(
+    messageId: string,
+    promise: Promise<string | null> | null | undefined,
+  ): Promise<void> {
+    if (!promise || !messageId) return;
+    try {
+      const reactionId = await promise;
+      if (reactionId) await im.removeMessageReaction?.(messageId, reactionId);
+    } catch {
+      /* 忽略失败：表情清理是尽力而为。 */
     }
   }
 

@@ -90,6 +90,7 @@ import {
 import { useBundleUpdatePrompt } from '@/update/useBundleUpdatePrompt';
 import { useUpdateChannelGate } from '@/update/useUpdateChannelGate';
 import { useBetaChannel } from '@/update/useBetaChannel';
+import { probeBetaChannel } from '@/update/fetchLatestRelease';
 import { MobileChoicePickerList } from '@/session/MobileChoicePickerList';
 import { SheetModal } from '@/session/SheetModal';
 import { SheetSurface } from '@/session/SheetSurface';
@@ -616,6 +617,17 @@ export default function SettingsScreen() {
     setBetaBusy(true);
     const next = !betaEnabled;
     try {
+      if (next) {
+        // 打开 beta 前预检(与桌面端 probeBetaManifest 对称):探测 /latest?channel=beta
+        // 是否可达。服务端未部署 beta 时拒绝开启,避免设备静默收不到 OTA/整包/强更记录。
+        const available = await probeBetaChannel(
+          Platform.OS === 'android' ? 'android' : 'ios',
+        );
+        if (!available) {
+          Alert.alert(t('settings.betaChannel.title'), t('settings.betaChannel.unavailable'));
+          return; // 不落盘,开关保持关闭
+        }
+      }
       await setBetaEnabled(next);
       if (next) {
         Alert.alert(

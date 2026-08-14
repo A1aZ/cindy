@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLatestRelease } from './fetchLatestRelease';
+import { fetchLatestRelease, probeBetaChannel } from './fetchLatestRelease';
 
 const BASE = 'https://ota.example.com';
 const resp = (status: number, json?: unknown) => ({
@@ -77,5 +77,28 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
   it('网络错误 → 抛错', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Network request failed'); }));
     await expect(fetchLatestRelease('ios', 8000, BASE)).rejects.toThrow(/Network request failed/);
+  });
+});
+
+describe('probeBetaChannel —— 打开 beta 前的可用性探测', () => {
+  it('服务端 404(无 beta 记录)仍视为可达(通道已部署、暂无可发布记录)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => resp(404)));
+    await expect(probeBetaChannel('ios', 8000, BASE)).resolves.toBe(true);
+  });
+
+  it('200 返回记录视为可达', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' })));
+    await expect(probeBetaChannel('android', 8000, BASE)).resolves.toBe(true);
+  });
+
+  it('5xx / 网络失败视为不可达', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => resp(500)));
+    await expect(probeBetaChannel('ios', 8000, BASE)).resolves.toBe(false);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Network request failed'); }));
+    await expect(probeBetaChannel('ios', 8000, BASE)).resolves.toBe(false);
+  });
+
+  it('非自建变体(baseUrl 为空)不可达', async () => {
+    await expect(probeBetaChannel('ios', 8000, '')).resolves.toBe(false);
   });
 });

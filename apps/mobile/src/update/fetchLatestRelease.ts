@@ -42,3 +42,32 @@ export async function fetchLatestRelease(
     clearTimeout(timer);
   }
 }
+
+/**
+ * 探测 beta 渠道是否可达(整包 `/latest?channel=beta`)。
+ * 打开 beta 开关前的预检,与桌面端 probeBetaManifest 对称。
+ *
+ * 判定口径:fetchLatestRelease 对 404 返回 null(服务端在线、认识 channel 参数、
+ * 只是暂无 beta 记录)、对 5xx/网络抛错。所以:
+ * - resolve(无论 null 还是记录)= 服务端在线且未报错 → 可开;
+ * - 抛错(5xx / 网络 / 超时)= 不可达 → 不可开。
+ *
+ * 已知限制(如实说明,非密闭):`channel=beta` 是 query 参数,若服务端**忽略**该参数
+ * 而返回 release 记录(200),本探测会误判为「已部署」——客户端无法区分「认识 beta」
+ * 与「忽略 beta 返回 release」。桌面端探测的是明确的 `-beta.json` 文件(404/200 泾渭
+ * 分明),手机端做不到同等精度;这里至少能拦住「mobileUpdateBaseUrl 整个不可达」与
+ * 「channel=beta 返回 5xx」两类最坏情况。是否部署 beta 分支仍以服务端为准。
+ */
+export async function probeBetaChannel(
+  platform = 'ios',
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  baseUrl = OTA_SERVER_BASE_URL,
+): Promise<boolean> {
+  if (!baseUrl) return false; // 非自建变体:无自托管服务,beta 不可用
+  try {
+    await fetchLatestRelease(platform, timeoutMs, baseUrl, 'beta');
+    return true;
+  } catch {
+    return false;
+  }
+}

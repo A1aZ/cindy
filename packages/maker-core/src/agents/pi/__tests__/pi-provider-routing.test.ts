@@ -1261,4 +1261,111 @@ describe('Pi provider-aware model routing', () => {
     // 未走到 spawn(transport 从未创建)。
     expect(captured.args).toEqual([]);
   });
+
+  it('hashes the remote permission snapshot into spawn env so a later Full-access attach restarts', async () => {
+    const remoteStub: import('../transport.js').PiTransport = {
+      writeLine: async () => {},
+      onLine: () => () => {},
+      onStderr: () => () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      pid: 4321,
+      isClosed: () => false,
+      remoteBinaryPath: '/remote/pi',
+      killRemoteSession: async () => {},
+    };
+    const capturedRemoteEnvs: Array<Record<string, string | undefined>> = [];
+    const remoteFileOps = {
+      mkdirp: async () => {},
+      writeFile: async () => {},
+      stat: async () => ({ isFile: true }),
+      rm: async () => {},
+      listDir: async () => [],
+    };
+    const startRemote = async (permissionMode: 'ask' | 'bypassPermissions') => {
+      const base = byomDeps(async () => ({ providers: [], env: {} }));
+      const agent = new PiAgent({
+        ...base,
+        runtimeConfig: { ...base.runtimeConfig, remoteEndpoint: 'https://gateway.example.test' },
+        resolveRemotePiBinaryPath: async () => '/remote/pi',
+        getRemotePiTransport: async (_hostId, opts) => {
+          capturedRemoteEnvs.push({ ...(opts.env ?? {}) });
+          return remoteStub;
+        },
+        getRemotePiFileOps: () => remoteFileOps,
+      });
+      const handle = await agent.startSession({
+        sessionId: 'remote-perm-hash',
+        workingDir: cwd,
+        model: 'local-model',
+        permissionMode,
+        remoteHostId: 'remote-host',
+      });
+      await handle.close();
+    };
+
+    await startRemote('ask');
+    await startRemote('bypassPermissions');
+    expect(capturedRemoteEnvs).toHaveLength(2);
+    expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_HASH).toMatch(/^[0-9a-f]{16}$/);
+    expect(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH).toMatch(/^[0-9a-f]{16}$/);
+    expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_HASH)
+      .not.toBe(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH);
+    expect(capturedRemoteEnvs[0]!.CINDY_PI_PERMISSION_FILE)
+      .toBe(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_FILE);
+  });
+
+  it('inlines remote text attachments and rejects local path mentions before dispatch', async () => {
+    const remoteStub: import('../transport.js').PiTransport = {
+      writeLine: async () => {},
+      onLine: () => () => {},
+      onStderr: () => () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      pid: 4321,
+      isClosed: () => false,
+      remoteBinaryPath: '/remote/pi',
+      killRemoteSession: async () => {},
+    };
+    const attachment = path.join(cwd, 'notes.txt');
+    writeFileSync(attachment, 'remote-inline-body');
+    const base = byomDeps(async () => ({ providers: [], env: {} }));
+    const agent = new PiAgent({
+      ...base,
+      runtimeConfig: { ...base.runtimeConfig, remoteEndpoint: 'https://gateway.example.test' },
+      resolveRemotePiBinaryPath: async () => '/remote/pi',
+      getRemotePiTransport: async () => remoteStub,
+      getRemotePiFileOps: () => ({
+        mkdirp: async () => {},
+        writeFile: async () => {},
+        stat: async () => ({ isFile: true }),
+        rm: async () => {},
+        listDir: async () => [],
+      }),
+    });
+    const handle = await agent.startSession({
+      sessionId: 'remote-attach',
+      workingDir: cwd,
+      model: 'local-model',
+      remoteHostId: 'remote-host',
+    });
+
+    captured.requests.length = 0;
+    await handle.send({
+      type: 'user',
+      content: [
+        { type: 'text', text: 'please read this' },
+        { type: 'file', path: attachment },
+      ],
+    });
+    const prompt = captured.requests.find((r) => r.type === 'prompt');
+    expect(String(prompt?.message)).toContain('remote-inline-body');
+    expect(String(prompt?.message)).not.toContain(attachment);
+
+    await expect(handle.send({
+      type: 'user',
+      content: [{ type: 'mention', name: 'local-dir', path: cwd, kind: 'dir' }],
+    })).rejects.toThrow(/cannot use local path mentions/);
+    await handle.close();
+  });
 });

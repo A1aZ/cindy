@@ -984,6 +984,27 @@ describe('shuttingDown', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(registry.list()).toHaveLength(0);
   });
+
+  it('awaits env-file removal when shutdown races after the credential file is written', async () => {
+    const { registry, tmpDir } = await createRegistry();
+    cleanupFns.push(() => { registry.close(); fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+    const envFile = path.join(tmpDir, 'envs', 'env-race-shutdown');
+    const origRename = fsPromises.rename.bind(fsPromises);
+    const renameSpy = vi.spyOn(fsPromises, 'rename').mockImplementation(async (src, dest, ...rest) => {
+      const result = await origRename(src, dest, ...rest);
+      if (String(dest) === envFile) registry.beginShutdown();
+      return result;
+    });
+
+    await expect(
+      registry.ensure('race-shutdown', 'cmd', { CINDY_PI_API_KEY: 'gateway-secret' }, 'h1', false),
+    ).rejects.toThrow(/pi-manager is shutting down/);
+
+    expect(fs.existsSync(envFile)).toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    renameSpy.mockRestore();
+  });
 });
 
 // ── 7. sessionId / env 校验 ──────────────────────────────

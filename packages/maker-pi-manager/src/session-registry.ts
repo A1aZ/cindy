@@ -437,8 +437,10 @@ export class PiSessionRegistry {
     }
 
     // 关停守卫提前(spawn 前, 不创建再销毁 —— 自审轮 6 L-3)。
+    // 必须 await 删凭证文件:shutdownAll 只等 pending spawn promise,
+    // fire-and-forget rm 会在 daemon process.exit 前残留 env-<id>(含 gateway/BYOM key)。
     if (this.shuttingDown) {
-      void fsPromises.rm(envFile, { force: true }).catch(() => {});
+      await fsPromises.rm(envFile, { force: true }).catch(() => {});
       throw makeServerError('INTERNAL', 'pi-manager is shutting down');
     }
 

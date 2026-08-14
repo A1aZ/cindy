@@ -152,6 +152,10 @@ const PI_SECRET_ENV_NAMES_ENV = 'CINDY_PI_SECRET_ENV_NAMES';
 const PI_MANAGED_RG_PATH_ENV = 'CINDY_PI_MANAGED_RG_PATH';
 /** 轮 42 P1:models.json 内容指纹(远端 daemon 启动身份的一部分, 值无凭证)。 */
 const PI_MODELS_JSON_HASH_ENV = 'CINDY_PI_MODELS_JSON_HASH';
+/** 远端权限/Extra Dir 快照指纹 —— 档位变则 envHash 变, daemon 重启而非覆盖热读文件。 */
+const PI_PERMISSION_HASH_ENV = 'CINDY_PI_PERMISSION_HASH';
+/** 远端附件内联上限:超过则 fail-before-dispatch, 不静默截断。 */
+const REMOTE_PI_ATTACHMENT_MAX_BYTES = 256 * 1024;
 
 /**
  * baseUrl 是否指向本机 loopback(远端会话不可达)。与 host 侧 isLoopbackUrl 同口径:
@@ -375,10 +379,14 @@ interface PiPromptImage {
 }
 
 /** UserMessage → pi prompt 文本 + images。mention/file 以路径文本引用。 */
-async function buildPiPrompt(message: UserMessage): Promise<{ text: string; images: PiPromptImage[] }> {
+async function buildPiPrompt(
+  message: UserMessage,
+  opts?: { remote?: boolean },
+): Promise<{ text: string; images: PiPromptImage[] }> {
   if (typeof message.content === 'string') {
     return { text: message.content, images: [] };
   }
+  const remote = Boolean(opts?.remote);
   const textParts: string[] = [];
   const images: PiPromptImage[] = [];
   for (const block of message.content as UserContentBlock[]) {
@@ -387,9 +395,42 @@ async function buildPiPrompt(message: UserMessage): Promise<{ text: string; imag
         textParts.push(block.text);
         break;
       case 'mention':
+        // 远端 Pi 读不到本机路径; mention 只是引用提示, 不内联目录/文件内容。
+        if (remote) {
+          throw new Error(
+            `pi: remote sessions cannot use local path mentions (${block.path}) — the remote Pi process cannot read desktop paths`,
+          );
+        }
         textParts.push(`\`${block.path}\``);
         break;
       case 'file':
+        if (remote) {
+          // 远端 Pi 读不到本机路径。内联文本内容;二进制/超大文件 fail-before-dispatch,
+          // 避免 turn 被接受但附件静默丢失,或远端同路径文件被误读。
+          let data: Buffer;
+          try {
+            data = await fs.readFile(block.path);
+          } catch (err) {
+            throw new Error(
+              `pi: failed to read file attachment ${block.path}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          if (data.length > REMOTE_PI_ATTACHMENT_MAX_BYTES) {
+            throw new Error(
+              `pi: remote file attachment ${block.path} is ${data.length} bytes (limit ${REMOTE_PI_ATTACHMENT_MAX_BYTES}) — upload to the remote host or send a smaller file`,
+            );
+          }
+          const name = path.basename(block.path);
+          if (data.includes(0)) {
+            throw new Error(
+              `pi: remote sessions cannot inline binary file attachments (${name}) — upload the file to the remote host first`,
+            );
+          }
+          textParts.push(
+            `Attached file \`${name}\` (inlined from desktop; remote Pi cannot read the original path):\n\`\`\`\n${data.toString('utf8')}\n\`\`\``,
+          );
+          break;
+        }
         textParts.push(`Attached file (read-only reference): \`${block.path}\``);
         break;
       case 'image': {
@@ -1139,8 +1180,9 @@ export class PiAgent extends BaseAgent {
     // 代价是文件按 startSession 而非 sessionId 唯一 → 必须显式回收,见 cleanupRuntimeFiles。
     // 轮 42 P1:远端会话用稳定派生(同 session 重连复用路径 → env 稳定 →
     // envHash 稳定 → attach 保活); 本地保持 nonce 隔离(多实例并发启动)。
-    // 远端多实例并发同 session 的覆盖竞态由 daemon envHash 串行化保证
-    // (kill 先于 spawn)。
+    // 远端同路径热读文件的覆盖:权限/Extra Dir 快照 hash 进 spawn env
+    // (CINDY_PI_PERMISSION_HASH) —— 档位变则 envHash 变, daemon 先 kill 再 spawn,
+    // 不让另一实例把 Full Access 写进仍在跑的 Pi。
     const runtimeInstanceId = remote
       ? stableSessionPathSegment(sid)
       : randomBytes(8).toString('hex');
@@ -1767,7 +1809,13 @@ export class PiAgent extends BaseAgent {
       // 轮 42 P1:models.json 内容 hash 进 spawn env —— 远端 daemon 的 envHash
       // 覆盖它, 配置变更(models.json 改写)时条件 restart 判定生效, 不误 attach。
       // 仅远端注入(本地无 envHash 机制); 值本身无凭证(只是内容指纹)。
-      if (remote) spawnEnv[PI_MODELS_JSON_HASH_ENV] = modelsJsonHash;
+      if (remote) {
+        spawnEnv[PI_MODELS_JSON_HASH_ENV] = modelsJsonHash;
+        spawnEnv[PI_PERMISSION_HASH_ENV] = createHash('sha256')
+          .update(JSON.stringify(requestedPermissionSnapshot))
+          .digest('hex')
+          .slice(0, 16);
+      }
       mergeLoopbackNoProxy(spawnEnv);
       const { transport } = await this.createTransport(
         { args, cwd: opts.workingDir, env: spawnEnv, sessionId: opts.sessionId },
@@ -2395,7 +2443,7 @@ export class PiAgent extends BaseAgent {
               reviewReadGrants,
             );
           }
-          const { text, images } = await buildPiPrompt(message);
+          const { text, images } = await buildPiPrompt(message, { remote });
           rejectIfCancelled(sendOpts, 'send');
           assertImageInputSupported(images);
           setAutoReviewIntent(message.content);
@@ -2434,7 +2482,7 @@ export class PiAgent extends BaseAgent {
             reviewReadGrants,
           );
         }
-        const { text, images } = await buildPiPrompt(message);
+        const { text, images } = await buildPiPrompt(message, { remote });
         rejectIfCancelled(sendOpts, 'steer');
         assertImageInputSupported(images);
         setAutoReviewIntent(message.content);

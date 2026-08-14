@@ -466,6 +466,11 @@
         "hint": "ピン留めセッションをタスク状況の要約付きカードで表示します。カードの高さは要約の長さで変わり、サイドバーを広げると 2〜3 列に自動配置されます。",
         "aria": "サイドバーカードモードを切り替える"
       },
+      "sidebarMainListMode": {
+        "label": "セッションリストの表示",
+        "hint": "サイドバーのメインリスト（ピン留め以外）の表示形式。テキストはコンパクトな 1 行、リストはプレビュー付きの 2 行です。",
+        "aria": "セッションリストの表示を切り替える"
+      },
       "layout": {
         "label": "パネルレイアウト",
         "hint": "パネルの位置と幅は次回起動時も保持されます。使いにくい配置になった場合は、初期レイアウトに戻せます。",
@@ -6953,7 +6958,7 @@
         "remoteSettings": "リモート接続設定",
         "multiSelect": "複数選択",
         "deselect": "選択を解除",
-        "menuTrigger": "リモートマシン",
+        "menuTrigger": "タスク範囲",
         "selectedCount_one": "{{count}} 台のマシン",
         "selectedCount_other": "{{count}} 台のマシン"
       },
@@ -6972,6 +6977,8 @@
         "awaitingPluginSetup": "プラグイン設定待ち"
       },
       "showAllSessions": "すべて表示 {{count}} 件",
+      "allSessions": "すべてのセッション",
+      "scopeLocalSessions": "このデバイスのセッション",
       "dialogues": "会話",
       "newDialogue": "新規セッション",
       "dialoguesToggleExpand": "会話を展開",
@@ -6989,12 +6996,10 @@
       "projects": "プロジェクト",
       "newProject": "新規プロジェクト",
       "createProjectFailed": "プロジェクトの作成に失敗しました",
-      "projectsSectionToggleExpand": "プロジェクトを展開",
-      "projectsSectionToggleCollapse": "プロジェクトを折りたたむ",
       "projectsToggleExpand": "すべてのプロジェクトセッションを展開",
       "projectsToggleCollapse": "すべてのプロジェクトセッションを折りたたむ",
-      "filterAria": "サイドバー整理（ステータス：{{status}}、Agent：{{vendor}}、最終アクティビティ：{{lastActivity}}、グループ：{{groupBy}}、並び替え：{{sortBy}}、プロジェクト：{{projects}}）",
-      "organizeSidebar": "サイドバー整理",
+      "filterAria": "サイドバー表示設定（ステータス：{{status}}、Agent：{{vendor}}、最終アクティビティ：{{lastActivity}}、グループ：{{groupBy}}、並び替え：{{sortBy}}、プロジェクト：{{projects}}）",
+      "organizeSidebar": "サイドバー表示設定",
       "filterAllText": "すべて",
       "filterSelectedProjects": "{{count}} 件選択",
       "filterStatus": {
@@ -7008,8 +7013,23 @@
         "codex": "Codex"
       },
       "filterGroupBy": {
-        "project": "プロジェクト",
-        "date": "日付"
+        "project": "プロジェクトでグループ化",
+        "flat": "フラット表示",
+        "device": "デバイスでグループ化",
+        "dialogue": "チャットをまとめる"
+      },
+      "filterGroupByDeviceManualTip": "手動並び替え中はデバイスグループを使えません",
+      "deviceGroup": {
+        "local": "このデバイス",
+        "offline": "オフライン",
+        "collapse": "このデバイスを折りたたむ",
+        "expand": "このデバイスを展開"
+      },
+      "foldAll": {
+        "collapseGroups": "すべてのグループを折りたたむ",
+        "collapseProjects": "プロジェクトグループを折りたたむ",
+        "collapseDevices": "デバイスグループを折りたたむ",
+        "expandAll": "すべてのグループを展開"
       },
       "filterLastActivity": {
         "1d": "1日",
@@ -7019,10 +7039,12 @@
         "all": "すべて"
       },
       "filterSortBy": {
-        "recency": "最近順",
-        "time": "時系列",
+        "recency": "時間順",
         "manual": "手動",
-        "alphabetic": "アルファベット順"
+        "priority": "優先度"
+      },
+      "filterSortByTip": {
+        "priority": "要対応を最上位に、次に未読、実行中、残りは時間順"
       },
       "filterStatusHeading": "ステータス",
       "filterAgentHeading": "エージェント",
@@ -7031,6 +7053,24 @@
       "filterSortByHeading": "並び替え",
       "filterProjectsHeading": "プロジェクト",
       "filterAllProjects": "すべてのプロジェクト",
+      "filterHeading": "フィルター",
+      "filterSummaryNone": "なし",
+      "filterSummaryActive": "{{count}} 件適用中",
+      "filterReset": "フィルターをリセット",
+      "displayHeading": "表示",
+      "taskInfoHeading": "セッション情報",
+      "taskInfoSummaryNone": "なし",
+      "taskInfoSummarySeparator": "、",
+      "taskInfo": {
+        "time": "時間",
+        "pr": "PR ステータス",
+        "tokens": "トークン",
+        "cost": "コスト"
+      },
+      "taskInfoTip": {
+        "tokens": "累計トークン",
+        "cost": "累計コスト"
+      },
       "dateGroup": {
         "today": "今日",
         "yesterday": "昨日",

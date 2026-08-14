@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildUnionRows,
   countModelsByAgent,
+  getHiddenAgents,
   isCapabilityRow,
   isRowDisabled,
   isRowDiverged,
@@ -121,6 +122,24 @@ describe('isRowDiverged', () => {
     const ccOnly = rows[1];
     setModelVisibility('claude-code', 'p1', 'cc-only', false);
     expect(isRowDiverged('p1', ccOnly)).toBe(false);
+  });
+
+  it('三 Agent 中两端隐藏时保留全部隐藏 Agent', () => {
+    const threeAgent = {
+      ...provider,
+      agents: ['claude-code', 'codex', 'pi'],
+      models: {
+        ...provider.models,
+        pi: [model('shared', 500_000)],
+      },
+    } as ProviderView;
+    const shared = buildUnionRows(threeAgent)[0];
+
+    setModelVisibility('claude-code', 'p1', 'shared', false);
+    setModelVisibility('codex', 'p1', 'shared', false);
+
+    expect(isRowDiverged('p1', shared)).toBe(true);
+    expect(getHiddenAgents('p1', shared)).toEqual(['claude-code', 'codex']);
   });
 });
 

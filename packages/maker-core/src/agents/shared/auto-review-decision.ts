@@ -153,11 +153,25 @@ export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'not_renderable',
   'headless_interaction_unavailable',
   'no_card',
+  'rich_output_not_supported',
   'wecom_interaction_disconnected',
 ]);
 
+/**
+ * IM turnRunner 会把投递失败写成 `prefix: ${msg}`，不能靠精确集合命中。
+ * 只认确认卡没送到 / 没登记完这类前缀；用户拒绝和 destructiveGuard 不在这里。
+ */
+export const SYSTEM_PERMISSION_DENIAL_PREFIXES: readonly string[] = Object.freeze([
+  'card send failed:',
+  'pending failed:',
+  'text interaction failed:',
+  'register failed:',
+]);
+
 export function isSystemPermissionDenialReason(reason: unknown): boolean {
-  return typeof reason === 'string' && SYSTEM_PERMISSION_DENIAL_REASONS.has(reason);
+  if (typeof reason !== 'string' || reason.length === 0) return false;
+  if (SYSTEM_PERMISSION_DENIAL_REASONS.has(reason)) return true;
+  return SYSTEM_PERMISSION_DENIAL_PREFIXES.some((prefix) => reason.startsWith(prefix));
 }
 
 export function isAutoReviewUnavailableMetadata(

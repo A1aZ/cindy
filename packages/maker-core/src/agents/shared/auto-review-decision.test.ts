@@ -347,10 +347,17 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('headless_interaction_unavailable')).toBe(true);
     expect(isSystemPermissionDenialReason('session_cleanup')).toBe(true);
     expect(isSystemPermissionDenialReason('no_card')).toBe(true);
+    expect(isSystemPermissionDenialReason('rich_output_not_supported')).toBe(true);
     expect(isSystemPermissionDenialReason('stale_route')).toBe(true);
     expect(isSystemPermissionDenialReason('wecom_interaction_disconnected')).toBe(true);
+    expect(isSystemPermissionDenialReason('card send failed: slack timeout')).toBe(true);
+    expect(isSystemPermissionDenialReason('pending failed: channel closed')).toBe(true);
+    expect(isSystemPermissionDenialReason('text interaction failed: socket hang up')).toBe(true);
+    expect(isSystemPermissionDenialReason('register failed: duplicate requestId')).toBe(true);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
+    expect(isSystemPermissionDenialReason('dingtalk_user_denied')).toBe(false);
+    expect(isSystemPermissionDenialReason('[destructiveGuard] rm -rf /')).toBe(false);
     expect(isSystemPermissionDenialReason(undefined)).toBe(false);
   });
 });

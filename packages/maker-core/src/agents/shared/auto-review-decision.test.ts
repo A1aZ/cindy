@@ -366,6 +366,10 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('permission_mode_changed_to_ask')).toBe(true);
     expect(isSystemPermissionDenialReason('plan_mode_enabled')).toBe(true);
     expect(isSystemPermissionDenialReason('plan_mode_disabled')).toBe(true);
+    expect(isSystemPermissionDenialReason('turn_idle_reconcile')).toBe(true);
+    expect(isSystemPermissionDenialReason('orca_disable')).toBe(true);
+    expect(isSystemPermissionDenialReason('session_running_race')).toBe(true);
+    expect(isSystemPermissionDenialReason('turn_not_dispatched')).toBe(true);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wecom_user_denied')).toBe(false);

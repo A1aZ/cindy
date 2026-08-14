@@ -77,6 +77,7 @@ import {
 } from './cindy-subagent-source.js';
 import { normalizePiToolForAutoReview } from './auto-review-policy.js';
 import {
+  annotatePermissionRequestForUnavailableReview,
   createAutoReviewConfirmUndeliveredNotice,
   createAutoReviewUnavailableNotice,
   extractAutoReviewUserIntent,
@@ -3456,8 +3457,8 @@ export class PiAgent extends BaseAgent {
           // resolver 是 host 注入的外部回调:可能同步 throw,也可能返回非 Promise。直接
           // `.then` 会让同步异常绕过下面的 finalize —— pending 条目永不注销、这次请求永不
           // settle,调用就此悬挂(copilot 报)。包一层把同步失败也收进 fail-closed 分支。
-          Promise.resolve().then(() => resolver({
-            kind: 'permission',
+          const permissionRequest = {
+            kind: 'permission' as const,
             requestId: id,
             toolName,
             input,
@@ -3467,7 +3468,12 @@ export class PiAgent extends BaseAgent {
             ...(hostApprovalPresentation?.description
               ? { description: hostApprovalPresentation.description }
               : {}),
-          })).then((decision) => {
+          };
+          Promise.resolve().then(() => resolver(
+            opts.unavailableHandoff
+              ? annotatePermissionRequestForUnavailableReview(permissionRequest)
+              : permissionRequest,
+          )).then((decision) => {
             if (decision.kind !== 'permission') {
               this.deps.logger.warn('pi permission got mismatched decision kind', {
                 toolName,

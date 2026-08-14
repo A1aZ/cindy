@@ -107,8 +107,12 @@ vi.mock('../rpc-client.js', () => ({
 import { PiAgent } from '../index.js';
 import type { AgentDeps, AgentSessionHandle } from '../../base-agent.js';
 import type { Logger } from '../../../interfaces/logger.js';
-import { AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE } from '../../shared/auto-review-decision.js';
-import type { InteractionDecision } from '../../../types/events.js';
+import {
+  AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE,
+  AUTO_REVIEW_UNAVAILABLE_METADATA_KEY,
+  AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT,
+} from '../../shared/auto-review-decision.js';
+import type { InteractionDecision, InteractionRequest } from '../../../types/events.js';
 
 type PiTestSessionHandle = AgentSessionHandle & {
   setModel: NonNullable<AgentSessionHandle['setModel']>;
@@ -1154,13 +1158,20 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   it('auto mode hands gray actions to the user when the current-model reviewer is unavailable', async () => {
     const handle = await start('auto');
     let resolverCalls = 0;
-    handle.setInteractionResolver?.(async () => {
+    const seen: InteractionRequest[] = [];
+    handle.setInteractionResolver?.(async (req) => {
+      seen.push(req);
       resolverCalls++;
       return { kind: 'permission', behavior: 'allow' } as never;
     });
     firePermissionRequest('r7', 'write', { path: '/tmp/outside.txt' });
     await flush();
     expect(resolverCalls).toBe(1);
+    expect(seen[0]).toMatchObject({
+      kind: 'permission',
+      description: AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT,
+      metadata: { [AUTO_REVIEW_UNAVAILABLE_METADATA_KEY]: true },
+    });
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r7', confirmed: true });
   });
 

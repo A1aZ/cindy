@@ -11889,6 +11889,64 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it.each([
+    'close',
+    'setPermissionMode',
+  ] as const)('does not treat a system-dismissed confirmation as a user rejection after auto-review fails (%s)', async (action) => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: `session-auto-unavailable-dismiss-${action}`,
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    let resolverCalled = false;
+    handle.setInteractionResolver(() => {
+      resolverCalled = true;
+      return new Promise<InteractionDecision>(() => {});
+    });
+    const notices: string[] = [];
+    void (async () => {
+      for await (const event of handle.events()) {
+        if (
+          event.type === 'error'
+          && typeof event.data === 'object'
+          && event.data !== null
+          && 'message' in event.data
+          && typeof event.data.message === 'string'
+        ) {
+          notices.push(event.data.message);
+        }
+      }
+    })().catch(() => {});
+
+    const pending = handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: `turn-unavailable-dismiss-${action}`,
+      itemId: `cmd-unavailable-dismiss-${action}`,
+      command: 'npx tsc --noEmit',
+      cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(resolverCalled).toBe(true));
+
+    if (action === 'close') {
+      await handle.close();
+    } else {
+      await handle.setPermissionMode?.('ask');
+    }
+    await expect(pending).resolves.toEqual({ decision: 'decline' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
+    expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    if (action !== 'close') await handle.close();
+  });
+
   it('keeps a real user deny distinct from a missing confirmation', async () => {
     const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
     const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));

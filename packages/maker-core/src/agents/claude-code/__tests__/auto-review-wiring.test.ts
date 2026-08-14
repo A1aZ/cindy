@@ -668,6 +668,43 @@ describe('Auto-review wiring: reviewer outages surface once per session', () => 
     await handle.close();
   });
 
+  it.each([
+    'close',
+    'setPermissionMode',
+  ] as const)('does not treat a system-dismissed confirmation as a user rejection after auto-review fails (%s)', async (action) => {
+    const { handle, canUseTool } = await startSession('auto', {
+      reviewer: async () => {
+        throw new Error('reviewer offline');
+      },
+      attachResolver: false,
+    });
+    let resolverCalled = false;
+    handle.setInteractionResolver(() => {
+      resolverCalled = true;
+      return new Promise<InteractionDecision>(() => {});
+    });
+    const { notices } = startNoticeCollector(handle);
+
+    const pending = canUseTool(
+      'Bash',
+      { command: 'npx tsc --noEmit' },
+      { toolUseID: `dismissed-${action}` },
+    );
+    await vi.waitFor(() => expect(resolverCalled).toBe(true));
+
+    if (action === 'close') {
+      await handle.close();
+    } else {
+      await handle.setPermissionMode?.('ask');
+    }
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny' });
+    await settle();
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
+    expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    if (action !== 'close') await handle.close();
+  });
+
   /**
    * 裁决缓存的 key 不含 permissionMode。用户切离 Auto、等审阅器恢复、再切回 Auto 时,
    * 同一个动作会命中先前那条 `unavailable` block —— 审阅器早就好了,动作还是被拒

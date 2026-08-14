@@ -123,6 +123,7 @@ import {
   createAutoReviewConfirmUndeliveredNotice,
   createAutoReviewUnavailableNotice,
   extractAutoReviewUserIntent,
+  isAutoReviewUnavailableMetadata,
   isSystemPermissionDenialReason,
   resolveAutoReviewDecision,
   type AutoReviewDecision,
@@ -1571,6 +1572,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       settled: boolean;
       /** prompt-each-time 高风险审批: 切到宽松模式时也不接受 dismissAllPending('allow')。 */
       forcePrompt?: boolean;
+      /** Auto 审阅故障降级来的确认:系统收口不能当成用户点了拒绝。 */
+      unavailableHandoff?: boolean;
     };
     const pendingInteractions = new Map<string, PendingEntry>();
 
@@ -1598,6 +1601,9 @@ export class ClaudeCodeAgent extends BaseAgent {
           resolve,
           settled: false,
           ...(opts?.forcePrompt ? { forcePrompt: true } : {}),
+          ...(req.kind === 'permission' && isAutoReviewUnavailableMetadata(req.metadata)
+            ? { unavailableHandoff: true }
+            : {}),
         };
         pendingInteractions.set(req.requestId, entry);
         const finalize = (d: InteractionDecision) => {
@@ -1635,6 +1641,9 @@ export class ClaudeCodeAgent extends BaseAgent {
         const decision = effectiveResolveAs === 'allow' && entry.kind !== 'ask_user_question'
           ? ({ kind: entry.kind, behavior: 'allow' } as InteractionDecision)
           : safeDefaultDecision(entry.kind, reason);
+        if (effectiveResolveAs === 'deny' && entry.unavailableHandoff) {
+          autoReviewConfirmUndeliveredNotice.notify();
+        }
         entry.settled = true;
         pendingInteractions.delete(requestId);
         entry.resolve(decision);
@@ -1650,6 +1659,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     function dismissSinglePending(requestId: string, reason: string): void {
       const entry = pendingInteractions.get(requestId);
       if (!entry || entry.settled) return;
+      if (entry.unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
       entry.settled = true;
       pendingInteractions.delete(requestId);
       entry.resolve(safeDefaultDecision(entry.kind, reason));

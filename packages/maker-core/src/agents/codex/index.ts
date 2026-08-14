@@ -5301,6 +5301,8 @@ export class CodexAgent extends BaseAgent {
       itemId?: string;
       /** prompt-each-time 高风险审批: 宽松模式也必须弹 UI, dismissAllPending('allow') 不得放行 */
       forcePrompt?: boolean;
+      /** Auto 审阅故障降级来的确认:系统收口不能当成用户点了拒绝。 */
+      unavailableHandoff?: boolean;
     }
     const pendingApprovals = new Map<string, PendingEntry>();
     const seenGuardianReviewIds = new Set<string>();
@@ -5637,6 +5639,7 @@ export class CodexAgent extends BaseAgent {
             turnId,
             ...(opts?.itemId ? { itemId: opts.itemId } : {}),
             forcePrompt,
+            ...(unavailableHandoff ? { unavailableHandoff: true } : {}),
           };
           pendingApprovals.set(requestId, entry);
           const finalize = (d: ApprovalDecision) => {
@@ -5691,6 +5694,9 @@ export class CodexAgent extends BaseAgent {
         // 里宽松模式仍强制弹 UI 的语义一致。
         const effectiveResolveAs: 'allow' | 'deny' =
           resolveAs === 'allow' && entry.forcePrompt === true ? 'deny' : resolveAs;
+        if (effectiveResolveAs === 'deny' && entry.unavailableHandoff) {
+          autoReviewConfirmUndeliveredNotice.notify();
+        }
         entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline');
         eventQueue.push({
           type: 'interaction_dismissed',

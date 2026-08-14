@@ -357,6 +357,9 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('pending failed: channel closed')).toBe(true);
     expect(isSystemPermissionDenialReason('text interaction failed: socket hang up')).toBe(true);
     expect(isSystemPermissionDenialReason('register failed: duplicate requestId')).toBe(true);
+    expect(isSystemPermissionDenialReason('permission_mode_changed_to_ask')).toBe(true);
+    expect(isSystemPermissionDenialReason('plan_mode_enabled')).toBe(true);
+    expect(isSystemPermissionDenialReason('plan_mode_disabled')).toBe(true);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason('dingtalk_user_denied')).toBe(false);

@@ -169,6 +169,8 @@ export const SYSTEM_PERMISSION_DENIAL_PREFIXES: readonly string[] = Object.freez
   'pending failed:',
   'text interaction failed:',
   'register failed:',
+  'permission_mode_changed_to_',
+  'plan_mode_',
 ]);
 
 export function isSystemPermissionDenialReason(reason: unknown): boolean {

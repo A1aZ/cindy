@@ -491,6 +491,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
             source: sessions.source,
             status: sessions.status,
             agentKind: sessions.agentKind,
+            workingDir: sessions.workingDir,
           })
           .from(sessions)
           .where(eq(sessions.id, sessionId));
@@ -521,7 +522,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
             sessionId,
             agentKind,
             messages,
-            ...(sessionRow.workingDir ? { workingDir: sessionRow.workingDir } : {}),
+            ...(latestSessionRow.workingDir ? { workingDir: latestSessionRow.workingDir } : {}),
           }),
         };
       } finally {

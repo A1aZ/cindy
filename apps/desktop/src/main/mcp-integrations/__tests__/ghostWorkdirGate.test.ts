@@ -80,9 +80,19 @@ vi.mock('electron', () => ({ app: { getPath: () => tmpUserData } }));
 vi.mock('../../appSessionState.js', () => ({
   ownerScopedUserDataPath: (...parts: string[]) => path.join(tmpUserData, ...parts),
 }));
-vi.mock('../../maker-host/logger-adapter.js', () => ({
-  desktopMakerLogger: { child: () => ({ info: () => {}, warn: () => {}, error: () => {} }) },
-}));
+vi.mock('../../maker-host/logger-adapter.js', () => {
+  const createMakerLogger = () => ({
+    trace: () => {},
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    fatal: () => {},
+    child: () => createMakerLogger(),
+    isDebugEnabled: () => false,
+  });
+  return { createMakerLogger, desktopMakerLogger: createMakerLogger() };
+});
 vi.mock('../../logger.js', () => ({
   createLogger: () => ({ info: logInfoMock, warn: logWarnMock, error: () => {}, debug: () => {} }),
 }));

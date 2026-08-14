@@ -880,6 +880,38 @@ function powerShellOutFileTargets(args: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * PowerShell 可直接调用 .NET 静态文件系统 API；这些调用不经过 cmdlet 参数绑定，因此此前完全
+ * 绕过 `powerShellWriteTargets`。这里仅登记会改变文件系统的 `File` / `Directory` 方法，
+ * 只读方法仍留给 reviewer。方法重载、表达式与多个路径参数的语义差异很大，当前映射无法可靠
+ * 证明目标作用域，所以统一返回不可证写目标，接入现有确定性同意门；不在此处另造 PowerShell AST。
+ */
+const POWERSHELL_DOTNET_STATIC_FILE_WRITES = new Set([
+  'appendallbytes', 'appendallbytesasync', 'appendalllines', 'appendalllinesasync',
+  'appendalltext', 'appendalltextasync', 'copy', 'create', 'createhardlink',
+  'createsymboliclink', 'createtext', 'decrypt', 'delete', 'encrypt', 'move', 'open',
+  'openhandle', 'openwrite', 'replace', 'setaccesscontrol', 'setattributes',
+  'setcreationtime', 'setcreationtimeutc', 'setlastaccesstime', 'setlastaccesstimeutc',
+  'setlastwritetime', 'setlastwritetimeutc', 'setunixfilemode', 'writeallbytes',
+  'writeallbytesasync', 'writealllines', 'writealllinesasync', 'writealltext',
+  'writealltextasync',
+]);
+
+const POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES = new Set([
+  'createdirectory', 'createsymboliclink', 'createtempsubdirectory', 'delete', 'move',
+  'setaccesscontrol', 'setcreationtime', 'setcreationtimeutc', 'setlastaccesstime',
+  'setlastaccesstimeutc', 'setlastwritetime', 'setlastwritetimeutc',
+]);
+
+function powerShellDotNetStaticWriteTargets(segment: string): string[] {
+  const call = /^\s*\[(?:system\.)?io\.(file|directory)\]\s*::\s*([a-z][a-z0-9]*)\s*\(/i.exec(segment);
+  if (!call) return [];
+  const methods = call[1].toLowerCase() === 'file'
+    ? POWERSHELL_DOTNET_STATIC_FILE_WRITES
+    : POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES;
+  return methods.has(call[2].toLowerCase()) ? [UNPROVABLE_WRITE_TARGET] : [];
+}
+
 function argumentWriteTargets(tokens: string[]): string[] {
   const bin = executableName(tokens[0] ?? '');
   const args = tokens.slice(1);
@@ -3441,6 +3473,7 @@ function systemWriteTargetsInSegment(
   const targets = [
     ...redirectionTargets(segment).map((t) =>
       dynamicRedirectUnprovable && POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t),
+    ...powerShellDotNetStaticWriteTargets(segment),
     ...argumentWriteTargets(tokens),
   ];
   if (targets.length === 0) return false;

@@ -1242,6 +1242,36 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       roots,
     )).toBe('prompt');
   });
+
+  it('PowerShell .NET 静态文件系统写入口不可证，不能交 reviewer 静默放行', () => {
+    const win = ['C:\\repo'];
+    for (const c of [
+      "[System.IO.File]::Delete('C:\\Windows\\System32\\drivers\\etc\\hosts')",
+      "[IO.File]::WriteAllText('C:\\Windows\\System32\\drivers\\etc\\hosts', 'owned')",
+      "[System.IO.File]::AppendAllText('C:\\Windows\\System32\\drivers\\etc\\hosts', 'owned')",
+      "[System.IO.File]::Copy('C:\\repo\\payload', 'C:\\Windows\\System32\\payload')",
+      "[System.IO.File]::Move('C:\\Windows\\System32\\payload', 'C:\\repo\\payload')",
+      "[System.IO.Directory]::Delete('C:\\Windows\\Temp\\x', $true)",
+      "[IO.Directory]::CreateDirectory('C:\\Windows\\Temp\\x')",
+      "[System.IO.File]::WriteAllText($target, 'owned')",
+      "[System.IO.File]::WriteAllText('C:\\repo\\out.txt', 'owned')",
+      'pwsh -Command "[System.IO.File]::Delete(\'C:\\Windows\\System32\\drivers\\etc\\hosts\')"',
+      'pwsh -CommandWithArgs "[IO.File]::WriteAllText(\'C:\\Windows\\System32\\x\', \'owned\')"',
+      'pwsh -cwa "[System.IO.Directory]::Delete(\'C:\\Windows\\Temp\\x\', $true)"',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 只读 API 与仅作为字符串传递的文字不进入静态写门。
+    for (const c of [
+      "[System.IO.File]::ReadAllText('C:\\Windows\\System32\\drivers\\etc\\hosts')",
+      "[IO.File]::Exists('C:\\Windows\\System32\\drivers\\etc\\hosts')",
+      "[System.IO.Directory]::GetFiles('C:\\Windows\\System32')",
+      "Write-Output \"[System.IO.File]::Delete('C:\\Windows\\System32\\drivers\\etc\\hosts')\"",
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
 });
 
 describe('classifyShellCommand — 嵌套替换/包装下载/Windows 全路径归一(第十八批评审)', () => {

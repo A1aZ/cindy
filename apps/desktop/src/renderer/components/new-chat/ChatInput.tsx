@@ -1465,18 +1465,22 @@ export function ChatInput({
   const deviceLinkDeviceIdRef = useRef<string | null | undefined>(deviceLinkDeviceId);
   deviceLinkDeviceIdRef.current = deviceLinkDeviceId;
   // Host capability 芯片只在「已确认本机」的 composer 里有效:SSH(remoteHostId)或
-  // device-link(deviceLinkDeviceId !== null,含未解析)会话若恢复本地草稿里序列化的芯片,
-  // 发送路径会因 TARGET_UNAVAILABLE 中断、逼用户手动删芯片。这里把「归一化 + 非本机剥芯片」
-  // 收口成一个入口,供草稿恢复路径统一复用(与 pendingHostCapabilityGhostId 的
-  // canPlaceHostCapability 同口径:仅已确认本机保留芯片,否则静默丢弃芯片意图)。
+  // device-link 远程会话若恢复本地草稿里序列化的芯片,发送路径会因
+  // TARGET_UNAVAILABLE 中断、逼用户手动删芯片。这里把「归一化 + 已确认远程剥芯片」
+  // 收口成一个入口,供草稿恢复路径统一复用。
+  // 三态:deviceLinkDeviceId = string(远程) / null(本机) / undefined(归属未解析)。
+  // 冷打开/重载时首帧归属尚未回流(undefined),不能当远程把已存本机草稿的芯片剥掉
+  // —— 只在「已确认远程」(SSH remoteHostId 或 deviceLinkDeviceId 为 string)时剥离,
+  // 未解析(undefined)时延后决定、保留芯片;随后本机(null)自然保留,若解析成远程则由
+  // 发送路径的 hostCapabilityGhost 谓词 fail-closed 兜底。
   const normalizeRestoredComposerDraft = (
     draftText: JSONContent | null | undefined,
   ): JSONContent | null => {
     if (!draftText) return null;
     const normalized = normalizeComposerDocumentJSON(draftText);
-    return remoteHostIdRef.current || deviceLinkDeviceIdRef.current !== null
-      ? stripHostCapabilityChips(normalized)
-      : normalized;
+    const isConfirmedRemote =
+      !!remoteHostIdRef.current || typeof deviceLinkDeviceIdRef.current === 'string';
+    return isConfirmedRemote ? stripHostCapabilityChips(normalized) : normalized;
   };
   const tRef = useRef(t);
   tRef.current = t;

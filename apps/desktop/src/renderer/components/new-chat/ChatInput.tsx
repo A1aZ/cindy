@@ -3588,11 +3588,14 @@ export function ChatInput({
       const dlDeviceId = deviceLinkDeviceIdRef.current;
       const canPlaceHostCapability =
         !remoteHostIdRef.current && dlDeviceId === null;
-      // 归属未解析(deviceLinkDeviceId === undefined)时延后决定:不清除
+      // 归属未解析(deviceLinkDeviceId === undefined)且非 SSH 时延后决定:不清除
       // pendingHostCapabilityGhostId,等归属解析后 effect 重跑。若此时清除,
       // 后续解析成本机也无法恢复芯片,Host 插件(如 iOS Simulator)的"使用"
       // handoff 会静默丢失。
-      if (dlDeviceId === undefined) {
+      // SSH(remoteHostId 已解析)时:即使 dlDeviceId === undefined,SSH 会话
+      // 永远无法放置 Host capability 芯片,直接清除 pendingHostCapabilityGhostId,
+      // 避免残留芯片在后续依赖变化时延迟插入已失效的能力。
+      if (dlDeviceId === undefined && !remoteHostIdRef.current) {
         return;
       }
       saveComposerDraft(

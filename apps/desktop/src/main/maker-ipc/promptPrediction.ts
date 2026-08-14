@@ -18,7 +18,7 @@ import { dbToMakerAgentKind } from '../../shared/agentKindConversion.js';
 import { getResolvedMainLocale } from '../i18n.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { generateTitleViaProviderResult } from '../maker-host/title-one-shot.js';
-import { connectedProvidersForAgent, type ProviderView } from '@cindy/model-providers';
+import { connectedProvidersForAgent, nativeDefaultSourceId, type ProviderView } from '@cindy/model-providers';
 import { eq } from 'drizzle-orm';
 import { getDbClient } from '../localDb/client/current.js';
 import { sessions } from '../localDb/schema.js';
@@ -245,7 +245,8 @@ export async function generatePromptPrediction(
             // 继续派发会外发到过期 provider/账号。重新计算当前有效默认 provider
             // 并与 resolvedProviderId 比对。
             const providers = await listConnectedProvidersForAgent(agentKind);
-            if (providers.length === 0 || providers[0].id !== resolvedProviderId) return false;
+            const defaultProviderId = nativeDefaultSourceId(providers, agentKind);
+            if (!defaultProviderId || defaultProviderId !== resolvedProviderId) return false;
           }
           // 紧前复查 workingDir：用户在 provider/凭证解析期间切换了工作目录，
           // 此时 buildPredictionPrompt 已嵌入旧 params.workingDir，继续派发

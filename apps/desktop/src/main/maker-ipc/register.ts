@@ -3250,11 +3250,6 @@ export function installDesktopInteractionListener(session: {
         planFilePath?: unknown;
       },
     );
-    broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
-      sessionId: session.id,
-      request: req,
-      persistId: interactionPersistId,
-    });
     return new Promise<InteractionDecision>((resolve) => {
       const entry: PendingInteractionEntry = {
         sessionId: session.id,
@@ -3272,7 +3267,14 @@ export function installDesktopInteractionListener(session: {
           dismissRendererInteraction(pending, req.requestId, 'timeout', 'deny');
         }, PERMISSION_INTERACTION_TIMEOUT_MS);
       }
+      // Register before delivery so a fast renderer/device response cannot race
+      // the resolver and be discarded as an unknown request.
       pendingInteractionResolvers.set(req.requestId, entry);
+      broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
+        sessionId: session.id,
+        request: req,
+        persistId: interactionPersistId,
+      });
       handleAgentIslandInteractionAfterBroadcast(
         session as { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
         req,

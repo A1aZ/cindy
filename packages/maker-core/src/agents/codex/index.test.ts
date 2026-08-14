@@ -11664,6 +11664,102 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('asks the user when a file-change approval omits grantRoot', async () => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => ({
+      verdict: 'block' as const,
+      reason: 'The destination path is missing.',
+    }));
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-file-change-without-root',
+      model: 'gpt-5.5',
+      providerId: 'xd',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.fileChangeApproval) throw new Error('expected fileChangeApproval handler');
+    const resolver = vi.fn(async (): Promise<InteractionDecision> => (
+      { kind: 'permission', behavior: 'allow' }
+    ));
+    handle.setInteractionResolver(resolver);
+
+    await expect(handlers.fileChangeApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-file-change-without-root',
+      itemId: 'patch-without-root',
+      grantRoot: null,
+    })).resolves.toEqual({ decision: 'accept' });
+
+    expect(reviewAutoPermissionAction).not.toHaveBeenCalled();
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver.mock.calls[0]?.[0]).toMatchObject({
+      kind: 'permission',
+      toolName: 'file_change',
+      input: { grantRoot: null },
+    });
+    const request = resolver.mock.calls[0]?.[0];
+    expect(request?.kind).toBe('permission');
+    if (request?.kind !== 'permission') throw new Error('expected permission request');
+    expect(request.suggestions).toBeDefined();
+    await handle.close();
+  });
+
+  it('accepts a pending missing-root file approval when switching to Full access', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-file-change-without-root-mode-switch',
+      model: 'gpt-5.5',
+      providerId: 'xd',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.fileChangeApproval) throw new Error('expected fileChangeApproval handler');
+    const pendingDecision = deferred<InteractionDecision>();
+    const resolver = vi.fn(() => pendingDecision.promise);
+    handle.setInteractionResolver(resolver);
+
+    const approval = handlers.fileChangeApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-file-change-without-root-mode-switch',
+      itemId: 'patch-without-root-mode-switch',
+      grantRoot: null,
+    });
+    await vi.waitFor(() => expect(resolver).toHaveBeenCalledOnce());
+
+    if (!handle.setPermissionMode) throw new Error('expected setPermissionMode');
+    await handle.setPermissionMode('bypassPermissions');
+
+    await expect(approval).resolves.toEqual({ decision: 'accept' });
+    pendingDecision.resolve({ kind: 'permission', behavior: 'deny' });
+    await handle.close();
+  });
+
+  it('keeps Full access non-interactive when a file-change approval omits grantRoot', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-full-file-change-without-root',
+      model: 'gpt-5.5',
+      providerId: 'xd',
+      workingDir: '/repo',
+      permissionMode: 'bypassPermissions',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.fileChangeApproval) throw new Error('expected fileChangeApproval handler');
+
+    await expect(handlers.fileChangeApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-full-file-change-without-root',
+      itemId: 'full-patch-without-root',
+      grantRoot: null,
+    })).resolves.toEqual({ decision: 'accept' });
+    await handle.close();
+  });
+
   it('re-checks Ask and Full access after an in-flight Cindy auto-review', async () => {
     const askReview = deferred<{ verdict: 'allow' }>();
     const askReviewer = vi.fn(() => askReview.promise);

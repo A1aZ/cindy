@@ -55,7 +55,7 @@ import {
   shouldAbortTransportTimeoutReopen,
 } from './transportTimeoutReopen';
 import {
-  isPlaceholderDeviceName,
+  normalizeCachedDeviceName,
   readDeviceLinkSettings,
   readLastKnownDeviceNames,
   rememberLastKnownDeviceName,
@@ -173,12 +173,13 @@ async function refreshControllerDisplayNamesFromDirectory(generation: number): P
     for (const device of result.devices ?? []) {
       if (typeof device.deviceId !== 'string' || !device.deviceId.trim()) continue;
       const deviceId = device.deviceId.trim();
-      const serverName = typeof device.name === 'string' ? device.name.trim() : '';
-      const hasDisplayName = !!serverName && !isPlaceholderDeviceName(serverName);
-      const displayName = hasDisplayName ? serverName : cachedNames[deviceId];
+      const serverName = typeof device.name === 'string'
+        ? normalizeCachedDeviceName(device.name)
+        : null;
+      const displayName = serverName ?? cachedNames[deviceId];
       if (!displayName) continue;
       setControllerDisplayName(deviceId, displayName);
-      if (hasDisplayName) void rememberLastKnownDeviceName(deviceId, serverName);
+      if (serverName) void rememberLastKnownDeviceName(deviceId, serverName);
     }
   } catch (err) {
     // 目录补齐是展示层 best-effort；失败时保留控制帧自报名 / 短 ID 回退，不影响建链。
@@ -611,7 +612,10 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     // (review P2)。翻转判据统一为「观察到进入某状态(含从未知)即触发一次」。
     if (!available && wasAvailable !== false) responsivenessTracker?.clearDevice(snap.deviceId);
     setControllerPlatform(snap.deviceId, snap.platform);
-    setControllerDisplayName(snap.deviceId, snap.deviceName);
+    const presenceDisplayName = normalizeCachedDeviceName(snap.deviceName);
+    if (presenceDisplayName) {
+      setControllerDisplayName(snap.deviceId, presenceDisplayName);
+    }
     presenceNameByDevice.set(snap.deviceId, snap.selfName || snap.deviceName);
     void rememberLastKnownDeviceName(snap.deviceId, snap.deviceName); // best-effort 名称缓存,不阻塞 presence 处理
     broadcast(DEVICE_LINK_PUSH.PRESENCE_CHANGED, snap);

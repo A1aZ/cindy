@@ -71,6 +71,35 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
     );
   });
 
+  it('presence 占位名或空名不覆盖已有展示名，无有效名时保留 dispatch 回退链', () => {
+    const deviceLinkHost = readFileSync(resolve(mainRoot, 'device-link/index.ts'), 'utf8');
+    const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8');
+
+    const presenceHandler = deviceLinkHost.indexOf('client.onPresenceChanged');
+    const normalizePresenceName = deviceLinkHost.indexOf(
+      'const presenceDisplayName = normalizeCachedDeviceName(snap.deviceName);',
+      presenceHandler,
+    );
+    const guardedDisplayNameUpdate = deviceLinkHost.indexOf(
+      'if (presenceDisplayName) {\n      setControllerDisplayName(snap.deviceId, presenceDisplayName);\n    }',
+      normalizePresenceName,
+    );
+    expect(presenceHandler).toBeGreaterThanOrEqual(0);
+    expect(normalizePresenceName).toBeGreaterThan(presenceHandler);
+    expect(guardedDisplayNameUpdate).toBeGreaterThan(normalizePresenceName);
+    expect(deviceLinkHost.slice(presenceHandler, guardedDisplayNameUpdate)).not.toContain(
+      'setControllerDisplayName(snap.deviceId, snap.deviceName)',
+    );
+
+    // guard 不写缓存时，dispatch 继续按「数据库名 → 自报名 → 短 ID」回退。
+    expect(dispatch).toContain(
+      'return controllerDisplayNameByDevice.get(deviceId)\n    ?? normalizedReportedName\n    ?? reportedControllerNameByDevice.get(deviceId);',
+    );
+    expect(dispatch).toContain(
+      'const displayName = normalized\n    ?? reportedControllerNameByDevice.get(deviceId)\n    ?? deviceId.slice(0, 8);',
+    );
+  });
+
   it('keeps device-link:voice:credential-sync matched but rejected (feature removed, readable error for old mobile)', () => {
     const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8');
 

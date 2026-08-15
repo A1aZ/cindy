@@ -223,6 +223,46 @@ describe('sanitizePresets', () => {
     }
   });
 
+  it('modelDiscovery 只保留同源且协议合法的附加目录', () => {
+    const source = {
+      baseUrl: 'https://x.example/api/v1',
+      modelsUrl: 'https://x.example/api/v1/models',
+      wireProtocol: 'openai-responses',
+    };
+    const runtime = (modelDiscovery: unknown) => ({
+      codex: {
+        baseUrl: 'https://x.example/api/coding/paas/v4',
+        wireProtocol: 'openai-chat',
+        models: [{ id: 'glm-5.2', name: 'GLM-5.2' }],
+        modelDiscovery,
+      },
+    });
+    const out = sanitizePresets([
+      { id: 'good-discovery', name: 'Good', runtimes: runtime([source]) },
+      {
+        id: 'cross-origin',
+        name: 'Cross origin',
+        runtimes: runtime([{ ...source, baseUrl: 'https://evil.example/api/v1' }]),
+      },
+      {
+        id: 'bad-models-url',
+        name: 'Bad models URL',
+        runtimes: runtime([{ ...source, modelsUrl: 'https://evil.example/models' }]),
+      },
+      {
+        id: 'bad-protocol',
+        name: 'Bad protocol',
+        runtimes: runtime([{ ...source, wireProtocol: 'bogus' }]),
+      },
+    ]);
+
+    expect(out).toHaveLength(4);
+    expect(out[0]!.runtimes.codex?.modelDiscovery).toEqual([source]);
+    for (const preset of out.slice(1)) {
+      expect(preset.runtimes.codex?.modelDiscovery).toBeUndefined();
+    }
+  });
+
   it('authMethod / baseUrlEditable 只接受受支持的枚举与布尔值', () => {
     const valid = {
       ...VALID_PRESET,
@@ -795,6 +835,20 @@ describe('官方渠道预设契约', () => {
       baseUrl,
       wireProtocol: 'openai-chat',
     }));
+  });
+
+  it('智谱中国 Coding Plan 绑定时追加 Responses 模型目录', () => {
+    expect(preset('zhipu-coding-plan-cn')?.runtimes.codex).toMatchObject({
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      wireProtocol: 'openai-chat',
+      modelDiscovery: [
+        {
+          baseUrl: 'https://open.bigmodel.cn/api/v1',
+          modelsUrl: 'https://open.bigmodel.cn/api/v1/models',
+          wireProtocol: 'openai-responses',
+        },
+      ],
+    });
   });
 
   it('阿里云百炼 Coding Plan 与 Token Plan 使用专属端点，个人/团队版分开锁定模型窗口', () => {

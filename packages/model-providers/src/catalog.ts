@@ -472,6 +472,11 @@ function isHttpUrl(v: unknown): boolean {
   }
 }
 
+function httpUrl(v: unknown): URL | null {
+  if (!isHttpUrl(v)) return null;
+  return new URL(v as string);
+}
+
 /**
  * runtime.modelsUrl 非法（非 http(s) URL）时剥掉该字段、保留预设本体——OSS 推错一个
  * 不可见字段不该让整条预设消失，更不该让用户保存时撞 main 侧 URL 校验无法自助修复。
@@ -490,6 +495,43 @@ function normalizePresetRuntimeOptions(p: ProviderPreset): ProviderPreset {
       const { requestPath: _drop, ...rest } = next;
       next = rest;
       changed = true;
+    }
+    if (next.modelDiscovery !== undefined) {
+      const runtimeUrl = httpUrl(next.baseUrl);
+      const sources = Array.isArray(next.modelDiscovery)
+        ? next.modelDiscovery.filter((candidate) => {
+            if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+            const source = candidate as unknown as Record<string, unknown>;
+            const sourceUrl = httpUrl(source.baseUrl);
+            if (!runtimeUrl || !sourceUrl || sourceUrl.origin !== runtimeUrl.origin) return false;
+            if (!isWireProtocol(source.wireProtocol)) return false;
+            if (agent === 'claude-code' && source.wireProtocol !== 'anthropic-messages') {
+              return false;
+            }
+            if (
+              source.modelsUrl !== undefined &&
+              (!isHttpUrl(source.modelsUrl) ||
+                httpUrl(source.modelsUrl)?.origin !== sourceUrl.origin)
+            ) {
+              return false;
+            }
+            return (
+              source.requestPath === undefined || isProviderRequestPath(source.requestPath)
+            );
+          })
+        : [];
+      if (
+        !Array.isArray(next.modelDiscovery) ||
+        sources.length !== next.modelDiscovery.length
+      ) {
+        changed = true;
+      }
+      if (sources.length > 0) {
+        next = { ...next, modelDiscovery: sources };
+      } else {
+        const { modelDiscovery: _drop, ...rest } = next;
+        next = rest;
+      }
     }
     runtimes[agent] = next;
   }

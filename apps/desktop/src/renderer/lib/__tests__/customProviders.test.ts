@@ -392,6 +392,27 @@ describe('customProviderModelConfigFromCatalogModel', () => {
     });
   });
 
+  it('preserves a model-specific route through the edit round trip', () => {
+    expect(
+      customProviderModelConfigFromCatalogModel({
+        id: 'glm-5.3',
+        name: 'GLM-5.3',
+        contextWindow: 200_000,
+        route: {
+          baseUrl: 'https://open.bigmodel.cn/api/v1',
+          wireProtocol: 'openai-responses',
+        },
+      }),
+    ).toEqual({
+      id: 'glm-5.3',
+      name: 'GLM-5.3',
+      route: {
+        baseUrl: 'https://open.bigmodel.cn/api/v1',
+        wireProtocol: 'openai-responses',
+      },
+    });
+  });
+
   it('reconstructs explicit Pi reasoning capability from catalog efforts only for Pi', () => {
     const catalogModel = {
       id: 'reasoner',

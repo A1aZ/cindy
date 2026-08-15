@@ -129,6 +129,25 @@ const dualDiscoveryPreset = {
   },
 };
 
+const zhipuCodingPreset = {
+  id: 'zhipu-coding-plan-cn',
+  name: 'Zhipu GLM Coding Plan',
+  runtimes: {
+    codex: {
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      wireProtocol: 'openai-chat' as const,
+      models: [{ id: 'glm-5.2', name: 'GLM-5.2' }],
+      modelDiscovery: [
+        {
+          baseUrl: 'https://open.bigmodel.cn/api/v1',
+          modelsUrl: 'https://open.bigmodel.cn/api/v1/models',
+          wireProtocol: 'openai-responses' as const,
+        },
+      ],
+    },
+  },
+};
+
 const piReasoningPreset = {
   id: 'pi-reasoning',
   name: 'Pi Reasoning',
@@ -198,6 +217,7 @@ beforeEach(() => {
           unsafeNoAuthDiscoveryPreset,
           openCodePreset,
           dualDiscoveryPreset,
+          zhipuCodingPreset,
           piReasoningPreset,
           explicitPiPreset,
           claudeRequestPathPreset,
@@ -617,6 +637,57 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(config.runtimes.codex?.models).toEqual([
       expect.objectContaining({ id: 'shared-model', contextWindow: 272_000 }),
     ]);
+  });
+
+  it('智谱绑定合并 V4 与 V1 目录，并给 glm-5.3 保存 Responses 路由', async () => {
+    vi.mocked(window.electronAPI.maker.fetchProviderModels).mockImplementation(
+      async ({ baseUrl }: { baseUrl: string }) =>
+        baseUrl === 'https://open.bigmodel.cn/api/v1'
+          ? { ok: true, models: [{ id: 'glm-5.3', name: 'GLM-5.3' }] }
+          : { ok: true, models: [{ id: 'glm-5.2', name: 'GLM-5.2' }] },
+    );
+    renderWizard('zhipu-coding-plan-cn');
+
+    await waitFor(() => expect(screen.getByDisplayValue('Zhipu GLM Coding Plan')).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'glm-key' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    fireEvent.click(await screen.findByText('GLM-5.3'));
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledTimes(2);
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: 'codex',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+        wireProtocol: 'openai-chat',
+      }),
+    );
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: 'codex',
+        baseUrl: 'https://open.bigmodel.cn/api/v1',
+        modelsUrl: 'https://open.bigmodel.cn/api/v1/models',
+        wireProtocol: 'openai-responses',
+      }),
+    );
+    const [config, keys] = vi.mocked(createCustomProvider).mock.calls[0];
+    expect(config.runtimes.codex).toMatchObject({
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      wireProtocol: 'openai-chat',
+      models: [
+        { id: 'glm-5.2', name: 'GLM-5.2' },
+        {
+          id: 'glm-5.3',
+          name: 'GLM-5.3',
+          route: {
+            baseUrl: 'https://open.bigmodel.cn/api/v1',
+            wireProtocol: 'openai-responses',
+          },
+        },
+      ],
+    });
+    expect(keys.codex).toBe('glm-key');
   });
 
   it('LiteLLM:清空可编辑端点后不回退预设地址，也不能继续', async () => {

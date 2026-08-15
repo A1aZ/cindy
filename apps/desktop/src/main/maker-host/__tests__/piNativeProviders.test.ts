@@ -246,6 +246,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       headers: {
         'x-cindy-pi-session-id': '$CINDY_PI_SESSION_ID',
         'x-cindy-pi-session-token': '$CINDY_PI_SESSION_TOKEN',
+        'x-cindy-pi-provider-id': 'xai',
       },
       modelIdAliases: { 'grok-4.6': 'xai/grok-4.6' },
     });
@@ -272,6 +273,11 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       id: 'xai',
       baseUrl: `http://127.0.0.1:${PI_XAI_COMPAT_FORWARD_PORT}`,
       api: 'anthropic-messages',
+      headers: {
+        'x-cindy-pi-session-id': '$CINDY_PI_SESSION_ID',
+        'x-cindy-pi-session-token': '$CINDY_PI_SESSION_TOKEN',
+        'x-cindy-pi-provider-id': 'xai',
+      },
       hostProxyForward: {
         localUrl: 'http://127.0.0.1:18765',
         remotePort: PI_XAI_COMPAT_FORWARD_PORT,

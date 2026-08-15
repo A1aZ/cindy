@@ -1131,6 +1131,7 @@ export async function buildXaiPiNativeProvider(
         headers: {
           'x-cindy-pi-session-id': `$${PI_SESSION_ID_ENV}`,
           'x-cindy-pi-session-token': `$${PI_SESSION_TOKEN_ENV}`,
+          [PI_PROVIDER_HEADER]: 'xai',
         },
         models,
         modelIdAliases: aliases,

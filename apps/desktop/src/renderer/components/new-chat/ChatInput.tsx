@@ -361,8 +361,10 @@ const TOOLBAR_COMPACT_MAX_WIDTH = 448;
 
 // 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
 // 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
-// 模块级 Set 跟踪正在进行的预测,确保同一 session 同时只有一次预测调用。
-const _predictingSessions = new Set<string>();
+// 模块级 Map<sessionId, turnGen> 跟踪正在进行的预测,确保同一 session 同一 turnGen
+// 同时只有一次预测调用。当旧 turn 的预测仍在途时新 turn 触发预测,新 turn 的
+// turnGen 不同,会替换旧条目并允许新预测通过,避免旧请求吞掉新轮预测。
+const _predictingSessions = new Map<string, number>();
 
 function isVoiceInputIdleLike(state: VoiceInputState): boolean {
   return state === 'idle' || state === 'done' || state === 'error';
@@ -1147,7 +1149,7 @@ export function ChatInput({
   if (prevSessionIdRef.current !== sessionId) {
     prevSessionIdRef.current = sessionId;
     prevShowStopRef.current = false;
-    turnGenRef.current = 0;
+    turnGenRef.current += 1;
     prevShowStopRender.current = false;
     showRecommendationRef.current = false;
   }
@@ -1229,11 +1231,11 @@ export function ChatInput({
         // 捕获请求时刻的 sessionId 与 turnGen 快照,落地前校验是否仍匹配。
         const requestSessionId = sessionId;
         const requestTurnGen = turnGenRef.current;
-        // 去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个
-        // ChatInput 实例都会独立检测到 turn 结束并触发预测。模块级 Set 确保
-        // 同一 session 同时只有一次预测调用,避免重复 provider 调用与费用。
-        if (_predictingSessions.has(requestSessionId)) return;
-        _predictingSessions.add(requestSessionId);
+        // 去重:同一 session 同一 turnGen 同时只有一次预测调用,避免重复 provider 调用与费用。
+        // 当旧 turn 预测仍在途时新 turn 触发预测,新 turnGen 不同 → 替换旧条目,允许新预测通过。
+        const existingTurnGen = _predictingSessions.get(requestSessionId);
+        if (existingTurnGen === requestTurnGen) return;
+        _predictingSessions.set(requestSessionId, requestTurnGen);
         window.electronAPI.maker
           .predictNextPrompt({
             sessionId,

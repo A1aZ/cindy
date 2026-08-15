@@ -360,6 +360,7 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('wecom_interaction_cancelled_by_stop')).toBe(true);
     expect(isSystemPermissionDenialReason('wechat_interaction_timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('wechat_interaction_send_failed')).toBe(true);
+    expect(isSystemPermissionDenialReason('wechat_binding_stopped')).toBe(true);
     expect(isSystemPermissionDenialReason('replaced_by_new_request')).toBe(true);
     expect(isSystemPermissionDenialReason('card send failed: slack timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('pending failed: channel closed')).toBe(true);

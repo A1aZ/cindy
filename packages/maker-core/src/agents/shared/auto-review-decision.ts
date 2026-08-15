@@ -166,6 +166,7 @@ export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'wecom_interaction_cancelled_by_stop',
   'wechat_interaction_timeout',
   'wechat_interaction_send_failed',
+  'wechat_binding_stopped',
   'turn_idle_reconcile',
   'orca_disable',
   'session_running_race',

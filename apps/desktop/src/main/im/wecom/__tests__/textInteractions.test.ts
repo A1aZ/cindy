@@ -4,13 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { formatWecomInteractionPrompt, WecomTextInteractions } from '../textInteractions';
 
-function permissionRequest(input: Record<string, unknown>): InteractionRequest {
+function permissionRequest(
+  input: Record<string, unknown>,
+  extras: Partial<Extract<InteractionRequest, { kind: 'permission' }>> = {},
+): InteractionRequest {
   return {
     kind: 'permission',
     requestId: 'permission-1',
     toolName: 'Bash',
     displayName: '运行命令',
     input,
+    ...extras,
   };
 }
 
@@ -26,6 +30,17 @@ describe('formatWecomInteractionPrompt', () => {
     expect(prompt).toContain('需要确认工具“运行命令”');
     expect(prompt).toContain('"command": "pnpm test"');
     expect(prompt).toContain('"path": "D:\\\\workspace\\\\cindy"');
+    expect(prompt).toContain('回复“允许”执行一次');
+    expect(prompt).not.toContain('自动审批没完成');
+  });
+
+  it('自动审批故障时在确认提示里写明原因', () => {
+    const prompt = formatWecomInteractionPrompt(
+      permissionRequest({ command: 'pnpm test' }, { metadata: { autoReviewUnavailable: true } }),
+    );
+
+    expect(prompt).toContain('自动审批没完成，请确认要不要允许这次操作。');
+    expect(prompt).toContain('需要确认工具“运行命令”');
     expect(prompt).toContain('回复“允许”执行一次');
   });
 

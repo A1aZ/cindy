@@ -78,6 +78,7 @@ export {
   getAutoReviewActionTextLength,
   getAutoReviewDelegateHardCeilingMs,
   isAutoReviewConfirmUndeliveredNotice,
+  isAutoReviewUnavailableMetadata,
   isAutoReviewUnavailableNotice,
   isSystemPermissionDenialReason,
   MAX_AUTO_REVIEW_ACTION_TEXT_CHARS,

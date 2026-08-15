@@ -1,6 +1,7 @@
 import type { InteractionDecision, InteractionRequest } from '@cindy/maker-core';
 import { escapeWecomMarkdown, type IMMessageEvent, type WecomIM } from '@cindy/im';
 
+import { autoReviewUnavailablePromptLine } from '../shared/autoReviewUnavailablePrompt';
 import { isStopCommand } from '../shared/controlCommands';
 
 interface PendingInteraction {
@@ -108,8 +109,9 @@ function previewPermissionInput(input: Record<string, unknown>): string {
 export function formatWecomInteractionPrompt(request: InteractionRequest): string {
   if (request.kind === 'permission') {
     const toolName = escapeWecomMarkdown(request.displayName ?? request.toolName);
+    const unavailable = autoReviewUnavailablePromptLine(request);
     return `需要确认工具“${toolName}”。
-
+${unavailable ? `\n${unavailable}\n` : ''}
 参数：
 \`\`\`json
 ${previewPermissionInput(request.input)}

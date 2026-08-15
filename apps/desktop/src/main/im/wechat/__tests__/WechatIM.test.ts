@@ -210,6 +210,27 @@ describe('WechatIM host boundary', () => {
     });
   });
 
+  it('自动审批故障时在微信确认提示里写明原因', () => {
+    const ordinary = __testing.formatWechatInteractionPrompt({
+      kind: 'permission',
+      requestId: 'r-ordinary',
+      toolName: 'Bash',
+      input: {},
+    });
+    expect(ordinary).toContain('需要确认工具“Bash”');
+    expect(ordinary).not.toContain('自动审批没完成');
+
+    const unavailable = __testing.formatWechatInteractionPrompt({
+      kind: 'permission',
+      requestId: 'r-unavailable',
+      toolName: 'Bash',
+      input: {},
+      metadata: { autoReviewUnavailable: true },
+    });
+    expect(unavailable).toContain('自动审批没完成，请确认要不要允许这次操作。');
+    expect(unavailable).toContain('回复“允许”执行一次');
+  });
+
   it('cancels only the matching one-shot interaction when its central route closes', async () => {
     const im = new WechatIM(deps());
     vi.spyOn(im, 'sendText').mockResolvedValue({ messageId: 'interaction-prompt' });

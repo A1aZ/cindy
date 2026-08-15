@@ -299,7 +299,6 @@ describe('跨实现一致性 — IM cardBuilders vs hook composeInteractionCard'
     expect(im.body).toContain('command');
     expect(im.buttons.map((b) => b.id)).toEqual([
       'permission:allow:once',
-      'permission:allow:always',
       'permission:deny',
     ]);
   });

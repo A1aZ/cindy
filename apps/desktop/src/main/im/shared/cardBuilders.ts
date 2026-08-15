@@ -140,12 +140,14 @@ export function createCardBuilders(
             type: 'primary',
             payload: { requestId: req.requestId },
           },
-          {
+          // Auto 故障降级会标 forcePrompt：Claude 丢 permissionUpdates，
+          // Codex 把 acceptForSession 收成单次 allow。展示「总是允许」等于说谎。
+          ...(!unavailable ? [{
             id: 'permission:allow:always',
             label: ui.cards.permission.btnAllowAlways,
-            type: 'default',
+            type: 'default' as const,
             payload: { requestId: req.requestId },
-          },
+          }] : []),
           {
             id: 'permission:deny',
             label: ui.cards.permission.btnDeny,

@@ -690,6 +690,36 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(keys.codex).toBe('glm-key');
   });
 
+  it('智谱主目录失败时附加目录不会改写预设模型的 V4 路由', async () => {
+    vi.mocked(window.electronAPI.maker.fetchProviderModels).mockImplementation(
+      async ({ baseUrl }: { baseUrl: string }) =>
+        baseUrl === 'https://open.bigmodel.cn/api/v1'
+          ? {
+              ok: true,
+              models: [
+                { id: 'glm-5.2', name: 'GLM-5.2' },
+                { id: 'glm-5.3', name: 'GLM-5.3' },
+              ],
+            }
+          : { ok: false },
+    );
+    renderWizard('zhipu-coding-plan-cn');
+
+    await waitFor(() => expect(screen.getByDisplayValue('Zhipu GLM Coding Plan')).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'glm-key' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    await screen.findByText('GLM-5.3');
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    const runtime = vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.codex;
+    expect(runtime).toMatchObject({
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      wireProtocol: 'openai-chat',
+    });
+    expect(runtime?.models).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2' }]);
+  });
+
   it('LiteLLM:清空可编辑端点后不回退预设地址，也不能继续', async () => {
     renderWizard('litellm');
 

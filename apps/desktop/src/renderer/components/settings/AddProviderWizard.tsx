@@ -698,8 +698,11 @@ export function AddProviderWizard({
             // 「预设没写窗口」的兜底)。
             const backfillWindow =
               existing.contextWindows?.[agent] === undefined && m.contextWindow !== undefined;
+            const presetOwnsModel =
+              preset.runtimes[agent]?.models.some((model) => model.id === m.id) === true;
             const discoveredRoute =
               route &&
+              !presetOwnsModel &&
               !defaultDiscoveredModels.has(`${agent}\u0000${m.id}`) &&
               !existing.routes?.[agent]
                 ? route

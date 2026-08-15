@@ -478,7 +478,7 @@ schedule 任务的当前详情可临时计入全局预算并作为当前任务�
 - 门禁暂缓时驻留权不撤（在途发送确认需要写回，是设计取舍）；暂缓窗口内非可见页可累积正文。
 - 驻留围栏是 boolean 而非 §10.1 字面要求的 generation token：blur→快速 refocus 后，撤销前发起的读取响应可提交旧窗口。后续 load **通常**会刷新到新数据，但 follow-up 失败时旧窗口会持续展示——没有硬保证。严格 token 需要动 requestSync 链路。
 - 原地切会话/卸载时被暂缓的旧会话没有观察者补回收（页面级 1→0 观察者随实例销毁或改绑新会话）。后果按分类不同：schedule 会话仅内存驻留（围栏生效后写入被拦，不再增长）；**regular 会话无围栏，后续全局 push/merge/append 仍可增长，且预算不在写入时触发**——重复操作可缓慢累积。
-- 全局预算淘汰对页面级在途工作的可见性：本 PR 已加会话级探针（`registerSessionLocalWorkProbe`，覆盖 outbox/上传/发送在途/附件托盘，压缩与预算候选统一咨询）；**草稿未接入**——草稿 payload 在独立 store 不会丢，但草稿所在任务的 messages/投影仍可能被压缩或淘汰，偏离 §9.1 保护清单「有草稿的任务不参与压缩/LRU」的字面要求（用户回到该任务时草稿仍在、消息从缓存重载）。完整接入归入本节重构。
+- 全局预算淘汰对页面级在途工作的可见性：本 PR 已加会话级探针（`registerSessionLocalWorkProbe`，页面回收入口门禁与探针共用 `hasSessionLocalWorkSnapshot` 同一信号清单：outbox 待派发、在途上传（`getPendingUploadCount`，含粘贴占位——上传未完成时附件尚未进托盘，只有该口径可见）、send() 全流程同步锁（`sendInFlightRef`，覆盖乐观气泡上屏之前的前半程）、enqueue 在途、落定中条目、附件托盘；压缩与预算候选统一咨询）；**草稿未接入**——草稿 payload 在独立 store 不会丢，但草稿所在任务的 messages/投影仍可能被压缩或淘汰，偏离 §9.1 保护清单「有草稿的任务不参与压缩/LRU」的字面要求（用户回到该任务时草稿仍在、消息从缓存重载）。完整接入归入本节重构。
 
 完整修法：按 sessionId 的 local-work registry（探针的常驻化与草稿接入）+ 可见性 authority 与破坏性回收拆开（blur/background 无条件推进 generation 并标记补载，破坏性回收可暂缓）+ per-session generation token。属一次重构，不在本 PR 范围内。
 

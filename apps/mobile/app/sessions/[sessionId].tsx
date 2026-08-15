@@ -353,6 +353,7 @@ import {
   type MobileOutboxItem,
   type MobileRecoverableDraftItem,
 } from '@/session/sessionOutbox';
+import { hasSessionLocalWorkSnapshot } from '@/session/sessionLocalWork';
 import {
   AT_RESOURCE_QUERY_DEBOUNCE_MS,
   buildComposerPaletteCacheKey,
@@ -4088,28 +4089,39 @@ export default function SessionScreen() {
     () => remoteSessionStore.getSessionRetention(sessionId),
   );
   const isScheduleDetail = sessionRetentionKind === 'schedule';
+  // 在途上传计数与 send() 同步锁经 ref 中转:getPendingUploadCount 来自 hook
+  // (每 render 可能换引用),回收入口与探针的闭包要读最新实例(复核第三轮 P1)。
+  const getPendingUploadCountRef = useRef(getPendingUploadCount);
+  getPendingUploadCountRef.current = getPendingUploadCount;
+  const sendInFlightGateRef = useRef(sendInFlightRef);
+  sendInFlightGateRef.current = sendInFlightRef;
+  /** 本会话此刻是否有在途本地工作——回收入口门禁与 store 探针共用同一份信号清单。 */
+  const hasLocalWorkNow = useCallback(() => hasSessionLocalWorkSnapshot({
+    outboxCount: outboxRef.current.length,
+    pendingUploadCount: getPendingUploadCountRef.current(),
+    sendInFlight: sendInFlightGateRef.current.current,
+    sendingCount: sendingQueueClientIdsRef.current.size,
+    settlingCount: settlingQueueItemsRef.current.length,
+    attachmentCount: attachmentsRef.current.length,
+  }), []);
   // 会话级在途工作探针(方案 §9.1 保护清单的 store 侧信号,复核 #6):压缩与
-  // 全局预算咨询它,栈下层的本会话 outbox / 上传 / 发送在途 / 附件托盘不被误回收。
-  // 经 ref 实时读,注册一次即可。
+  // 全局预算咨询它,栈下层的本会话 outbox / 在途上传(含粘贴占位)/ 发送全流程
+  // / 附件托盘不被误回收。经 ref 实时读,注册一次即可。
   useEffect(() => {
-    const unregister = remoteSessionStore.registerSessionLocalWorkProbe((id) => (
-      id === sessionId
-      && (outboxRef.current.length > 0
-        || sendingQueueClientIdsRef.current.size > 0
-        || settlingQueueItemsRef.current.length > 0
-        || attachmentsRef.current.length > 0)
-    ));
+    const unregister = remoteSessionStore.registerSessionLocalWorkProbe(
+      (id) => id === sessionId && hasLocalWorkNow(),
+    );
     return unregister;
-  }, [sessionId]);
+  }, [sessionId, hasLocalWorkNow]);
   const maybeReclaimSessionRuntime = useCallback((reason: SessionReclaimReason) => {
     if (!sessionId) return;
-    // 在途本地工作门禁(方案 §7.3):outbox 待派发、enqueue 在途、落定中条目、
-    // pendingQueue 排队消息任一非空就暂缓回收——乐观消息与排队正文靠这些状态活着,
-    // 正文丢了用户「已发出」的内容就蒸发。暂缓后由下方的排空观察者自动补回收。
-    // 门禁对两类任务一视同仁:schedule 回收与普通任务压缩(阶段 4)共用本入口。
-    if (outboxRef.current.length > 0) return;
-    if (sendingQueueClientIdsRef.current.size > 0) return;
-    if (settlingQueueItemsRef.current.length > 0) return;
+    // 在途本地工作门禁(方案 §7.3):outbox 待派发、在途上传、send() 前半程、
+    // enqueue 在途、落定中条目、附件托盘、pendingQueue 排队消息任一非空就暂缓
+    // 回收——乐观消息与排队正文靠这些状态活着,正文丢了用户「已发出」的内容就
+    // 蒸发。暂缓后由下方的排空观察者自动补回收。门禁对两类任务一视同仁:
+    // schedule 回收与普通任务压缩(阶段 4)共用本入口(信号清单与探针共用
+    // hasLocalWorkNow,两套门禁不漂移)。
+    if (hasLocalWorkNow()) return;
     if (remoteSessionStore.getInputProjection(sessionId).pendingQueue.length > 0) return;
     const retention = remoteSessionStore.getSessionRetention(sessionId);
     remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason });

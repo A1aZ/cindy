@@ -4061,11 +4061,12 @@ export default function SessionScreen() {
     };
   }, [deviceId, load, sessionId, unsubscribe]);
 
-  // ===== schedule 任务激进回收接线(方案 §6.3/§6.4/§8) =====
+  // ===== 任务运行时回收接线(方案 §6.3/§6.4/§8/§9.1) =====
   // 页面层只报告事实(失焦 / 切任务 / App 后台),清理统一走
-  // remoteSessionStore.releaseSessionRuntimeState。回调刻意只依赖 sessionId:
-  // 门禁输入全部经 ref / store 实时读取,避免 useFocusEffect 因依赖变化重注册时
-  // 把「依赖更新」误当成「失焦」触发一次假回收。
+  // remoteSessionStore.releaseSessionRuntimeState:schedule 任务回收到 0,
+  // 普通任务压缩回 80 条并顺带执行全局预算淘汰(阶段 4)。回调刻意只依赖
+  // sessionId:门禁输入全部经 ref / store 实时读取,避免 useFocusEffect 因依赖
+  // 变化重注册时把「依赖更新」误当成「失焦」触发一次假回收。
   const sendingQueueClientIdsRef = useRef(sendingQueueClientIds);
   sendingQueueClientIdsRef.current = sendingQueueClientIds;
   const settlingQueueItemsRef = useRef(settlingQueueItems);
@@ -4076,16 +4077,21 @@ export default function SessionScreen() {
   const scheduleReclaimedRef = useRef(false);
   const loadRef = useRef(load);
   loadRef.current = load;
-  const maybeReclaimScheduleRuntime = useCallback((reason: SessionReclaimReason) => {
+  const maybeReclaimSessionRuntime = useCallback((reason: SessionReclaimReason) => {
     if (!sessionId) return;
     // 在途本地工作门禁(方案 §7.3):outbox 待派发、enqueue 在途、落定中条目、
     // pendingQueue 排队消息任一非空就暂缓回收——乐观消息与排队正文靠这些状态活着,
     // 正文丢了用户「已发出」的内容就蒸发。暂缓后由下方的排空观察者自动补回收。
+    // 门禁对两类任务一视同仁:schedule 回收与普通任务压缩(阶段 4)共用本入口。
     if (outboxRef.current.length > 0) return;
     if (sendingQueueClientIdsRef.current.size > 0) return;
     if (settlingQueueItemsRef.current.length > 0) return;
     if (remoteSessionStore.getInputProjection(sessionId).pendingQueue.length > 0) return;
-    if (remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason })) {
+    const retention = remoteSessionStore.getSessionRetention(sessionId);
+    const released = remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason });
+    if (retention === 'schedule' && released) {
+      // 只有 schedule 的整窗回收需要重开补载;普通任务压缩由缓存 hydrate +
+      // _count affordance 覆盖,预算淘汰同理,不标记。
       scheduleReclaimedRef.current = true;
     }
   }, [sessionId]);
@@ -4104,16 +4110,16 @@ export default function SessionScreen() {
       }
       return () => {
         sessionFocusedRef.current = false;
-        maybeReclaimScheduleRuntime('detail-blur');
+        maybeReclaimSessionRuntime('detail-blur');
       };
-    }, [maybeReclaimScheduleRuntime, sessionId]),
+    }, [maybeReclaimSessionRuntime, sessionId]),
   );
   // App 切后台按「已不可见」处理;回前台补 load。与已读回执的 AppState 门槛
   // 同构(见上方 appStateActive 注释:锁屏 / 切后台 useFocusEffect cleanup 不跑)。
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState !== 'active') {
-        maybeReclaimScheduleRuntime('app-background');
+        maybeReclaimSessionRuntime('app-background');
         return;
       }
       if (scheduleReclaimedRef.current) {
@@ -4128,14 +4134,14 @@ export default function SessionScreen() {
       }
     });
     return () => subscription.remove();
-  }, [maybeReclaimScheduleRuntime]);
+  }, [maybeReclaimSessionRuntime, sessionId]);
   // 原地切会话(实例复用,不触发失焦)与卸载兜底:cleanup 闭包持旧 sessionId。
-  // 撤销驻留权限放在 maybeReclaim 之后:回收路径自己会撤;回收被在途工作暂缓时
-  // 也要撤——页面已离场,后续推送按「非当前详情」处置,不给该任务再灌正文。
+  // 撤销驻留权限放在回收之后:回收路径自己会撤;回收被在途工作暂缓时也要撤——
+  // 页面已离场,后续推送按「非当前详情」处置,不给该任务再灌正文。
   useEffect(() => () => {
-    maybeReclaimScheduleRuntime('session-switch');
+    maybeReclaimSessionRuntime('session-switch');
     remoteSessionStore.revokeScheduleDetailResidency(sessionId);
-  }, [maybeReclaimScheduleRuntime, sessionId]);
+  }, [maybeReclaimSessionRuntime, sessionId]);
   // 门禁暂缓后的自动补回收(方案 §7.3:保护只影响「能否立即清理」,不让整段
   // 历史长期驻留):在途工作排空 → 0 且页面已失焦(或已后台)时补一次回收。
   // 会话目录行缺失(分类未知)时 maybeReclaim 内部保守 no-op,这里不会误伤。
@@ -4148,9 +4154,9 @@ export default function SessionScreen() {
     const prev = prevScheduleLocalWorkCountRef.current;
     prevScheduleLocalWorkCountRef.current = scheduleLocalWorkCount;
     if (prev > 0 && scheduleLocalWorkCount === 0 && !sessionFocusedRef.current) {
-      maybeReclaimScheduleRuntime('detail-blur');
+      maybeReclaimSessionRuntime('detail-blur');
     }
-  }, [scheduleLocalWorkCount, maybeReclaimScheduleRuntime]);
+  }, [scheduleLocalWorkCount, maybeReclaimSessionRuntime]);
 
   // 乐观点亮「加载更早」入口:缓存消息 hydrate 后(messages 已有内容),不等首开那次慢 listMessages(A1,
   // device-link 往返可能数秒)回来,就用已存 session 的 _count.messages 与 in-store 已加载真实条数比较,

@@ -352,3 +352,130 @@ describe('schedule 详情驻留权限与写入围栏(方案 §10.1,阶段 3)', (
     expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(2);
   });
 });
+
+describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
+  function seedRegularSession(id: string, count: number): void {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [session(id)]);
+    remoteSessionStore.setMessages(id, Array.from({ length: count }, (_, index) =>
+      message(`${id}-m${index}`, id, `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+  }
+
+  it('离开详情后压回 80 条:保留最新窗口,目录行 / pending interaction 不受影响', () => {
+    seedRegularSession('normal-1', 200);
+    remoteSessionStore.setPendingInteractions('normal-1', [
+      { request: { kind: 'permission', requestId: 'r-keep' } },
+    ]);
+    // 有 pending interaction 的任务受保护不压缩——先验证保护,再清掉验证压缩。
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(false);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(200);
+    remoteSessionStore.setPendingInteractions('normal-1', []);
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(true);
+    const compacted = remoteSessionStore.getMessages('normal-1');
+    expect(compacted).toHaveLength(80);
+    // 保留的是最新 80 条(编号 120..199)。
+    expect(compacted[0].id).toBe('normal-1-m120');
+    expect(compacted[compacted.length - 1].id).toBe('normal-1-m199');
+    // 目录元数据仍在。
+    expect(remoteSessionStore.getSessions().map((s) => s.id)).toContain('normal-1');
+  });
+
+  it('运行中的普通任务不被压缩;运行结束后再离开详情才压缩', () => {
+    seedRegularSession('normal-1', 120);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'normal-1',
+      event: { type: 'status', data: { isRunning: true } },
+    });
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'app-background' })).toBe(false);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(120);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'normal-1',
+      event: { type: 'done', data: {} },
+    });
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'app-background' })).toBe(true);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(80);
+  });
+
+  it('pendingQueue 有排队消息(在途发送)时不压缩', () => {
+    seedRegularSession('normal-1', 120);
+    remoteSessionStore.grantScheduleDetailResidency('normal-1');
+    remoteSessionStore.setInputProjection('normal-1', {
+      sessionId: 'normal-1',
+      pendingQueue: [{
+        clientId: 'q1',
+        text: '在途',
+        persistedContent: JSON.stringify({ text: '在途', images: [], files: [] }),
+        model: 'claude',
+        effort: 'medium',
+        permissionMode: 'ask',
+        workingDir: '/repo',
+        createOpts: { agentKind: 'claude-code', workingDir: '/repo', model: 'claude' },
+        chatMessage: { clientId: 'q1', role: 'user', content: '在途', createdAt: '2026-01-01T00:00:00.000Z' },
+      }],
+      steeringQueueClientIds: [],
+      queuePaused: false,
+      queueExpanded: false,
+      queueInteractionLocks: [],
+      queueEditLocks: [],
+      queueAbortPending: false,
+      error: null,
+      errorRetryText: null,
+      credentialSwitchWait: null,
+    });
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(false);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(120);
+  });
+
+  it('全局预算:合计超过 800 条时按 LRU 回收最冷的非保护任务,当前打开与运行中的不淘汰', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      // 12 个普通任务各 80 条(合计 960 > 800);逐个写入并推进时钟,构造 LRU 顺序
+      // n0 最冷 → n11 最新。一次性种入目录(shard 是整表替换,不能分次 set)。
+      const ids = Array.from({ length: 12 }, (_, index) => `n${index}`);
+      remoteSessionStore.setDeviceSessions('dev-1', 'Dev', ids.map((id) => session(id)));
+      for (const id of ids) {
+        remoteSessionStore.setMessages(id, Array.from({ length: 80 }, (_, index) =>
+          message(`${id}-m${index}`, id, `2026-01-01T00:${String(index % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+        vi.advanceTimersByTime(60_000);
+      }
+      // n11 运行中、n10 当前打开(驻留):两者计入总量但不淘汰(160 条)。
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 'n11',
+        event: { type: 'status', data: { isRunning: true } },
+      });
+      remoteSessionStore.grantScheduleDetailResidency('n10');
+      // 触发点:对最冷的 n0 走一次 detail-blur(压缩无变化,预算淘汰干实活)。
+      expect(remoteSessionStore.releaseSessionRuntimeState('n0', { reason: 'detail-blur' })).toBe(true);
+      // 960 - 800 = 160 → 整窗回收最冷的两个非保护任务 n0、n1。
+      expect(remoteSessionStore.getMessages('n0')).toEqual([]);
+      expect(remoteSessionStore.getMessages('n1')).toEqual([]);
+      expect(remoteSessionStore.getMessages('n2')).toHaveLength(80);
+      expect(remoteSessionStore.getMessages('n10')).toHaveLength(80);
+      expect(remoteSessionStore.getMessages('n11')).toHaveLength(80);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('预算淘汰不把任务当删除:目录行、缓存与磁盘外的摘要层保留,重开可恢复', () => {
+    seedRegularSession('cold', 300);
+    remoteSessionStore.releaseSessionRuntimeState('cold', { reason: 'detail-blur' });
+    // cold 只有 300 条,未超预算:压缩到 80,不整窗回收。
+    expect(remoteSessionStore.getMessages('cold')).toHaveLength(80);
+    expect(remoteSessionStore.getSessions().map((s) => s.id)).toContain('cold');
+    // 重新写入照常(重开 hydrate + 同步路径)。
+    remoteSessionStore.setMessages('cold', [message('c-new', 'cold')]);
+    expect(remoteSessionStore.getMessages('cold')).toHaveLength(1);
+  });
+
+  it('schedule 任务不参与普通预算:失焦归零而非压回 80 条', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+    ]);
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.setMessages('sched-1', Array.from({ length: 200 }, (_, index) =>
+      message(`s${index}`, 'sched-1', `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.${String(index).padStart(3, '0')}Z`)));
+    remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+});

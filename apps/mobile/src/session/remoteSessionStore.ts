@@ -32,7 +32,7 @@ import { classifySessionRetention, type SessionRetentionKind } from '@/session/s
 import { contentToPreview } from '@/utils/contentPreview';
 import type { MobileSystemCardType } from '@/session/systemCard';
 import type { InputProjection, PendingInteraction, RemoteMessage, RemoteSession } from '@/session/types';
-import { compareMessageOrder } from '@/session/messagePaging';
+import { compareMessageOrder, MESSAGE_PAGE_SIZE } from '@/session/messagePaging';
 import { normalizeRemoteMoney } from '@/session/remoteMoney';
 
 interface DeviceShard {
@@ -107,7 +107,8 @@ interface SessionMessageSyncMarker {
 
 /**
  * 统一回收入口的调用原因(方案 §8):页面 / 事件层只表达事实,不自拼清理步骤。
- * 阶段 4 的普通任务预算回收会新增 `'budget'`。
+ * 普通任务的全局预算淘汰由入口内部顺带执行(enforceRegularMessageBudget),
+ * 不需要外部以 budget 原因调用。
  */
 export type SessionReclaimReason = 'detail-blur' | 'session-switch' | 'app-background';
 
@@ -535,6 +536,127 @@ const scheduleDetailResidency = new Set<string>();
 function scheduleFullMessagesBlocked(sessionId: string): boolean {
   if (!sessionId || scheduleDetailResidency.has(sessionId)) return false;
   return classifySessionRetention(mergedSessions.find((session) => session.id === sessionId)) === 'schedule';
+}
+
+/**
+ * 普通任务的全局消息预算(方案 §9.1,阶段 4):所有普通任务合计的内存消息条数
+ * 软上限,超出按最近访问时间 LRU 回收非保护任务。「约」是软目标——保护任务的
+ * 消息照常计入总量但不参与淘汰,实际峰值可以超过该值。
+ */
+const REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET = 800;
+
+/**
+ * 每会话最近访问时间(LRU 依据):详情打开(grant)与消息写入时刷新。只服务普通
+ * 任务的全局预算淘汰;schedule 任务失焦即归零、不参与 LRU。
+ */
+const sessionLastAccessAt = new Map<string, number>();
+
+function touchSessionAccess(sessionId: string): void {
+  sessionLastAccessAt.set(sessionId, Date.now());
+}
+
+/**
+ * 普通任务的压缩 / LRU 保护判定(方案 §9.1 保护清单)。store 可见的保护信号:
+ * 正在运行(turn 或宽运行态)、有待处理交互、pendingQueue 有排队消息(在途发送)。
+ * 「当前详情任务」不在其中——能带着 detail-blur / session-switch / app-background
+ * reason 进统一入口的就是正在离开的会话,正是要压缩的对象;预算淘汰则用驻留
+ * 权限跳过当前打开的会话。outbox / 草稿 / 上传在页面层门禁(方案 §7.3)。
+ */
+function regularSessionProtected(sessionId: string): boolean {
+  if (readSessionRunStatus(sessionId).isRunning) return true;
+  if (sessionMakerTurnRunning.get(sessionId) === true) return true;
+  if ((pendingInteractions.get(sessionId)?.length ?? 0) > 0) return true;
+  if ((inputProjections.get(sessionId)?.pendingQueue.length ?? 0) > 0) return true;
+  return false;
+}
+
+/**
+ * 会话运行时映射的整组回收(schedule 失焦回收与普通任务预算淘汰共用):消息、
+ * live plan / task 投影、输入投影(含 epoch 抬升)、同步 marker、覆盖区间、订阅
+ * ACK、流式三件套。调用方负责 emit 与后续动作(schedule 清缓存 / 淘汰保留缓存)。
+ * 返回是否有任何映射实际被清(幂等)。
+ */
+function reclaimSessionRuntimeMaps(sessionId: string): boolean {
+  let changed = messages.delete(sessionId);
+  changed = livePlanSnapshots.delete(sessionId) || changed;
+  changed = sessionTaskUpdates.delete(sessionId) || changed;
+  changed = sessionParkedTaskUpdates.delete(sessionId) || changed;
+  changed = inputProjections.delete(sessionId) || changed;
+  // 在途 projection 查询的终局围栏:epoch 抬升后 setInputProjectionIfCurrent 全部拒写。
+  bumpInputProjectionAuthorityEpoch(sessionId);
+  changed = sessionMessageSyncMarkers.delete(sessionId) || changed;
+  changed = pendingRefreshSessions.delete(sessionId) || changed;
+  // 连续性结论与订阅 ACK 随消息一起失效:窗口已空,不能留着背书或点亮后续页。
+  forgetWindowCoverage(sessionId);
+  changed = sessionLiveStreamAcked.delete(sessionId) || changed;
+  changed = streamingAssistantClientIds.delete(sessionId) || changed;
+  changed = pendingLiveAssistantClientIds.delete(sessionId) || changed;
+  // 未落地的流式增量直接丢弃(不 flush):flush 会把正文写回刚清掉的窗口(方案 §6.5)。
+  discardPendingTextDelta(sessionId);
+  return changed;
+}
+
+/**
+ * 普通任务压缩:保留最新 MESSAGE_PAGE_SIZE 条(与首开窗口、磁盘缓存上限对齐),
+ * 更早的正文丢弃——可从工作设备经「加载更早」翻页重新取回。压缩前先 flush 流式
+ * 合批,刚结束的 turn 的最后一段文字不丢。同步 marker 保留:最近一次窗口同步的
+ * 结论仍然成立(压缩只裁掉更早的历史),重开走缓存 hydrate + _count 差值点亮
+ * 「加载更早」,与既有 affordance 语义一致。目录行、未读、pending interaction
+ * 不在压缩范围(方案 §9.1 语义边界)。
+ */
+function compactRegularSessionMessages(sessionId: string): boolean {
+  const existing = messages.get(sessionId);
+  if (!existing || existing.length <= MESSAGE_PAGE_SIZE) return false;
+  const textFlushed = flushPendingTextDelta(sessionId);
+  const current = messages.get(sessionId) ?? existing;
+  if (current.length <= MESSAGE_PAGE_SIZE) {
+    if (textFlushed) emit();
+    return false;
+  }
+  // 只裁更早的历史:覆盖区间下界随之失效,保守遗忘,下次同步重建。
+  forgetWindowCoverage(sessionId);
+  messages.set(sessionId, current.slice(current.length - MESSAGE_PAGE_SIZE));
+  bumpMessageVersion();
+  emit();
+  return true;
+}
+
+/**
+ * 普通任务全局预算(方案 §9.1,阶段 4):合计超过约 800 条时,按最近访问时间从
+ * 最冷端整窗回收非保护任务的消息(磁盘缓存保留,重开可 hydrate)。保护任务与
+ * 当前打开(驻留中)的任务计入总量但不淘汰。只在统一入口的调用时机执行,不引入
+ * 定时器或周期扫描。
+ */
+function enforceRegularMessageBudget(): boolean {
+  let total = 0;
+  let hasCandidates = false;
+  const candidates: Array<{ sessionId: string; count: number; at: number }> = [];
+  for (const [sessionId, list] of messages) {
+    if (!sessionLastAccessAt.has(sessionId)) sessionLastAccessAt.set(sessionId, Date.now());
+    if (list.length === 0) continue;
+    if (classifySessionRetention(mergedSessions.find((session) => session.id === sessionId)) === 'schedule') {
+      continue;
+    }
+    total += list.length;
+    if (scheduleDetailResidency.has(sessionId) || regularSessionProtected(sessionId)) continue;
+    candidates.push({ sessionId, count: list.length, at: sessionLastAccessAt.get(sessionId) ?? 0 });
+    hasCandidates = true;
+  }
+  if (!hasCandidates || total <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET) return false;
+  candidates.sort((a, b) => a.at - b.at);
+  let changed = false;
+  for (const candidate of candidates) {
+    if (total <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET) break;
+    // maps 已空(并发清理过)也无妨:记账按进入本轮时的条数扣减,继续下一个候选。
+    reclaimSessionRuntimeMaps(candidate.sessionId);
+    changed = true;
+    total -= candidate.count;
+  }
+  if (changed) {
+    bumpMessageVersion();
+    emit();
+  }
+  return changed;
 }
 
 let mergedSessions: RemoteSession[] = [];
@@ -1463,6 +1585,7 @@ export const remoteSessionStore = {
   setMessages(sessionId: string, list: readonly RemoteMessage[]): void {
     // 围栏(方案 §10.1):已回收的 schedule 任务,迟到的整窗替换不得复活正文。
     if (scheduleFullMessagesBlocked(sessionId)) return;
+    touchSessionAccess(sessionId);
     const textFlushed = flushPendingTextDelta(sessionId);
     const next = normalizeMessages(list);
     // 记账在相等早退**之前**:这一页是服务端一次给出的连续段,它带来的连续性结论与"窗口内容有没有
@@ -1510,6 +1633,7 @@ export const remoteSessionStore = {
   ): void {
     // 围栏(方案 §10.1):迟到的最新窗口同步(requestSync 在途响应)不得写回已回收任务。
     if (scheduleFullMessagesBlocked(sessionId)) return;
+    touchSessionAccess(sessionId);
     const textFlushed = flushPendingTextDelta(sessionId);
     const latestWindow = normalizeMessages(list);
     if (latestWindow.length === 0) {
@@ -1683,6 +1807,7 @@ export const remoteSessionStore = {
   mergeMessages(sessionId: string, list: readonly RemoteMessage[]): void {
     // 围栏(方案 §10.1):空洞补齐 / 对账合并的迟到结果不得写回已回收任务。
     if (scheduleFullMessagesBlocked(sessionId)) return;
+    touchSessionAccess(sessionId);
     const textFlushed = flushPendingTextDelta(sessionId);
     const byKey = new Map<string, RemoteMessage>();
     for (const item of messages.get(sessionId) ?? []) {
@@ -1739,6 +1864,7 @@ export const remoteSessionStore = {
     // 不得把完整正文灌回 Store。驻留期内(详情打开中)不拦——乐观发送与本地系统卡
     // 都走这里。
     if (scheduleFullMessagesBlocked(sessionId)) return;
+    touchSessionAccess(sessionId);
     let changed = flushPendingTextDelta(sessionId);
     changed = upsertMessage(sessionId, overlayLivePlanSnapshot(sessionId, message)) || changed;
     // 订阅内到达的实时行可以把覆盖区间的上界往后推;断流后收到的不行(见 liveTailTrusted)。
@@ -2779,6 +2905,7 @@ export const remoteSessionStore = {
         sessionMakerTurnRunning.delete(sessionId);
         sessionParkedTaskUpdates.delete(sessionId);
         scheduleDetailResidency.delete(sessionId);
+        sessionLastAccessAt.delete(sessionId);
         sessionDeviceIndex.delete(sessionId);
         // revision 下限按会话回收:它不参与单轮快照回收(那会把覆盖权还给晚到的
         // 旧快照),所以只能在会话本身消失时清,保持有界。
@@ -2816,7 +2943,12 @@ export const remoteSessionStore = {
    * 放行,撤销后全部被围栏拦截。
    */
   grantScheduleDetailResidency(sessionId: string): void {
-    if (sessionId) scheduleDetailResidency.add(sessionId);
+    if (sessionId) {
+      scheduleDetailResidency.add(sessionId);
+      // 详情打开即最近访问(方案 §9.1 的 LRU 依据):只读浏览没有消息写入,
+      // 打开动作本身要刷新热度。
+      touchSessionAccess(sessionId);
+    }
   },
 
   revokeScheduleDetailResidency(sessionId: string): void {
@@ -2831,44 +2963,39 @@ export const remoteSessionStore = {
    *   task 投影、同步 marker、覆盖区间、订阅 ACK 记录,并定点清除本地完整消息缓存。
    *   **保留**通知摘要层:任务目录行、pendingInteractions(含权威位与抑制账本)、
    *   liveActivity / 运行状态、maker turn 边界、goal 镜像(方案 §7.2)。
-   * - `'regular'`:阶段 1–3 期间为 no-op(当前基线本就无普通任务回收,方案 §9.1);
-   *   阶段 4 在此分派「压回 80 条 + 全局预算」。
+   * - `'regular'`(阶段 4):非活跃任务压缩回 80 条(与 MESSAGE_PAGE_SIZE、磁盘缓存
+   *   上限对齐),随后按全局约 800 条预算 LRU 淘汰非保护任务;被保护(运行中 /
+   *   待处理交互 / pendingQueue 排队)的任务跳过压缩,只参与预算统计。
    *
    * 契约:调用前必须完成安全交接(方案 §6.3 第 3 步)——草稿、outbox、在途上传与
    * 未确认乐观发送由调用方确认已落定或另行保留;本入口不感知这些独立 Store。
-   * 返回是否实际回收了运行时状态(重复调用返回 false);缓存清除不受返回值影响,
-   * 每次调用都兜底清一次,防页面卸载路径的去抖落盘在回收后把正文写回。
+   * 返回是否实际回收了运行时状态(重复调用返回 false);schedule 的缓存清除不受
+   * 返回值影响,每次调用都兜底清一次,防页面卸载路径的去抖落盘在回收后把正文写回。
    */
   releaseSessionRuntimeState(sessionId: string, options: { reason: SessionReclaimReason }): boolean {
     if (!sessionId) return false;
-    if (this.getSessionRetention(sessionId) !== 'schedule') return false;
-    // 撤销详情驻留权限(方案 §10.1):回收之后,迟到的读取 / 推送 / 流式合批
-    // 全部被各写入点的围栏拦截,不得复活正文。
-    scheduleDetailResidency.delete(sessionId);
-    let changed = messages.delete(sessionId);
-    changed = livePlanSnapshots.delete(sessionId) || changed;
-    changed = sessionTaskUpdates.delete(sessionId) || changed;
-    changed = sessionParkedTaskUpdates.delete(sessionId) || changed;
-    changed = inputProjections.delete(sessionId) || changed;
-    // 在途 projection 查询的终局围栏:epoch 抬升后 setInputProjectionIfCurrent 全部拒写。
-    bumpInputProjectionAuthorityEpoch(sessionId);
-    changed = sessionMessageSyncMarkers.delete(sessionId) || changed;
-    changed = pendingRefreshSessions.delete(sessionId) || changed;
-    // 连续性结论与订阅 ACK 随消息一起失效:窗口已空,不能留着背书或点亮后续页。
-    forgetWindowCoverage(sessionId);
-    changed = sessionLiveStreamAcked.delete(sessionId) || changed;
-    changed = streamingAssistantClientIds.delete(sessionId) || changed;
-    changed = pendingLiveAssistantClientIds.delete(sessionId) || changed;
-    // 未落地的流式增量直接丢弃(不 flush):flush 会把正文写回刚清掉的窗口(方案 §6.5)。
-    discardPendingTextDelta(sessionId);
-    if (changed) {
-      bumpMessageVersion();
-      emit();
+    const retention = this.getSessionRetention(sessionId);
+    if (retention === 'schedule') {
+      // 撤销详情驻留权限(方案 §10.1):回收之后,迟到的读取 / 推送 / 流式合批
+      // 全部被各写入点的围栏拦截,不得复活正文。
+      scheduleDetailResidency.delete(sessionId);
+      const changed = reclaimSessionRuntimeMaps(sessionId);
+      if (changed) {
+        bumpMessageVersion();
+        emit();
+      }
+      // 本地完整消息缓存定点清除(方案 §6.3 第 5 步)。deviceId 未知时跳过——
+      // 登出的全量清理(clearCachedSessionMessages)仍兜底。
+      const deviceId = sessionDeviceIndex.get(sessionId);
+      if (deviceId) void cacheSessionMessages(deviceId, sessionId, []).catch(() => undefined);
+      return changed;
     }
-    // 本地完整消息缓存定点清除(方案 §6.3 第 5 步)。deviceId 未知时跳过——
-    // 登出的全量清理(clearCachedSessionMessages)仍兜底。
-    const deviceId = sessionDeviceIndex.get(sessionId);
-    if (deviceId) void cacheSessionMessages(deviceId, sessionId, []).catch(() => undefined);
+    if (retention !== 'regular') return false;
+    let changed = false;
+    if (!regularSessionProtected(sessionId)) {
+      changed = compactRegularSessionMessages(sessionId);
+    }
+    changed = enforceRegularMessageBudget() || changed;
     return changed;
   },
 
@@ -2904,6 +3031,7 @@ export const remoteSessionStore = {
     sessionMakerTurnRunning.clear();
     sessionParkedTaskUpdates.clear();
     scheduleDetailResidency.clear();
+    sessionLastAccessAt.clear();
     sessionDeviceIndex.clear();
     reseedHandlers.clear();
     mergedSessions = [];

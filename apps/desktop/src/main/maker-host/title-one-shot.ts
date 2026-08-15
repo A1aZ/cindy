@@ -247,7 +247,7 @@ export function buildTitleTarget(providerId: string): TitleTarget | null {
       if (!base) return null;
       const model = pickXdTitleModel(provider);
       if (!model) {
-        log.debug('title oneShot skipped: no usable chat model in xd gateway catalog', {
+        log.debug('oneShot skipped: no usable chat model in xd gateway catalog', {
           providerId,
         });
         return null;
@@ -488,7 +488,7 @@ export async function generateTitleViaProviderResult(
   }
 
   if (!providerId) {
-    log.debug('title oneShot skipped: no connected provider', { agentKind: args.agentKind });
+    log.debug('oneShot skipped: no connected provider', { agentKind: args.agentKind });
     return { status: 'failed' };
   }
 
@@ -497,7 +497,7 @@ export async function generateTitleViaProviderResult(
     const status = TITLE_ONE_SHOT_PROVIDER_IDS.has(providerId)
       ? 'failed'
       : 'unsupported-provider';
-    log.debug('title oneShot skipped: no title target', {
+    log.debug('oneShot skipped: no title target', {
       providerId,
       agentKind: args.agentKind,
       status,
@@ -515,7 +515,7 @@ export async function generateTitleViaProviderResult(
     ? titleRouteUnavailableReason(titleCatalogModel, railProvider?.source === 'user')
     : null;
   if (initialUnavailableReason) {
-    log.debug('title oneShot skipped: title model unavailable for new route', {
+    log.debug('oneShot skipped: title model unavailable for new route', {
       providerId,
       model: target.model,
       reason: initialUnavailableReason,
@@ -561,7 +561,7 @@ export async function generateTitleViaProviderResult(
   const canDispatchNow = (stage: string): boolean => {
     const reason = routeUnavailableNow();
     if (!reason) return true;
-    log.debug('title oneShot skipped: route unavailable before dispatch', {
+    log.debug('oneShot skipped: route unavailable before dispatch', {
       providerId,
       model: target.model,
       reason,
@@ -578,7 +578,7 @@ export async function generateTitleViaProviderResult(
       deps.beforeDispatch &&
       !(await deps.beforeDispatch({ sessionId: args.sessionId, agentKind: args.agentKind, providerId }))
     ) {
-      log.debug('title oneShot skipped: pre-dispatch eligibility check failed', {
+      log.debug('oneShot skipped: pre-dispatch eligibility check failed', {
         providerId,
         model: target.model,
         stage,
@@ -598,14 +598,14 @@ export async function generateTitleViaProviderResult(
       case 'anthropic-messages': {
         const oauth = await readAnthropicOAuth();
         if (!oauth?.accessToken) {
-          log.debug('title oneShot skipped: no anthropic OAuth', { providerId });
+          log.debug('oneShot skipped: no anthropic OAuth', { providerId });
           return { status: 'failed' };
         }
         // 紧前复查：readAnthropicOAuth 是异步操作，期间用户可能登出/切换账号/轮换凭证。
         // 重新读取当前凭证并与捕获值比对，不一致则中止，避免向旧账号外发付费调用。
         const oauthRecheck = await readAnthropicOAuth();
         if (oauthRecheck?.accessToken !== oauth.accessToken) {
-          log.debug('title oneShot skipped: credential changed during OAuth read', {
+          log.debug('oneShot skipped: credential changed during OAuth read', {
             providerId,
           });
           return { status: 'failed' };
@@ -621,7 +621,7 @@ export async function generateTitleViaProviderResult(
         // 检查期间的凭证变更，避免向旧账号外发付费调用。
         const oauthPostEligibility = await readAnthropicOAuth();
         if (oauthPostEligibility?.accessToken !== oauth.accessToken) {
-          log.debug('title oneShot skipped: credential changed during eligibility check', {
+          log.debug('oneShot skipped: credential changed during eligibility check', {
             providerId,
           });
           return { status: 'failed' };
@@ -641,7 +641,7 @@ export async function generateTitleViaProviderResult(
       case 'codex-responses': {
         const creds = readCodexCreds();
         if (!creds) {
-          log.debug('title oneShot skipped: no codex creds', { providerId });
+          log.debug('oneShot skipped: no codex creds', { providerId });
           return { status: 'failed' };
         }
         // 紧前复查：readCodexCreds 之后用户可能切换 ChatGPT workspace/账号或轮换 token。
@@ -652,7 +652,7 @@ export async function generateTitleViaProviderResult(
           credsRecheck.accountId !== creds.accountId ||
           credsRecheck.accessToken !== creds.accessToken
         ) {
-          log.debug('title oneShot skipped: credential changed during creds read', {
+          log.debug('oneShot skipped: credential changed during creds read', {
             providerId,
           });
           return { status: 'failed' };
@@ -670,7 +670,7 @@ export async function generateTitleViaProviderResult(
           credsPostEligibility.accountId !== creds.accountId ||
           credsPostEligibility.accessToken !== creds.accessToken
         ) {
-          log.debug('title oneShot skipped: credential changed during eligibility check', {
+          log.debug('oneShot skipped: credential changed during eligibility check', {
             providerId,
           });
           return { status: 'failed' };
@@ -692,13 +692,13 @@ export async function generateTitleViaProviderResult(
       case 'gateway-chat': {
         const key = readGatewayKey();
         if (!key) {
-          log.debug('title oneShot skipped: no gateway key', { providerId });
+          log.debug('oneShot skipped: no gateway key', { providerId });
           return { status: 'failed' };
         }
         // 紧前复查：readGatewayKey 之后用户可能轮换 XD 网关 key。
         // 重新读取并与捕获值比对，不一致则中止。
         if (readGatewayKey() !== key) {
-          log.debug('title oneShot skipped: credential changed during key read', {
+          log.debug('oneShot skipped: credential changed during key read', {
             providerId,
           });
           return { status: 'failed' };
@@ -711,7 +711,7 @@ export async function generateTitleViaProviderResult(
         // 网关 key。在最后一个 await 之后重新读取并比对，捕获 eligibility 检查期间的
         // 凭证变更，避免用旧 key 外发付费调用。
         if (readGatewayKey() !== key) {
-          log.debug('title oneShot skipped: gateway key changed during eligibility check', {
+          log.debug('oneShot skipped: gateway key changed during eligibility check', {
             providerId,
           });
           return { status: 'failed' };
@@ -741,7 +741,7 @@ export async function generateTitleViaProviderResult(
         ? Array.from(normalized).slice(0, maxVisualChars).join('')
         : normalized;
     if (!title) {
-      log.warn('title oneShot rejected invalid model output', {
+      log.warn('oneShot rejected invalid model output', {
         providerId,
         model: target.model,
         wire: target.wire,
@@ -749,7 +749,7 @@ export async function generateTitleViaProviderResult(
       });
       return { status: 'failed' };
     }
-    log.info('title oneShot done', {
+    log.info('oneShot done', {
       providerId,
       model: target.model,
       wire: target.wire,
@@ -758,7 +758,7 @@ export async function generateTitleViaProviderResult(
     });
     return { status: 'ok', title };
   } catch (err) {
-    log.warn('title oneShot failed', {
+    log.warn('oneShot failed', {
       providerId,
       model: target.model,
       wire: target.wire,

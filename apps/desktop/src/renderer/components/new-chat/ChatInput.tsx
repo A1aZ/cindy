@@ -6711,8 +6711,9 @@ export function ChatInput({
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
   const hasVoiceDraftText = voiceInput.draftText.trim().length > 0;
-  // 推荐 overlay 的唯一可见判据:有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 不在语音态。
+  // 推荐 overlay 的可见判据:开关开启 + 有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 不在语音态。
   const showRecommendationOverlay =
+    recommendationEnabled &&
     !!recommendedPrompt &&
     !hasMessage &&
     !hasAttachments &&

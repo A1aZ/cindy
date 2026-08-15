@@ -28,6 +28,7 @@ import {
   createSessionWriteQueue,
 } from '@/session/swipeRowRegistry';
 import { cacheSessionMessages, getCachedSessionMessages } from '@/session/mobileSessionMessageCache';
+import { classifySessionRetention, type SessionRetentionKind } from '@/session/sessionRetention';
 import { contentToPreview } from '@/utils/contentPreview';
 import type { MobileSystemCardType } from '@/session/systemCard';
 import type { InputProjection, PendingInteraction, RemoteMessage, RemoteSession } from '@/session/types';
@@ -103,6 +104,12 @@ interface SessionMessageSyncMarker {
   messageCount: number | null;
   updatedAt: string;
 }
+
+/**
+ * 统一回收入口的调用原因(方案 §8):页面 / 事件层只表达事实,不自拼清理步骤。
+ * 阶段 4 的普通任务预算回收会新增 `'budget'`。
+ */
+export type SessionReclaimReason = 'detail-blur' | 'session-switch' | 'app-background';
 
 export interface SetLatestMessageWindowOptions {
   /**
@@ -2729,6 +2736,62 @@ export const remoteSessionStore = {
     ) return;
     bumpMessageVersion();
     recomputeSessions();
+  },
+
+  /**
+   * 任务的驻留策略分类(方案 §4:创建来源决定、终身不变)。单一分类入口——
+   * 列表、详情页、缓存层不得各自判断。会话行未知(设备 shard 尚未加载 / 已移除)
+   * 时保守返回 `'regular'`,不做任何回收。
+   */
+  getSessionRetention(sessionId: string): SessionRetentionKind {
+    if (!sessionId) return 'regular';
+    return classifySessionRetention(mergedSessions.find((session) => session.id === sessionId));
+  },
+
+  /**
+   * 统一任务运行时回收入口(方案 §8)。调用方(详情页生命周期 / App 后台监听)
+   * 只报告事实(reason),清理步骤集中在这里按分类分派:
+   *
+   * - `'schedule'`:完整消息回收到 0——消息数组、流式中间态、渲染投影、live plan /
+   *   task 投影、同步 marker、覆盖区间、订阅 ACK 记录,并定点清除本地完整消息缓存。
+   *   **保留**通知摘要层:任务目录行、pendingInteractions(含权威位与抑制账本)、
+   *   liveActivity / 运行状态、maker turn 边界、goal 镜像(方案 §7.2)。
+   * - `'regular'`:阶段 1–3 期间为 no-op(当前基线本就无普通任务回收,方案 §9.1);
+   *   阶段 4 在此分派「压回 80 条 + 全局预算」。
+   *
+   * 契约:调用前必须完成安全交接(方案 §6.3 第 3 步)——草稿、outbox、在途上传与
+   * 未确认乐观发送由调用方确认已落定或另行保留;本入口不感知这些独立 Store。
+   * 返回是否实际回收了运行时状态(重复调用返回 false);缓存清除不受返回值影响,
+   * 每次调用都兜底清一次,防页面卸载路径的去抖落盘在回收后把正文写回。
+   */
+  releaseSessionRuntimeState(sessionId: string, options: { reason: SessionReclaimReason }): boolean {
+    if (!sessionId) return false;
+    if (this.getSessionRetention(sessionId) !== 'schedule') return false;
+    let changed = messages.delete(sessionId);
+    changed = livePlanSnapshots.delete(sessionId) || changed;
+    changed = sessionTaskUpdates.delete(sessionId) || changed;
+    changed = sessionParkedTaskUpdates.delete(sessionId) || changed;
+    changed = inputProjections.delete(sessionId) || changed;
+    // 在途 projection 查询的终局围栏:epoch 抬升后 setInputProjectionIfCurrent 全部拒写。
+    bumpInputProjectionAuthorityEpoch(sessionId);
+    changed = sessionMessageSyncMarkers.delete(sessionId) || changed;
+    changed = pendingRefreshSessions.delete(sessionId) || changed;
+    // 连续性结论与订阅 ACK 随消息一起失效:窗口已空,不能留着背书或点亮后续页。
+    forgetWindowCoverage(sessionId);
+    changed = sessionLiveStreamAcked.delete(sessionId) || changed;
+    changed = streamingAssistantClientIds.delete(sessionId) || changed;
+    changed = pendingLiveAssistantClientIds.delete(sessionId) || changed;
+    // 未落地的流式增量直接丢弃(不 flush):flush 会把正文写回刚清掉的窗口(方案 §6.5)。
+    discardPendingTextDelta(sessionId);
+    if (changed) {
+      bumpMessageVersion();
+      emit();
+    }
+    // 本地完整消息缓存定点清除(方案 §6.3 第 5 步)。deviceId 未知时跳过——
+    // 登出的全量清理(clearCachedSessionMessages)仍兜底。
+    const deviceId = sessionDeviceIndex.get(sessionId);
+    if (deviceId) void cacheSessionMessages(deviceId, sessionId, []).catch(() => undefined);
+    return changed;
   },
 
   clear(): void {

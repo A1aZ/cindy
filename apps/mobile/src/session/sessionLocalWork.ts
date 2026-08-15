@@ -20,6 +20,12 @@ export interface SessionLocalWorkSnapshot {
   sendingCount: number;
   settlingCount: number;
   attachmentCount: number;
+  /**
+   * store 侧的排队消息数(inputProjection.pendingQueue,在途发送的排队正文)。
+   * 只参与**签名**(补回收观察者的触发镜像),不参与页面侧 boolean 门禁——
+   * pendingQueue 由回收入口与 store 的 regularSessionProtected 另行检查。
+   */
+  pendingQueueCount?: number;
 }
 
 export function hasSessionLocalWorkSnapshot(snapshot: SessionLocalWorkSnapshot): boolean {
@@ -29,4 +35,23 @@ export function hasSessionLocalWorkSnapshot(snapshot: SessionLocalWorkSnapshot):
     || snapshot.sendingCount > 0
     || snapshot.settlingCount > 0
     || snapshot.attachmentCount > 0;
+}
+
+/**
+ * 在途工作签名的响应式镜像(GPT-5.6 复核第四轮 P1):门禁暂缓回收后,「自动补
+ * 回收」的观察者要能感知**任一**信号的增减——不只旧的 1→0 计数,也包括在途
+ * 上传、send() 同步锁、附件托盘这些新信号(它们可能单独经历 非空→空 的完整
+ * 生命周期而旧计数全程为 0)。签名在 render 时由同步快照构建,变化即重试;
+ * 是否真的补回收由 hasSessionLocalWorkSnapshot 二次判定,签名只负责触发。
+ */
+export function sessionLocalWorkSignature(snapshot: SessionLocalWorkSnapshot): string {
+  return [
+    snapshot.outboxCount,
+    snapshot.pendingUploadCount,
+    snapshot.sendInFlight ? 1 : 0,
+    snapshot.sendingCount,
+    snapshot.settlingCount,
+    snapshot.attachmentCount,
+    snapshot.pendingQueueCount ?? 0,
+  ].join('|');
 }

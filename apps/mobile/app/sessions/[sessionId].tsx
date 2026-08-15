@@ -353,7 +353,11 @@ import {
   type MobileOutboxItem,
   type MobileRecoverableDraftItem,
 } from '@/session/sessionOutbox';
-import { hasSessionLocalWorkSnapshot } from '@/session/sessionLocalWork';
+import {
+  hasSessionLocalWorkSnapshot,
+  sessionLocalWorkSignature,
+  type SessionLocalWorkSnapshot,
+} from '@/session/sessionLocalWork';
 import {
   AT_RESOURCE_QUERY_DEBOUNCE_MS,
   buildComposerPaletteCacheKey,
@@ -4095,8 +4099,8 @@ export default function SessionScreen() {
   getPendingUploadCountRef.current = getPendingUploadCount;
   const sendInFlightGateRef = useRef(sendInFlightRef);
   sendInFlightGateRef.current = sendInFlightRef;
-  /** 本会话此刻是否有在途本地工作——回收入口门禁与 store 探针共用同一份信号清单。 */
-  const hasLocalWorkNow = useCallback(() => hasSessionLocalWorkSnapshot({
+  /** 本会话此刻的在途工作快照——门禁、探针与补回收观察者共用同一读取口径。 */
+  const readSessionLocalWorkSnapshot = useCallback((): SessionLocalWorkSnapshot => ({
     outboxCount: outboxRef.current.length,
     pendingUploadCount: getPendingUploadCountRef.current(),
     sendInFlight: sendInFlightGateRef.current.current,
@@ -4104,6 +4108,11 @@ export default function SessionScreen() {
     settlingCount: settlingQueueItemsRef.current.length,
     attachmentCount: attachmentsRef.current.length,
   }), []);
+  /** 本会话此刻是否有在途本地工作——回收入口门禁与 store 探针共用同一份信号清单。 */
+  const hasLocalWorkNow = useCallback(
+    () => hasSessionLocalWorkSnapshot(readSessionLocalWorkSnapshot()),
+    [readSessionLocalWorkSnapshot],
+  );
   // 会话级在途工作探针(方案 §9.1 保护清单的 store 侧信号,复核 #6):压缩与
   // 全局预算咨询它,栈下层的本会话 outbox / 在途上传(含粘贴占位)/ 发送全流程
   // / 附件托盘不被误回收。经 ref 实时读,注册一次即可。
@@ -4183,23 +4192,23 @@ export default function SessionScreen() {
     remoteSessionStore.revokeScheduleDetailResidency(sessionId);
   }, [maybeReclaimSessionRuntime, sessionId]);
   // 门禁暂缓后的自动补回收(方案 §7.3:保护只影响「能否立即清理」,不让整段
-  // 历史长期驻留):在途工作排空 → 0 且页面已失焦**或已后台**(后台时导航焦点
-  // 不变,只看 focus 会漏)时补一次回收。已知限制:后台断链可能丢失 queue 排空
-  // 的 projection push,store 里残留 stale pendingQueue 会让门禁恒非空——此场景
-  // 等重开该会话(load 拉新 projection 覆盖)后自愈。
-  // 会话目录行缺失(分类未知)时 maybeReclaim 内部按普通任务处置,不会误删摘要层。
-  const scheduleLocalWorkCount = outboxItems.length
-    + sendingQueueClientIds.size
-    + settlingQueueItems.length
-    + inputProjection.pendingQueue.length;
-  const prevScheduleLocalWorkCountRef = useRef(scheduleLocalWorkCount);
+  // 历史长期驻留)。复核第四轮 P1:触发口径从旧四源的 1→0 计数改为**六源签名
+  // 变化**——在途上传(含粘贴占位)、send() 同步锁、附件托盘可能单独走完
+  // 非空→空 的完整生命周期而旧计数全程为 0,prev>0→0 永不成立。签名在 render
+  // 时由同步快照构建(getPendingUploadCount 是最新鲜口径,state commit 走
+  // macrotask 有延迟),任一变化且页面已失焦**或已后台**时重试,由
+  // hasLocalWorkNow 二次判定(工作还在就 no-op)。已知限制:后台断链可能丢失
+  // queue 排空的 projection push,store 里残留 stale pendingQueue 会让门禁恒
+  // 非空——此场景等重开该会话(load 拉新 projection 覆盖)后自愈。
+  const scheduleLocalWorkSig = sessionLocalWorkSignature({
+    ...readSessionLocalWorkSnapshot(),
+    // pendingQueue 是 store 侧信号,不在页面快照里,单独并入签名。
+    pendingQueueCount: inputProjection.pendingQueue.length,
+  });
   useEffect(() => {
-    const prev = prevScheduleLocalWorkCountRef.current;
-    prevScheduleLocalWorkCountRef.current = scheduleLocalWorkCount;
-    if (prev > 0 && scheduleLocalWorkCount === 0 && (!sessionFocusedRef.current || !appStateActiveRef.current)) {
-      maybeReclaimSessionRuntime('detail-blur');
-    }
-  }, [scheduleLocalWorkCount, maybeReclaimSessionRuntime]);
+    if (sessionFocusedRef.current && appStateActiveRef.current) return;
+    maybeReclaimSessionRuntime('detail-blur');
+  }, [scheduleLocalWorkSig, maybeReclaimSessionRuntime]);
 
   // 乐观点亮「加载更早」入口:缓存消息 hydrate 后(messages 已有内容),不等首开那次慢 listMessages(A1,
   // device-link 往返可能数秒)回来,就用已存 session 的 _count.messages 与 in-store 已加载真实条数比较,

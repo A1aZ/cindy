@@ -98,7 +98,7 @@ export const DEVICE_LINK_PUSH = {
    * 同机单持有者仲裁的角色变化。payload: { standby: boolean }。
    * standby=true 表示本机另一个 Cindy 实例正持有 device-link 连接,本实例不连 relay ——
    * 此时远程设备一律显示离线、远程调用一律 DEVICE_LINK_STANDBY,必须让界面说清楚,
-   * 否则用户只能看到"远程功能坏了"。
+   * 否则用户只能看到"远程功能坏了"。本 channel 只描述本机仲裁角色,不进跨端 allowlist。
    */
   OWNERSHIP_CHANGED: 'device-link:ownership-changed',
   /**

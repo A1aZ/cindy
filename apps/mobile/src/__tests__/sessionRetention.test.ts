@@ -541,4 +541,31 @@ describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
     remoteSessionStore.mergeEarlierMessages('sched-1', [message('older', 'sched-1', '2025-12-31T00:00:00.000Z')]);
     expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
   });
+
+  it('字节维度兜底(方案 §9.1 阶段 5):条数不超限但大消息堆积超 64MB 时,LRU 淘汰最冷任务', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      // 8 个任务 × 12 条 × 350K 字符(每条 ≈ 700KB):合计 ≈ 67MB > 64MB,
+      // 总条数 96 远低于 800——只有字节维度会触发。逐任务推进时钟构造 LRU 顺序。
+      const ids = Array.from({ length: 8 }, (_, index) => `big${index}`);
+      remoteSessionStore.setDeviceSessions('dev-1', 'Dev', ids.map((id) => session(id)));
+      const bigContent = 'x'.repeat(350_000);
+      for (const id of ids) {
+        remoteSessionStore.setMessages(id, Array.from({ length: 12 }, (_, index) => ({
+          ...message(`${id}-m${index}`, id, `2026-01-01T00:${String(index).padStart(2, '0')}:00.000Z`),
+          content: bigContent,
+        })));
+        vi.advanceTimersByTime(60_000);
+      }
+      expect(remoteSessionStore.releaseSessionRuntimeState('big0', { reason: 'detail-blur' })).toBe(true);
+      // 67MB - 8.4MB ≈ 59MB ≤ 64MB:只淘汰最冷的 big0,其余保留。
+      expect(remoteSessionStore.getMessages('big0')).toEqual([]);
+      expect(remoteSessionStore.getMessages('big1')).toHaveLength(12);
+      expect(remoteSessionStore.getMessages('big7')).toHaveLength(12);
+      expect(cacheSessionMessagesMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

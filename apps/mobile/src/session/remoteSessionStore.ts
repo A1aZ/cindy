@@ -539,11 +539,41 @@ function scheduleFullMessagesBlocked(sessionId: string): boolean {
 }
 
 /**
- * 普通任务的全局消息预算(方案 §9.1,阶段 4):所有普通任务合计的内存消息条数
- * 软上限,超出按最近访问时间 LRU 回收非保护任务。「约」是软目标——保护任务的
- * 消息照常计入总量但不参与淘汰,实际峰值可以超过该值。
+ * 普通任务的全局消息预算(方案 §9.1,阶段 4/5):双维度软上限——条数 800 与
+ * 估算内存字节数(阶段 5 兜底)。任一超限按最近访问时间 LRU 回收非保护任务。
+ * 「约」是软目标——保护任务的消息照常计入总量但不参与淘汰,实际峰值可超标。
+ *
+ * 为什么条数之外还要字节:消息体积分布极不均匀(一条大 tool 输出可顶上万条
+ * 短消息),device-link 的 push 截断只把单条限制在约 160K 字符(≈320KB,见
+ * dispatch.ts 的 REMOTE_PUSH_TEXT_BUDGET_CHARS),800 条最坏 ≈ 256MB——条数
+ * 预算对病态分布完全不设防。字节上限按移动端 JS 堆的量级取 64MB 兜底:典型
+ * 分布(每条几 KB)下永不触发,只在病态分布下淘汰。
  */
 const REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET = 800;
+const REGULAR_SESSION_GLOBAL_MESSAGE_BYTES_BUDGET = 64 * 1024 * 1024;
+
+/**
+ * 每消息估算字节的缓存(阶段 5):key 是消息对象本身。RemoteMessage 是不可变
+ * 替换的(更新 = 铸新对象),每个版本只估算一次,旧对象随消息数组一起被 GC。
+ * 估算口径:UTF-16 字符 × 2 字节 + 固定结构开销常数——只求量级正确,不求精确。
+ */
+const messageBytesEstimates = new WeakMap<RemoteMessage, number>();
+const MESSAGE_STRUCTURAL_BYTES_ESTIMATE = 512;
+
+function estimateMessageBytes(message: RemoteMessage): number {
+  const cached = messageBytesEstimates.get(message);
+  if (cached !== undefined) return cached;
+  let bytes = MESSAGE_STRUCTURAL_BYTES_ESTIMATE;
+  const content = message.content;
+  if (typeof content === 'string') {
+    bytes += content.length * 2;
+  } else if (content != null) {
+    bytes += safeStableStringify(content).length * 2;
+  }
+  if (message.agentMeta) bytes += safeStableStringify(message.agentMeta).length * 2;
+  messageBytesEstimates.set(message, bytes);
+  return bytes;
+}
 
 /**
  * 每会话最近访问时间(LRU 依据):详情打开(grant)与消息写入时刷新。只服务普通
@@ -622,35 +652,47 @@ function compactRegularSessionMessages(sessionId: string): boolean {
 }
 
 /**
- * 普通任务全局预算(方案 §9.1,阶段 4):合计超过约 800 条时,按最近访问时间从
- * 最冷端整窗回收非保护任务的消息(磁盘缓存保留,重开可 hydrate)。保护任务与
- * 当前打开(驻留中)的任务计入总量但不淘汰。只在统一入口的调用时机执行,不引入
- * 定时器或周期扫描。
+ * 普通任务全局预算(方案 §9.1,阶段 4/5):条数或估算字节任一超限,按最近访问
+ * 时间从最冷端整窗回收非保护任务的消息(磁盘缓存保留,重开可 hydrate)。保护
+ * 任务与当前打开(驻留中)的任务计入总量但不淘汰。只在统一入口的调用时机执行,
+ * 不引入定时器或周期扫描。字节维度只在病态分布(大 tool 输出堆积)下兜底,
+ * 典型分布下条数预算先触顶。
  */
 function enforceRegularMessageBudget(): boolean {
-  let total = 0;
+  let totalCount = 0;
+  let totalBytes = 0;
   let hasCandidates = false;
-  const candidates: Array<{ sessionId: string; count: number; at: number }> = [];
+  const candidates: Array<{ sessionId: string; count: number; bytes: number; at: number }> = [];
   for (const [sessionId, list] of messages) {
     if (!sessionLastAccessAt.has(sessionId)) sessionLastAccessAt.set(sessionId, Date.now());
     if (list.length === 0) continue;
     if (classifySessionRetention(mergedSessions.find((session) => session.id === sessionId)) === 'schedule') {
       continue;
     }
-    total += list.length;
+    let sessionBytes = 0;
+    for (const message of list) sessionBytes += estimateMessageBytes(message);
+    totalCount += list.length;
+    totalBytes += sessionBytes;
     if (scheduleDetailResidency.has(sessionId) || regularSessionProtected(sessionId)) continue;
-    candidates.push({ sessionId, count: list.length, at: sessionLastAccessAt.get(sessionId) ?? 0 });
+    candidates.push({ sessionId, count: list.length, bytes: sessionBytes, at: sessionLastAccessAt.get(sessionId) ?? 0 });
     hasCandidates = true;
   }
-  if (!hasCandidates || total <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET) return false;
+  if (
+    !hasCandidates
+    || (totalCount <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET && totalBytes <= REGULAR_SESSION_GLOBAL_MESSAGE_BYTES_BUDGET)
+  ) return false;
   candidates.sort((a, b) => a.at - b.at);
   let changed = false;
   for (const candidate of candidates) {
-    if (total <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET) break;
+    if (
+      totalCount <= REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET
+      && totalBytes <= REGULAR_SESSION_GLOBAL_MESSAGE_BYTES_BUDGET
+    ) break;
     // maps 已空(并发清理过)也无妨:记账按进入本轮时的条数扣减,继续下一个候选。
     reclaimSessionRuntimeMaps(candidate.sessionId);
     changed = true;
-    total -= candidate.count;
+    totalCount -= candidate.count;
+    totalBytes -= candidate.bytes;
   }
   if (changed) {
     bumpMessageVersion();

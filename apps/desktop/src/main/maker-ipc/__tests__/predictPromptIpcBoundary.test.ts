@@ -374,39 +374,31 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果' });
   });
 
-  it('同一 session 新 turn(DB userSendAt 变化)的预测可以替换旧条目的进行中请求', async () => {
+  it('同一 session 新 turn(DB userSendAt 变化)时若旧请求仍在途则拒绝,避免 userSendAt 提前推进导致去重碰撞', async () => {
     let resolveFirst!: (value: string) => void;
-    let resolveSecond!: (value: string) => void;
-    h.predict
-      .mockImplementationOnce(
-        () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
-      )
-      .mockImplementationOnce(
-        () => new Promise<string>((resolve) => { resolveSecond = resolve; }),
-      );
+    h.predict.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+    );
 
     // 发起 userSendAt=1 的预测并暂挂
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 1 };
     const first = invokePredict(VALID_REQUEST);
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 同一 session DB userSendAt 变为 2(新 turn),应能通过(替换旧条目)
+    // 同一 session,DB userSendAt 变为 2(新 turn),但旧预测仍在途,
+    // 使用独立请求计数器去重,应被拒绝(避免 userSendAt 提前推进引发碰撞)
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 2 };
     const second = invokePredict(VALID_REQUEST);
-    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(2));
+    await expect(second).resolves.toEqual({ prompt: null });
 
-    // 旧预测完成,因 userSendAt 不匹配,不应删除去重条目
+    // 旧预测完成,去重条目清除
     resolveFirst('旧轮预测');
     await expect(first).resolves.toEqual({ prompt: '旧轮预测' });
 
-    // 新预测仍在途,去重条目应仍为 userSendAt=2
+    // 新 turn 的预测请求现在可以接受(去重条目已清除)
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 2 };
     const third = invokePredict(VALID_REQUEST);
-    await expect(third).resolves.toEqual({ prompt: null });
-
-    // 新预测完成
-    resolveSecond('新轮预测');
-    await expect(second).resolves.toEqual({ prompt: '新轮预测' });
+    await expect(third).resolves.toEqual({ prompt: '下一步做什么' });
   });
 
   it('不同 session 可以并发预测', async () => {

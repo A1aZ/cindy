@@ -347,7 +347,7 @@ const PREDICTION_RECENT_MESSAGE_LIMIT = 6;
 /** 预测请求:仅 sessionId + agentKind + turnGen。素材(messages / workingDir)一律由 main 从 DB 读取,
  * 不信任 renderer 上报内容——受信 renderer 或 stale UI 可能携带其它会话转写 / 伪造 workdir,
  * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于 IPC 参数校验与 renderer 侧去重;
- * 主进程级去重使用 DB 的权威 userSendAt(见 _predictingPromptSessions)。 */
+ * 主进程级去重使用独立的请求计数器(见 _predictingPromptSessions)。 */
 interface PredictPromptRequest {
   sessionId: string;
   agentKind: AgentKind;
@@ -355,14 +355,14 @@ interface PredictPromptRequest {
 }
 
 /** 主进程级去重:同一 session 同时只能有一笔预测在途,
- * 避免多窗口重复付费调用。与 renderer 侧 _predictingSessions 同模式:
- * Map<sessionId, userSendAt(DB 权威值)>——新 turn 的 DB userSendAt 变化时替换旧条目。
- * 使用 DB 的权威 userSendAt 而非 renderer 的局部 turnGen:同一 session 的
- * 任意窗口都读到相同的 DB 记录,避免跨窗口代次顺序失真。
- * 选 userSendAt 而非 updatedAt:updatedAt 会因非 turn 更新(agent 切换、标题变更等)
- * 而改变,导致去重键失真——非 turn 更新允许重复请求,或新 turn 被当作重复请求拒绝。
- * userSendAt 仅由「用户按下发送」bump,不受非 turn 更新干扰,是更可靠的轮次标识。 */
+ * 避免多窗口重复付费调用。使用独立的请求计数器(而非 userSendAt)作为去重键:
+ * 每个预测请求获得唯一递增的 requestId;Map 中已存在同 session 条目时直接拒绝。
+ * 不以 userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
+ * userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测请求
+ * 读取到相同的 userSendAt,下一 turn 的预测被误判为重复而拒绝。
+ * 清理时通过 requestId 比对确保只删除自身条目,不误删后续请求的去重保护。 */
 const _predictingPromptSessions = new Map<string, number>();
+let _predictingPromptRequestId = 0;
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -483,22 +483,19 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。使用 DB 的权威 userSendAt 而非
-      // renderer 的局部 turnGen 作为去重键:同一 session 的任意窗口都读到相同的 DB
-      // 记录,避免跨窗口代次顺序失真。若 DB 的 userSendAt 未变(同一轮),拒绝重复请求;
-      // 若 userSendAt 已变(新轮),允许新请求替换旧条目。
-      // 选 userSendAt 而非 updatedAt:updatedAt 会因非 turn 更新(agent 切换、标题变更等)
-      // 而改变,导致去重键失真——非 turn 更新允许重复请求,或新 turn 被当作重复请求拒绝。
-      // userSendAt 仅由「用户按下发送」bump,不受非 turn 更新干扰,是更可靠的轮次标识。
-      const existingUserSendAt = _predictingPromptSessions.get(sessionId);
-      if (existingUserSendAt != null && sessionRow.userSendAt === existingUserSendAt) {
+      // 等多窗口场景下重复触发付费 provider 调用。使用独立的请求计数器而非
+      // userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
+      // userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测
+      // 读取到相同的 userSendAt,下一 turn 的预测被误判为重复。
+      if (_predictingPromptSessions.has(sessionId)) {
         return { prompt: null };
       }
       // userSendAt 为 NULL 表示从未发过消息(草稿会话),不应触发预测。
       if (sessionRow.userSendAt == null) {
         return { prompt: null };
       }
-      _predictingPromptSessions.set(sessionId, sessionRow.userSendAt);
+      const thisRequestId = ++_predictingPromptRequestId;
+      _predictingPromptSessions.set(sessionId, thisRequestId);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -559,9 +556,9 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           }),
         };
       } finally {
-        // 仅在 Map 条目仍为请求时刻的 userSendAt 时才删除,防止旧轮预测结束时
-        // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
-        if (_predictingPromptSessions.get(sessionId) === sessionRow.userSendAt) {
+        // 仅在 Map 条目仍为本次请求的 requestId 时才删除,防止旧请求结束时
+        // 清除后续请求的去重保护(与 renderer 侧 _predictingSessions 同模式)。
+        if (_predictingPromptSessions.get(sessionId) === thisRequestId) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

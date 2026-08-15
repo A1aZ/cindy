@@ -4095,6 +4095,9 @@ export default function SessionScreen() {
   useFocusEffect(
     useCallback(() => {
       sessionFocusedRef.current = true;
+      // 驻留权限与焦点同步授予(方案 §10.1):schedule 会话的完整消息写入围栏放行,
+      // 首开 / 重开的 listMessages 响应才能落库。普通会话授了也无感。
+      remoteSessionStore.grantScheduleDetailResidency(sessionId);
       if (scheduleReclaimedRef.current) {
         scheduleReclaimedRef.current = false;
         void loadRef.current();
@@ -4103,7 +4106,7 @@ export default function SessionScreen() {
         sessionFocusedRef.current = false;
         maybeReclaimScheduleRuntime('detail-blur');
       };
-    }, [maybeReclaimScheduleRuntime]),
+    }, [maybeReclaimScheduleRuntime, sessionId]),
   );
   // App 切后台按「已不可见」处理;回前台补 load。与已读回执的 AppState 门槛
   // 同构(见上方 appStateActive 注释:锁屏 / 切后台 useFocusEffect cleanup 不跑)。
@@ -4117,6 +4120,9 @@ export default function SessionScreen() {
         // 本屏在栈下层(导航未聚焦)时不补 load:给失焦的 schedule 任务重新拉全文
         // 等于把刚回收的正文复活。留给用户导航回来时的 focus setup 补载。
         if (!sessionFocusedRef.current) return;
+        // 回前台时导航焦点未变,focus setup 不会重跑——驻留权限在后台回收时已被
+        // 撤销,必须先重新授予,否则这次补载会被写入围栏拦成空屏。
+        remoteSessionStore.grantScheduleDetailResidency(sessionId);
         scheduleReclaimedRef.current = false;
         void loadRef.current();
       }
@@ -4124,9 +4130,12 @@ export default function SessionScreen() {
     return () => subscription.remove();
   }, [maybeReclaimScheduleRuntime]);
   // 原地切会话(实例复用,不触发失焦)与卸载兜底:cleanup 闭包持旧 sessionId。
+  // 撤销驻留权限放在 maybeReclaim 之后:回收路径自己会撤;回收被在途工作暂缓时
+  // 也要撤——页面已离场,后续推送按「非当前详情」处置,不给该任务再灌正文。
   useEffect(() => () => {
     maybeReclaimScheduleRuntime('session-switch');
-  }, [maybeReclaimScheduleRuntime]);
+    remoteSessionStore.revokeScheduleDetailResidency(sessionId);
+  }, [maybeReclaimScheduleRuntime, sessionId]);
   // 门禁暂缓后的自动补回收(方案 §7.3:保护只影响「能否立即清理」,不让整段
   // 历史长期驻留):在途工作排空 → 0 且页面已失焦(或已后台)时补一次回收。
   // 会话目录行缺失(分类未知)时 maybeReclaim 内部保守 no-op,这里不会误伤。

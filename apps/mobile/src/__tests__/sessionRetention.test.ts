@@ -108,6 +108,8 @@ describe('remoteSessionStore.releaseSessionRuntimeState(统一回收入口,方�
       session('sched-1', { source: 'scheduler' }),
       session('normal-1'),
     ]);
+    // 与真实页面流程一致:详情打开(grant)→ listMessages 落库 → 失焦回收。
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
     remoteSessionStore.setMessages('sched-1', [
       message('m1', 'sched-1', '2026-01-01T00:00:01.000Z'),
       message('m2', 'sched-1', '2026-01-01T00:00:02.000Z'),
@@ -235,5 +237,118 @@ describe('schedule 任务消息缓存门禁(方案 §6.2/§9.2,阶段 2)', () =>
     ]);
     remoteSessionStore.hydrateMessagesIfEmpty('sched-1', [message('c1', 'sched-1')]);
     expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+});
+
+describe('schedule 详情驻留权限与写入围栏(方案 §10.1,阶段 3)', () => {
+  function seed(): void {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+      session('normal-1'),
+    ]);
+  }
+
+  it('从未打开过的 schedule 任务(无驻留权限)不接收订阅推送正文(方案 §6.1)', () => {
+    seed();
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:messages:created', {
+      sessionId: 'sched-1',
+      message: message('m1', 'sched-1'),
+    });
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+
+  it('驻留期内写入放行;回收撤权后,迟到的读取响应 / 推送 / 合并全部被拦', () => {
+    seed();
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.setMessages('sched-1', [message('m1', 'sched-1')]);
+    expect(remoteSessionStore.getMessages('sched-1')).toHaveLength(1);
+    remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    remoteSessionStore.setLatestMessageWindow('sched-1', [message('m2', 'sched-1')]);
+    remoteSessionStore.setMessages('sched-1', [message('m3', 'sched-1')]);
+    remoteSessionStore.mergeMessages('sched-1', [message('m4', 'sched-1')]);
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:messages:created', {
+      sessionId: 'sched-1',
+      message: message('m5', 'sched-1'),
+    });
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+
+  it('重新 grant 后写入恢复(重新打开详情,方案 §6.6)', () => {
+    seed();
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    remoteSessionStore.revokeScheduleDetailResidency('sched-1');
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.setMessages('sched-1', [message('m1', 'sched-1')]);
+    expect(remoteSessionStore.getMessages('sched-1')).toHaveLength(1);
+  });
+
+  it('非驻留 schedule 的流式事件不产生正文与合批队列,但 status / 终态仍更新运行摘要', () => {
+    seed();
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'sched-1',
+      event: { type: 'text', data: { text: '后台运行的输出', isFinal: false } },
+    });
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'sched-1',
+      event: { type: 'status', data: { isRunning: true, status: 'thinking' } },
+    });
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+    expect(remoteSessionStore.getSessionRunStatus('sched-1').isRunning).toBe(true);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'sched-1',
+      event: { type: 'done', data: {} },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('sched-1').isRunning).toBe(false);
+  });
+
+  it('非驻留 schedule 的 agent_task_update / compact_boundary 不登记投影', () => {
+    seed();
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'sched-1',
+      event: {
+        type: 'agent_task_update',
+        source: 'claude-code',
+        data: { taskId: 't1', status: 'running', title: 't1' },
+      },
+    });
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'sched-1',
+      event: { type: 'compact_boundary', data: { boundaryId: 'b1' } },
+    });
+    expect(remoteSessionStore.getSessionTaskUpdates('sched-1').size).toBe(0);
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+
+  it('输入投影 push 对非驻留 schedule 被拦;epoch 守卫路径(setInputProjectionIfCurrent)行为不变', () => {
+    seed();
+    remoteSessionStore.setInputProjection('sched-1', {
+      sessionId: 'sched-1',
+      pendingQueue: [],
+    });
+    expect(remoteSessionStore.getInputProjection('sched-1').pendingQueue).toHaveLength(0);
+    const epoch = remoteSessionStore.captureInputProjectionAuthorityEpoch('sched-1');
+    expect(
+      remoteSessionStore.setInputProjectionIfCurrent('sched-1', { sessionId: 'sched-1' }, epoch),
+    ).toBe(true);
+  });
+
+  it('pendingInteractions 属摘要层,非驻照常应用(方案 §6.5/§7.2)', () => {
+    seed();
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:interaction-request', {
+      sessionId: 'sched-1',
+      request: { kind: 'permission', requestId: 'r1' },
+    });
+    expect(remoteSessionStore.getPendingInteractions('sched-1')).toHaveLength(1);
+  });
+
+  it('普通任务不受围栏影响:无任何 grant 也照常写入', () => {
+    seed();
+    remoteSessionStore.setMessages('normal-1', [message('n1', 'normal-1')]);
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:messages:created', {
+      sessionId: 'normal-1',
+      message: message('n2', 'normal-1'),
+    });
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(2);
   });
 });

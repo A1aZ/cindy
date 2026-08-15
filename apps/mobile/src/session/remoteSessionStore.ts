@@ -517,6 +517,26 @@ const emptyMessages: RemoteMessage[] = [];
 const emptyPendingInteractions: PendingInteraction[] = [];
 const EMPTY_TASK_UPDATES: ReadonlyMap<string, AgentTaskUpdate> = new Map();
 
+/**
+ * schedule 详情驻留权限(方案 §10.1):完整消息只在该任务详情页当前打开期间驻留。
+ * 页面获得焦点时 grant,失焦回收 / 切换任务 / 卸载 / 设备移除时 revoke;回收
+ * (releaseSessionRuntimeState)本身也会撤销。撤销后,迟到的读取响应、缓存 hydrate、
+ * 订阅推送与流式合批都不得把完整正文写回(下述各写入点的围栏);运行状态、
+ * liveActivity、pending interaction 等通知摘要层不受围栏影响(方案 §6.5)。
+ * 普通任务不查这张表——围栏只对 schedule 分类生效。
+ */
+const scheduleDetailResidency = new Set<string>();
+
+/**
+ * 该会话的 schedule 完整消息写入是否被围栏拦截:分类为 schedule 且当前没有详情
+ * 驻留权限时为 true。会话行未知(目录未加载)按普通任务放行——保守方向是
+ * 「多驻留」,绝不因围栏误挡普通会话的首开加载。
+ */
+function scheduleFullMessagesBlocked(sessionId: string): boolean {
+  if (!sessionId || scheduleDetailResidency.has(sessionId)) return false;
+  return classifySessionRetention(mergedSessions.find((session) => session.id === sessionId)) === 'schedule';
+}
+
 let mergedSessions: RemoteSession[] = [];
 let messageVersion = 0;
 let storeVersion = 0;
@@ -718,6 +738,9 @@ function applyLivePlanToolUseMessage(
   event: Record<string, unknown>,
   persistId?: string,
 ): LivePlanToolUseResult {
+  // 围栏:live plan 快照属于详情投影,非驻留 schedule 不登记(rememberLivePlanSnapshot
+  // 会随消息路径一起复活投影)。handled:true 让 update_plan 分支就此收住。
+  if (scheduleFullMessagesBlocked(sessionId)) return { handled: true, changed: false };
   const data = isRecord(event.data) ? event.data : {};
   if (readString(data, 'toolName') !== 'update_plan') return { handled: false, changed: false };
 
@@ -1027,6 +1050,8 @@ function applyRemoteTextEvent(
   event: Record<string, unknown>,
   persistId?: string,
 ): boolean {
+  // 围栏(方案 §6.5):非当前详情的 schedule 任务不保留流式全文。
+  if (scheduleFullMessagesBlocked(sessionId)) return false;
   const data = isRecord(event.data) ? event.data : null;
   const text = typeof data?.text === 'string' ? data.text : '';
   const isFinal = data?.isFinal === true;
@@ -1097,6 +1122,9 @@ function enqueueRemoteTextDelta(
   event: Record<string, unknown>,
   persistId?: string,
 ): boolean {
+  // 围栏(方案 §6.5):非驻留 schedule 的增量连合批队列都不进,防止 32ms 定时器
+  // 把已回收任务的正文重新灌回。
+  if (scheduleFullMessagesBlocked(sessionId)) return false;
   const data = isRecord(event.data) ? event.data : null;
   const text = typeof data?.text === 'string' ? data.text : '';
   if (!text) return false;
@@ -1433,6 +1461,8 @@ export const remoteSessionStore = {
   },
 
   setMessages(sessionId: string, list: readonly RemoteMessage[]): void {
+    // 围栏(方案 §10.1):已回收的 schedule 任务,迟到的整窗替换不得复活正文。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     const textFlushed = flushPendingTextDelta(sessionId);
     const next = normalizeMessages(list);
     // 记账在相等早退**之前**:这一页是服务端一次给出的连续段,它带来的连续性结论与"窗口内容有没有
@@ -1478,6 +1508,8 @@ export const remoteSessionStore = {
     list: readonly RemoteMessage[],
     options: SetLatestMessageWindowOptions = {},
   ): void {
+    // 围栏(方案 §10.1):迟到的最新窗口同步(requestSync 在途响应)不得写回已回收任务。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     const textFlushed = flushPendingTextDelta(sessionId);
     const latestWindow = normalizeMessages(list);
     if (latestWindow.length === 0) {
@@ -1649,6 +1681,8 @@ export const remoteSessionStore = {
   },
 
   mergeMessages(sessionId: string, list: readonly RemoteMessage[]): void {
+    // 围栏(方案 §10.1):空洞补齐 / 对账合并的迟到结果不得写回已回收任务。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     const textFlushed = flushPendingTextDelta(sessionId);
     const byKey = new Map<string, RemoteMessage>();
     for (const item of messages.get(sessionId) ?? []) {
@@ -1691,6 +1725,8 @@ export const remoteSessionStore = {
    * 只有真正沿窗口最旧端连续翻页的调用方可以用它;补内部空洞请继续用 `mergeMessages`。
    */
   mergeEarlierMessages(sessionId: string, list: readonly RemoteMessage[]): void {
+    // 围栏同 mergeMessages:同时挡住 coverEarlierPage 给已回收任务登记覆盖区间。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     // 合并前窗口的最旧行 = 这一页接上的那一行,尚无结论时它就是区间上界(见 coverEarlierPage)。
     const joinsAt = oldestCreatedAt(messages.get(sessionId) ?? emptyMessages);
     this.mergeMessages(sessionId, list);
@@ -1699,6 +1735,10 @@ export const remoteSessionStore = {
   },
 
   appendMessage(sessionId: string, message: RemoteMessage): void {
+    // 围栏(方案 §10.1/§6.5):非当前详情的 schedule 任务,订阅推送 / 本地追加
+    // 不得把完整正文灌回 Store。驻留期内(详情打开中)不拦——乐观发送与本地系统卡
+    // 都走这里。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     let changed = flushPendingTextDelta(sessionId);
     changed = upsertMessage(sessionId, overlayLivePlanSnapshot(sessionId, message)) || changed;
     // 订阅内到达的实时行可以把覆盖区间的上界往后推;断流后收到的不行(见 liveTailTrusted)。
@@ -1876,6 +1916,9 @@ export const remoteSessionStore = {
   },
 
   setInputProjection(sessionId: string, projection: unknown): void {
+    // 围栏(方案 §7.1):输入投影属于仅详情可见的运行态,非驻留 schedule 不接受
+    // push 复活(epoch 守卫的 setInputProjectionIfCurrent 自带拒写,不受影响)。
+    if (scheduleFullMessagesBlocked(sessionId)) return;
     const next = normalizeInputProjection(projection, sessionId);
     bumpInputProjectionAuthorityEpoch(sessionId);
     commitInputProjection(sessionId, next);
@@ -2545,6 +2588,11 @@ export const remoteSessionStore = {
       return;
     }
     if (type === 'agent_task_update') {
+      // 围栏(方案 §7.1):task 投影属于详情运行态,非驻留 schedule 不登记。
+      if (scheduleFullMessagesBlocked(sessionId)) {
+        if (textFlushed || reconnectCleared) emit();
+        return;
+      }
       const rawSource = readString(event, 'source');
       const source = rawSource === 'codex' || rawSource === 'claude-code' || rawSource === 'pi'
         ? rawSource
@@ -2564,6 +2612,11 @@ export const remoteSessionStore = {
       return;
     }
     if (type === 'compact_boundary') {
+      // 围栏:压缩边界卡是本地合成行,非驻留 schedule 不追加。
+      if (scheduleFullMessagesBlocked(sessionId)) {
+        if (textFlushed || reconnectCleared) emit();
+        return;
+      }
       const data = isRecord(event.data) ? event.data : {};
       const boundaryId = readString(data, 'boundaryId');
       // 新 producer 都会给 provider boundaryId；兼容旧事件时以完整 data 的 canonical
@@ -2725,6 +2778,7 @@ export const remoteSessionStore = {
         pendingLiveAssistantClientIds.delete(sessionId);
         sessionMakerTurnRunning.delete(sessionId);
         sessionParkedTaskUpdates.delete(sessionId);
+        scheduleDetailResidency.delete(sessionId);
         sessionDeviceIndex.delete(sessionId);
         // revision 下限按会话回收:它不参与单轮快照回收(那会把覆盖权还给晚到的
         // 旧快照),所以只能在会话本身消失时清,保持有界。
@@ -2756,6 +2810,20 @@ export const remoteSessionStore = {
   },
 
   /**
+   * 授予 / 撤销 schedule 详情驻留权限(方案 §10.1)。详情页获得焦点时 grant
+   * (任意会话都授——围栏只对 schedule 分类生效,普通任务不受影响);切换任务、
+   * 卸载时 revoke,失焦回收也会撤销。grant 后该 schedule 会话的完整消息写入
+   * 放行,撤销后全部被围栏拦截。
+   */
+  grantScheduleDetailResidency(sessionId: string): void {
+    if (sessionId) scheduleDetailResidency.add(sessionId);
+  },
+
+  revokeScheduleDetailResidency(sessionId: string): void {
+    if (sessionId) scheduleDetailResidency.delete(sessionId);
+  },
+
+  /**
    * 统一任务运行时回收入口(方案 §8)。调用方(详情页生命周期 / App 后台监听)
    * 只报告事实(reason),清理步骤集中在这里按分类分派:
    *
@@ -2774,6 +2842,9 @@ export const remoteSessionStore = {
   releaseSessionRuntimeState(sessionId: string, options: { reason: SessionReclaimReason }): boolean {
     if (!sessionId) return false;
     if (this.getSessionRetention(sessionId) !== 'schedule') return false;
+    // 撤销详情驻留权限(方案 §10.1):回收之后,迟到的读取 / 推送 / 流式合批
+    // 全部被各写入点的围栏拦截,不得复活正文。
+    scheduleDetailResidency.delete(sessionId);
     let changed = messages.delete(sessionId);
     changed = livePlanSnapshots.delete(sessionId) || changed;
     changed = sessionTaskUpdates.delete(sessionId) || changed;
@@ -2832,6 +2903,7 @@ export const remoteSessionStore = {
     clearTextDeltaFlushTimer();
     sessionMakerTurnRunning.clear();
     sessionParkedTaskUpdates.clear();
+    scheduleDetailResidency.clear();
     sessionDeviceIndex.clear();
     reseedHandlers.clear();
     mergedSessions = [];

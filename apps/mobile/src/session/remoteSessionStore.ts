@@ -1452,6 +1452,13 @@ export const remoteSessionStore = {
   // 「if empty」是关键不变量——fresh 数据若已先到则不覆盖;fresh 之后到也会按 messageKey 对账替换。
   hydrateMessagesIfEmpty(sessionId: string, list: readonly RemoteMessage[]): void {
     const textFlushed = flushPendingTextDelta(sessionId);
+    // schedule 任务不从长期消息缓存 hydrate 完整正文(方案 §6.2):列表只消费通知摘要,
+    // 详情打开时从工作设备读最新窗口。旧版本遗留缓存在识别点定点清除,不在这里种入。
+    // 门禁放 store 层(而非 hook):回收后的迟到缓存 promise 也走这里,天然被挡住。
+    if (this.getSessionRetention(sessionId) === 'schedule') {
+      if (textFlushed) emit();
+      return;
+    }
     if ((messages.get(sessionId)?.length ?? 0) > 0) {
       if (textFlushed) emit();
       return;
@@ -3340,6 +3347,13 @@ function useSessionMessageCacheSync(
   // 乐观 hydrate:每个 (deviceId, sessionId) 只跑一次;缓存回来时若 store 仍为空才种入。
   useEffect(() => {
     if (!deviceId || !sessionId) return;
+    // schedule 任务跳过完整消息缓存的读与写(方案 §9.2):详情从工作设备按需加载,
+    // 失焦回收到 0。识别为 schedule 的那一刻顺带定点清除旧版本遗留缓存(惰性清理,
+    // 不做一次性迁移;登出全量清理仍兜底)。
+    if (remoteSessionStore.getSessionRetention(sessionId) === 'schedule') {
+      void cacheSessionMessages(deviceId, sessionId, []).catch(() => undefined);
+      return;
+    }
     const key = `${deviceId}::${sessionId}`;
     if (hydratedKeyRef.current === key) return;
     hydratedKeyRef.current = key;
@@ -3364,6 +3378,9 @@ function useSessionMessageCacheSync(
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = null;
     if (!deviceId || !sessionId) return;
+    // schedule 任务不写长期完整消息缓存(方案 §9.2);分类用实时查询,会话行后到
+    // (深链先于目录)也能在首拍之后挡住,不产生新缓存。
+    if (remoteSessionStore.getSessionRetention(sessionId) === 'schedule') return;
     const key = `${deviceId}::${sessionId}`;
     if (messages.length === 0) {
       if (hydrationReadyKeyRef.current !== key) return;
@@ -3379,12 +3396,14 @@ function useSessionMessageCacheSync(
   }, [deviceId, sessionId, messages]);
 
   // 卸载时把尚未落盘的最新快照立即 flush(防止快速返回导致最后一次更新丢失)。
+  // schedule 会话同样跳过:卸载伴随失焦回收,此处再写回等于把刚清掉的缓存复活。
   useEffect(() => () => {
     if (!persistTimerRef.current) return;
     clearTimeout(persistTimerRef.current);
     persistTimerRef.current = null;
     const ctx = ctxRef.current;
     if (!ctx.deviceId || !ctx.sessionId || ctx.messages.length === 0) return;
+    if (remoteSessionStore.getSessionRetention(ctx.sessionId) === 'schedule') return;
     void cacheSessionMessages(ctx.deviceId, ctx.sessionId, ctx.messages).catch(() => undefined);
   }, []);
 }

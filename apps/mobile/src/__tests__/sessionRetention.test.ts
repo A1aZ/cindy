@@ -210,3 +210,30 @@ describe('remoteSessionStore.releaseSessionRuntimeState(统一回收入口,方�
     }
   });
 });
+
+describe('schedule 任务消息缓存门禁(方案 §6.2/§9.2,阶段 2)', () => {
+  it('schedule 任务不从长期缓存 hydrate 完整正文:回收后迟到的缓存 promise 也被挡住', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+      session('normal-1'),
+    ]);
+    // 详情失焦回收后,冷开缓存的 promise 才落定(useSessionMessageCacheSync 的常态竞态)。
+    remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    remoteSessionStore.hydrateMessagesIfEmpty('sched-1', [message('c1', 'sched-1')]);
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+
+  it('普通任务保持既有 hydrate 行为:空会话种入缓存预览', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [session('normal-1')]);
+    remoteSessionStore.hydrateMessagesIfEmpty('normal-1', [message('c1', 'normal-1')]);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(1);
+  });
+
+  it('schedule 任务未回收时同样不 hydrate(识别即跳过,不依赖先发生回收)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+    ]);
+    remoteSessionStore.hydrateMessagesIfEmpty('sched-1', [message('c1', 'sched-1')]);
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+});

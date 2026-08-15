@@ -494,6 +494,7 @@ import {
   sessionMetaWriteQueue,
   sessionPendingWrites,
   type RemoteSessionRunStatus,
+  type SessionReclaimReason,
   useRemoteSessions,
   useSessionGoalStatus,
   useSessionInputProjection,
@@ -4059,6 +4060,88 @@ export default function SessionScreen() {
       void unsubscribe(`session:${sessionId}`, deviceId, ['sessions', `session:${sessionId}`]).catch(() => undefined);
     };
   }, [deviceId, load, sessionId, unsubscribe]);
+
+  // ===== schedule 任务激进回收接线(方案 §6.3/§6.4/§8) =====
+  // 页面层只报告事实(失焦 / 切任务 / App 后台),清理统一走
+  // remoteSessionStore.releaseSessionRuntimeState。回调刻意只依赖 sessionId:
+  // 门禁输入全部经 ref / store 实时读取,避免 useFocusEffect 因依赖变化重注册时
+  // 把「依赖更新」误当成「失焦」触发一次假回收。
+  const sendingQueueClientIdsRef = useRef(sendingQueueClientIds);
+  sendingQueueClientIdsRef.current = sendingQueueClientIds;
+  const settlingQueueItemsRef = useRef(settlingQueueItems);
+  settlingQueueItemsRef.current = settlingQueueItems;
+  const sessionFocusedRef = useRef(true);
+  // 本页驻留期间已回收过 schedule 正文:重新获得焦点 / 回前台时据此补一次 load,
+  // 让详情从工作设备重读最新窗口(方案 §6.6),而不是展示已被回收的空窗。
+  const scheduleReclaimedRef = useRef(false);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const maybeReclaimScheduleRuntime = useCallback((reason: SessionReclaimReason) => {
+    if (!sessionId) return;
+    // 在途本地工作门禁(方案 §7.3):outbox 待派发、enqueue 在途、落定中条目、
+    // pendingQueue 排队消息任一非空就暂缓回收——乐观消息与排队正文靠这些状态活着,
+    // 正文丢了用户「已发出」的内容就蒸发。暂缓后由下方的排空观察者自动补回收。
+    if (outboxRef.current.length > 0) return;
+    if (sendingQueueClientIdsRef.current.size > 0) return;
+    if (settlingQueueItemsRef.current.length > 0) return;
+    if (remoteSessionStore.getInputProjection(sessionId).pendingQueue.length > 0) return;
+    if (remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason })) {
+      scheduleReclaimedRef.current = true;
+    }
+  }, [sessionId]);
+  // 导航失焦:useFocusEffect 的 cleanup 覆盖「离开本屏 / 推入子路由 / 原地切会话
+  // (依赖变化重注册)」。锁屏 / 切后台时导航焦点不变,cleanup 不会跑,由下方
+  // AppState 监听兜底(方案 §6.4 的三处挂点)。
+  useFocusEffect(
+    useCallback(() => {
+      sessionFocusedRef.current = true;
+      if (scheduleReclaimedRef.current) {
+        scheduleReclaimedRef.current = false;
+        void loadRef.current();
+      }
+      return () => {
+        sessionFocusedRef.current = false;
+        maybeReclaimScheduleRuntime('detail-blur');
+      };
+    }, [maybeReclaimScheduleRuntime]),
+  );
+  // App 切后台按「已不可见」处理;回前台补 load。与已读回执的 AppState 门槛
+  // 同构(见上方 appStateActive 注释:锁屏 / 切后台 useFocusEffect cleanup 不跑)。
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        maybeReclaimScheduleRuntime('app-background');
+        return;
+      }
+      if (scheduleReclaimedRef.current) {
+        // 本屏在栈下层(导航未聚焦)时不补 load:给失焦的 schedule 任务重新拉全文
+        // 等于把刚回收的正文复活。留给用户导航回来时的 focus setup 补载。
+        if (!sessionFocusedRef.current) return;
+        scheduleReclaimedRef.current = false;
+        void loadRef.current();
+      }
+    });
+    return () => subscription.remove();
+  }, [maybeReclaimScheduleRuntime]);
+  // 原地切会话(实例复用,不触发失焦)与卸载兜底:cleanup 闭包持旧 sessionId。
+  useEffect(() => () => {
+    maybeReclaimScheduleRuntime('session-switch');
+  }, [maybeReclaimScheduleRuntime]);
+  // 门禁暂缓后的自动补回收(方案 §7.3:保护只影响「能否立即清理」,不让整段
+  // 历史长期驻留):在途工作排空 → 0 且页面已失焦(或已后台)时补一次回收。
+  // 会话目录行缺失(分类未知)时 maybeReclaim 内部保守 no-op,这里不会误伤。
+  const scheduleLocalWorkCount = outboxItems.length
+    + sendingQueueClientIds.size
+    + settlingQueueItems.length
+    + inputProjection.pendingQueue.length;
+  const prevScheduleLocalWorkCountRef = useRef(scheduleLocalWorkCount);
+  useEffect(() => {
+    const prev = prevScheduleLocalWorkCountRef.current;
+    prevScheduleLocalWorkCountRef.current = scheduleLocalWorkCount;
+    if (prev > 0 && scheduleLocalWorkCount === 0 && !sessionFocusedRef.current) {
+      maybeReclaimScheduleRuntime('detail-blur');
+    }
+  }, [scheduleLocalWorkCount, maybeReclaimScheduleRuntime]);
 
   // 乐观点亮「加载更早」入口:缓存消息 hydrate 后(messages 已有内容),不等首开那次慢 listMessages(A1,
   // device-link 往返可能数秒)回来,就用已存 session 的 _count.messages 与 in-store 已加载真实条数比较,

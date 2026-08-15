@@ -5849,16 +5849,17 @@ function handleStatusUpdate(
     ...state,
     // 真实 turn 的起/止都把 side-task 标记复位(它只描述「最近一次 stop」)。
     lastStopWasSideTask: false,
-    // 唤醒桥接:仅在 wake turn 真正启动(isRunning:true)时清除,或 wake turn
-    // 失败时清除——后者表现为 Done + !isRunning 且主 turn 已经结束
+    // 唤醒桥接:仅在 wake turn 真正启动(isRunning:true)时消费一个计数,或 wake turn
+    // 失败时消费——后者表现为 Done + !isRunning 且主 turn 已经结束
     // (state.agentStatus.isRunning 已为 false),此时 isTurnStart 永远不会
     // 变 true,若不清除 pendingTaskWake 会永久撑住 running 快照。
+    // 多任务并发时只消费一个计数(Math.max(0, count - 1)),剩余桥接留给后续 turn。
     // 主 turn Done(isTurnComplete)时若桥接是在主 turn 仍 running 时置位的
     // (pendingTaskWakeDuringTurn),不清除:桥接必须跨过主 turn 自己的 Done 继续
     // 存活,直到 wake turn 启动或失败。仅靠 agentStatus.isRunning 判断会把「主轮
     // Done 前 SDK 先推了 isRunning=false 的中间 status」误判成 wake 失败。
-    pendingTaskWake: isTurnStart ? 0 :
-      (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0) ? 0 :
+    pendingTaskWake: isTurnStart ? Math.max(0, state.pendingTaskWake - 1) :
+      (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0) ? Math.max(0, state.pendingTaskWake - 1) :
       state.pendingTaskWake,
     // 跨主 turn 标记:主 turn 自己的 Done 越过(标记仍为 true 时到达的首个 Done)后,
     // 标记使命已尽、立即退休。否则 wake turn 失败(从未 isRunning:true、无 isTurnStart)

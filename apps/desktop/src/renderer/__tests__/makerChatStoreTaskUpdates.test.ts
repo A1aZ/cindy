@@ -820,4 +820,33 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
       makerChatStore.purgeSession(sid);
     }
   });
+
+  it('多任务并发:两个 wake 终态累加为 2,每个 turn start 消费 1', async () => {
+    const sid = `multi-wake-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // 主 turn 启动再结束,模拟主轮完成后的空窗
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false));
+      // 两个 wake 任务完成
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      applyTask(sid, { taskId: 't2', status: 'running', taskType: 'local_workflow' });
+      applyTask(sid, { taskId: 't2', status: 'completed' });
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(2);
+
+      // 第一个 wake turn 启动 → 只消费 1
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(1);
+
+      // 第一个 wake turn 结束
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(1);
+
+      // 第二个 wake turn 启动 → 消费最后 1
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(0);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
 });

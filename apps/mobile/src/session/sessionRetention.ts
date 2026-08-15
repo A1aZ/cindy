@@ -12,20 +12,15 @@ import type { RemoteSession } from '@/session/types';
  *    保留原始 source,仍是普通任务;不能因为它出现在 schedule 索引里就改判
  *    (索引同时包含 schedule 创建与 schedule 绑定两类任务)。
  *
- * legacy 兜底:老数据 source 缺失但标题带 `[Schedule] ` 前缀。source 有值但不是
- * `'scheduler'` 时以 source 为准(冲突保守)。无法确认的一律 `'regular'`——
- * 把普通任务误当 schedule 回收的代价,大于 schedule 任务多驻留一段消息。
+ * legacy `[Schedule] ` 标题前缀**不再识别**(2026-08-15 裁决:老版本命名已废弃)。
+ * 老数据里 source 缺失、标题带前缀的会话按普通任务保守处理——方向是多驻留
+ * 而不是误回收;且标题会被用户重命名,当分类依据本来就不稳定(整体 review P1-5)。
  */
 export type SessionRetentionKind = 'regular' | 'schedule';
-
-/** scheduler-host 落库的 legacy 命名前缀(新会话已改为只写 source 字段)。 */
-export const SCHEDULE_CREATED_TITLE_PREFIX = '[Schedule] ';
 
 export function classifySessionRetention(
   session: Pick<RemoteSession, 'source' | 'title'> | null | undefined,
 ): SessionRetentionKind {
   if (!session) return 'regular';
-  if (session.source === 'scheduler') return 'schedule';
-  if (!session.source && session.title.startsWith(SCHEDULE_CREATED_TITLE_PREFIX)) return 'schedule';
-  return 'regular';
+  return session.source === 'scheduler' ? 'schedule' : 'regular';
 }

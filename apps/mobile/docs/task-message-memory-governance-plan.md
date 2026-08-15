@@ -17,6 +17,8 @@
 > 修订 4：2026-08-15 更名——原「Mobile schedule 任务通知化与激进回收方案」覆盖面已扩展到普通任务治理，标题与文件名改为任务通用的「任务消息内存治理」；文档内 schedule 专项章节（§5–§7）标题保持不变，仍准确描述 schedule 侧策略。
 >
 > 修订 5：2026-08-15 阶段 5——普通任务全局预算增加字节维度（64MB 兜底，条数 800 为主），防病态大消息分布；§17.4 记录渲染层内存不受预算约束的已知限制。实施细节见 commit。
+>
+> 修订 6：2026-08-15 GPT-5.6 整体 review 修复轮——legacy `[Schedule] ` 标题兜底移除（用户裁决：老版本命名已废弃，老会话保守按普通任务）；regular 失焦压缩后撤销驻留标记（预算可淘汰栈下层会话）；80 条压缩同时释放详情投影与流式中间态；schedule 驻留详情增加 80 条单窗口上限（setMessages/加载更早/实时 push 滚动裁剪）。暂缓回收收口的四个架构级缺口登记 §17.5，另行重构。
 
 ## 1. 背景
 
@@ -85,17 +87,16 @@ Mobile 中只存在两种任务保留策略：
 
 分类应由一个 Mobile 内部的纯函数统一完成，列表、详情页、Store 和缓存层不得各自判断。
 
-**主判据是任务的稳定来源字段 `session.source === 'scheduler'`**（外加 legacy `[Schedule] ` 标题前缀兜底，即现有 `isAutomationGeneratedSession` 的判定口径）。这个判据成立的原因：
+**判据只有任务的稳定来源字段 `session.source === 'scheduler'`**。这个判据成立的原因：
 
 - Desktop scheduler 对 fresh 和 persistent 两种模式的会话创建走同一 `createSession` 路径，统一带 `vendorOptions: { source: 'scheduler' }`（`apps/desktop/src/main/scheduler-host/runner.ts`）。
 - bound 模式（`targetSessionId` 指向既有会话）的目标会话保留用户创建时的原始 source，不会被改写。
 
-因此 schedule 配置（`persistentSession` / `targetSessionId`）**只作为 source 字段缺失或不可信时的 legacy fallback 线索**，不做主判据：
-
 1. `session.source === 'scheduler'` → schedule 任务。
-2. `session.source` 缺失且标题以 `[Schedule] ` 开头 → schedule 任务（legacy 兼容）。
-3. 其余情况（包括出现在 schedule 索引中、带 schedule 未读、由 schedule 触发运行的绑定任务）→ 普通任务。
-4. 来源冲突或无法确认时保守按普通任务处理。
+2. 其余情况（包括出现在 schedule 索引中、带 schedule 未读、由 schedule 触发运行的绑定任务）→ 普通任务。
+3. 无法确认时保守按普通任务处理。
+
+**legacy `[Schedule] ` 标题前缀不再识别**（2026-08-15 裁决：老版本命名已废弃）。老数据里 source 缺失、标题带前缀的会话按普通任务保守处理——方向是多驻留而不是误回收；且标题会被用户重命名，作为分类依据本来就不稳定（整体 review P1-5）。
 
 **分类不得依赖 schedule 索引或 `schedule.list` 的新鲜度**：schedule 索引是 30s TTL + 失败负缓存的“晚半拍”次要数据（`scheduleIndex.ts`），分类若依赖它，索引加载失败会把任务拖成“无法分类”。source 字段随 `sessions:list` 一次性到达，分类只读它。
 
@@ -392,7 +393,7 @@ schedule 任务的当前详情可临时计入全局预算并作为当前任务�
 - fresh schedule 创建的任务判为 schedule 任务。
 - `persistentSession` 创建并复用的任务始终判为 schedule 任务。
 - schedule 绑定的既有 `targetSessionId` 始终判为普通任务。
-- source 字段缺失、标题以 `[Schedule] ` 开头的 legacy 任务判为 schedule 任务；来源冲突时保守判为普通任务。
+- legacy `[Schedule] ` 标题不再识别：source 缺失的老任务保守判为普通任务（2026-08-15 裁决）。
 - 分类不依赖 schedule 索引：索引未加载 / 加载失败 / 只命中绑定任务时，分类结果不变。
 - schedule 任务被回复、置顶或重命名后仍按 schedule 策略回收。
 - 运行中、等待处理、成功、失败和已读状态都不改变分类。
@@ -432,7 +433,7 @@ schedule 任务的当前详情可临时计入全局预算并作为当前任务�
 ## 16. 已知代价
 
 - schedule 详情离开后再次打开需要重新读取，首屏速度和离线可读性会弱于普通任务。
-- 首版仍受现有 schedule index 和 50 条 run 窗口限制；较老 legacy 任务可能因无法可靠确认来源而保守走普通任务策略。
+- 首版仍受现有 schedule index 和 50 条 run 窗口限制；较老 legacy 任务（source 缺失）保守走普通任务策略。
 - 首版只降低 Mobile 的消息驻留和缓存，不减少工作设备推送的数据量，也不解决目录被 schedule 任务占满的问题。
 
 这些代价是“通知型 schedule 任务 + Mobile-only + 低维护复杂度”边界下的有意取舍。若实际数据表明需要提升离线详情、目录容量或协议效率，应分别立项，不在本回收策略上继续叠加例外状态。
@@ -470,6 +471,17 @@ schedule 任务的当前详情可临时计入全局预算并作为当前任务�
 - **首扫 stringify 尖峰**：首次预算检查对未缓存的对象型 content（tool_use/tool_result JSON）在同步循环里 stringify，瞬时分配约等于对象 content 总量（上界受 64MB 预算自身约束）；字符串 content 走 length×2 零分配路径。触发点在失焦/后台而非渲染热路径，可接受；将来如有需要可换无字符串的递归估算。
 - **驻留中的 schedule 详情不计入字节预算**：窗口有界（≤80 条）、失焦即归零，实际驻留内存最多比预算多一个 schedule 窗口；预算检查只挂在普通任务触发点上，schedule 失焦的下一次普通任务失焦才会顺带评估。
 
-### 17.5 立项门槛
+### 17.5 已知限制：暂缓回收的收口依赖页面生命周期（GPT-5.6 整体 review P1-1/2/3/6，后续重构）
+
+在途本地工作门禁暂缓回收期间与之后，存在四个已评估、暂接受的缺口，共同指向同一个架构级后续重构——**会话级在途工作跟踪与可见性 authority 拆分**：
+
+- 门禁暂缓时驻留权不撤（在途发送确认需要写回，是设计取舍）；暂缓窗口内非可见页可累积正文。
+- 驻留围栏是 boolean 而非 §10.1 字面要求的 generation token：blur→快速 refocus 后，撤销前发起的读取响应可提交旧窗口（数据真实、后续 load 会刷新，危害有界）。严格 token 需要动 requestSync 链路。
+- 原地切会话/卸载时被暂缓的旧会话没有观察者补回收（页面级 1→0 观察者随实例销毁或改绑新会话）；后果仅内存驻留、无增长，重复操作可跨任务累积。
+- 全局预算淘汰看不到其他会话的页面级在途工作（outbox/上传/乐观发送）；草稿在独立 store 不受影响，实际暴露面是栈下层会话这类边缘路径。
+
+完整修法：按 sessionId 的 local-work registry（页面当前任务门禁与全局预算候选筛选共用）+ 可见性 authority 与破坏性回收拆开（blur/background 无条件推进 generation 并标记补载，破坏性回收可暂缓）+ per-session generation token。属一次重构，不在本 PR 范围内。
+
+### 17.6 立项门槛
 
 上述任一方向立项时，都必须先过 §13 的扩大范围确认：说明为什么 Mobile 内无法完成、需要修改的准确文件、协议兼容 / 冷更 / 其他端 / CI 影响，以及不扩大范围的替代方案。**不得作为本方案的后续 PR 静默混入。**

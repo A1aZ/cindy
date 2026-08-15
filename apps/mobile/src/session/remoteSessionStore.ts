@@ -590,6 +590,30 @@ function touchSessionAccess(sessionId: string): void {
 }
 
 /**
+ * schedule 驻留详情是否处于「单窗口」策略(方案 §9.2,整体 review P1-8):详情打开
+ * 期间最多驻留一个 MESSAGE_PAGE_SIZE 窗口。普通任务不受此策略约束(加载更早照常
+ * 累积,失焦时统一压回 80)。
+ */
+function scheduleDetailWindowActive(sessionId: string): boolean {
+  if (!sessionId || !scheduleDetailResidency.has(sessionId)) return false;
+  return classifySessionRetention(mergedSessions.find((session) => session.id === sessionId)) === 'schedule';
+}
+
+/**
+ * 把驻留 schedule 详情的消息窗口滚动裁剪到最新 MESSAGE_PAGE_SIZE 条:「加载更早」
+ * 与实时 push 都不得让它超过一个窗口,超出部分立即丢弃(翻回去重新取)。裁掉的是
+ * 已验证连续段的更早历史,覆盖区间下界随之失效,保守遗忘。不 bump/emit——紧跟在
+ * 各写入点的 messages.set 之后、调用方统一 emit 之前执行。
+ */
+function clampScheduleDetailWindow(sessionId: string): void {
+  if (!scheduleDetailWindowActive(sessionId)) return;
+  const current = messages.get(sessionId);
+  if (!current || current.length <= MESSAGE_PAGE_SIZE) return;
+  forgetWindowCoverage(sessionId);
+  messages.set(sessionId, current.slice(current.length - MESSAGE_PAGE_SIZE));
+}
+
+/**
  * 普通任务的压缩 / LRU 保护判定(方案 §9.1 保护清单)。store 可见的保护信号:
  * 正在运行(turn 或宽运行态)、有待处理交互、pendingQueue 有排队消息(在途发送)。
  * 「当前详情任务」不在其中——能带着 detail-blur / session-switch / app-background
@@ -633,10 +657,13 @@ function reclaimSessionRuntimeMaps(sessionId: string): boolean {
 /**
  * 普通任务压缩:保留最新 MESSAGE_PAGE_SIZE 条(与首开窗口、磁盘缓存上限对齐),
  * 更早的正文丢弃——可从工作设备经「加载更早」翻页重新取回。压缩前先 flush 流式
- * 合批,刚结束的 turn 的最后一段文字不丢。同步 marker 保留:最近一次窗口同步的
- * 结论仍然成立(压缩只裁掉更早的历史),重开走缓存 hydrate + _count 差值点亮
- * 「加载更早」,与既有 affordance 语义一致。目录行、未读、pending interaction
- * 不在压缩范围(方案 §9.1 语义边界)。
+ * 合批,刚结束的 turn 的最后一段文字不丢。详情级投影与流式中间态一并释放(整体
+ * review P1-7,方案 §9.1 语义边界:压缩释放的是「可重新获取」的运行态)——调用点
+ * 已保证非保护态(非 running、pendingQueue 为空),这些投影不会有人再用,重开时
+ * 按需重建;pendingTextDelta 已 flush 保住末段,不再 discard。同步 marker 保留:
+ * 最近一次窗口同步的结论仍然成立(压缩只裁掉更早的历史),重开走缓存 hydrate +
+ * _count 差值点亮「加载更早」,与既有 affordance 语义一致。目录行、未读、
+ * pending interaction 不在压缩范围。
  */
 function compactRegularSessionMessages(sessionId: string): boolean {
   const existing = messages.get(sessionId);
@@ -649,6 +676,14 @@ function compactRegularSessionMessages(sessionId: string): boolean {
   }
   // 只裁更早的历史:覆盖区间下界随之失效,保守遗忘,下次同步重建。
   forgetWindowCoverage(sessionId);
+  livePlanSnapshots.delete(sessionId);
+  sessionTaskUpdates.delete(sessionId);
+  sessionParkedTaskUpdates.delete(sessionId);
+  inputProjections.delete(sessionId);
+  // 在途 projection 查询的终局围栏:epoch 抬升后旧查询拒写。
+  bumpInputProjectionAuthorityEpoch(sessionId);
+  streamingAssistantClientIds.delete(sessionId);
+  pendingLiveAssistantClientIds.delete(sessionId);
   messages.set(sessionId, current.slice(current.length - MESSAGE_PAGE_SIZE));
   bumpMessageVersion();
   emit();
@@ -1643,6 +1678,7 @@ export const remoteSessionStore = {
       return;
     }
     messages.set(sessionId, next);
+    clampScheduleDetailWindow(sessionId);
     bumpMessageVersion();
     emit();
   },
@@ -1823,6 +1859,7 @@ export const remoteSessionStore = {
       return;
     }
     messages.set(sessionId, next);
+    clampScheduleDetailWindow(sessionId);
     bumpMessageVersion();
     emit();
   },
@@ -1882,6 +1919,7 @@ export const remoteSessionStore = {
       return;
     }
     messages.set(sessionId, next);
+    clampScheduleDetailWindow(sessionId);
     bumpMessageVersion();
     emit();
   },
@@ -1901,6 +1939,9 @@ export const remoteSessionStore = {
     // 合并前窗口的最旧行 = 这一页接上的那一行,尚无结论时它就是区间上界(见 coverEarlierPage)。
     const joinsAt = oldestCreatedAt(messages.get(sessionId) ?? emptyMessages);
     this.mergeMessages(sessionId, list);
+    // 驻留 schedule 的单窗口策略(§9.2):mergeMessages 内已把超出 80 条的更早页滚动
+    // 裁掉,这里不得再为已不在窗口里的行登记覆盖区间。
+    if (scheduleDetailWindowActive(sessionId)) return;
     const pageOldest = oldestCreatedAt(list);
     if (pageOldest) coverEarlierPage(sessionId, pageOldest, joinsAt);
   },
@@ -1915,7 +1956,11 @@ export const remoteSessionStore = {
     changed = upsertMessage(sessionId, overlayLivePlanSnapshot(sessionId, message)) || changed;
     // 订阅内到达的实时行可以把覆盖区间的上界往后推;断流后收到的不行(见 liveTailTrusted)。
     coverLiveRow(sessionId, message);
-    if (changed) emit();
+    if (changed) {
+      // 实时 push 也受驻留 schedule 的单窗口上限约束(§9.2)。
+      clampScheduleDetailWindow(sessionId);
+      emit();
+    }
   },
 
   /**
@@ -2824,6 +2869,7 @@ export const remoteSessionStore = {
           systemCardData: data,
         },
       ]));
+      clampScheduleDetailWindow(sessionId);
       bumpMessageVersion();
       emit();
       return;
@@ -3038,6 +3084,10 @@ export const remoteSessionStore = {
       return changed;
     }
     if (retention !== 'regular') return false;
+    // 失焦走完压缩即不再是「当前详情」(整体 review P1-4):驻留标记若不撤,栈下层的
+    // 普通会话会被预算永久跳过,64MB 无法收敛。被在途工作暂缓的路径不会走到这里
+    // (门禁提前返回),保护语义不受影响;重新聚焦时 focus setup 会重新授予。
+    scheduleDetailResidency.delete(sessionId);
     let changed = false;
     if (!regularSessionProtected(sessionId)) {
       changed = compactRegularSessionMessages(sessionId);

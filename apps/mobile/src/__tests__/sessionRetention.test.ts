@@ -67,11 +67,11 @@ describe('classifySessionRetention(不可变二分类,方案 §4)', () => {
     expect(classifySessionRetention({ source: 'user', title: '我的对话' })).toBe('regular');
   });
 
-  it('source 缺失 + legacy "[Schedule] " 标题 → schedule', () => {
-    expect(classifySessionRetention({ title: '[Schedule] 周报' })).toBe('schedule');
+  it('legacy "[Schedule] " 标题不再识别(2026-08-15 裁决:老版本命名已废弃)——保守判 regular', () => {
+    expect(classifySessionRetention({ title: '[Schedule] 周报' })).toBe('regular');
   });
 
-  it('source 有值且非 scheduler 时以 source 为准,标题前缀不翻案(冲突保守)', () => {
+  it('source 有值且非 scheduler 时判 regular,标题前缀不翻案', () => {
     expect(classifySessionRetention({ source: 'user', title: '[Schedule] 周报' })).toBe('regular');
   });
 
@@ -567,5 +567,84 @@ describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('普通任务失焦压缩后撤销驻留标记,预算可淘汰栈下层的失焦会话(整体 review P1-4)', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const ids = Array.from({ length: 12 }, (_, index) => `n${index}`);
+      remoteSessionStore.setDeviceSessions('dev-1', 'Dev', ids.map((id) => session(id)));
+      // n0 最早打开(t0 grant 即 touch),随后离开详情(压缩 + 撤驻留),
+      // 再依次种入 n1..n11 —— n0 成为最冷候选。
+      remoteSessionStore.grantScheduleDetailResidency('n0');
+      remoteSessionStore.setMessages('n0', Array.from({ length: 80 }, (_, index) =>
+        message(`n0-m${index}`, 'n0', `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.000Z`)));
+      remoteSessionStore.releaseSessionRuntimeState('n0', { reason: 'detail-blur' });
+      for (const id of ids.slice(1)) {
+        remoteSessionStore.setMessages(id, Array.from({ length: 80 }, (_, index) =>
+          message(`${id}-m${index}`, id, `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.000Z`)));
+        vi.advanceTimersByTime(60_000);
+      }
+      remoteSessionStore.releaseSessionRuntimeState('n1', { reason: 'detail-blur' });
+      // 960 - 800 = 160:淘汰最冷两个。n0 已撤驻留 → 是候选;没有本修复时 n0 仍被
+      // 当「当前详情」跳过,被淘汰的会是 n1、n2。
+      expect(remoteSessionStore.getMessages('n0')).toEqual([]);
+      expect(remoteSessionStore.getMessages('n2')).toHaveLength(80);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('压缩同时释放详情投影与流式中间态,保留摘要层(整体 review P1-7)', () => {
+    seedRegularSession('normal-1', 200);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'normal-1',
+      event: {
+        type: 'agent_task_update',
+        source: 'claude-code',
+        data: { taskId: 't1', status: 'succeeded', title: 't1' },
+      },
+    });
+    // 空 pendingQueue 的输入投影(非保护态),压缩后应随消息窗口一起释放。
+    remoteSessionStore.setInputProjection('normal-1', { sessionId: 'normal-1', pendingQueue: [] });
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(true);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(80);
+    expect(remoteSessionStore.getSessionTaskUpdates('normal-1').size).toBe(0);
+    expect(remoteSessionStore.getInputProjection('normal-1').pendingQueue).toHaveLength(0);
+  });
+
+  it('驻留 schedule 详情最多 80 条窗口:setMessages / 加载更早 / 实时 push 超限滚动裁剪(整体 review P1-8)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+    ]);
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    const ids = Array.from({ length: 120 }, (_, index) => `s${index}`);
+    remoteSessionStore.setMessages('sched-1', ids.map((id, index) =>
+      message(id, 'sched-1', `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+    const trimmed = remoteSessionStore.getMessages('sched-1');
+    expect(trimmed).toHaveLength(80);
+    expect(trimmed[0].id).toBe('s40');
+    expect(trimmed[trimmed.length - 1].id).toBe('s119');
+    // 「加载更早」翻回更旧的一页:立即被单窗口策略裁掉,窗口仍是最新的 80 条。
+    remoteSessionStore.mergeEarlierMessages('sched-1', [
+      message('old1', 'sched-1', '2025-12-31T00:00:00.000Z'),
+      message('old2', 'sched-1', '2025-12-31T00:00:01.000Z'),
+    ]);
+    expect(remoteSessionStore.getMessages('sched-1')).toHaveLength(80);
+    expect(remoteSessionStore.getMessages('sched-1')[0].id).toBe('s40');
+    // 实时 push 同样不突破窗口。
+    remoteSessionStore.appendMessage('sched-1', message('push1', 'sched-1', '2026-01-02T00:00:00.000Z'));
+    const afterPush = remoteSessionStore.getMessages('sched-1');
+    expect(afterPush).toHaveLength(80);
+    expect(afterPush[afterPush.length - 1].id).toBe('push1');
+    // 普通任务不受单窗口策略约束:驻留期间加载更早照常累积,失焦才统一压回 80。
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+      session('normal-1'),
+    ]);
+    remoteSessionStore.setMessages('normal-1', ids.slice(0, 100).map((id, index) =>
+      message(`n-${id}`, 'normal-1', `2026-01-01T01:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(100);
   });
 });

@@ -263,6 +263,32 @@ describe('sanitizePresets', () => {
     }
   });
 
+  it('模型级 route 只保留同源且与 agent 兼容的声明', () => {
+    const modelRoute = (route: unknown) => ({
+      codex: {
+        baseUrl: 'https://x.example/v1',
+        models: [{ id: 'm', name: 'M', route }],
+      },
+    });
+    const valid = {
+      baseUrl: 'https://x.example/v1',
+      wireProtocol: 'openai-responses' as const,
+      requestPath: '/responses',
+    };
+    const out = sanitizePresets([
+      { id: 'valid-route', name: 'Valid', runtimes: modelRoute(valid) },
+      { id: 'cross-origin-route', name: 'Cross origin', runtimes: modelRoute({ ...valid, baseUrl: 'https://evil.example/v1' }) },
+      { id: 'credential-route', name: 'Credentials', runtimes: modelRoute({ ...valid, baseUrl: 'https://user:pass@x.example/v1' }) },
+      { id: 'bad-protocol-route', name: 'Bad protocol', runtimes: modelRoute({ ...valid, wireProtocol: 'invalid' }) },
+      { id: 'bad-path-route', name: 'Bad path', runtimes: modelRoute({ ...valid, requestPath: '//evil.example' }) },
+    ]);
+
+    expect(out[0]!.runtimes.codex?.models[0]!.route).toEqual(valid);
+    for (const preset of out.slice(1)) {
+      expect(preset.runtimes.codex?.models[0]!.route).toBeUndefined();
+    }
+  });
+
   it('authMethod / baseUrlEditable 只接受受支持的枚举与布尔值', () => {
     const valid = {
       ...VALID_PRESET,

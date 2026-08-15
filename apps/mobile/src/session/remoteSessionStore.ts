@@ -544,9 +544,10 @@ function scheduleFullMessagesBlocked(sessionId: string): boolean {
  * 「约」是软目标——保护任务的消息照常计入总量但不参与淘汰,实际峰值可超标。
  *
  * 为什么条数之外还要字节:消息体积分布极不均匀(一条大 tool 输出可顶上万条
- * 短消息),device-link 的 push 截断只把单条限制在约 160K 字符(≈320KB,见
- * dispatch.ts 的 REMOTE_PUSH_TEXT_BUDGET_CHARS),800 条最坏 ≈ 256MB——条数
- * 预算对病态分布完全不设防。字节上限按移动端 JS 堆的量级取 64MB 兜底:典型
+ * 短消息)。device-link 的 push 截断是**整帧超限后**的紧凑预算(160K 字符/帧,
+ * 见 dispatch.ts 的 REMOTE_PUSH_TEXT_BUDGET_CHARS)——不是单条上限,读取路径
+ * (listMessages)也不受它约束,病态大行可以整帧顶格。800 条最坏可达数百 MB,
+ * 条数预算对这种分布不设防。字节上限按移动端 JS 堆的量级取 64MB 兜底:典型
  * 分布(每条几 KB)下永不触发,只在病态分布下淘汰。
  */
 const REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET = 800;
@@ -571,6 +572,9 @@ function estimateMessageBytes(message: RemoteMessage): number {
     bytes += safeStableStringify(content).length * 2;
   }
   if (message.agentMeta) bytes += safeStableStringify(message.agentMeta).length * 2;
+  // systemCardData 是无上界 Record(review P2):不计的话未来任何携带大 payload 的
+  // 卡类型会静默绕过字节兜底。当前产出方都小,这一行主要是封口径漏洞。
+  if (message.systemCardData) bytes += safeStableStringify(message.systemCardData).length * 2;
   messageBytesEstimates.set(message, bytes);
   return bytes;
 }

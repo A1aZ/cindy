@@ -627,9 +627,10 @@ export async function generateTitleViaProviderResult(
           return { status: 'failed' };
         }
         // readAnthropicOAuth 是异步操作，期间 session 可能被删除/切换 agent/
-        // 转远程/改工作目录。在最后一个 await 之后再做一次 session 归属复核
-        // （仅 DB 查询，不做 provider/credential 状态读取），避免用过期
-        // session 上下文外发付费调用。
+        // 转远程/改工作目录。在最后一个 await 之后再做一次 session 归属复核，
+        // 避免用过期 session 上下文外发付费调用。
+        // 注：deps.beforeDispatch 内部会调用 listConnectedProvidersForAgent()，
+        // 该异步操作期间凭证可能变更，在 beforeDispatch 返回后还有一轮凭证终末复查。
         if (
           deps.beforeDispatch &&
           !(await deps.beforeDispatch({
@@ -639,6 +640,17 @@ export async function generateTitleViaProviderResult(
           }))
         ) {
           log.debug('oneShot skipped: session eligibility changed during final OAuth check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
+        // deps.beforeDispatch 内部调用 listConnectedProvidersForAgent() 是异步操作
+        // 且允许凭证相关副作用。期间用户可能切换账号/轮换 OAuth token。在最后一个
+        // await 之后重新读取并比对，捕获 beforeDispatch 期间的凭证变更，避免向
+        // 旧账号外发付费调用。
+        const oauthPostDispatch = await readAnthropicOAuth();
+        if (oauthPostDispatch?.accessToken !== oauth.accessToken) {
+          log.debug('oneShot skipped: credential changed during beforeDispatch', {
             providerId,
           });
           return { status: 'failed' };
@@ -693,9 +705,9 @@ export async function generateTitleViaProviderResult(
           return { status: 'failed' };
         }
         // readCodexCreds 是同步操作，但 preDispatchEligible 内部有异步 provider
-        // 状态读取，期间 session 可能被删除/切换 agent/转远程。在最后一个 await
-        // 之后再做一次 session 归属复核（仅 DB 查询），避免用过期 session 上下文
-        // 外发付费调用。
+        // 状态读取，期间 session 可能被删除/切换 agent/转远程/改工作目录。
+        // 在最后一个 await 之后再做一次 session 归属复核（仅 DB 查询），
+        // 避免用过期 session 上下文外发付费调用。
         if (
           deps.beforeDispatch &&
           !(await deps.beforeDispatch({
@@ -705,6 +717,21 @@ export async function generateTitleViaProviderResult(
           }))
         ) {
           log.debug('oneShot skipped: session eligibility changed during final creds check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
+        // deps.beforeDispatch 内部调用 listConnectedProvidersForAgent() 是异步操作
+        // 且允许凭证相关副作用。期间用户可能切换 workspace/轮换 token。在最后一个
+        // await 之后重新读取并比对，捕获 beforeDispatch 期间的凭证变更，避免向
+        // 旧账号外发付费调用。
+        const credsPostDispatch = readCodexCreds();
+        if (
+          !credsPostDispatch ||
+          credsPostDispatch.accountId !== creds.accountId ||
+          credsPostDispatch.accessToken !== creds.accessToken
+        ) {
+          log.debug('oneShot skipped: credential changed during beforeDispatch', {
             providerId,
           });
           return { status: 'failed' };
@@ -751,9 +778,9 @@ export async function generateTitleViaProviderResult(
           return { status: 'failed' };
         }
         // readGatewayKey 是同步操作，但 preDispatchEligible 内部有异步 provider
-        // 状态读取，期间 session 可能被删除/切换 agent/转远程。在最后一个 await
-        // 之后再做一次 session 归属复核（仅 DB 查询），避免用过期 session 上下文
-        // 外发付费调用。
+        // 状态读取，期间 session 可能被删除/切换 agent/转远程/改工作目录。
+        // 在最后一个 await 之后再做一次 session 归属复核（仅 DB 查询），
+        // 避免用过期 session 上下文外发付费调用。
         if (
           deps.beforeDispatch &&
           !(await deps.beforeDispatch({
@@ -763,6 +790,16 @@ export async function generateTitleViaProviderResult(
           }))
         ) {
           log.debug('oneShot skipped: session eligibility changed during final key check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
+        // deps.beforeDispatch 内部调用 listConnectedProvidersForAgent() 是异步操作
+        // 且允许凭证相关副作用。期间用户可能轮换网关 key。在最后一个 await 之后
+        // 重新读取并比对，捕获 beforeDispatch 期间的凭证变更，避免用旧 key 外发
+        // 付费调用。
+        if (readGatewayKey() !== key) {
+          log.debug('oneShot skipped: gateway key changed during beforeDispatch', {
             providerId,
           });
           return { status: 'failed' };

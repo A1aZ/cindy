@@ -346,17 +346,19 @@ const PREDICTION_RECENT_MESSAGE_LIMIT = 6;
 
 /** 预测请求:仅 sessionId + agentKind + turnGen。素材(messages / workingDir)一律由 main 从 DB 读取,
  * 不信任 renderer 上报内容——受信 renderer 或 stale UI 可能携带其它会话转写 / 伪造 workdir,
- * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于主进程级去重:同一 session
- * 新 turn 的预测(更高 turnGen)可以替换旧 turn 的进行中请求,避免旧请求阻塞新轮预测。 */
+ * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于 IPC 参数校验与 renderer 侧去重;
+ * 主进程级去重使用 DB 的权威 updatedAt(见 _predictingPromptSessions)。 */
 interface PredictPromptRequest {
   sessionId: string;
   agentKind: AgentKind;
   turnGen: number;
 }
 
-/** 主进程级去重:同一 session 同一 turnGen 同时只能有一笔预测在途,
+/** 主进程级去重:同一 session 同时只能有一笔预测在途,
  * 避免多窗口重复付费调用。与 renderer 侧 _predictingSessions 同模式:
- * Map<sessionId, turnGen>——新 turn 的更高 turnGen 会替换旧条目,不阻塞新轮预测。 */
+ * Map<sessionId, updatedAt(DB 权威值)>——新 turn 的 DB updatedAt 变化时替换旧条目。
+ * 使用 DB 的权威 updatedAt 而非 renderer 的局部 turnGen:同一 session 的
+ * 任意窗口都读到相同的 DB 记录,避免跨窗口代次顺序失真。 */
 const _predictingPromptSessions = new Map<string, number>();
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
@@ -478,15 +480,15 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。与 renderer 侧 _predictingSessions 同模式:
-      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过。
-      // 使用 <= 比较而非 ===:两个窗口的 ChatInput 因各自的挂载/会话切换/turn 历史
-      // 持有不同的 turnGen 时,低 turnGen 的旧请求被拒绝,高 turnGen 的新请求替换旧条目。
-      const existingTurnGen = _predictingPromptSessions.get(sessionId);
-      if (existingTurnGen != null && turnGen <= existingTurnGen) {
+      // 等多窗口场景下重复触发付费 provider 调用。使用 DB 的权威 updatedAt 而非
+      // renderer 的局部 turnGen 作为去重键:同一 session 的任意窗口都读到相同的 DB
+      // 记录,避免跨窗口代次顺序失真。若 DB 状态未变(同一轮),拒绝重复请求;若 DB
+      // 状态已变(新轮),允许新请求替换旧条目。
+      const existingUpdatedAt = _predictingPromptSessions.get(sessionId);
+      if (existingUpdatedAt != null && sessionRow.updatedAt === existingUpdatedAt) {
         return { prompt: null };
       }
-      _predictingPromptSessions.set(sessionId, turnGen);
+      _predictingPromptSessions.set(sessionId, sessionRow.updatedAt);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -547,9 +549,9 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           }),
         };
       } finally {
-        // 仅在 Map 条目仍为请求时刻的 turnGen 时才删除,防止旧轮预测结束时
+        // 仅在 Map 条目仍为请求时刻的 updatedAt 时才删除,防止旧轮预测结束时
         // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
-        if (_predictingPromptSessions.get(sessionId) === turnGen) {
+        if (_predictingPromptSessions.get(sessionId) === sessionRow.updatedAt) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

@@ -346,26 +346,18 @@ const PREDICTION_RECENT_MESSAGE_LIMIT = 6;
 
 /** 预测请求:仅 sessionId + agentKind + turnGen。素材(messages / workingDir)一律由 main 从 DB 读取,
  * 不信任 renderer 上报内容——受信 renderer 或 stale UI 可能携带其它会话转写 / 伪造 workdir,
- * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于 IPC 参数校验与 renderer 侧去重;
- * 主进程级去重使用独立的请求计数器(见 _predictingPromptSessions)。 */
+ * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于主进程级去重:同一 session
+ * 新 turn 的预测(更高 turnGen)可以替换旧 turn 的进行中请求,避免旧请求阻塞新轮预测。 */
 interface PredictPromptRequest {
   sessionId: string;
   agentKind: AgentKind;
   turnGen: number;
 }
 
-/** 主进程级去重:同一 session 同时只能有一笔预测在途,
- * 避免多窗口重复付费调用。使用独立的请求计数器(而非 userSendAt)作为去重键:
- * 每个预测请求获得唯一递增的 requestId。Map 中已存在同 session、同 turnGen 的
- * 条目时直接拒绝(多窗口并发);同 session 但 turnGen 不同时,说明旧请求仍在途但
- * 新 turn 已完成,用新请求替换旧请求——旧请求的结果会被 renderer 的 turnGen 校验
- * 丢弃,不取消旧请求会导致新 turn 永久无推荐。
- * 不以 userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
- * userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测请求
- * 读取到相同的 userSendAt,下一 turn 的预测被误判为重复而拒绝。
- * 清理时通过 requestId 比对确保只删除自身条目,不误删后续请求的去重保护。 */
-const _predictingPromptSessions = new Map<string, { requestId: number; turnGen: number }>();
-let _predictingPromptRequestId = 0;
+/** 主进程级去重:同一 session 同一 turnGen 同时只能有一笔预测在途,
+ * 避免多窗口重复付费调用。与 renderer 侧 _predictingSessions 同模式:
+ * Map<sessionId, turnGen>——新 turn 的更高 turnGen 会替换旧条目,不阻塞新轮预测。 */
+const _predictingPromptSessions = new Map<string, number>();
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -468,7 +460,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       // 对其做预测是浪费付费调用。也拒绝 soft-deleted session:删除态会话的消息仍保留在 DB,
       // 但已从用户会话列表移除,对其做预测会外发已删除转写并产生付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status, updatedAt: sessions.updatedAt, userSendAt: sessions.userSendAt })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status, updatedAt: sessions.updatedAt })
         .from(sessions)
         .where(eq(sessions.id, sessionId));
       if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review' || sessionRow.status === 'deleted') {
@@ -486,32 +478,15 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。使用独立的请求计数器而非
-      // userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
-      // userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测
-      // 读取到相同的 userSendAt,下一 turn 的预测被误判为重复。
-      const thisRequestId = ++_predictingPromptRequestId;
-      const existingEntry = _predictingPromptSessions.get(sessionId);
-      if (existingEntry) {
-        // 同一 turn 的多窗口并发(相同 turnGen):拒绝重复请求,避免跨窗口重复付费。
-        if (existingEntry.turnGen === turnGen) {
-          return { prompt: null };
-        }
-        // 不同 turnGen:旧请求仍在途但新 turn 已完成,用新请求替换旧请求。
-        // 旧请求的结果会被 renderer 的 turnGen 校验丢弃,不取消旧请求会导致新 turn 永久无推荐。
-        log.debug('predict-prompt replacing stale in-flight request for new turn', {
-          sessionId,
-          oldTurnGen: existingEntry.turnGen,
-          newTurnGen: turnGen,
-          oldRequestId: existingEntry.requestId,
-          newRequestId: thisRequestId,
-        });
-      }
-      _predictingPromptSessions.set(sessionId, { requestId: thisRequestId, turnGen });
-      // userSendAt 为 NULL 表示从未发过消息(草稿会话),不应触发预测。
-      if (sessionRow.userSendAt == null) {
+      // 等多窗口场景下重复触发付费 provider 调用。与 renderer 侧 _predictingSessions 同模式:
+      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过。
+      // 使用 <= 比较而非 ===:两个窗口的 ChatInput 因各自的挂载/会话切换/turn 历史
+      // 持有不同的 turnGen 时,低 turnGen 的旧请求被拒绝,高 turnGen 的新请求替换旧条目。
+      const existingTurnGen = _predictingPromptSessions.get(sessionId);
+      if (existingTurnGen != null && turnGen <= existingTurnGen) {
         return { prompt: null };
       }
+      _predictingPromptSessions.set(sessionId, turnGen);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -572,9 +547,9 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           }),
         };
       } finally {
-        // 仅在 Map 条目仍为本次请求的 requestId 时才删除,防止旧请求结束时
-        // 清除后续请求的去重保护(与 renderer 侧 _predictingSessions 同模式)。
-        if (_predictingPromptSessions.get(sessionId)?.requestId === thisRequestId) {
+        // 仅在 Map 条目仍为请求时刻的 turnGen 时才删除,防止旧轮预测结束时
+        // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
+        if (_predictingPromptSessions.get(sessionId) === turnGen) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

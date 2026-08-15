@@ -431,6 +431,7 @@ export function CustomProviderDialog({
   const runtimeFillTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelFetchInFlightRef = useRef(false);
+  const scrimRef = useRef<HTMLDivElement>(null);
   const dialogPanelRef = useRef<HTMLDivElement>(null);
   // 原生 window listener 的生命周期不跟着每次 render 重绑；layout effect 只把
   // 已提交的层状态写入 ref，既避开 passive effect 延迟，也不暴露被放弃的并发 render。
@@ -477,6 +478,24 @@ export function CustomProviderDialog({
     };
     window.addEventListener('keydown', onKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [dismissTopmostLayer]);
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      if (event.target !== scrimRef.current) return;
+      if (!childLayerRef.current && !runtimeFillRef.current) return;
+
+      // This must run before Radix's document-capture outside-dismiss. The
+      // scrim gesture belongs to the dialog's current child layer; consuming
+      // it here prevents Radix from committing a closed popover before the
+      // form can settle that layer exactly once.
+      event.preventDefault();
+      event.stopPropagation();
+      dismissTopmostLayer();
+    };
+    window.addEventListener('pointerdown', onPointerDown, { capture: true });
+    return () => window.removeEventListener('pointerdown', onPointerDown, true);
   }, [dismissTopmostLayer]);
 
   useEffect(() => {
@@ -1587,6 +1606,8 @@ export function CustomProviderDialog({
 
   return (
     <div
+      ref={scrimRef}
+      data-custom-provider-dialog-scrim="true"
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--overlay-modal)]"
       onPointerDown={(event) => {
         // pointerdown 时先按当前层级结算，避免 Popover 的 outside-dismiss 在随后

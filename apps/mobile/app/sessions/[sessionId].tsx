@@ -4072,6 +4072,9 @@ export default function SessionScreen() {
   const settlingQueueItemsRef = useRef(settlingQueueItems);
   settlingQueueItemsRef.current = settlingQueueItems;
   const sessionFocusedRef = useRef(true);
+  // App 是否前台(与导航焦点正交:切后台/锁屏时导航焦点不变)。排空观察者用
+  // 「已失焦**或**已后台」判定非驻留态——后台期间在途工作排空同样要补回收。
+  const appStateActiveRef = useRef(AppState.currentState === 'active');
   // 本页驻留期间已回收过 schedule 正文:重新获得焦点 / 回前台时据此补一次 load,
   // 让详情从工作设备重读最新窗口(方案 §6.6),而不是展示已被回收的空窗。
   const scheduleReclaimedRef = useRef(false);
@@ -4088,10 +4091,13 @@ export default function SessionScreen() {
     if (settlingQueueItemsRef.current.length > 0) return;
     if (remoteSessionStore.getInputProjection(sessionId).pendingQueue.length > 0) return;
     const retention = remoteSessionStore.getSessionRetention(sessionId);
-    const released = remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason });
-    if (retention === 'schedule' && released) {
-      // 只有 schedule 的整窗回收需要重开补载;普通任务压缩由缓存 hydrate +
-      // _count affordance 覆盖,预算淘汰同理,不标记。
+    remoteSessionStore.releaseSessionRuntimeState(sessionId, { reason });
+    if (retention === 'schedule') {
+      // schedule 分支**无条件撤销驻留权限**(即使运行时映射已空、返回 false)——
+      // 典型时序:首开 listMessages 在途时失焦,回收撤权但 changed=false。flag 必须
+      // 与「驻留权已撤」对齐而不是与返回值对齐,否则重开不补 load、回前台时
+      // rehydrate 的窗口回填也被围栏拦住(review P1)。普通任务压缩由缓存 hydrate +
+      // _count affordance 覆盖,不标记。
       scheduleReclaimedRef.current = true;
     }
   }, [sessionId]);
@@ -4118,6 +4124,7 @@ export default function SessionScreen() {
   // 同构(见上方 appStateActive 注释:锁屏 / 切后台 useFocusEffect cleanup 不跑)。
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateActiveRef.current = nextState === 'active';
       if (nextState !== 'active') {
         maybeReclaimSessionRuntime('app-background');
         return;
@@ -4143,8 +4150,11 @@ export default function SessionScreen() {
     remoteSessionStore.revokeScheduleDetailResidency(sessionId);
   }, [maybeReclaimSessionRuntime, sessionId]);
   // 门禁暂缓后的自动补回收(方案 §7.3:保护只影响「能否立即清理」,不让整段
-  // 历史长期驻留):在途工作排空 → 0 且页面已失焦(或已后台)时补一次回收。
-  // 会话目录行缺失(分类未知)时 maybeReclaim 内部保守 no-op,这里不会误伤。
+  // 历史长期驻留):在途工作排空 → 0 且页面已失焦**或已后台**(后台时导航焦点
+  // 不变,只看 focus 会漏)时补一次回收。已知限制:后台断链可能丢失 queue 排空
+  // 的 projection push,store 里残留 stale pendingQueue 会让门禁恒非空——此场景
+  // 等重开该会话(load 拉新 projection 覆盖)后自愈。
+  // 会话目录行缺失(分类未知)时 maybeReclaim 内部按普通任务处置,不会误删摘要层。
   const scheduleLocalWorkCount = outboxItems.length
     + sendingQueueClientIds.size
     + settlingQueueItems.length
@@ -4153,7 +4163,7 @@ export default function SessionScreen() {
   useEffect(() => {
     const prev = prevScheduleLocalWorkCountRef.current;
     prevScheduleLocalWorkCountRef.current = scheduleLocalWorkCount;
-    if (prev > 0 && scheduleLocalWorkCount === 0 && !sessionFocusedRef.current) {
+    if (prev > 0 && scheduleLocalWorkCount === 0 && (!sessionFocusedRef.current || !appStateActiveRef.current)) {
       maybeReclaimSessionRuntime('detail-blur');
     }
   }, [scheduleLocalWorkCount, maybeReclaimSessionRuntime]);

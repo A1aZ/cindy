@@ -2929,7 +2929,8 @@ export const remoteSessionStore = {
   /**
    * 任务的驻留策略分类(方案 §4:创建来源决定、终身不变)。单一分类入口——
    * 列表、详情页、缓存层不得各自判断。会话行未知(设备 shard 尚未加载 / 已移除)
-   * 时保守返回 `'regular'`,不做任何回收。
+   * 时保守返回 `'regular'`,按普通任务处置(阶段 4 起含压缩与预算淘汰)——方向
+   * 保守:宁可多驻留或压回 80 条,绝不把来源不明的会话当 schedule 归零、清缓存。
    */
   getSessionRetention(sessionId: string): SessionRetentionKind {
     if (!sessionId) return 'regular';

@@ -179,10 +179,18 @@ describe('remoteSessionStore.releaseSessionRuntimeState(统一回收入口,方�
     expect(cacheSessionMessagesMock).not.toHaveBeenCalled();
   });
 
-  it('未知会话(目录行缺失)保守 no-op', () => {
+  it('未知会话(目录行缺失)按普通任务处置:不归零不清缓存,超 80 条才压缩', () => {
     remoteSessionStore.setMessages('ghost', [message('g1', 'ghost')]);
     expect(remoteSessionStore.releaseSessionRuntimeState('ghost', { reason: 'detail-blur' })).toBe(false);
     expect(remoteSessionStore.getMessages('ghost')).toHaveLength(1);
+    // >80 条时按普通任务压缩(方案 §4.1「无法确认保守按普通任务处理」;
+    // 决不能当 schedule 归零、清缓存)。
+    remoteSessionStore.setMessages('ghost', Array.from({ length: 120 }, (_, index) =>
+      message(`g${index}`, 'ghost', `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.${String(index).padStart(3, '0')}Z`)));
+    cacheSessionMessagesMock.mockClear();
+    expect(remoteSessionStore.releaseSessionRuntimeState('ghost', { reason: 'detail-blur' })).toBe(true);
+    expect(remoteSessionStore.getMessages('ghost')).toHaveLength(80);
+    expect(cacheSessionMessagesMock).not.toHaveBeenCalled();
   });
 
   it('幂等:第二次调用不再回收运行时状态,但仍兜底清一次缓存(防迟到落盘写回)', () => {
@@ -476,6 +484,61 @@ describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
     remoteSessionStore.setMessages('sched-1', Array.from({ length: 200 }, (_, index) =>
       message(`s${index}`, 'sched-1', `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.${String(index).padStart(3, '0')}Z`)));
     remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
+  });
+
+  it('压缩与 LRU 淘汰都不删普通任务的磁盘缓存(重开走缓存 hydrate)', () => {
+    seedRegularSession('normal-1', 200);
+    cacheSessionMessagesMock.mockClear();
+    remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' });
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(80);
+    expect(cacheSessionMessagesMock).not.toHaveBeenCalled();
+  });
+
+  it('压缩保留最近一次窗口同步 marker(重开走 cheap path 的依据)', () => {
+    seedRegularSession('normal-1', 200);
+    const sessionRow = remoteSessionStore.getSessions().find((s) => s.id === 'normal-1');
+    const markerSession = { _count: { messages: 200 }, updatedAt: sessionRow?.updatedAt ?? '2026-01-01T00:00:00.000Z' };
+    remoteSessionStore.markSessionMessagesSynced('normal-1', markerSession);
+    remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' });
+    expect(remoteSessionStore.isSessionMessageWindowSynced('normal-1', markerSession)).toBe(true);
+  });
+
+  it('LRU 淘汰路径同样保护有待处理交互的任务', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const ids = Array.from({ length: 12 }, (_, index) => `n${index}`);
+      remoteSessionStore.setDeviceSessions('dev-1', 'Dev', ids.map((id) => session(id)));
+      for (const id of ids) {
+        remoteSessionStore.setMessages(id, Array.from({ length: 80 }, (_, index) =>
+          message(`${id}-m${index}`, id, `2026-01-01T00:${String(index % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+        vi.advanceTimersByTime(60_000);
+      }
+      // n1 有待处理交互:计入总量但不得被淘汰。
+      remoteSessionStore.setPendingInteractions('n1', [
+        { request: { kind: 'permission', requestId: 'r1' } },
+      ]);
+      remoteSessionStore.releaseSessionRuntimeState('n0', { reason: 'detail-blur' });
+      expect(remoteSessionStore.getMessages('n0')).toEqual([]);
+      expect(remoteSessionStore.getMessages('n1')).toHaveLength(80);
+      expect(remoteSessionStore.getPendingInteractions('n1')).toHaveLength(1);
+      expect(remoteSessionStore.getMessages('n2')).toEqual([]);
+      // 淘汰同样不动磁盘缓存(重开走缓存 hydrate)。
+      expect(cacheSessionMessagesMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('mergeEarlierMessages 的迟到「加载更早」响应同样被围栏拦截(独立 fence 行)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+    ]);
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.setMessages('sched-1', [message('m1', 'sched-1')]);
+    remoteSessionStore.releaseSessionRuntimeState('sched-1', { reason: 'detail-blur' });
+    remoteSessionStore.mergeEarlierMessages('sched-1', [message('older', 'sched-1', '2025-12-31T00:00:00.000Z')]);
     expect(remoteSessionStore.getMessages('sched-1')).toEqual([]);
   });
 });

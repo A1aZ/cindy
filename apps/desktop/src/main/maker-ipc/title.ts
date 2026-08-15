@@ -477,11 +477,13 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         });
         return { prompt: null };
       }
-      // 多窗口去重:同一 session 同一 turnGen 同时只能有一笔预测在途,避免 openSessionInNewWindow
+      // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
       // 等多窗口场景下重复触发付费 provider 调用。与 renderer 侧 _predictingSessions 同模式:
-      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过,避免旧请求阻塞新轮预测。
+      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过。
+      // 使用 <= 比较而非 ===:两个窗口的 ChatInput 因各自的挂载/会话切换/turn 历史
+      // 持有不同的 turnGen 时,低 turnGen 的旧请求被拒绝,高 turnGen 的新请求替换旧条目。
       const existingTurnGen = _predictingPromptSessions.get(sessionId);
-      if (existingTurnGen === turnGen) {
+      if (existingTurnGen != null && turnGen <= existingTurnGen) {
         return { prompt: null };
       }
       _predictingPromptSessions.set(sessionId, turnGen);

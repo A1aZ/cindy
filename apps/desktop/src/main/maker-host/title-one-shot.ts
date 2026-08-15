@@ -626,6 +626,23 @@ export async function generateTitleViaProviderResult(
           });
           return { status: 'failed' };
         }
+        // readAnthropicOAuth 是异步操作，期间 session 可能被删除/切换 agent/
+        // 转远程/改工作目录。在最后一个 await 之后再做一次 session 归属复核
+        // （仅 DB 查询，不做 provider/credential 状态读取），避免用过期
+        // session 上下文外发付费调用。
+        if (
+          deps.beforeDispatch &&
+          !(await deps.beforeDispatch({
+            sessionId: args.sessionId,
+            agentKind: args.agentKind,
+            providerId,
+          }))
+        ) {
+          log.debug('oneShot skipped: session eligibility changed during final OAuth check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchAnthropicTitle(
           target.upstream,
           target.model,
@@ -675,6 +692,23 @@ export async function generateTitleViaProviderResult(
           });
           return { status: 'failed' };
         }
+        // readCodexCreds 是同步操作，但 preDispatchEligible 内部有异步 provider
+        // 状态读取，期间 session 可能被删除/切换 agent/转远程。在最后一个 await
+        // 之后再做一次 session 归属复核（仅 DB 查询），避免用过期 session 上下文
+        // 外发付费调用。
+        if (
+          deps.beforeDispatch &&
+          !(await deps.beforeDispatch({
+            sessionId: args.sessionId,
+            agentKind: args.agentKind,
+            providerId,
+          }))
+        ) {
+          log.debug('oneShot skipped: session eligibility changed during final creds check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchCodexTitle(
           target.upstream,
           target.model,
@@ -712,6 +746,23 @@ export async function generateTitleViaProviderResult(
         // 凭证变更，避免用旧 key 外发付费调用。
         if (readGatewayKey() !== key) {
           log.debug('oneShot skipped: gateway key changed during eligibility check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
+        // readGatewayKey 是同步操作，但 preDispatchEligible 内部有异步 provider
+        // 状态读取，期间 session 可能被删除/切换 agent/转远程。在最后一个 await
+        // 之后再做一次 session 归属复核（仅 DB 查询），避免用过期 session 上下文
+        // 外发付费调用。
+        if (
+          deps.beforeDispatch &&
+          !(await deps.beforeDispatch({
+            sessionId: args.sessionId,
+            agentKind: args.agentKind,
+            providerId,
+          }))
+        ) {
+          log.debug('oneShot skipped: session eligibility changed during final key check', {
             providerId,
           });
           return { status: 'failed' };

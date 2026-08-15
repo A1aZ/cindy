@@ -427,4 +427,23 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     resolveFirst('预测结果A');
     await expect(first).resolves.toEqual({ prompt: '预测结果A' });
   });
+
+  it('同一 session 更低 turnGen 的请求被拒绝（跨窗口旧窗口场景）', async () => {
+    let resolveFirst!: (value: string) => void;
+    h.predict.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+    );
+
+    // 窗口 A 发起 turnGen=5 的预测并暂挂
+    const first = invokePredict({ ...VALID_REQUEST, turnGen: 5 });
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
+
+    // 窗口 B 发起 turnGen=3 的预测（因挂载/会话切换历史不同，turnGen 更低），应被拒绝
+    const second = invokePredict({ ...VALID_REQUEST, turnGen: 3 });
+    await expect(second).resolves.toEqual({ prompt: null });
+
+    // 窗口 A 的预测完成
+    resolveFirst('预测结果');
+    await expect(first).resolves.toEqual({ prompt: '预测结果' });
+  });
 });

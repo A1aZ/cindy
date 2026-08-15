@@ -252,6 +252,52 @@ function toolLoopError(events: AgentEvent[]): AgentEvent | undefined {
   );
 }
 
+async function runStableAbabLoop(
+  session: Awaited<ReturnType<typeof startSessionWithStream>>,
+  userContent: string,
+  idPrefix: string,
+): Promise<{ loopError: AgentEvent | undefined; interruptCalls: number }> {
+  const { handle, stream, events, fakeQuery } = session;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+  try {
+    await handle.send({ type: 'user', content: userContent });
+    for (let i = 0; i < 12; i += 1) {
+      const id = `${idPrefix}_${i}`;
+      const isA = i % 2 === 0;
+      stream.emit(
+        assistantToolUse(
+          id,
+          isA
+            ? 'grep -R "getShellCommandPolicy" packages apps'
+            : 'grep -R "shell-command-policy" packages apps',
+        ),
+      );
+      stream.emit(userToolResult(id, isA ? 'base-agent.ts:731' : 'not found'));
+    }
+
+    await pumpUntil(
+      () => events.filter((event) => event.type === 'tool_result_full').length === 12,
+      `${idPrefix} tool results processed`,
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    const result = {
+      loopError: toolLoopError(events),
+      interruptCalls: fakeQuery.interrupt.mock.calls.length,
+    };
+
+    if (handle.isTurnRunning?.()) {
+      stream.emit(successResult());
+      await pumpUntil(() => handle.isTurnRunning?.() === false, `${idPrefix} turn done`);
+    }
+    return result;
+  } finally {
+    vi.useRealTimers();
+    stream.end();
+    await handle.close().catch(() => undefined);
+  }
+}
+
 afterEach(async () => {
   vi.useRealTimers();
   sdkMock.forkSession.mockReset();
@@ -350,52 +396,112 @@ describe('upstream-response-idle watchdog suspend awareness', () => {
   });
 });
 
-describe('DeepSeek tool-loop guard runtime integration', () => {
-  it('真实 SDK 事件流中的 150 次不同调用与空结果可以完成同一个 turn', async () => {
-    const { handle, stream, events, fakeQuery } = await startSessionWithStream(
-      'deepseek/deepseek-v4-flash',
+describe('Claude Code tool-loop guard runtime integration', () => {
+  it('claude-opus-5 的稳定 ABAB Bash 循环在第 12 个结果处中断', async () => {
+    const result = await runStableAbabLoop(
+      await startSessionWithStream('claude-opus-5'),
+      'find the missing implementation',
+      'toolu_issue_2721',
     );
 
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-    await handle.send({ type: 'user', content: 'analyze 150 different projects' });
-
-    for (let i = 0; i < 150; i += 1) {
-      const id = `toolu_project_${i}`;
-      stream.emit(assistantToolUse(id, `read-project-${i}`));
-      stream.emit(userToolResult(id, ''));
-    }
-    stream.emit(successResult());
-
-    await pumpUntil(() => handle.isTurnRunning?.() === false, 'long DeepSeek turn done');
-    expect(toolLoopError(events)).toBeUndefined();
-    expect(fakeQuery.interrupt).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
-    stream.end();
-    await handle.close().catch(() => undefined);
+    expect(result.loopError).toMatchObject({
+      type: 'error',
+      data: {
+        reason: 'tool_use_loop_detected',
+        loopKind: 'pingpong',
+        loopCount: 12,
+        model: 'claude-opus-5',
+        isTerminal: true,
+      },
+      source: 'claude-code',
+    });
+    expect(result.interruptCalls).toBe(1);
   });
 
-  it('真实 SDK 事件流中的稳定 TaskOutput 轮询不会中断 turn', async () => {
-    const { handle, stream, events, fakeQuery } = await startSessionWithStream(
+  it('热切到 claude-opus-5 后稳定 ABAB Bash 循环仍会中断', async () => {
+    const session = await startSessionWithStream(
       'deepseek/deepseek-v4-flash',
     );
+    await session.handle.setModel?.('claude-opus-5');
+    const result = await runStableAbabLoop(
+      session,
+      'find the missing implementation after switching models',
+      'toolu_issue_2721_switch',
+    );
 
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-    await handle.send({ type: 'user', content: 'wait for the background task' });
-
-    for (let i = 0; i < 30; i += 1) {
-      const id = `toolu_task_output_${i}`;
-      stream.emit(assistantTaskOutput(id));
-      stream.emit(userToolResult(id, 'still running'));
-    }
-    stream.emit(successResult());
-
-    await pumpUntil(() => handle.isTurnRunning?.() === false, 'TaskOutput polling turn done');
-    expect(toolLoopError(events)).toBeUndefined();
-    expect(fakeQuery.interrupt).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
-    stream.end();
-    await handle.close().catch(() => undefined);
+    expect(session.fakeQuery.setModel).toHaveBeenCalledWith('claude-opus-5[1m]');
+    expect(result.loopError).toMatchObject({
+      type: 'error',
+      data: {
+        reason: 'tool_use_loop_detected',
+        loopKind: 'pingpong',
+        loopCount: 12,
+        model: 'claude-opus-5',
+        isTerminal: true,
+      },
+      source: 'claude-code',
+    });
+    expect(result.interruptCalls).toBe(1);
   });
+
+  it('未确认的 provider-routed 模型不扩展自动硬中断范围', async () => {
+    const result = await runStableAbabLoop(
+      await startSessionWithStream('codex/gpt-5.5'),
+      'run a provider-routed investigation',
+      'toolu_provider_boundary',
+    );
+
+    expect(result.loopError).toBeUndefined();
+    expect(result.interruptCalls).toBe(0);
+  });
+
+  it.each(['deepseek/deepseek-v4-flash', 'claude-opus-5'])(
+    '%s 真实 SDK 事件流中的 150 次不同调用与空结果可以完成同一个 turn',
+    async (model) => {
+      const { handle, stream, events, fakeQuery } = await startSessionWithStream(model);
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      await handle.send({ type: 'user', content: 'analyze 150 different projects' });
+
+      for (let i = 0; i < 150; i += 1) {
+        const id = `toolu_project_${i}`;
+        stream.emit(assistantToolUse(id, `read-project-${i}`));
+        stream.emit(userToolResult(id, ''));
+      }
+      stream.emit(successResult());
+
+      await pumpUntil(() => handle.isTurnRunning?.() === false, `long ${model} turn done`);
+      expect(toolLoopError(events)).toBeUndefined();
+      expect(fakeQuery.interrupt).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+      stream.end();
+      await handle.close().catch(() => undefined);
+    },
+  );
+
+  it.each(['deepseek/deepseek-v4-flash', 'claude-opus-5'])(
+    '%s 真实 SDK 事件流中的稳定 TaskOutput 轮询不会中断 turn',
+    async (model) => {
+      const { handle, stream, events, fakeQuery } = await startSessionWithStream(model);
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      await handle.send({ type: 'user', content: 'wait for the background task' });
+
+      for (let i = 0; i < 30; i += 1) {
+        const id = `toolu_task_output_${i}`;
+        stream.emit(assistantTaskOutput(id));
+        stream.emit(userToolResult(id, 'still running'));
+      }
+      stream.emit(successResult());
+
+      await pumpUntil(() => handle.isTurnRunning?.() === false, `${model} TaskOutput polling turn done`);
+      expect(toolLoopError(events)).toBeUndefined();
+      expect(fakeQuery.interrupt).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+      stream.end();
+      await handle.close().catch(() => undefined);
+    },
+  );
 });

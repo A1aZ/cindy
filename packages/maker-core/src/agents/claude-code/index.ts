@@ -232,18 +232,17 @@ function legacyToSdkModelString(model: string): string {
   return model;
 }
 
-/**
- * ToolLoopGuard 必须基于 maker-core 对外暴露的 model id 判断。
- * SDK 字符串会被 toSdkModelString 改写(例如 Sonnet 5 变成 claude-sonnet-5[1m]),
- * 容易把 provider 细节和公开模型选择混在一起; host 注入的 DeepSeek id
- * 当前为 deepseek/deepseek-v4-pro 与 deepseek/deepseek-v4-flash。
- */
-function isDeepSeekModel(model: string): boolean {
-  return model.startsWith('deepseek/');
-}
-
 function isProviderRoutedModel(model: string): boolean {
   return !model.startsWith('claude-');
+}
+
+/**
+ * 结果感知的硬中断目前只覆盖既有 DeepSeek 与原生 Claude 系列。
+ * 其他 provider-routed 模型需要独立确认产品口径,不能因共用 Claude Code harness
+ * 就自动扩大行为。这里基于 maker-core 公开 model id 判断,不使用带 [1m] 的 SDK id。
+ */
+function shouldUseToolLoopGuard(model: string): boolean {
+  return model.startsWith('deepseek/') || model.startsWith('claude-');
 }
 
 /** URL → host(路由决策日志用,失败返回 undefined,不抛)。 */
@@ -2131,7 +2130,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       autoReviewDecisionCache.set(key, pending);
       return pending;
     };
-    let toolLoopGuard: ToolLoopGuard | null = isDeepSeekModel(mutableModel)
+    let toolLoopGuard: ToolLoopGuard | null = shouldUseToolLoopGuard(mutableModel)
       ? new ToolLoopGuard()
       : null;
     let mutableEffort: Effort = opts.effort ?? 'high';
@@ -5853,7 +5852,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             triggerAutoCompactIfNeeded();
           }
         }
-        toolLoopGuard = isDeepSeekModel(mutableModel) ? new ToolLoopGuard() : null;
+        toolLoopGuard = shouldUseToolLoopGuard(mutableModel) ? new ToolLoopGuard() : null;
       },
 
       async setEffort(newEffort: Effort) {

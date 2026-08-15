@@ -420,25 +420,47 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果A' });
   });
 
-  it('同一 session DB userSendAt 不变时拒绝重复请求,避免跨窗口重复付费', async () => {
+  it('同一 session 同一 turnGen 时拒绝重复请求,避免跨窗口重复付费', async () => {
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
     );
 
-    // 窗口 A 发起预测(DB userSendAt=1)并暂挂
+    // 窗口 A 发起预测(turnGen=0)并暂挂
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 1 };
     const first = invokePredict(VALID_REQUEST);
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 窗口 B 同时发起预测,DB userSendAt 仍为 1(同一 turn),应被拒绝
-    // (无论窗口 B 的局部 turnGen 是多少,DB 记录才是权威去重依据)
+    // 窗口 B 同时发起预测,同一 turn(相同 turnGen=0),应被拒绝
+    // 避免跨窗口同一 turn 重复付费
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 1 };
-    const second = invokePredict({ ...VALID_REQUEST, turnGen: 5 });
+    const second = invokePredict({ ...VALID_REQUEST, turnGen: 0 });
     await expect(second).resolves.toEqual({ prompt: null });
 
     // 窗口 A 的预测完成
     resolveFirst('预测结果');
     await expect(first).resolves.toEqual({ prompt: '预测结果' });
+  });
+
+  it('同一 session 新 turn(turnGen 不同)时旧请求仍在途则替换旧请求,确保新 turn 可获推荐', async () => {
+    let resolveFirst!: (value: string) => void;
+    h.predict.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+    );
+
+    // Turn 0 完成后发起预测(turnGen=0)并暂挂(模拟慢速 provider)
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 1 };
+    const first = invokePredict({ ...VALID_REQUEST, turnGen: 0 });
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
+
+    // 用户在 Turn 0 的预测仍在途时完成了 Turn 1,发起新预测(turnGen=1)
+    // 旧请求仍在途但新 turn 已完成,应替换旧请求并允许新请求执行
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', userSendAt: 2 };
+    const second = invokePredict({ ...VALID_REQUEST, turnGen: 1 });
+    await expect(second).resolves.toEqual({ prompt: '下一步做什么' });
+
+    // 旧预测完成,但因 turnGen 已被替换,结果被 renderer 丢弃(此处仅验证旧请求可正常完成)
+    resolveFirst('旧轮预测');
+    await expect(first).resolves.toEqual({ prompt: '旧轮预测' });
   });
 });

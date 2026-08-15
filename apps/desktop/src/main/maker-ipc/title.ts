@@ -356,12 +356,15 @@ interface PredictPromptRequest {
 
 /** 主进程级去重:同一 session 同时只能有一笔预测在途,
  * 避免多窗口重复付费调用。使用独立的请求计数器(而非 userSendAt)作为去重键:
- * 每个预测请求获得唯一递增的 requestId;Map 中已存在同 session 条目时直接拒绝。
+ * 每个预测请求获得唯一递增的 requestId。Map 中已存在同 session、同 turnGen 的
+ * 条目时直接拒绝(多窗口并发);同 session 但 turnGen 不同时,说明旧请求仍在途但
+ * 新 turn 已完成,用新请求替换旧请求——旧请求的结果会被 renderer 的 turnGen 校验
+ * 丢弃,不取消旧请求会导致新 turn 永久无推荐。
  * 不以 userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
  * userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测请求
  * 读取到相同的 userSendAt,下一 turn 的预测被误判为重复而拒绝。
  * 清理时通过 requestId 比对确保只删除自身条目,不误删后续请求的去重保护。 */
-const _predictingPromptSessions = new Map<string, number>();
+const _predictingPromptSessions = new Map<string, { requestId: number; turnGen: number }>();
 let _predictingPromptRequestId = 0;
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
@@ -487,15 +490,28 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       // userSendAt 作为去重键:当用户在当前 turn 运行期间排队发送消息时,
       // userSendAt 会在 turn 完成前提前推进,导致当前 turn 与下一 turn 的预测
       // 读取到相同的 userSendAt,下一 turn 的预测被误判为重复。
-      if (_predictingPromptSessions.has(sessionId)) {
-        return { prompt: null };
+      const thisRequestId = ++_predictingPromptRequestId;
+      const existingEntry = _predictingPromptSessions.get(sessionId);
+      if (existingEntry) {
+        // 同一 turn 的多窗口并发(相同 turnGen):拒绝重复请求,避免跨窗口重复付费。
+        if (existingEntry.turnGen === turnGen) {
+          return { prompt: null };
+        }
+        // 不同 turnGen:旧请求仍在途但新 turn 已完成,用新请求替换旧请求。
+        // 旧请求的结果会被 renderer 的 turnGen 校验丢弃,不取消旧请求会导致新 turn 永久无推荐。
+        log.debug('predict-prompt replacing stale in-flight request for new turn', {
+          sessionId,
+          oldTurnGen: existingEntry.turnGen,
+          newTurnGen: turnGen,
+          oldRequestId: existingEntry.requestId,
+          newRequestId: thisRequestId,
+        });
       }
+      _predictingPromptSessions.set(sessionId, { requestId: thisRequestId, turnGen });
       // userSendAt 为 NULL 表示从未发过消息(草稿会话),不应触发预测。
       if (sessionRow.userSendAt == null) {
         return { prompt: null };
       }
-      const thisRequestId = ++_predictingPromptRequestId;
-      _predictingPromptSessions.set(sessionId, thisRequestId);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -558,7 +574,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       } finally {
         // 仅在 Map 条目仍为本次请求的 requestId 时才删除,防止旧请求结束时
         // 清除后续请求的去重保护(与 renderer 侧 _predictingSessions 同模式)。
-        if (_predictingPromptSessions.get(sessionId) === thisRequestId) {
+        if (_predictingPromptSessions.get(sessionId)?.requestId === thisRequestId) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

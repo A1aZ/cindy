@@ -1244,7 +1244,9 @@ export function ChatInput({
             workingDir: workingDir ?? undefined,
           })
           .then((result) => {
-            _predictingSessions.delete(requestSessionId);
+            if (_predictingSessions.get(requestSessionId) === requestTurnGen) {
+              _predictingSessions.delete(requestSessionId);
+            }
             // 请求往返期间用户可能已经切换会话、发起新 turn 或开始打字 —— 落地前
             // 重新确认 sessionId、turnGen、编辑器状态,否则旧上下文的推荐会覆盖当前轮。
             const cur = editorRef.current;
@@ -1263,7 +1265,9 @@ export function ChatInput({
             }
           })
           .catch(() => {
-            _predictingSessions.delete(requestSessionId);
+            if (_predictingSessions.get(requestSessionId) === requestTurnGen) {
+              _predictingSessions.delete(requestSessionId);
+            }
             // 预测失败静默处理:不显示推荐,也不回落任何默认文案。
           });
       }

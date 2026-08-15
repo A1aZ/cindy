@@ -25,6 +25,7 @@ import type { ProviderSection } from '@cindy/model-providers';
 import type { Schedule, ScheduleRun } from '@cindy/maker-scheduler';
 import type { InteractiveCardSpec } from '@cindy/im';
 
+import { autoReviewUnavailablePromptLine } from './autoReviewUnavailablePrompt';
 import type { ImUiTextPack } from './types';
 import {
   composeInteractionModel,
@@ -127,9 +128,11 @@ export function createCardBuilders(
 
     buildPermissionCard(req) {
       const model = composeInteractionModel(req);
+      const params = `${ui.cards.permission.paramsLabel}\n\`\`\`json\n${previewInput(model.input)}\n\`\`\``;
+      const unavailable = autoReviewUnavailablePromptLine(req);
       return {
         title: ui.cards.permission.title(model.toolName),
-        body: `${ui.cards.permission.paramsLabel}\n\`\`\`json\n${previewInput(model.input)}\n\`\`\``,
+        body: unavailable ? `${unavailable}\n\n${params}` : params,
         buttons: [
           {
             id: 'permission:allow:once',

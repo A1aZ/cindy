@@ -128,4 +128,24 @@ describe('formatWecomInteractionPrompt', () => {
     });
     expect(sendText).not.toHaveBeenCalled();
   });
+
+  it('投递失败时用稳定系统码收口，不把 Error.message 当成拒绝原因', async () => {
+    const sendMarkdownText = vi.fn(async () => {
+      throw new Error('Request failed with status code 500');
+    });
+    const im = {
+      onTextMessageIntercept: vi.fn(() => () => undefined),
+      onStatusChange: vi.fn(() => () => undefined),
+      sendMarkdownText,
+      sendText: vi.fn(),
+    } as unknown as WecomIM;
+    const interactions = new WecomTextInteractions(im);
+
+    await expect(interactions.handle('owner', permissionRequest({ command: 'pnpm test' })))
+      .resolves.toEqual({
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'wecom_interaction_send_failed',
+      });
+  });
 });

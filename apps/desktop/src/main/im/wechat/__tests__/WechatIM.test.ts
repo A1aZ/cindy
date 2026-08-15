@@ -239,6 +239,22 @@ describe('WechatIM host boundary', () => {
     });
   });
 
+  it('投递失败时用稳定系统码收口，不把 Error.message 当成拒绝原因', async () => {
+    const im = new WechatIM(deps());
+    vi.spyOn(im, 'sendText').mockRejectedValue(new Error('socket hang up'));
+
+    await expect(im.handleTextInteraction('peer-1', {
+      kind: 'permission',
+      requestId: 'request-send-failed',
+      toolName: 'bash',
+      input: { command: 'pnpm test' },
+    })).resolves.toEqual({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'wechat_interaction_send_failed',
+    });
+  });
+
   it('fails closed before authorization when the signed compatibility policy disables it', async () => {
     const createTransport = vi.fn();
     const im = new WechatIM(

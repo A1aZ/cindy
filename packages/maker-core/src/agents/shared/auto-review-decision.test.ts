@@ -370,6 +370,8 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('orca_disable')).toBe(true);
     expect(isSystemPermissionDenialReason('session_running_race')).toBe(true);
     expect(isSystemPermissionDenialReason('turn_not_dispatched')).toBe(true);
+    expect(isSystemPermissionDenialReason('Request failed with status code 500')).toBe(false);
+    expect(isSystemPermissionDenialReason('socket hang up')).toBe(false);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason('wecom_user_denied')).toBe(false);

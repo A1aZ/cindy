@@ -44,16 +44,15 @@ export class WecomTextInteractions {
 
     try {
       await this.im.sendMarkdownText(userId, formatWecomInteractionPrompt(request));
-    } catch (error) {
+    } catch {
       const current = this.pending.get(userId);
       if (current?.request.requestId === request.requestId) {
         clearTimeout(current.timer);
         this.pending.delete(userId);
       }
-      return defaultDecision(
-        request,
-        error instanceof Error ? error.message : 'wecom_interaction_send_failed',
-      );
+      // Denial reasons are classified by exact/prefix match. Raw Error.message
+      // is not a system code and would be presented as a user rejection.
+      return defaultDecision(request, 'wecom_interaction_send_failed');
     }
     return result;
   }

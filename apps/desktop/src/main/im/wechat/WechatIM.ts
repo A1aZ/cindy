@@ -503,16 +503,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     this.#pendingInteractions.set(userId, { request, resolve: resolvePending, timer });
     try {
       await this.sendText(userId, formatWechatInteractionPrompt(request));
-    } catch (error) {
+    } catch {
       const pending = this.#pendingInteractions.get(userId);
       if (pending?.request.requestId === request.requestId) {
         clearTimeout(pending.timer);
         this.#pendingInteractions.delete(userId);
       }
-      return defaultWechatInteractionDecision(
-        request,
-        error instanceof Error ? error.message : 'wechat_interaction_send_failed',
-      );
+      // Denial reasons are classified by exact/prefix match. Raw Error.message
+      // is not a system code and would be presented as a user rejection.
+      return defaultWechatInteractionDecision(request, 'wechat_interaction_send_failed');
     }
     return result;
   }

@@ -35,12 +35,14 @@ import { derivePiRuntimeFromClaudeRuntime } from '@/../shared/piRuntimeInitializ
 
 import {
   isLoopbackProviderUrl,
+  isProviderRequestPath,
   presetDisplayName,
   sortPresetsForRegion,
 } from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
+  ProviderModelDiscoverySource,
   ProviderModelRouteConfig,
   ProviderPreset,
   ProviderView,
@@ -91,16 +93,52 @@ function presetRuntimeBaseUrl(
 }
 
 function isValidEditablePresetBaseUrl(value: string): boolean {
+  return parseSafePresetHttpUrl(value) !== null;
+}
+
+function parseSafePresetHttpUrl(value: string): URL | null {
   try {
     const url = new URL(value);
-    return (
-      (url.protocol === 'http:' || url.protocol === 'https:')
-      && !url.username
-      && !url.password
-    );
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || url.username
+      || url.password
+    ) return null;
+    return url;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isAllowedDiscoveryWireProtocol(
+  agent: AgentKind,
+  value: unknown,
+): value is ProviderModelRouteConfig['wireProtocol'] {
+  const supported =
+    value === 'anthropic-messages'
+    || value === 'openai-responses'
+    || value === 'openai-chat';
+  return supported && (agent !== 'claude-code' || value === 'anthropic-messages');
+}
+
+function isDiscoverySourceValidForRuntime(
+  agent: AgentKind,
+  runtimeBaseUrl: string,
+  source: ProviderModelDiscoverySource,
+): boolean {
+  const runtimeUrl = parseSafePresetHttpUrl(runtimeBaseUrl);
+  const sourceUrl = parseSafePresetHttpUrl(source.baseUrl);
+  if (
+    !runtimeUrl
+    || !sourceUrl
+    || sourceUrl.origin !== runtimeUrl.origin
+    || !isAllowedDiscoveryWireProtocol(agent, source.wireProtocol)
+  ) return false;
+  if (source.modelsUrl !== undefined) {
+    const modelsUrl = parseSafePresetHttpUrl(source.modelsUrl);
+    if (!modelsUrl || modelsUrl.origin !== sourceUrl.origin) return false;
+  }
+  return source.requestPath === undefined || isProviderRequestPath(source.requestPath);
 }
 
 /**
@@ -623,6 +661,7 @@ export function AddProviderWizard({
         if (!rt) {
           return [];
         }
+        const runtimeBaseUrl = presetRuntimeBaseUrl(preset, agent, presetBaseUrls);
         const sources: {
           baseUrl: string;
           modelsUrl: string | null;
@@ -630,20 +669,22 @@ export function AddProviderWizard({
           route?: ProviderModelRouteConfig;
         }[] = [
           {
-            baseUrl: presetRuntimeBaseUrl(preset, agent, presetBaseUrls),
+            baseUrl: runtimeBaseUrl,
             modelsUrl: rt.modelsUrl ?? null,
             ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
           },
-          ...(rt.modelDiscovery ?? []).map((source) => ({
-            baseUrl: source.baseUrl,
-            modelsUrl: source.modelsUrl ?? null,
-            wireProtocol: source.wireProtocol,
-            route: {
+          ...(rt.modelDiscovery ?? [])
+            .filter((source) => isDiscoverySourceValidForRuntime(agent, runtimeBaseUrl, source))
+            .map((source) => ({
               baseUrl: source.baseUrl,
+              modelsUrl: source.modelsUrl ?? null,
               wireProtocol: source.wireProtocol,
-              ...(source.requestPath ? { requestPath: source.requestPath } : {}),
-            },
-          })),
+              route: {
+                baseUrl: source.baseUrl,
+                wireProtocol: source.wireProtocol,
+                ...(source.requestPath ? { requestPath: source.requestPath } : {}),
+              },
+            })),
         ];
         return sources.map(async (source) => {
           try {

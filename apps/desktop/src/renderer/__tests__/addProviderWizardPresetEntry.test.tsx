@@ -148,6 +148,26 @@ const zhipuCodingPreset = {
   },
 };
 
+const editableDiscoveryPreset = {
+  id: 'editable-discovery',
+  name: 'Editable Discovery',
+  runtimes: {
+    codex: {
+      baseUrl: 'https://editable.example/api/v4',
+      baseUrlEditable: true,
+      wireProtocol: 'openai-chat' as const,
+      models: [{ id: 'chat-model', name: 'Chat Model' }],
+      modelDiscovery: [
+        {
+          baseUrl: 'https://editable.example/api/v1',
+          modelsUrl: 'https://editable.example/api/v1/models',
+          wireProtocol: 'openai-responses' as const,
+        },
+      ],
+    },
+  },
+};
+
 const piReasoningPreset = {
   id: 'pi-reasoning',
   name: 'Pi Reasoning',
@@ -218,6 +238,7 @@ beforeEach(() => {
           openCodePreset,
           dualDiscoveryPreset,
           zhipuCodingPreset,
+          editableDiscoveryPreset,
           piReasoningPreset,
           explicitPiPreset,
           claudeRequestPathPreset,
@@ -718,6 +739,84 @@ describe('AddProviderWizard — preset 直达', () => {
       wireProtocol: 'openai-chat',
     });
     expect(runtime?.models).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2' }]);
+  });
+
+  it('可编辑预设改为同源 endpoint 后继续合并 Responses 目录', async () => {
+    vi.mocked(window.electronAPI.maker.fetchProviderModels).mockImplementation(
+      async ({ baseUrl }: { baseUrl: string }) =>
+        baseUrl === 'https://editable.example/api/v1'
+          ? { ok: true, models: [{ id: 'responses-model', name: 'Responses Model' }] }
+          : { ok: true, models: [{ id: 'chat-model', name: 'Chat Model' }] },
+    );
+    renderWizard('editable-discovery');
+
+    const endpoint = await screen.findByDisplayValue('https://editable.example/api/v4');
+    fireEvent.change(endpoint, { target: { value: 'https://editable.example/custom/v4' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'edited-key' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    fireEvent.click(await screen.findByText('Responses Model'));
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledTimes(2);
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://editable.example/custom/v4',
+        apiKey: 'edited-key',
+      }),
+    );
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://editable.example/api/v1',
+        wireProtocol: 'openai-responses',
+        apiKey: 'edited-key',
+      }),
+    );
+    expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.codex?.models).toEqual([
+      { id: 'chat-model', name: 'Chat Model' },
+      {
+        id: 'responses-model',
+        name: 'Responses Model',
+        route: {
+          baseUrl: 'https://editable.example/api/v1',
+          wireProtocol: 'openai-responses',
+        },
+      },
+    ]);
+  });
+
+  it('可编辑预设改为异源 endpoint 后不向旧目录发送 API Key', async () => {
+    vi.mocked(window.electronAPI.maker.fetchProviderModels).mockResolvedValue({
+      ok: true,
+      models: [{ id: 'self-hosted-model', name: 'Self-hosted Model' }],
+    });
+    renderWizard('editable-discovery');
+
+    const endpoint = await screen.findByDisplayValue('https://editable.example/api/v4');
+    fireEvent.change(endpoint, { target: { value: 'https://self-hosted.example/v4' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'self-hosted-key' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    fireEvent.click(await screen.findByText('Self-hosted Model'));
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledTimes(1);
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://self-hosted.example/v4',
+        apiKey: 'self-hosted-key',
+      }),
+    );
+    expect(window.electronAPI.maker.fetchProviderModels).not.toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: 'https://editable.example/api/v1' }),
+    );
+    expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.codex).toMatchObject({
+      baseUrl: 'https://self-hosted.example/v4',
+      models: [
+        { id: 'chat-model', name: 'Chat Model' },
+        { id: 'self-hosted-model', name: 'Self-hosted Model' },
+      ],
+    });
   });
 
   it('LiteLLM:清空可编辑端点后不回退预设地址，也不能继续', async () => {

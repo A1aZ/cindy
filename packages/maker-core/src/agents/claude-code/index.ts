@@ -2130,9 +2130,22 @@ export class ClaudeCodeAgent extends BaseAgent {
       autoReviewDecisionCache.set(key, pending);
       return pending;
     };
-    let toolLoopGuard: ToolLoopGuard | null = shouldUseToolLoopGuard(mutableModel)
-      ? new ToolLoopGuard()
+    let toolLoopGuards: Map<string | null, ToolLoopGuard> | null = shouldUseToolLoopGuard(mutableModel)
+      ? new Map()
       : null;
+    const getToolLoopGuard = (parentToolUseId?: string): ToolLoopGuard | null => {
+      if (!toolLoopGuards) return null;
+      const scopeKey = parentToolUseId ?? null;
+      let guard = toolLoopGuards.get(scopeKey);
+      if (!guard) {
+        guard = new ToolLoopGuard();
+        toolLoopGuards.set(scopeKey, guard);
+      }
+      return guard;
+    };
+    const resetToolLoopGuards = (): void => {
+      toolLoopGuards?.clear();
+    };
     let mutableEffort: Effort = opts.effort ?? 'high';
     let mutablePermissionMode: PermissionMode = reviewMode ? 'ask' : opts.permissionMode ?? 'default';
     // 计划模式(与 permissionMode 正交, **一次性选择**): mutablePlanMode 是 UI 勾选的
@@ -2502,7 +2515,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         sdkSessionId,
       });
       beginNewTurn();
-      toolLoopGuard?.resetTurn();
+      resetToolLoopGuards();
       turnInFlight = true;
       inputQueue.push({
         type: 'user',
@@ -4150,7 +4163,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             // 消息"(assistant / stream_event)为证据补登记；若 provider 已给上一
             // done 锁存 continuation claim，result-only 也能证明自动续 turn 已开始。
             // 随后镜像 send 入口的
-            // per-turn 状态重置(beginNewTurn + toolLoopGuard.resetTurn),否则 guard
+            // per-turn 状态重置(beginNewTurn + resetToolLoopGuards),否则 guard
             // 会带着上一轮的陈旧计数误判。
             // 排除两种非新 turn 场景:
             //  - interruptRequested:watchdog / tool-loop 已 q.interrupt(),SDK 残留
@@ -4193,7 +4206,7 @@ export class ClaudeCodeAgent extends BaseAgent {
                 sdkSessionId,
               });
               beginNewTurn();
-              toolLoopGuard?.resetTurn();
+              resetToolLoopGuards();
               turnInFlight = true;
             }
             noteUpstreamResponseActivity(typeof rawType === 'string' ? rawType : 'unknown');
@@ -4233,15 +4246,20 @@ export class ClaudeCodeAgent extends BaseAgent {
                 }
                 completeTranslatedTurnEnd();
               },
-              onToolUseStart: (id: string, toolName?: unknown, input?: unknown) => {
+              onToolUseStart: (
+                id: string,
+                toolName?: unknown,
+                input?: unknown,
+                parentToolUseId?: string,
+              ) => {
                 pendingToolIds.add(id);
-                toolLoopGuard?.onToolUse(id, toolName, input);
+                getToolLoopGuard(parentToolUseId)?.onToolUse(id, toolName, input);
                 clearUpstreamResponseIdle();
               },
-              onToolResultDone: (id: string, output: string) => {
+              onToolResultDone: (id: string, output: string, parentToolUseId?: string) => {
                 pendingToolIds.delete(id);
                 if (turnInFlight) {
-                  const verdict = toolLoopGuard?.onToolResult(id, output);
+                  const verdict = getToolLoopGuard(parentToolUseId)?.onToolResult(id, output);
                   if (verdict?.kind === 'hard') {
                     const loopHint = verdict.reason === 'consecutive'
                       ? `连续 ${verdict.count} 次发起完全相同的 ${verdict.toolName} 调用`
@@ -4607,7 +4625,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 全新 query + startForwardLoop 等价于 startSession 首次起 q 的空闲态。
       if (replayInput) {
         beginNewTurn();
-        toolLoopGuard?.resetTurn();
+        resetToolLoopGuards();
         turnInFlight = true;
       }
       try {
@@ -5144,7 +5162,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         // 兜底重置 currentTurn —— 上一 turn 异常 / abort 时 endTurn 可能没跑,
         // 防止 currentTurn 残留累加到下一 turn (lastApi / contextWindow / cost 跨 turn 保留)
         beginNewTurn();
-        toolLoopGuard?.resetTurn();
+        resetToolLoopGuards();
         // 标记 turn 进入 in-flight 态 (translator.onTurnEnd 在 result 事件回调时清);
         // rewind preview/commit 守卫读 isTurnRunning() 决定能否操作。
         sendInAcceptPhase = true;
@@ -5852,7 +5870,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             triggerAutoCompactIfNeeded();
           }
         }
-        toolLoopGuard = shouldUseToolLoopGuard(mutableModel) ? new ToolLoopGuard() : null;
+        toolLoopGuards = shouldUseToolLoopGuard(mutableModel) ? new Map() : null;
       },
 
       async setEffort(newEffort: Effort) {

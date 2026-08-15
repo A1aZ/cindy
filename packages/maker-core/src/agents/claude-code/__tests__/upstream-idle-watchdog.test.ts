@@ -190,9 +190,14 @@ function successResult(): Record<string, unknown> {
   };
 }
 
-function assistantToolUse(id: string, command = 'sleep 999'): Record<string, unknown> {
+function assistantToolUse(
+  id: string,
+  command = 'sleep 999',
+  parentToolUseId?: string,
+): Record<string, unknown> {
   return {
     type: 'assistant',
+    parent_tool_use_id: parentToolUseId ?? null,
     message: {
       role: 'assistant',
       content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }],
@@ -217,9 +222,14 @@ function assistantTaskOutput(id: string): Record<string, unknown> {
   };
 }
 
-function userToolResult(id: string, content = 'done'): Record<string, unknown> {
+function userToolResult(
+  id: string,
+  content = 'done',
+  parentToolUseId?: string,
+): Record<string, unknown> {
   return {
     type: 'user',
+    parent_tool_use_id: parentToolUseId ?? null,
     message: {
       role: 'user',
       content: [{ type: 'tool_result', tool_use_id: id, content }],
@@ -257,7 +267,7 @@ async function runStableAbabLoop(
   userContent: string,
   idPrefix: string,
 ): Promise<{ loopError: AgentEvent | undefined; interruptCalls: number }> {
-  const { handle, stream, events, fakeQuery } = session;
+  const { handle, stream, events, fakeQuery, collected } = session;
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 
   try {
@@ -295,6 +305,7 @@ async function runStableAbabLoop(
     vi.useRealTimers();
     stream.end();
     await handle.close().catch(() => undefined);
+    await collected;
   }
 }
 
@@ -319,7 +330,7 @@ describe('upstream-response-idle watchdog suspend awareness', () => {
   it('清醒静默满阈值 → 开火;系统挂起 8 小时 → 不开火,随后清醒走满仍开火', async () => {
     // 150s = 60s + 60s + 30s 三个分片,覆盖"满片消耗"与"尾片短于片长"两种形态。
     process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS = '150000';
-    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+    const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream();
 
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await handle.send({ type: 'user', content: 'long silent turn' });
@@ -345,11 +356,12 @@ describe('upstream-response-idle watchdog suspend awareness', () => {
     vi.useRealTimers();
     stream.end();
     await handle.close().catch(() => undefined);
+    await collected;
   });
 
   it('工具执行期间停表不开火;tool_result 配对完重新起表、走满才开火', async () => {
     process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS = '120000';
-    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+    const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream();
 
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await handle.send({ type: 'user', content: 'run a long tool' });
@@ -375,11 +387,12 @@ describe('upstream-response-idle watchdog suspend awareness', () => {
     vi.useRealTimers();
     stream.end();
     await handle.close().catch(() => undefined);
+    await collected;
   });
 
   it('turn 正常结束 → 清表,不再开火', async () => {
     process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS = '100000';
-    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+    const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream();
 
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await handle.send({ type: 'user', content: 'quick turn' });
@@ -393,10 +406,41 @@ describe('upstream-response-idle watchdog suspend awareness', () => {
     vi.useRealTimers();
     stream.end();
     await handle.close().catch(() => undefined);
+    await collected;
   });
 });
 
 describe('Claude Code tool-loop guard runtime integration', () => {
+  it('并发 subagent 的相同调用按 parent 隔离，不会聚合成会话级死循环', async () => {
+    const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream(
+      'claude-opus-5',
+    );
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      await handle.send({ type: 'user', content: 'run four independent subagents' });
+
+      for (let round = 0; round < 3; round += 1) {
+        for (let agent = 0; agent < 4; agent += 1) {
+          const parentToolUseId = `toolu_agent_${agent}`;
+          const id = `${parentToolUseId}_bash_${round}`;
+          stream.emit(assistantToolUse(id, 'git status --short', parentToolUseId));
+          stream.emit(userToolResult(id, 'clean', parentToolUseId));
+        }
+      }
+      stream.emit(successResult());
+
+      await pumpUntil(() => handle.isTurnRunning?.() === false, 'parallel subagent turn done');
+      expect(toolLoopError(events)).toBeUndefined();
+      expect(fakeQuery.interrupt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      stream.end();
+      await handle.close().catch(() => undefined);
+      await collected;
+    }
+  });
+
   it('claude-opus-5 的稳定 ABAB Bash 循环在第 12 个结果处中断', async () => {
     const result = await runStableAbabLoop(
       await startSessionWithStream('claude-opus-5'),
@@ -458,7 +502,7 @@ describe('Claude Code tool-loop guard runtime integration', () => {
   it.each(['deepseek/deepseek-v4-flash', 'claude-opus-5'])(
     '%s 真实 SDK 事件流中的 150 次不同调用与空结果可以完成同一个 turn',
     async (model) => {
-      const { handle, stream, events, fakeQuery } = await startSessionWithStream(model);
+      const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream(model);
 
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
       await handle.send({ type: 'user', content: 'analyze 150 different projects' });
@@ -477,13 +521,14 @@ describe('Claude Code tool-loop guard runtime integration', () => {
       vi.useRealTimers();
       stream.end();
       await handle.close().catch(() => undefined);
+      await collected;
     },
   );
 
   it.each(['deepseek/deepseek-v4-flash', 'claude-opus-5'])(
     '%s 真实 SDK 事件流中的稳定 TaskOutput 轮询不会中断 turn',
     async (model) => {
-      const { handle, stream, events, fakeQuery } = await startSessionWithStream(model);
+      const { handle, stream, events, fakeQuery, collected } = await startSessionWithStream(model);
 
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
       await handle.send({ type: 'user', content: 'wait for the background task' });
@@ -502,6 +547,7 @@ describe('Claude Code tool-loop guard runtime integration', () => {
       vi.useRealTimers();
       stream.end();
       await handle.close().catch(() => undefined);
+      await collected;
     },
   );
 });

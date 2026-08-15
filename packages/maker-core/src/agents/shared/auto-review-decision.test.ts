@@ -349,6 +349,8 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('not_renderable')).toBe(true);
     expect(isSystemPermissionDenialReason('headless_interaction_unavailable')).toBe(true);
     expect(isSystemPermissionDenialReason('session_cleanup')).toBe(true);
+    expect(isSystemPermissionDenialReason('session_disposed')).toBe(true);
+    expect(isSystemPermissionDenialReason('session disposed')).toBe(true);
     expect(isSystemPermissionDenialReason('no_card')).toBe(true);
     expect(isSystemPermissionDenialReason('rich_output_not_supported')).toBe(true);
     expect(isSystemPermissionDenialReason('stale_route')).toBe(true);

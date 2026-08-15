@@ -150,6 +150,8 @@ export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'session_closed',
   'session_aborted',
   'session_cleanup',
+  'session_disposed',
+  'session disposed',
   'interaction_route_released',
   'hook_turn_terminal',
   'turn_terminal',

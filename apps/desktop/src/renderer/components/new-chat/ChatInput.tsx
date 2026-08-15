@@ -2854,15 +2854,17 @@ export function ChatInput({
   // showRecommendationOverlay 的可见判据包含 !hasAttachments / browserComments.length === 0 /
   // !hasVoiceDraftText,但当这些条件变为 false 时只隐藏 overlay,不清除 ref。
   // 此时按 Tab 仍会通过 showRecommendationRef.current 检查并插入不可见的推荐词。
+  // voiceInput.isBusy 也需要纳入：用户通过快捷键开始听写时 isBusy 立即为 true，
+  // 但 draftText 可能尚未到达，此时 overlay 已隐藏而 ref 未清除，Tab 仍会插入推荐词。
   useEffect(() => {
     if (
       recommendedPromptRef.current &&
-      (attachments.length > 0 || browserComments.length > 0 || voiceInput.draftText.trim().length > 0)
+      (attachments.length > 0 || browserComments.length > 0 || voiceInput.isBusy || voiceInput.draftText.trim().length > 0)
     ) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
     }
-  }, [attachments.length, browserComments.length, voiceInput.draftText]);
+  }, [attachments.length, browserComments.length, voiceInput.isBusy, voiceInput.draftText]);
 
   const captureSendFocusForRestore = useComposerSendFocusRestore(
     editor,

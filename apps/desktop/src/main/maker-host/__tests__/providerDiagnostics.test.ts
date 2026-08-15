@@ -434,6 +434,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
           codex: {
             baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
             wireProtocol: 'openai-chat',
+            requestPath: '/legacy/chat',
             models: [
               {
                 id: 'glm-5.3',
@@ -441,7 +442,6 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
                 route: {
                   baseUrl: 'https://open.bigmodel.cn/api/v1',
                   wireProtocol: 'openai-responses',
-                  requestPath: '/responses',
                 },
               },
             ],
@@ -455,7 +455,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
       baseUrl: 'https://open.bigmodel.cn/api/v1',
       modelId: 'glm-5.3',
       wireProtocol: 'openai-responses',
-      requestPath: '/responses',
+      requestPath: undefined,
     });
     let seenUrl = '';
     await testProviderConnection(
@@ -477,6 +477,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
           codex: {
             baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
             wireProtocol: 'openai-chat',
+            requestPath: '/chat/completions',
             models: [{ id: 'glm-5.2', name: 'GLM-5.2' }],
           },
         },
@@ -488,6 +489,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
       baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
       modelId: 'glm-5.2',
       wireProtocol: 'openai-chat',
+      requestPath: '/chat/completions',
     });
     let seenUrl = '';
     await testProviderConnection(

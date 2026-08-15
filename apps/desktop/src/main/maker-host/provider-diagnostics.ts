@@ -338,7 +338,9 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
   // Pi derives its inference path from wireProtocol and does not consume requestPath.
   const requestPath = agent === 'pi'
     ? undefined
-    : (model.route?.requestPath ?? routing.requestPath);
+    : model.route
+      ? model.route.requestPath
+      : routing.requestPath;
   // OAuth 形态：探测凭证用 Runner 持有的 access_token（与 oauth-token 路由同源），未登录时
   // 无 token → 探测会得到 AUTH_INVALID，这本身就是「先去登录」的正确结论。
   // token 走 authorization 头而**不走 apiKey 字段**——apiKey 会让 cc 探测同时发

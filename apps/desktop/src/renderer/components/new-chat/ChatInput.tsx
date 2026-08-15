@@ -2849,6 +2849,21 @@ export function ChatInput({
   useEffect(() => {
     editor?.setEditable(!composerMutationLocked);
   }, [composerMutationLocked, editor]);
+
+  // 当推荐因附件/浏览器评论/语音草稿变为不可见时,清除 ref 防止 Tab 填入隐藏内容。
+  // showRecommendationOverlay 的可见判据包含 !hasAttachments / browserComments.length === 0 /
+  // !hasVoiceDraftText,但当这些条件变为 false 时只隐藏 overlay,不清除 ref。
+  // 此时按 Tab 仍会通过 showRecommendationRef.current 检查并插入不可见的推荐词。
+  useEffect(() => {
+    if (
+      recommendedPromptRef.current &&
+      (attachments.length > 0 || browserComments.length > 0 || voiceInput.draftText.trim().length > 0)
+    ) {
+      showRecommendationRef.current = false;
+      setRecommendedPrompt(null);
+    }
+  }, [attachments.length, browserComments.length, voiceInput.draftText]);
+
   const captureSendFocusForRestore = useComposerSendFocusRestore(
     editor,
     composerMutationLocked,

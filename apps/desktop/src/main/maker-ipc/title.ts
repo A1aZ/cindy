@@ -347,7 +347,7 @@ const PREDICTION_RECENT_MESSAGE_LIMIT = 6;
 /** 预测请求:仅 sessionId + agentKind + turnGen。素材(messages / workingDir)一律由 main 从 DB 读取,
  * 不信任 renderer 上报内容——受信 renderer 或 stale UI 可能携带其它会话转写 / 伪造 workdir,
  * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于 IPC 参数校验与 renderer 侧去重;
- * 主进程级去重使用 DB 的权威 updatedAt(见 _predictingPromptSessions)。 */
+ * 主进程级去重使用 DB 的权威 userSendAt(见 _predictingPromptSessions)。 */
 interface PredictPromptRequest {
   sessionId: string;
   agentKind: AgentKind;
@@ -356,9 +356,12 @@ interface PredictPromptRequest {
 
 /** 主进程级去重:同一 session 同时只能有一笔预测在途,
  * 避免多窗口重复付费调用。与 renderer 侧 _predictingSessions 同模式:
- * Map<sessionId, updatedAt(DB 权威值)>——新 turn 的 DB updatedAt 变化时替换旧条目。
- * 使用 DB 的权威 updatedAt 而非 renderer 的局部 turnGen:同一 session 的
- * 任意窗口都读到相同的 DB 记录,避免跨窗口代次顺序失真。 */
+ * Map<sessionId, userSendAt(DB 权威值)>——新 turn 的 DB userSendAt 变化时替换旧条目。
+ * 使用 DB 的权威 userSendAt 而非 renderer 的局部 turnGen:同一 session 的
+ * 任意窗口都读到相同的 DB 记录,避免跨窗口代次顺序失真。
+ * 选 userSendAt 而非 updatedAt:updatedAt 会因非 turn 更新(agent 切换、标题变更等)
+ * 而改变,导致去重键失真——非 turn 更新允许重复请求,或新 turn 被当作重复请求拒绝。
+ * userSendAt 仅由「用户按下发送」bump,不受非 turn 更新干扰,是更可靠的轮次标识。 */
 const _predictingPromptSessions = new Map<string, number>();
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
@@ -462,7 +465,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       // 对其做预测是浪费付费调用。也拒绝 soft-deleted session:删除态会话的消息仍保留在 DB,
       // 但已从用户会话列表移除,对其做预测会外发已删除转写并产生付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status, updatedAt: sessions.updatedAt })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status, updatedAt: sessions.updatedAt, userSendAt: sessions.userSendAt })
         .from(sessions)
         .where(eq(sessions.id, sessionId));
       if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review' || sessionRow.status === 'deleted') {
@@ -480,15 +483,22 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。使用 DB 的权威 updatedAt 而非
+      // 等多窗口场景下重复触发付费 provider 调用。使用 DB 的权威 userSendAt 而非
       // renderer 的局部 turnGen 作为去重键:同一 session 的任意窗口都读到相同的 DB
-      // 记录,避免跨窗口代次顺序失真。若 DB 状态未变(同一轮),拒绝重复请求;若 DB
-      // 状态已变(新轮),允许新请求替换旧条目。
-      const existingUpdatedAt = _predictingPromptSessions.get(sessionId);
-      if (existingUpdatedAt != null && sessionRow.updatedAt === existingUpdatedAt) {
+      // 记录,避免跨窗口代次顺序失真。若 DB 的 userSendAt 未变(同一轮),拒绝重复请求;
+      // 若 userSendAt 已变(新轮),允许新请求替换旧条目。
+      // 选 userSendAt 而非 updatedAt:updatedAt 会因非 turn 更新(agent 切换、标题变更等)
+      // 而改变,导致去重键失真——非 turn 更新允许重复请求,或新 turn 被当作重复请求拒绝。
+      // userSendAt 仅由「用户按下发送」bump,不受非 turn 更新干扰,是更可靠的轮次标识。
+      const existingUserSendAt = _predictingPromptSessions.get(sessionId);
+      if (existingUserSendAt != null && sessionRow.userSendAt === existingUserSendAt) {
         return { prompt: null };
       }
-      _predictingPromptSessions.set(sessionId, sessionRow.updatedAt);
+      // userSendAt 为 NULL 表示从未发过消息(草稿会话),不应触发预测。
+      if (sessionRow.userSendAt == null) {
+        return { prompt: null };
+      }
+      _predictingPromptSessions.set(sessionId, sessionRow.userSendAt);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -549,9 +559,9 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           }),
         };
       } finally {
-        // 仅在 Map 条目仍为请求时刻的 updatedAt 时才删除,防止旧轮预测结束时
+        // 仅在 Map 条目仍为请求时刻的 userSendAt 时才删除,防止旧轮预测结束时
         // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
-        if (_predictingPromptSessions.get(sessionId) === sessionRow.updatedAt) {
+        if (_predictingPromptSessions.get(sessionId) === sessionRow.userSendAt) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

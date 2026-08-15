@@ -344,29 +344,36 @@ function parseAutoTitleRequest(raw: unknown): SessionAutoTitleRequest {
 /** 预测素材窗口:从 DB 读最近几条 user/assistant 消息(与 promptPrediction 的最近 3 轮配对对齐)。 */
 const PREDICTION_RECENT_MESSAGE_LIMIT = 6;
 
-/** 预测请求:仅 sessionId + agentKind。素材(messages / workingDir)一律由 main 从 DB 读取,
+/** 预测请求:仅 sessionId + agentKind + turnGen。素材(messages / workingDir)一律由 main 从 DB 读取,
  * 不信任 renderer 上报内容——受信 renderer 或 stale UI 可能携带其它会话转写 / 伪造 workdir,
- * 把非本会话内容送到本地 provider 触发付费调用。 */
+ * 把非本会话内容送到本地 provider 触发付费调用。turnGen 用于主进程级去重:同一 session
+ * 新 turn 的预测(更高 turnGen)可以替换旧 turn 的进行中请求,避免旧请求阻塞新轮预测。 */
 interface PredictPromptRequest {
   sessionId: string;
   agentKind: AgentKind;
+  turnGen: number;
 }
 
-/** 主进程级去重:同一 session 同时只能有一笔预测在途,避免多窗口重复付费调用。 */
-const _predictingPromptSessions = new Set<string>();
+/** 主进程级去重:同一 session 同一 turnGen 同时只能有一笔预测在途,
+ * 避免多窗口重复付费调用。与 renderer 侧 _predictingSessions 同模式:
+ * Map<sessionId, turnGen>——新 turn 的更高 turnGen 会替换旧条目,不阻塞新轮预测。 */
+const _predictingPromptSessions = new Map<string, number>();
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throwIpcError('INVALID_PARAMS', 'predict-prompt request must be a non-null object');
   }
-  const { sessionId, agentKind } = raw as Record<string, unknown>;
+  const { sessionId, agentKind, turnGen } = raw as Record<string, unknown>;
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > SESSION_ID_MAX) {
     throwIpcError('INVALID_PARAMS', 'invalid or missing sessionId for predict-prompt');
   }
   if (!TITLE_AGENT_KINDS.includes(agentKind as AgentKind)) {
     throwIpcError('INVALID_PARAMS', `invalid agentKind for predict-prompt: ${String(agentKind)}`);
   }
-  return { sessionId, agentKind: agentKind as AgentKind };
+  if (typeof turnGen !== 'number' || !Number.isFinite(turnGen) || turnGen < 0) {
+    throwIpcError('INVALID_PARAMS', `invalid or missing turnGen for predict-prompt: ${String(turnGen)}`);
+  }
+  return { sessionId, agentKind: agentKind as AgentKind, turnGen };
 }
 
 export interface RegisterMakerTitleIpcOptions {
@@ -446,7 +453,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       request: unknown,
     ): Promise<{ prompt: string | null }> => {
       assertTrustedAppRendererEvent(event);
-      const { sessionId, agentKind } = parsePredictPromptRequest(request);
+      const { sessionId, agentKind, turnGen } = parsePredictPromptRequest(request);
       // 防御纵深:即使 renderer 有 UI 守卫,main 侧也需从 DB 确认 session 真实存在且非远程
       // (SSH / device-link),避免受信 renderer 绕过 UI 守卫携带远程会话内容触发付费调用。
       // 同时拒绝 review session:reviewer 会话的 composer 被禁用(disabled),不可编辑也不可发送,
@@ -470,12 +477,14 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         });
         return { prompt: null };
       }
-      // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。主进程级 Set 跨窗口可见。
-      if (_predictingPromptSessions.has(sessionId)) {
+      // 多窗口去重:同一 session 同一 turnGen 同时只能有一笔预测在途,避免 openSessionInNewWindow
+      // 等多窗口场景下重复触发付费 provider 调用。与 renderer 侧 _predictingSessions 同模式:
+      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过,避免旧请求阻塞新轮预测。
+      const existingTurnGen = _predictingPromptSessions.get(sessionId);
+      if (existingTurnGen === turnGen) {
         return { prompt: null };
       }
-      _predictingPromptSessions.add(sessionId);
+      _predictingPromptSessions.set(sessionId, turnGen);
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
@@ -532,10 +541,15 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
             agentKind,
             messages,
             ...(latestSessionRow.workingDir ? { workingDir: latestSessionRow.workingDir } : {}),
+            materialDrainUpdatedAt: latestSessionRow.updatedAt,
           }),
         };
       } finally {
-        _predictingPromptSessions.delete(sessionId);
+        // 仅在 Map 条目仍为请求时刻的 turnGen 时才删除,防止旧轮预测结束时
+        // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
+        if (_predictingPromptSessions.get(sessionId) === turnGen) {
+          _predictingPromptSessions.delete(sessionId);
+        }
       }
     },
   );

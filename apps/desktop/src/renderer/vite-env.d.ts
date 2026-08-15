@@ -5583,6 +5583,7 @@ interface ElectronAPI {
       agentKind: 'claude-code' | 'codex' | 'pi';
       messages: Array<{ role: string; content: string }>;
       workingDir?: string;
+      turnGen: number;
     }) => Promise<{ prompt: string | null }>;
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,

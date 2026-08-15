@@ -212,10 +212,11 @@ function invokePredict(request: unknown): Promise<unknown> {
   return Promise.resolve(handler(EVENT, request));
 }
 
-/** 合法的 predict-prompt payload:仅 sessionId + agentKind(素材由 main 从 DB 读取)。 */
+/** 合法的 predict-prompt payload: sessionId + agentKind + turnGen(素材由 main 从 DB 读取)。 */
 const VALID_REQUEST = {
   sessionId: 'session-1',
   agentKind: 'claude-code',
+  turnGen: 0,
 };
 
 beforeEach(() => {
@@ -252,11 +253,15 @@ describe('maker:predict-prompt — payload 运行期校验', () => {
   it.each([
     ['非对象', null],
     ['数组', []],
-    ['缺 sessionId', { agentKind: 'claude-code' }],
-    ['sessionId 非字符串', { sessionId: 1, agentKind: 'claude-code' }],
-    ['sessionId 空串', { sessionId: '', agentKind: 'claude-code' }],
-    ['sessionId 超长', { sessionId: 'a'.repeat(200), agentKind: 'claude-code' }],
-    ['agentKind 非枚举值', { sessionId: 's1', agentKind: 'gpt' }],
+    ['缺 sessionId', { agentKind: 'claude-code', turnGen: 0 }],
+    ['sessionId 非字符串', { sessionId: 1, agentKind: 'claude-code', turnGen: 0 }],
+    ['sessionId 空串', { sessionId: '', agentKind: 'claude-code', turnGen: 0 }],
+    ['sessionId 超长', { sessionId: 'a'.repeat(200), agentKind: 'claude-code', turnGen: 0 }],
+    ['agentKind 非枚举值', { sessionId: 's1', agentKind: 'gpt', turnGen: 0 }],
+    ['缺 turnGen', { sessionId: 's1', agentKind: 'claude-code' }],
+    ['turnGen 非数字', { sessionId: 's1', agentKind: 'claude-code', turnGen: 'abc' }],
+    ['turnGen 负数', { sessionId: 's1', agentKind: 'claude-code', turnGen: -1 }],
+    ['turnGen NaN', { sessionId: 's1', agentKind: 'claude-code', turnGen: NaN }],
   ])('%s → INVALID_PARAMS 且不调用付费模型', async (_label, payload) => {
     await expect(invokePredict(payload)).rejects.toThrow(/INVALID_PARAMS/);
     expect(h.predict).not.toHaveBeenCalled();
@@ -267,6 +272,7 @@ describe('maker:predict-prompt — payload 运行期校验', () => {
     await invokePredict({
       sessionId: 'session-1',
       agentKind: 'pi',
+      turnGen: 0,
       // 受信 renderer 或 stale UI 可能上报其它会话转写 / 伪造 workdir,应被忽略
       messages: [{ role: 'user', content: '外部注入的伪造内容' }],
       workingDir: '/spoofed/path',
@@ -348,14 +354,14 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
 });
 
 describe('maker:predict-prompt — 多窗口去重', () => {
-  it('同一 session 并发调用时第二个请求直接返回 null,避免重复付费', async () => {
+  it('同一 session 同一 turnGen 并发调用时第二个请求直接返回 null,避免重复付费', async () => {
     // 让第一次预测暂挂,模拟并发
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
     );
 
-    // 发起两个并发调用
+    // 发起两个并发调用(同一 turnGen)
     const first = invokePredict(VALID_REQUEST);
     // 等第一个进入 handler 并标记 _predictingPromptSessions
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
@@ -366,6 +372,41 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     // 第一个完成
     resolveFirst('预测结果');
     await expect(first).resolves.toEqual({ prompt: '预测结果' });
+  });
+
+  it('同一 session 新 turnGen 的预测可以替换旧 turnGen 的进行中请求', async () => {
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    h.predict
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+      )
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => { resolveSecond = resolve; }),
+      );
+
+    // 发起 turnGen=0 的预测并暂挂
+    const first = invokePredict(VALID_REQUEST);
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
+
+    // 同一 session 发起 turnGen=1 的新预测,应能通过(替换旧条目)
+    const second = invokePredict({
+      ...VALID_REQUEST,
+      turnGen: 1,
+    });
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(2));
+
+    // 旧预测完成,因 turnGen 不匹配,不应删除去重条目
+    resolveFirst('旧轮预测');
+    await expect(first).resolves.toEqual({ prompt: '旧轮预测' });
+
+    // 新预测仍在途,去重条目应仍为 turnGen=1
+    const third = invokePredict({ ...VALID_REQUEST, turnGen: 1 });
+    await expect(third).resolves.toEqual({ prompt: null });
+
+    // 新预测完成
+    resolveSecond('新轮预测');
+    await expect(second).resolves.toEqual({ prompt: '新轮预测' });
   });
 
   it('不同 session 可以并发预测', async () => {

@@ -148,6 +148,10 @@ export interface PromptPredictionParams {
   agentKind: AgentKind;
   messages: SlimMessage[];
   workingDir?: string;
+  /** title.ts 中 readMaterial 之后捕获的 session.updatedAt,用于 beforeDispatch 终末复核。
+   * 传入此参数后 generatePromptPrediction 不再重新从 DB 读取 drain 时 updatedAt,
+   * 避免素材物化后、provider/凭证解析期间新消息落盘导致轮次变化未被检测。 */
+  materialDrainUpdatedAt?: number;
 }
 
 /**
@@ -192,16 +196,22 @@ export async function generatePromptPrediction(
   // 在 provider/凭证解析之前捕获 drain 时的 updatedAt，供 beforeDispatch 终末复核。
   // 若在 drain 之后、beforeDispatch 首次 DB 读之前用户发送了新消息，row.updatedAt
   // 和 finalRow.updatedAt 都会包含新值，仅做两次 DB 读互相比较无法检测到轮次变化。
+  // 优先使用 title.ts 中素材物化后传入的 materialDrainUpdatedAt（覆盖素材物化→provider
+  // 解析之间的空窗），未传入时回退到在此处从 DB 读取。
   let beforeDispatchDrainUpdatedAt: number | undefined;
-  try {
-    const [drainRow] = await getDbClient()
-      .drizzle.select({ updatedAt: sessions.updatedAt })
-      .from(sessions)
-      .where(eq(sessions.id, params.sessionId))
-      .limit(1);
-    beforeDispatchDrainUpdatedAt = drainRow?.updatedAt ?? undefined;
-  } catch {
-    beforeDispatchDrainUpdatedAt = undefined;
+  if (params.materialDrainUpdatedAt != null) {
+    beforeDispatchDrainUpdatedAt = params.materialDrainUpdatedAt;
+  } else {
+    try {
+      const [drainRow] = await getDbClient()
+        .drizzle.select({ updatedAt: sessions.updatedAt })
+        .from(sessions)
+        .where(eq(sessions.id, params.sessionId))
+        .limit(1);
+      beforeDispatchDrainUpdatedAt = drainRow?.updatedAt ?? undefined;
+    } catch {
+      beforeDispatchDrainUpdatedAt = undefined;
+    }
   }
   const result = await generateTitleViaProviderResult(
     {

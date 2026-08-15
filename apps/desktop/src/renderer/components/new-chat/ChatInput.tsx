@@ -1242,6 +1242,7 @@ export function ChatInput({
             agentKind: runtimeAgentKind,
             messages: contextMsgs,
             workingDir: workingDir ?? undefined,
+            turnGen: requestTurnGen,
           })
           .then((result) => {
             if (_predictingSessions.get(requestSessionId) === requestTurnGen) {

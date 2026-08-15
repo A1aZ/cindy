@@ -6162,6 +6162,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       agentKind: 'claude-code' | 'codex' | 'pi';
       messages: Array<{ role: string; content: string }>;
       workingDir?: string;
+      turnGen: number;
     }): Promise<{ prompt: string | null }> =>
       ipcRenderer.invoke('maker:predict-prompt', request),
     helpAsk: (

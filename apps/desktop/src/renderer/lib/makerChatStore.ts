@@ -4893,6 +4893,7 @@ export function handleStreamEvent(
         existing?.status === 'completed' || existing?.status === 'failed';
       const wakesAfterTerminal =
         !wasAlreadyTerminal &&
+        !state.turnStoppedByUser &&
         (merged.status === 'completed' || merged.status === 'failed') &&
         isWakeAgentTask(merged);
       const nextWake = state.pendingTaskWake + (wakesAfterTerminal ? 1 : 0);

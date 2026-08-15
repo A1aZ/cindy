@@ -616,6 +616,16 @@ export async function generateTitleViaProviderResult(
         if (!(await preDispatchEligible('after-credential-recheck'))) {
           return { status: 'failed' };
         }
+        // preDispatchEligible 内部可能有异步 provider 状态读取，期间用户仍可能登出/
+        // 切换账号/轮换凭证。在最后一个 await 之后重新读取并比对，捕获 eligibility
+        // 检查期间的凭证变更，避免向旧账号外发付费调用。
+        const oauthPostEligibility = await readAnthropicOAuth();
+        if (oauthPostEligibility?.accessToken !== oauth.accessToken) {
+          log.debug('title oneShot skipped: credential changed during eligibility check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchAnthropicTitle(
           target.upstream,
           target.model,
@@ -651,6 +661,20 @@ export async function generateTitleViaProviderResult(
         if (!(await preDispatchEligible('after-credential-recheck'))) {
           return { status: 'failed' };
         }
+        // preDispatchEligible 内部可能有异步 provider 状态读取，期间用户仍可能登出/
+        // 切换 workspace/轮换 token。在最后一个 await 之后重新读取并比对，捕获
+        // eligibility 检查期间的凭证变更，避免向旧账号外发付费调用。
+        const credsPostEligibility = readCodexCreds();
+        if (
+          !credsPostEligibility ||
+          credsPostEligibility.accountId !== creds.accountId ||
+          credsPostEligibility.accessToken !== creds.accessToken
+        ) {
+          log.debug('title oneShot skipped: credential changed during eligibility check', {
+            providerId,
+          });
+          return { status: 'failed' };
+        }
         text = await fetchCodexTitle(
           target.upstream,
           target.model,
@@ -681,6 +705,15 @@ export async function generateTitleViaProviderResult(
         }
         // 凭证确认后再做派发紧前复查（会话资格），把凭证读取期间的 TOCTOU 窗口也覆盖。
         if (!(await preDispatchEligible('after-credential-recheck'))) {
+          return { status: 'failed' };
+        }
+        // preDispatchEligible 内部可能有异步 provider 状态读取，期间用户仍可能轮换
+        // 网关 key。在最后一个 await 之后重新读取并比对，捕获 eligibility 检查期间的
+        // 凭证变更，避免用旧 key 外发付费调用。
+        if (readGatewayKey() !== key) {
+          log.debug('title oneShot skipped: gateway key changed during eligibility check', {
+            providerId,
+          });
           return { status: 'failed' };
         }
         text = await fetchGatewayTitle(

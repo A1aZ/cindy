@@ -189,6 +189,20 @@ export async function generatePromptPrediction(
   //   - systemPrompt: Anthropic Messages API 顶层 system 字段(非 Anthropic wire 忽略)
   //   - maxOutputChars=512: 恢复 validateTitleOutput 输出校验(拦截多行/Markdown/role label),再交给 maxVisualChars=140 做展示截断
   //   - maxVisualChars=140: 截断到推荐提示词上限
+  // 在 provider/凭证解析之前捕获 drain 时的 updatedAt，供 beforeDispatch 终末复核。
+  // 若在 drain 之后、beforeDispatch 首次 DB 读之前用户发送了新消息，row.updatedAt
+  // 和 finalRow.updatedAt 都会包含新值，仅做两次 DB 读互相比较无法检测到轮次变化。
+  let beforeDispatchDrainUpdatedAt: number | undefined;
+  try {
+    const [drainRow] = await getDbClient()
+      .drizzle.select({ updatedAt: sessions.updatedAt })
+      .from(sessions)
+      .where(eq(sessions.id, params.sessionId))
+      .limit(1);
+    beforeDispatchDrainUpdatedAt = drainRow?.updatedAt ?? undefined;
+  } catch {
+    beforeDispatchDrainUpdatedAt = undefined;
+  }
   const result = await generateTitleViaProviderResult(
     {
       sessionId: params.sessionId,
@@ -209,6 +223,11 @@ export async function generatePromptPrediction(
       //   - providerId: 会话 provider 被切换时中止,避免路由到过期 provider
       beforeDispatch: async ({ sessionId, agentKind, providerId: resolvedProviderId }) => {
         try {
+          // drainUpdatedAt 在 provider/凭证解析之前捕获，用于终末复核。
+          // 若在 drain 之后、beforeDispatch 首次 DB 读之前用户发送了新消息，
+          // row.updatedAt 和 finalRow.updatedAt 都会包含新值，仅做 row↔finalRow
+          // 比较无法检测到轮次变化。与 drainUpdatedAt 比较才可靠。
+          const drainUpdatedAt = beforeDispatchDrainUpdatedAt;
           const [row] = await getDbClient()
             .drizzle.select({
               agentKind: sessions.agentKind,
@@ -282,10 +301,10 @@ export async function generatePromptPrediction(
           // 中止，避免用旧 provider 凭证外发付费调用。
           if (finalRow.providerId == null && row.providerId != null) return false;
           if (finalRow.workingDir !== (params.workingDir ?? null)) return false;
-          // 终末复核消息轮次：用户在 drain 后、provider/凭证解析期间发送了新消息，
-          // touchUserSendInDb 会推进 sessions.updatedAt。若 updatedAt 已变化说明
-          // 会话已进入新轮次，当前预测素材已过期，按 fail-closed 中止。
-          if (finalRow.updatedAt !== row.updatedAt) return false;
+          // 终末复核消息轮次：与 drain 时的 updatedAt（provider/凭证解析之前捕获）比较。
+          // 仅与 row.updatedAt（beforeDispatch 内首次 DB 读）比较无法检测到
+          // drain 之后、首次 DB 读之前发来的新消息——此时两次读都返回同一新值。
+          if (drainUpdatedAt && finalRow.updatedAt !== drainUpdatedAt) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

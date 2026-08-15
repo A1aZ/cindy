@@ -590,6 +590,21 @@ function touchSessionAccess(sessionId: string): void {
 }
 
 /**
+ * 会话级在途本地工作探针(整体 review 复核 #6):页面把「本会话此刻有 outbox /
+ * 上传 / 发送在途 / 附件托盘非空」等 store 不可见的本地工作注册进来,
+ * regularSessionProtected 与预算候选筛选统一咨询。probe 只需回答当前时刻该
+ * 会话是否有本地工作;注销由页面在卸载 / 切会话时执行(返回的 unregister)。
+ */
+const sessionLocalWorkProbes = new Set<(sessionId: string) => boolean>();
+
+function hasSessionLocalWork(sessionId: string): boolean {
+  for (const probe of sessionLocalWorkProbes) {
+    if (probe(sessionId)) return true;
+  }
+  return false;
+}
+
+/**
  * schedule 驻留详情是否处于「单窗口」策略(方案 §9.2,整体 review P1-8):详情打开
  * 期间最多驻留一个 MESSAGE_PAGE_SIZE 窗口。普通任务不受此策略约束(加载更早照常
  * 累积,失焦时统一压回 80)。
@@ -600,17 +615,42 @@ function scheduleDetailWindowActive(sessionId: string): boolean {
 }
 
 /**
+ * 单行是否为「不可安全裁剪」的在途/本地行(复核 #5):裁掉会丢数据或丢对账身份。
+ * - 本地系统卡(mobile-system-*):没有服务端对应行,裁掉即永久丢失;
+ * - 在途 live assistant(generated fallback):迟到落库行靠 pendingLive 身份对账去重;
+ * - 未确认乐观用户行:服务端行带 id,本地乐观行只有 clientId——宁可超窗也保留。
+ */
+function isScheduleClampProtectedRow(sessionId: string, message: RemoteMessage): boolean {
+  if (messageKey(message).startsWith('mobile-system-')) return true;
+  if (isPendingLiveAssistantMessage(sessionId, message)) return true;
+  if (message.role === 'user' && !message.id) return true;
+  return false;
+}
+
+/**
  * 把驻留 schedule 详情的消息窗口滚动裁剪到最新 MESSAGE_PAGE_SIZE 条:「加载更早」
- * 与实时 push 都不得让它超过一个窗口,超出部分立即丢弃(翻回去重新取)。裁掉的是
- * 已验证连续段的更早历史,覆盖区间下界随之失效,保守遗忘。不 bump/emit——紧跟在
- * 各写入点的 messages.set 之后、调用方统一 emit 之前执行。
+ * 与实时 push 都不得让它超过一个窗口,超出部分立即丢弃(翻回去重新取)。在途/
+ * 本地行优先占位(复核 #5),剩余额度给最新可重取行;裁掉的是已验证连续段的更早
+ * 历史,覆盖区间下界随之失效,保守遗忘。不 bump/emit——紧跟在各写入点的
+ * messages.set 之后、调用方统一 emit 之前执行。
  */
 function clampScheduleDetailWindow(sessionId: string): void {
   if (!scheduleDetailWindowActive(sessionId)) return;
   const current = messages.get(sessionId);
   if (!current || current.length <= MESSAGE_PAGE_SIZE) return;
+  const protectedRows: RemoteMessage[] = [];
+  const evictable: RemoteMessage[] = [];
+  for (const row of current) {
+    if (isScheduleClampProtectedRow(sessionId, row)) protectedRows.push(row);
+    else evictable.push(row);
+  }
+  const keepEvictable = Math.max(0, MESSAGE_PAGE_SIZE - protectedRows.length);
+  if (keepEvictable >= evictable.length) return; // 保护行挤占全部额度:保守不裁。
   forgetWindowCoverage(sessionId);
-  messages.set(sessionId, current.slice(current.length - MESSAGE_PAGE_SIZE));
+  messages.set(sessionId, normalizeMessages([
+    ...protectedRows,
+    ...evictable.slice(evictable.length - keepEvictable),
+  ]));
 }
 
 /**
@@ -625,6 +665,9 @@ function regularSessionProtected(sessionId: string): boolean {
   if (sessionMakerTurnRunning.get(sessionId) === true) return true;
   if ((pendingInteractions.get(sessionId)?.length ?? 0) > 0) return true;
   if ((inputProjections.get(sessionId)?.pendingQueue.length ?? 0) > 0) return true;
+  // 页面注册的本地在途工作(outbox / 上传 / 发送 / 附件托盘)——跨会话可见,
+  // 预算淘汰栈下层会话时同样要保护(复核 #6)。
+  if (hasSessionLocalWork(sessionId)) return true;
   return false;
 }
 
@@ -657,37 +700,48 @@ function reclaimSessionRuntimeMaps(sessionId: string): boolean {
 /**
  * 普通任务压缩:保留最新 MESSAGE_PAGE_SIZE 条(与首开窗口、磁盘缓存上限对齐),
  * 更早的正文丢弃——可从工作设备经「加载更早」翻页重新取回。压缩前先 flush 流式
- * 合批,刚结束的 turn 的最后一段文字不丢。详情级投影与流式中间态一并释放(整体
- * review P1-7,方案 §9.1 语义边界:压缩释放的是「可重新获取」的运行态)——调用点
- * 已保证非保护态(非 running、pendingQueue 为空),这些投影不会有人再用,重开时
- * 按需重建;pendingTextDelta 已 flush 保住末段,不再 discard。同步 marker 保留:
- * 最近一次窗口同步的结论仍然成立(压缩只裁掉更早的历史),重开走缓存 hydrate +
- * _count 差值点亮「加载更早」,与既有 affordance 语义一致。目录行、未读、
- * pending interaction 不在压缩范围。
+ * 合批,刚结束的 turn 的最后一段文字不丢。详情级投影与输入投影的释放**与条数
+ * 无关**(复核 #1:≤80 条的会话同样可能挂着 live plan / task / input 投影,且
+ * 在途 projection 查询需要 epoch 终局围栏拒写);对账身份(pendingLive /
+ * streaming clientId)只在其对应行被裁掉时回收(复核 #2)——盲删会让迟到的落库
+ * 行识别不到保留窗口里的 generated fallback,追加成重复 assistant 气泡。调用点
+ * 已保证非保护态(非 running、pendingQueue 为空)。同步 marker 保留:最近一次
+ * 窗口同步的结论仍然成立(压缩只裁掉更早的历史),重开走缓存 hydrate + _count
+ * 差值点亮「加载更早」。目录行、未读、pending interaction 不在压缩范围。
  */
 function compactRegularSessionMessages(sessionId: string): boolean {
-  const existing = messages.get(sessionId);
-  if (!existing || existing.length <= MESSAGE_PAGE_SIZE) return false;
-  const textFlushed = flushPendingTextDelta(sessionId);
-  const current = messages.get(sessionId) ?? existing;
-  if (current.length <= MESSAGE_PAGE_SIZE) {
-    if (textFlushed) emit();
-    return false;
-  }
-  // 只裁更早的历史:覆盖区间下界随之失效,保守遗忘,下次同步重建。
-  forgetWindowCoverage(sessionId);
-  livePlanSnapshots.delete(sessionId);
-  sessionTaskUpdates.delete(sessionId);
-  sessionParkedTaskUpdates.delete(sessionId);
-  inputProjections.delete(sessionId);
-  // 在途 projection 查询的终局围栏:epoch 抬升后旧查询拒写。
+  // flush 先行(与条数无关):末段文字先进窗口,再决定裁多少。
+  let changed = flushPendingTextDelta(sessionId);
+  changed = livePlanSnapshots.delete(sessionId) || changed;
+  changed = sessionTaskUpdates.delete(sessionId) || changed;
+  changed = sessionParkedTaskUpdates.delete(sessionId) || changed;
+  changed = inputProjections.delete(sessionId) || changed;
+  // 在途 projection 查询的终局围栏:epoch 抬升后 setInputProjectionIfCurrent 拒写。
   bumpInputProjectionAuthorityEpoch(sessionId);
-  streamingAssistantClientIds.delete(sessionId);
-  pendingLiveAssistantClientIds.delete(sessionId);
-  messages.set(sessionId, current.slice(current.length - MESSAGE_PAGE_SIZE));
-  bumpMessageVersion();
-  emit();
-  return true;
+  const current = messages.get(sessionId);
+  if (current && current.length > MESSAGE_PAGE_SIZE) {
+    // 只裁更早的历史:覆盖区间下界随之失效,保守遗忘,下次同步重建。
+    forgetWindowCoverage(sessionId);
+    const retained = current.slice(current.length - MESSAGE_PAGE_SIZE);
+    // 被裁行的对账身份一并回收;保留行的身份留着,迟到落库行才能去重(复核 #2)。
+    for (const dropped of current.slice(0, current.length - MESSAGE_PAGE_SIZE)) {
+      forgetPendingLiveAssistantMessageIdentity(sessionId, dropped.id, dropped.clientId);
+    }
+    const streamingId = streamingAssistantClientIds.get(sessionId);
+    if (
+      streamingId !== undefined
+      && !retained.some((row) => row.id === streamingId || row.clientId === streamingId)
+    ) {
+      streamingAssistantClientIds.delete(sessionId);
+    }
+    messages.set(sessionId, retained);
+    changed = true;
+  }
+  if (changed) {
+    bumpMessageVersion();
+    emit();
+  }
+  return changed;
 }
 
 /**
@@ -1277,7 +1331,11 @@ function applyRemoteTextEvent(
       agentMeta: isRecord(event.agentMeta) ? event.agentMeta : null,
       createdAt: new Date().toISOString(),
     });
-    if (changed) rememberPendingLiveAssistantClientId(sessionId, clientId);
+    if (changed) {
+      rememberPendingLiveAssistantClientId(sessionId, clientId);
+      // 流式链也会增长窗口(复核 #3):直接 final 的整段文本同样受单窗口上限约束。
+      clampScheduleDetailWindow(sessionId);
+    }
     return changed || clientIdResolution.changed;
   }
 
@@ -1310,7 +1368,11 @@ function applyRemoteTextEvent(
     agentMeta: nextMeta,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   });
-  if (changed) rememberPendingLiveAssistantClientId(sessionId, clientId);
+  if (changed) {
+    rememberPendingLiveAssistantClientId(sessionId, clientId);
+    // 同上(复核 #3):32ms 合批 flush 走这里,窗口增长必须收口。
+    clampScheduleDetailWindow(sessionId);
+  }
   return changed || clientIdResolution.changed;
 }
 
@@ -3046,6 +3108,18 @@ export const remoteSessionStore = {
 
   revokeScheduleDetailResidency(sessionId: string): void {
     if (sessionId) scheduleDetailResidency.delete(sessionId);
+  },
+
+  /**
+   * 注册会话级在途本地工作探针(见 sessionLocalWorkProbes 注释):页面在挂载期间
+   * 注册,返回注销函数。压缩与全局预算的候选筛选都会咨询探针——栈下层会话的
+   * outbox / 上传 / 发送在途 / 附件托盘不被误回收(方案 §9.1 保护清单)。
+   */
+  registerSessionLocalWorkProbe(probe: (sessionId: string) => boolean): () => void {
+    sessionLocalWorkProbes.add(probe);
+    return () => {
+      sessionLocalWorkProbes.delete(probe);
+    };
   },
 
   /**

@@ -4080,6 +4080,27 @@ export default function SessionScreen() {
   const scheduleReclaimedRef = useRef(false);
   const loadRef = useRef(load);
   loadRef.current = load;
+  // 本会话的驻留分类(响应式):schedule 详情不提供「加载更早」——单窗口策略下
+  // 翻出的更早页会被滚动裁剪,入口必须是死的,不能留一个永远无效的远程操作
+  // (整体 review 复核 #4;方案 §9.2 单窗口语义)。
+  const sessionRetentionKind = useSyncExternalStore(
+    remoteSessionStore.subscribe,
+    () => remoteSessionStore.getSessionRetention(sessionId),
+  );
+  const isScheduleDetail = sessionRetentionKind === 'schedule';
+  // 会话级在途工作探针(方案 §9.1 保护清单的 store 侧信号,复核 #6):压缩与
+  // 全局预算咨询它,栈下层的本会话 outbox / 上传 / 发送在途 / 附件托盘不被误回收。
+  // 经 ref 实时读,注册一次即可。
+  useEffect(() => {
+    const unregister = remoteSessionStore.registerSessionLocalWorkProbe((id) => (
+      id === sessionId
+      && (outboxRef.current.length > 0
+        || sendingQueueClientIdsRef.current.size > 0
+        || settlingQueueItemsRef.current.length > 0
+        || attachmentsRef.current.length > 0)
+    ));
+    return unregister;
+  }, [sessionId]);
   const maybeReclaimSessionRuntime = useCallback((reason: SessionReclaimReason) => {
     if (!sessionId) return;
     // 在途本地工作门禁(方案 §7.3):outbox 待派发、enqueue 在途、落定中条目、
@@ -4174,11 +4195,12 @@ export default function SessionScreen() {
   // (lastSyncedAt 为空)、入口当前不可见、且 _count 已知且 > 已加载时乐观置 true;A1 / reopen 回来后仍按
   // shouldKeepOlderMessagesAffordance / hasOlderMessagesAfterReopen 校正(:806/:846)。_count 未知不凭空点亮。
   useEffect(() => {
+    if (isScheduleDetail) return;
     if (lastSyncedAt !== null || hasOlderMessages || messages.length === 0) return;
     if (hasOlderMessagesByServerCount(currentSession?._count?.messages, messages)) {
       setHasOlderMessages(true);
     }
-  }, [currentSession?._count?.messages, hasOlderMessages, lastSyncedAt, messages]);
+  }, [currentSession?._count?.messages, hasOlderMessages, isScheduleDetail, lastSyncedAt, messages]);
 
   // 在线时按 connectionEpoch 去重:每个连接 epoch 只 resync 一次。首开同步由上面的 mount effect 负责
   // (此处 epoch == 初值 → skip);仅在 epoch 变化(真正重连 / 回前台 connectNow→online)时再 resync,
@@ -4741,6 +4763,8 @@ export default function SessionScreen() {
   }, [abandonInFlightBackfill, sessionId, connectionEpoch]);
 
   const loadEarlierMessages = useCallback(async () => {
+    // schedule 详情不翻历史(单窗口策略,入口已隐藏;此处兜底程序化调用)。
+    if (isScheduleDetail) return;
     if (!deviceId || !sessionId || loadingEarlier || !hasOlderMessages) return;
     const before = oldestMessageCursor(messages);
     if (!before) {
@@ -4768,7 +4792,7 @@ export default function SessionScreen() {
     } finally {
       setLoadingEarlier(false);
     }
-  }, [abandonInFlightBackfill, deviceId, hasOlderMessages, loadingEarlier, maker, messages, sessionId]);
+  }, [abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, messages, sessionId]);
 
   /**
    * 历史窗口空洞的自动补齐(见 `historyWindowGap.ts` 的文件头)。
@@ -8888,7 +8912,7 @@ export default function SessionScreen() {
         <SessionSearchSheet
           activeHit={activeSearchHit}
           activeIndex={activeSearchIndex}
-          hasOlderMessages={hasOlderMessages}
+          hasOlderMessages={hasOlderMessages && !isScheduleDetail}
           hitCount={searchHits.length}
           loadingEarlier={loadingEarlier}
           onChangeQuery={setSearchQuery}
@@ -9155,7 +9179,7 @@ export default function SessionScreen() {
                     topOverlayHeight={topOverlayHeight}
                     busyAction={messageActionBusy?.kind ?? null}
                     busyClientId={messageActionBusy?.clientId ?? null}
-                    canLoadEarlier={hasOlderMessages && messages.length > 0}
+                    canLoadEarlier={hasOlderMessages && messages.length > 0 && !isScheduleDetail}
                     emptyTestID="session.messageList.empty"
                     focusedItemKey={focusedMessageItemKey ?? null}
                     focusedRequestKey={focusedMessageRequestKey}

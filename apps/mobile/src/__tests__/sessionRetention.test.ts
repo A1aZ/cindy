@@ -52,6 +52,11 @@ function message(id: string, sessionId: string, createdAt = '2026-01-01T00:00:00
   };
 }
 
+/** 与 remoteSessionStore.messageKey 同口径(id → clientId → role:createdAt)。 */
+function messageKeyOf(row: RemoteMessage): string {
+  return row.id || row.clientId || `${row.role}:${row.createdAt}`;
+}
+
 beforeEach(() => {
   remoteSessionStore.clear();
   cacheStore.clear();
@@ -626,7 +631,8 @@ describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
     expect(trimmed).toHaveLength(80);
     expect(trimmed[0].id).toBe('s40');
     expect(trimmed[trimmed.length - 1].id).toBe('s119');
-    // 「加载更早」翻回更旧的一页:立即被单窗口策略裁掉,窗口仍是最新的 80 条。
+    // 「加载更早」翻回更旧的一页:单窗口策略下翻出的页被裁掉(页面层对 schedule
+    // 隐藏入口,这里是 store 语义的钉子——见 [sessionId].tsx isScheduleDetail 门禁)。
     remoteSessionStore.mergeEarlierMessages('sched-1', [
       message('old1', 'sched-1', '2025-12-31T00:00:00.000Z'),
       message('old2', 'sched-1', '2025-12-31T00:00:01.000Z'),
@@ -646,5 +652,113 @@ describe('普通任务消息治理(方案 §9.1,阶段 4)', () => {
     remoteSessionStore.setMessages('normal-1', ids.slice(0, 100).map((id, index) =>
       message(`n-${id}`, 'normal-1', `2026-01-01T01:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
     expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(100);
+  });
+
+  it('流式 text 链同样受单窗口约束:32ms 合批 flush 与直接 final 不突破 80 条(复核 #3)', () => {
+    vi.useFakeTimers();
+    try {
+      remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+        session('sched-1', { source: 'scheduler' }),
+      ]);
+      remoteSessionStore.grantScheduleDetailResidency('sched-1');
+      remoteSessionStore.setMessages('sched-1', Array.from({ length: 80 }, (_, index) =>
+        message(`s${index}`, 'sched-1', `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+      // 合批 delta → 32ms flush 创建第 81 行 → 立即被裁回 80。
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 'sched-1',
+        event: { type: 'text', data: { text: 'streaming tail', isFinal: false } },
+      });
+      vi.advanceTimersByTime(64);
+      expect(remoteSessionStore.getMessages('sched-1')).toHaveLength(80);
+      // 直接 final 的整段文本同理。
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 'sched-1',
+        event: { type: 'text', data: { text: 'final block', isFinal: true } },
+      });
+      expect(remoteSessionStore.getMessages('sched-1')).toHaveLength(80);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('单窗口裁剪保护在途/本地行:本地系统卡不被裁掉(复核 #5)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [
+      session('sched-1', { source: 'scheduler' }),
+    ]);
+    remoteSessionStore.grantScheduleDetailResidency('sched-1');
+    remoteSessionStore.setMessages('sched-1', Array.from({ length: 80 }, (_, index) =>
+      message(`s${index}`, 'sched-1', `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`)));
+    // 本地系统卡(无服务端对应行)追加为第 81 行:受保护占位,裁的是最旧可重取行。
+    remoteSessionStore.appendLocalSystemCard('sched-1', 'compact', { boundaryId: 'b1' });
+    const rows = remoteSessionStore.getMessages('sched-1');
+    expect(rows).toHaveLength(80);
+    expect(rows.some((row) => messageKeyOf(row).startsWith('mobile-system-'))).toBe(true);
+    expect(rows.some((row) => row.id === 's0')).toBe(false);
+  });
+
+  it('压缩对 ≤80 条的会话同样释放详情投影并抬升 epoch(复核 #1)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [session('normal-1')]);
+    remoteSessionStore.setMessages('normal-1', [
+      message('n1', 'normal-1'), message('n2', 'normal-1', '2026-01-01T00:00:01.000Z'),
+    ]);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'normal-1',
+      event: {
+        type: 'agent_task_update',
+        source: 'claude-code',
+        data: { taskId: 't1', status: 'succeeded', title: 't1' },
+      },
+    });
+    const epochBefore = remoteSessionStore.captureInputProjectionAuthorityEpoch('normal-1');
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(true);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(2);
+    expect(remoteSessionStore.getSessionTaskUpdates('normal-1').size).toBe(0);
+    expect(
+      remoteSessionStore.setInputProjectionIfCurrent('normal-1', { sessionId: 'normal-1' }, epochBefore),
+    ).toBe(false);
+  });
+
+  it('压缩保留 retained 窗口内 fallback 的对账身份:迟到落库行去重不重复(复核 #2)', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Dev', [session('normal-1')]);
+    // 100 条旧服务端行,流式 fallback 落在最新端(createdAt = 真实 now)。
+    remoteSessionStore.setMessages('normal-1', Array.from({ length: 100 }, (_, index) =>
+      message(`n${index}`, 'normal-1', `2025-12-31T${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}:00.000Z`)));
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 'normal-1',
+      event: { type: 'text', data: { text: 'a'.repeat(24), isFinal: false } },
+    });
+    // 压缩:101 → 80,fallback(最新)被保留,身份必须跟着保留。
+    remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' });
+    const compacted = remoteSessionStore.getMessages('normal-1');
+    expect(compacted).toHaveLength(80);
+    expect(compacted.some((row) => messageKeyOf(row).startsWith('mobile-stream-'))).toBe(true);
+    // 迟到的落库行(prefix 匹配 fallback)应替换 fallback,而不是追加第二条。
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:messages:created', {
+      sessionId: 'normal-1',
+      message: {
+        ...message('db-final', 'normal-1'),
+        content: 'a'.repeat(24) + ' tail from server',
+      },
+    });
+    const after = remoteSessionStore.getMessages('normal-1');
+    expect(after.some((row) => messageKeyOf(row).startsWith('mobile-stream-'))).toBe(false);
+    expect(after.some((row) => row.id === 'db-final')).toBe(true);
+    expect(after).toHaveLength(80);
+  });
+
+  it('会话级在途工作探针:压缩与预算淘汰都咨询(复核 #6)', () => {
+    seedRegularSession('normal-1', 200);
+    const unregister = remoteSessionStore.registerSessionLocalWorkProbe(
+      (id) => id === 'normal-1',
+    );
+    try {
+      expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(false);
+      expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(200);
+    } finally {
+      unregister();
+    }
+    // 注销后恢复压缩。
+    expect(remoteSessionStore.releaseSessionRuntimeState('normal-1', { reason: 'detail-blur' })).toBe(true);
+    expect(remoteSessionStore.getMessages('normal-1')).toHaveLength(80);
   });
 });

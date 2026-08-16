@@ -1755,6 +1755,19 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     expect(consumeLastAssistantPersistId(SESSION)).toBe(first);
   });
 
+  it('keeps an embedded stop token when it arrives as a later streaming delta', async () => {
+    onAssistantTextEvent(SESSION, { text: 'The token is ', isFinal: false }, null);
+    onAssistantTextEvent(SESSION, { text: '<|eos|>', isFinal: false }, null);
+    flushAssistantBlock(SESSION, null);
+    await flushWrites();
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(createMessage).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ content: 'The token is <|eos|>' }),
+      expect.anything(),
+    );
+  });
+
   it('同 turn 多条 assistant → 取到最后一条的 persistId', () => {
     onAssistantTextEvent(SESSION, { text: 'first', isFinal: true }, null);
     onToolUseEvent(SESSION, { toolUseId: 'tu_seq', toolName: 'Bash', input: {} }, null);

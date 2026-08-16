@@ -2003,6 +2003,13 @@ describe('codex internal citation 归一化 (#785)', () => {
     expect((final?.data as { text: string } | undefined)?.text).toBe('');
   });
 
+  it('finalizeCodexCitationText keeps a completed incomplete prefix as real text', async () => {
+    const { finalizeCodexCitationText } = await import('./translator.js');
+    expect(finalizeCodexCitationText('<')).toBe('<');
+    expect(finalizeCodexCitationText('<|eo')).toBe('<|eo');
+    expect(finalizeCodexCitationText('<|eos|>')).toBe('');
+  });
+
   it('Web Search 引用标记被剥离,普通 cite 文本与相邻标点不变', async () => {
     const { finalizeCodexCitationText } = await import('./translator.js');
     const one = '\uE200cite\uE202turn17search1\uE201';

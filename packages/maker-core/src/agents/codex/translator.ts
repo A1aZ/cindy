@@ -1013,11 +1013,7 @@ function findUnfinishedCitationOpen(text: string): number {
 export function finalizeCodexCitationText(text: string): string {
   const fileOpenAt = findUnfinishedCitationOpen(text);
   const fileStableEnd = fileOpenAt === -1 ? text.length : fileOpenAt;
-  const stableEnd = Math.min(
-    fileStableEnd,
-    stableInternalWebCitationBoundary(text),
-    stableStandaloneModelStopTokenBoundary(text),
-  );
+  const stableEnd = Math.min(fileStableEnd, stableInternalWebCitationBoundary(text));
   return stripInternalWebCitations(normalizeCodexFileCitations(text.slice(0, stableEnd)));
 }
 

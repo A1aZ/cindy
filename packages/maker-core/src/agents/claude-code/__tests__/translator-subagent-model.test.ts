@@ -351,7 +351,7 @@ describe('Claude Code assistant text streaming contract', () => {
       }),
     ]);
     expect(ctx.turn.uiEmittedText).toBe('answer');
-    expect(ctx.rt.streamStopTokenByKey.get('toolu-a')).toEqual({
+    expect(ctx.rt.streamStopTokenByKey.get('toolu-a:0')).toEqual({
       pending: '<|eo',
       emitted: false,
     });
@@ -403,7 +403,7 @@ describe('Claude Code assistant text streaming contract', () => {
       }),
     ]);
     expect(ctx.turn.uiEmittedText).toBe('answer');
-    expect(ctx.rt.streamStopTokenByKey.get('toolu-a')).toEqual({
+    expect(ctx.rt.streamStopTokenByKey.get('toolu-a:0')).toEqual({
       pending: '<|eos|>',
       emitted: false,
     });
@@ -444,7 +444,55 @@ describe('Claude Code assistant text streaming contract', () => {
       { text: '先看一眼。', isFinal: true },
     ]);
     expect(ctx.turn.uiEmittedText).toBe('先看一眼。');
-    expect(ctx.rt.streamStopTokenByKey.get('__main__')).toEqual({
+    expect(ctx.rt.streamStopTokenByKey.get('__main__:0')).toEqual({
+      pending: '<|eos|>',
+      emitted: false,
+    });
+  });
+
+  it('drops a later text-block leftover after earlier prose in the same envelope', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'block-0',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '先看一眼。' } },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'block-1-start',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_start', index: 1, content_block: { type: 'text' } },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'block-1',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '<|eos|>' } },
+      },
+      queue,
+      ctx,
+    );
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents.map((event) => event.data)).toEqual([
+      { text: '先看一眼。', isFinal: false },
+    ]);
+    expect(ctx.rt.streamStopTokenByKey.get('__main__:1')).toEqual({
       pending: '<|eos|>',
       emitted: false,
     });

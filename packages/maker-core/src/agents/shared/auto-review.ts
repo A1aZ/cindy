@@ -38,6 +38,7 @@
  */
 
 import {
+  isDotenvCredentialPath,
   isSensitiveCredentialPath,
   SENSITIVE_CREDENTIAL_PATH_PATTERNS,
 } from './sensitive-credential-paths.js';
@@ -159,6 +160,19 @@ const SAFE_READONLY_BINS: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'tree', 'du', 'df', 'ps',
   'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'column', 'nl', 'tac',
   'jq', 'yq', 'base64', 'md5', 'md5sum', 'sha256sum', 'cksum',
+]);
+
+/** Read-only commands whose positional operands may expose file contents. */
+const DOTENV_FILE_READER_BINS: ReadonlySet<string> = new Set([
+  'cat', 'head', 'tail', 'wc', 'stat', 'file', 'realpath', 'readlink',
+  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'tree', 'du',
+  'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'nl', 'tac',
+  'jq', 'yq', 'base64', 'md5', 'md5sum', 'sha256sum', 'cksum', 'sed',
+]);
+
+/** These readers consume their first positional argument as an expression, not a file. */
+const FIRST_DATA_ARGUMENT_BINS: ReadonlySet<string> = new Set([
+  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq',
 ]);
 
 /** 命令包裹器:剥掉后信任绑定到内层真实命令。`sudo`/`doas` 不在此列(提权本身危险)。 */
@@ -4720,12 +4734,45 @@ export function commandExecutableNames(command: string): string[] {
   return [...names];
 }
 
+function shellCommandReadsDotenv(command: string): boolean {
+  for (const segment of splitTopLevelSegments(command)) {
+    const tokens = unwrapWrappers(stripShellControlTokens(tokenize(segment)));
+    const bin = executableName(tokens[0] ?? '');
+    if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
+
+    let dataArgumentIndex = -1;
+    if (FIRST_DATA_ARGUMENT_BINS.has(bin)) {
+      for (let index = 1; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (token === '--') {
+          dataArgumentIndex = index + 1;
+          break;
+        }
+        if (!token.startsWith('-')) {
+          dataArgumentIndex = index;
+          break;
+        }
+      }
+    }
+
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (index === dataArgumentIndex) continue;
+      if (isDotenvCredentialPath(tokens[index])) return true;
+    }
+  }
+  return false;
+}
+
 export function classifyShellCommand(
   command: string,
   workspaceRoots: string[],
   opts: ShellReviewOptions = {},
 ): ReviewVerdict {
   if (typeof command !== 'string' || command.trim().length === 0) return 'prompt';
+  // The shared path matcher deliberately accepts only complete path values. Shell
+  // commands need argument-aware scanning so a trailing pipe/comment cannot hide a
+  // dotenv operand, while jq/grep expressions such as jq .env data.json stay data.
+  if (shellCommandReadsDotenv(command)) return 'prompt-each-time';
   // 两档风险模式都跑以下变体；明确红线优先，命中才 prompt-each-time：
   //  - deEscaped(去引号 + 去反斜杠转义):防 su'do' / su\do / rm -r'f' 这类把关键词拆开的绕过。
   //  - quotesOnly(只去引号、保留 `\`):Windows `\` 路径的凭证检测 —— `cat C:\Users\me\.ssh\id_rsa`

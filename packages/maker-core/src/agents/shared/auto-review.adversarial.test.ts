@@ -381,15 +381,32 @@ describe('对抗语料 — 变体矩阵', () => {
 
 /** Dotenv files are credential-bearing paths, including when shell tools read them. */
 describe('对抗语料 — dotenv 凭证路径', () => {
-  it('绝对或显式相对 dotenv 路径不得直接放行', () => {
+  it('命令分段中的 dotenv 文件操作数一律要求确认', () => {
     for (const command of [
-      'cat /repo/.env',
-      'grep KEY /repo/.env.local',
+      'cat .env',
+      'cat /repo/.env && true',
+      "cat /repo/.env | sed -n '1p'",
+      'cat /repo/.env   ',
+      'cat /repo/.env # inspect configuration',
+      'cat "/repo/.env.local"; true',
       'cat ./.env.production.local',
+      'grep KEY .env.local && true',
+      'sed -n 1p .env.test',
     ]) {
       expect(classifyShellCommand(command, roots, opts)).toBe('prompt-each-time');
     }
-    expect(classifyShellCommand('jq .env data.json', roots, opts)).toBe('auto-approve');
+  });
+
+  it('普通文件与数据表达式仍保持只读直通', () => {
+    for (const command of [
+      'cat .environment',
+      'cat config.env.local',
+      'echo .env',
+      'jq .env data.json',
+      'grep .env data.json',
+    ]) {
+      expect(classifyShellCommand(command, roots, opts)).toBe('auto-approve');
+    }
   });
 });
 

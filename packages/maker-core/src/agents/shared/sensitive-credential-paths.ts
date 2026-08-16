@@ -5,6 +5,11 @@
  * bridge runs in a standalone child process and embeds these specs into its
  * generated extension instead of maintaining a second handwritten regex list.
  */
+export const DOTENV_CREDENTIAL_PATH_PATTERN_SPEC = {
+  source: String.raw`(?:^|[\\/])\.env(?:\.[^\\/]+)?$`,
+  flags: "i",
+} as const;
+
 export const SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
   {
     source: String.raw`(?:^|[\\/\s'"~])\.(?:ssh|aws|gnupg|kube|docker|azure|claude|codex)\b`,
@@ -14,10 +19,7 @@ export const SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
     source: String.raw`(?:^|[\\/\s'"~])\.(?:netrc|npmrc|pgpass|pypirc|git-credentials)\b`,
     flags: "i",
   },
-  {
-    source: String.raw`(?:^|[\\/])\.env(?:\.[^\\/]+)?$`,
-    flags: "i",
-  },
+  DOTENV_CREDENTIAL_PATH_PATTERN_SPEC,
   { source: String.raw`[\\/]\.cargo[\\/]credentials(?:\.toml)?\b`, flags: "i" },
   {
     source: String.raw`[\\/]\.m2[\\/]settings(?:-security)?\.xml\b`,
@@ -134,6 +136,17 @@ export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
   "**/.xdt-server",
   "**/.xdt-server/**",
 ] as const;
+
+const DOTENV_CREDENTIAL_PATH_PATTERN = new RegExp(
+  DOTENV_CREDENTIAL_PATH_PATTERN_SPEC.source,
+  DOTENV_CREDENTIAL_PATH_PATTERN_SPEC.flags,
+);
+
+export function isDotenvCredentialPath(target: string): boolean {
+  return (
+    typeof target === "string" && DOTENV_CREDENTIAL_PATH_PATTERN.test(target)
+  );
+}
 
 export const SENSITIVE_CREDENTIAL_PATH_PATTERNS: readonly RegExp[] =
   SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS.map(

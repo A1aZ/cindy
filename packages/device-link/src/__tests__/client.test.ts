@@ -4677,9 +4677,37 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     const ws = h.current();
     expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
 
-    await establishInboundReliableLink(h, 'remote-stream-2');
+    await establishInboundReliableLink(h, 'remote-stream');
     await tick();
     expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
+
+    h.client.stop();
+  }, 10_000);
+
+  it('对端换 stream 视为真正恢复,按探测预算 replay', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    for (let i = 0; i < 7; i += 1) {
+      h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+    }
+    const ws = h.current();
+    const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
+
+    await establishInboundReliableLink(h, 'remote-stream-restarted');
+    await tick();
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual(seqs.slice(0, 2));
 
     h.client.stop();
   }, 10_000);
@@ -4730,6 +4758,59 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     expect(retriedSeqs(sendsBySeq(ws))).toEqual([...seqs.slice(0, 2), ...seqs.slice(2, 4)]);
 
     h.client.stop();
+  }, 10_000);
+
+  it('恢复探测未 ACK 时定时器仍重发已发出的探针,不放行新帧', async () => {
+    await withFakeTimers(async (h, advance) => {
+      for (let i = 0; i < 7; i += 1) {
+        h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+      }
+      const ws = h.current();
+      const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
+      const internals = h.client as unknown as {
+        peerTransport: Map<string, { linkReady: boolean }>;
+      };
+      internals.peerTransport.get('dev-b')!.linkReady = false;
+
+      const id = `inbound-link-${++inboundLinkId}`;
+      const off = h.client.onFrame((env) => {
+        if (env.kind !== 'link-open' || env.id !== id || !env.src) return;
+        h.client.sendLinkAccept(env.src, env.id, {
+          appVersion: '1',
+          allowlistHash: 'hash',
+        });
+      });
+      h.current().push({
+        v: PROTOCOL_VERSION,
+        kind: 'link-open',
+        id,
+        src: 'dev-b',
+        payload: {
+          controllerName: 'Remote',
+          protocolVersion: 1,
+          appVersion: '1',
+          capabilities: [
+            DEVICE_LINK_CAPABILITY_RELIABLE_TRANSPORT,
+            DEVICE_LINK_CAPABILITY_TRANSPORT_TIMEOUT_CLOSE,
+          ],
+          transportStreamId: 'remote-stream-2',
+          transportBaseSeq: 1,
+        },
+      });
+      await advance(1);
+      off();
+      expect(retriedSeqs(sendsBySeq(ws))).toEqual(seqs.slice(0, 2));
+
+      await advance(200);
+      expect(retriedSeqs(sendsBySeq(ws))).toEqual(seqs.slice(0, 2));
+      expect(seqs.slice(0, 2).map((seq) => sendsBySeq(ws).get(seq))).toEqual([3, 3]);
+      expect(seqs.slice(2).every((seq) => sendsBySeq(ws).get(seq) === 1)).toBe(true);
+    }, {
+      pingIntervalMs: 600_000,
+      transportRetryIntervalMs: 200,
+      transportRetryPassBudget: 2,
+      transportMaxRetryAttempts: 50,
+    });
   }, 10_000);
 
   it('多 peer 拓扑:一个 peer 停止 ACK 被限流,另一个 peer 的投递零感知', async () => {

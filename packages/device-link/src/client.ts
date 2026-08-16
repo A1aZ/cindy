@@ -448,6 +448,8 @@ interface PeerTransportState {
   receive: Map<string, ReceiveStreamState>;
   highestAckSeq: number;
   lastReplayEpoch: number;
+  /** 上次真正 replay 时对端的 stream。对端重启换 stream 时不能当重复 open。 */
+  lastReplayRemoteStreamId: string | null;
   /**
    * 恢复探测：link 刚恢复或刚被 DEVICE_OFFLINE 刹停后为 true。
    * 此间出站不超过 transportRetryPassBudget，直到收到可靠 ACK。
@@ -2454,6 +2456,7 @@ export class DeviceLinkClient {
         receive: new Map(),
         highestAckSeq: 0,
         lastReplayEpoch: this.connEpoch,
+        lastReplayRemoteStreamId: null,
         recoveryNeedsAck: false,
         recoveryFramesSent: 0,
         pushAdmissionDropCount: 0,
@@ -2829,7 +2832,6 @@ export class DeviceLinkClient {
       || this.stopped
       || this.status !== 'online'
     ) return;
-    if (this.shouldHoldRecoverySend(peer)) return;
     const now = Date.now();
     // pending 是按 seq 递增插入的 Map,迭代天然旧→新 —— 正是累计 ACK 需要推进的顺序。
     // 对端长期不 ACK 时预算会一直压在队头那几条上,这**不是饥饿**而是正确形状:接收端
@@ -2852,7 +2854,7 @@ export class DeviceLinkClient {
     // peer 是净损失。量级上也不是主要矛盾:线上那 449 条的形状是几 KB 级 maker:event 塞满
     // 64 槽窗口(最大簇 213),本上限已把它压到 ≤8;「队头恰好 4MB」时溢出是 ≤32,仍低于
     // 引发事故的量级。真出现这种负载时日志会给出真实形状,届时按证据设计,不先建机制。
-    const budget = this.remainingRecoveryBudget(peer);
+    const budget = this.recoveryPassBudget();
     let framesSpent = 0;
     for (const pending of peer.pending.values()) {
       if (!opts.ignoreInterval && now - pending.lastSentAt < this.timing.transportRetryIntervalMs) {
@@ -2862,6 +2864,8 @@ export class DeviceLinkClient {
         this.handleReliableRetryExhausted(dst, pending.seq);
         return;
       }
+      const admittingNew = !pending.sent;
+      if (admittingNew && this.shouldHoldRecoverySend(peer)) break;
       // 发送前先按预估分片数结算:已经发过东西、且这一条会超预算时,把它留到下一趟。
       // 用预估而非真实编码结果是刻意的 —— 这是流控决策,不需要精确,重新编码一条 4MB
       // 消息只为数分片数不划算;发送后再用真实帧数扣减。
@@ -2874,7 +2878,7 @@ export class DeviceLinkClient {
         break;
       }
       framesSpent += Math.max(1, sentFrames);
-      this.noteRecoveryFrames(peer, sentFrames);
+      if (admittingNew) this.noteRecoveryFrames(peer, sentFrames);
       if (framesSpent >= budget) break;
     }
   }
@@ -2907,12 +2911,13 @@ export class DeviceLinkClient {
   }
 
   /**
-   * 同连接代、链路已 ready 的重复 link-open 只重发 accept,不再全量 replay、
-   * 也不重置 attempts。真正从 not-ready 恢复时进入探测预算。
+   * 同连接代、同对端 stream、链路已 ready 的重复 link-open 只重发 accept。
+   * 对端重启会换 transportStreamId，必须当真正恢复。
    */
   private completeReliableLinkResume(dst: string, peer: PeerTransportState): void {
     const wasReady = peer.linkReady;
-    const duplicateOpen = wasReady && peer.lastReplayEpoch === this.connEpoch;
+    const streamChanged = peer.lastReplayRemoteStreamId !== peer.remoteStreamId;
+    const duplicateOpen = wasReady && !streamChanged && peer.lastReplayEpoch === this.connEpoch;
     peer.linkReady = true;
     this.staleLinkNotifiedAt.delete(dst);
     this.resumeReceiveStreams(dst, peer);
@@ -2921,12 +2926,13 @@ export class DeviceLinkClient {
       return;
     }
     peer.lastReplayEpoch = this.connEpoch;
-    const enterRecovery = !wasReady && (peer.pending.size > 0 || peer.recoveryNeedsAck);
+    peer.lastReplayRemoteStreamId = peer.remoteStreamId;
+    const enterRecovery = (!wasReady || streamChanged) && (peer.pending.size > 0 || peer.recoveryNeedsAck);
     if (enterRecovery) {
       peer.recoveryNeedsAck = true;
       peer.recoveryFramesSent = 0;
     }
-    this.replayPending(dst, !wasReady);
+    this.replayPending(dst, !wasReady || streamChanged);
   }
 
   private logRecoverySend(

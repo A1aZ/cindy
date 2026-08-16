@@ -626,7 +626,12 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     // 拒绝,review P2)。频度由探测退避与 openLinkInFlight 单飞约束。open
     // 期间 transport-timeout 重建照旧让位(观测入口被快速拒绝,熔断关闭后
     // 下一次触发生效),恢复统一由探测循环驱动。
-    recoverLink: (deviceId) => openRemoteLink(deviceId, { observed: false }),
+    recoverLink: (deviceId) => {
+      if (revokedByRemote.has(deviceId)) {
+        return Promise.reject(new DeviceLinkError('ACCESS_REVOKED', 'access revoked by target device'));
+      }
+      return openRemoteLink(deviceId, { observed: false });
+    },
     log: {
       info: (...args) => log.info(...args),
       warn: (...args) => log.warn(...args),
@@ -1564,10 +1569,9 @@ export async function openRemoteLink(
   assertNotStandby();
   assertRemoteControlTargetEnabled(deviceId);
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
+  // 自动 recover/probe 由 recoverLink + isProbeEligible 挡。presence / subscribe
+  // 必须能在对端重新授权后走这里接回；成功建链再清终态。
   if (opts?.allowRevokedRetry) revokedByRemote.delete(deviceId);
-  else if (revokedByRemote.has(deviceId)) {
-    throw new DeviceLinkError('ACCESS_REVOKED', 'access revoked by target device');
-  }
   const existing = openLinkInFlight.get(deviceId);
   if (existing) return existing;
 
@@ -1584,12 +1588,14 @@ export async function openRemoteLink(
       throw new DeviceLinkError('LINK_NOT_OPEN', 'link closed while waiting to reconnect');
     }
     if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
-    return client.openLink(deviceId, {
+    const accepted = await client.openLink(deviceId, {
       controllerName: deviceName(),
       protocolVersion: 1,
       appVersion: app.getVersion(),
       capabilities: [...CONTROLLER_CAPABILITIES],
     });
+    revokedByRemote.delete(deviceId);
+    return accepted;
   };
   // 结算所有权由 tracker.guardInvoke 统一声明(第一个 settle 的 guard 打标,
   // 后续 guard 见标不定论):observed 发起、unobserved 发起被多个业务加入者

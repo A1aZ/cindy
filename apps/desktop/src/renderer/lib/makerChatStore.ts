@@ -7994,6 +7994,7 @@ function selectLightState(state: SessionChatState): SessionChatLightState {
     fastMode: state.fastMode,
     planModeEnabled: state.planModeEnabled,
     pendingTaskWake: state.pendingTaskWake,
+    pendingTaskWakeStarted: state.pendingTaskWakeStarted,
     turnStoppedByUser: state.turnStoppedByUser,
   };
 }
@@ -8037,6 +8038,7 @@ function lightStateEquals(a: SessionChatLightState, b: SessionChatLightState): b
     a.fastMode === b.fastMode &&
     a.planModeEnabled === b.planModeEnabled &&
     a.pendingTaskWake === b.pendingTaskWake &&
+    a.pendingTaskWakeStarted === b.pendingTaskWakeStarted &&
     a.turnStoppedByUser === b.turnStoppedByUser
   );
 }

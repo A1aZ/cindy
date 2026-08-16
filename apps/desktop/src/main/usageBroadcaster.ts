@@ -901,6 +901,12 @@ let xaiSubscriptionUsageHydrated = false;
 let xaiSubscriptionUsageSnapshot: XaiSubscriptionUsageSnapshot | null = null;
 let xaiSubscriptionUsageLoadPromise: Promise<void> | null = null;
 let xaiSubscriptionUsageGeneration = 0;
+/**
+ * 磁盘 hydrate 不能直接给 Renderer。换号后若 DELETE 没落盘就退出,
+ * 冷启动只按 agent_kind='xai' 读会把账号 A 的套餐/周用量交给账号 B。
+ * 只有本进程成功 record 过一次当前凭证的快照,才允许读出。
+ */
+let xaiSubscriptionUsageServable = false;
 
 function resetXaiSubscriptionUsageCacheIfOwnerChanged(): void {
   const owner = currentAccountUsageOwner();
@@ -911,6 +917,7 @@ function resetXaiSubscriptionUsageCacheIfOwnerChanged(): void {
   if (isFirstInit) return;
   xaiSubscriptionUsageHydrated = false;
   xaiSubscriptionUsageSnapshot = null;
+  xaiSubscriptionUsageServable = false;
   xaiSubscriptionUsageGeneration += 1;
 }
 
@@ -979,6 +986,7 @@ export async function recordXaiSubscriptionUsageSnapshot(snapshot: unknown): Pro
     };
   }
   const next = xaiSubscriptionUsageSnapshot;
+  xaiSubscriptionUsageServable = true;
   broadcastXaiSubscriptionUsage(next);
 
   if (!xaiSubscriptionUsageHydrated) {
@@ -1013,6 +1021,7 @@ export async function clearXaiSubscriptionUsageSnapshot(): Promise<void> {
   resetXaiSubscriptionUsageCacheIfOwnerChanged();
   xaiSubscriptionUsageHydrated = true;
   xaiSubscriptionUsageSnapshot = null;
+  xaiSubscriptionUsageServable = false;
   xaiSubscriptionUsageGeneration += 1;
   broadcastXaiSubscriptionUsage(null);
 
@@ -1031,7 +1040,7 @@ export async function clearXaiSubscriptionUsageSnapshot(): Promise<void> {
 
 export async function readXaiSubscriptionUsageSnapshot(): Promise<XaiSubscriptionUsageSnapshot | null> {
   await ensureXaiSubscriptionUsageLoaded();
-  return xaiSubscriptionUsageSnapshot;
+  return xaiSubscriptionUsageServable ? xaiSubscriptionUsageSnapshot : null;
 }
 
 // ── 内部广播 ─────────────────────────────────────────────────────────────────

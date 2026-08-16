@@ -3777,10 +3777,11 @@ const registerIpcHandlers = () => {
     clearXaiDiscoveredModels();
     clearXaiMediaModels();
     clearXaiRateLimitSnapshot();
-    void clearXaiSubscriptionUsageSnapshot();
-    void syncXaiSubscriptionUsageForAuthChange().then(() => {
+    void (async () => {
+      await clearXaiSubscriptionUsageSnapshot();
+      await syncXaiSubscriptionUsageForAuthChange();
       broadcastXaiAuthStateChanged();
-    });
+    })();
   });
 
   // xAI(SuperGrok 订阅)OAuth —— 与 claude-oauth 同形态。登录成功后 bridge 的 xai provider 立即可用
@@ -3793,7 +3794,7 @@ const registerIpcHandlers = () => {
       resetProviderModelAutoRefreshCooldowns('xai');
       // 新凭证在 runGrokOAuthLogin 返回前已经落盘。先同步关掉旧周用量读取窗口,
       // 再去做模型磁盘清理等 await,避免换号间隙里 IPC read 仍返回账号 A 的快照。
-      void clearXaiSubscriptionUsageSnapshot();
+      await clearXaiSubscriptionUsageSnapshot();
       // 登录可直接覆盖旧 SuperGrok 账号：先清旧世代内存，再直接读新账号官方清单。
       // 这里不能先恢复同一 Cindy owner 的磁盘 LKG，否则 A→B 重登会短暂展示 A 的成员。
       clearXaiDiscoveredModels();
@@ -3821,7 +3822,7 @@ const registerIpcHandlers = () => {
     try {
       logoutGrok();
       resetProviderModelAutoRefreshCooldowns('xai');
-      void clearXaiSubscriptionUsageSnapshot();
+      await clearXaiSubscriptionUsageSnapshot();
       clearXaiDiscoveredModels();
       clearXaiMediaModels();
     } catch (err) {

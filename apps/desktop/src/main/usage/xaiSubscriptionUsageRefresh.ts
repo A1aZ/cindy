@@ -54,6 +54,7 @@ export function createXaiSubscriptionUsageReader(
 
   let inFlight: Promise<void> | null = null;
   let inFlightToken: string | null = null;
+  let inFlightGeneration = 0;
   let queuedCredentials: XaiSubscriptionCredentialInfo | null = null;
   let lastRefreshAt = 0;
   let backoffMs = 0;
@@ -141,8 +142,14 @@ export function createXaiSubscriptionUsageReader(
   ): void {
     const now = deps.now();
     if (inFlight) {
-      // 同凭证:复用在途请求,不要再排队绕过节流。换号才覆盖排队。
-      if (inFlightToken === credentials.accessToken) return;
+      // 同凭证且仍是同一世代:复用在途请求。clear 已经提升 generation 时,
+      // 在途结果会被丢掉,必须再排一次,否则新账号周用量会空到下一次 turn。
+      if (inFlightToken === credentials.accessToken) {
+        if (inFlightGeneration !== refreshGeneration) {
+          queuedCredentials = credentials;
+        }
+        return;
+      }
       queuedCredentials = credentials;
       return;
     }
@@ -152,10 +159,12 @@ export function createXaiSubscriptionUsageReader(
     }
     const generation = refreshGeneration;
     inFlightToken = credentials.accessToken;
+    inFlightGeneration = generation;
     const pending = runRefresh(credentials, generation).finally(() => {
       if (inFlight === pending) {
         inFlight = null;
         inFlightToken = null;
+        inFlightGeneration = 0;
       }
       const queued = queuedCredentials;
       queuedCredentials = null;

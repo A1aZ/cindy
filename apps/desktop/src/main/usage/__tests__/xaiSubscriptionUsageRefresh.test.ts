@@ -181,6 +181,30 @@ describe('createXaiSubscriptionUsageReader', () => {
     await sync;
   });
 
+  it('replays the same token after a clear invalidates the in-flight generation', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fetches = 0;
+    const fetchSnapshot = vi.fn(async () => {
+      fetches += 1;
+      if (fetches === 1) await gate;
+      return makeSnapshot(fetches);
+    });
+    const { deps, recordSnapshot } = makeDeps({ fetchSnapshot });
+    const reader = createXaiSubscriptionUsageReader(deps, { throttleMs: 1 });
+    const first = reader.read();
+    await settle();
+    await reader.syncForCredentialChange();
+    release();
+    await first;
+    await settle();
+    await settle();
+    expect(fetchSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(recordSnapshot).toHaveBeenCalled();
+  });
+
   it('does not queue a second fetch for the same in-flight token', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

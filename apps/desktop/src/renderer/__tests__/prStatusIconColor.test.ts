@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  hslTripletLightness,
   prIconSurface,
   prStatusIconColor,
   shouldShowPrUnresolvedDot,
@@ -12,9 +13,31 @@ describe('prIconSurface', () => {
     expect(prIconSurface({ themeIsDark: true, isActive: false })).toBe('dark');
   });
 
-  it('选中胶囊反相:夜间选中是浅表面,白天选中是深表面', () => {
+  it('读不到实际明度时,选中按 Cindy 反相假设兜底', () => {
     expect(prIconSurface({ themeIsDark: true, isActive: true })).toBe('light');
     expect(prIconSurface({ themeIsDark: false, isActive: true })).toBe('dark');
+  });
+
+  it('有实际背景明度时不再假设选中反相(社区/导入主题)', () => {
+    expect(
+      prIconSurface({ themeIsDark: false, isActive: true, backgroundLightness: 92 }),
+    ).toBe('light');
+    expect(
+      prIconSurface({ themeIsDark: true, isActive: true, backgroundLightness: 18 }),
+    ).toBe('dark');
+  });
+});
+
+describe('hslTripletLightness', () => {
+  it('解析 HSL 三元组与带 alpha 的写法', () => {
+    expect(hslTripletLightness('0.0 0.0% 93.3%')).toBe(93.3);
+    expect(hslTripletLightness('0.0 0.0% 100.0% / 0.09')).toBe(100);
+    expect(hslTripletLightness('214.3 5.5% 24.9%')).toBe(24.9);
+  });
+
+  it('解析不了返回 null', () => {
+    expect(hslTripletLightness('')).toBeNull();
+    expect(hslTripletLightness('#eeeeee')).toBeNull();
   });
 });
 

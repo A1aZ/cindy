@@ -32,7 +32,7 @@
  * 等价于"只查可见行"(列表有 collapse 上限,数量有界)。
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { GitPullRequest } from 'lucide-react';
 import { formatCompactTokens } from '@cindy/maker-shared/usage-format';
 import { useTranslation } from 'react-i18next';
@@ -46,6 +46,7 @@ import { formatMoney, formatUsd } from '@/lib/usageFormat';
 import { prStatusKey } from '@/lib/prStatus';
 import {
   PR_STATUS_ICON,
+  hslTripletLightness,
   prIconSurface,
   prStatusIconColor,
   shouldShowPrUnresolvedDot,
@@ -134,9 +135,28 @@ export function buildSessionInfoPieces(
  * 在 icon 上(open 按所在表面取,见 prStatusIconColor)。状态未加载时 icon
  * 灰色 GitPullRequest 占位;文字状态与未解决条数进 title。
  */
+function readSidebarSurfaceLightness(isActive: boolean): number | null {
+  if (typeof document === 'undefined') return null;
+  const token = isActive ? '--sidebar-item-active' : '--sidebar';
+  return hslTripletLightness(getComputedStyle(document.documentElement).getPropertyValue(token));
+}
+
 function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: boolean }) {
   const { t } = useTranslation();
   const themeIsDark = useIsDarkMode();
+  const [backgroundLightness, setBackgroundLightness] = useState(() =>
+    readSidebarSurfaceLightness(Boolean(isActive)),
+  );
+  useEffect(() => {
+    const read = () => setBackgroundLightness(readSidebarSurfaceLightness(Boolean(isActive)));
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'style'],
+    });
+    return () => observer.disconnect();
+  }, [isActive, themeIsDark]);
   // fetch 从恒定的 actions context 拿——经 usePrStatuses 拿会连带订阅整表快照,
   // 徽标就退化回"任一状态变化全体重渲染"。
   const { fetchStatusesForSession } = usePrActions();
@@ -150,7 +170,14 @@ function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: bo
   const unresolvedCount = status?.ok ? status.unresolvedCount : null;
   const showDot = shouldShowPrUnresolvedDot(kind, unresolvedCount);
   const Icon = kind ? PR_STATUS_ICON[kind] : GitPullRequest;
-  const color = prStatusIconColor(kind, prIconSurface({ themeIsDark, isActive: Boolean(isActive) }));
+  const color = prStatusIconColor(
+    kind,
+    prIconSurface({
+      themeIsDark,
+      isActive: Boolean(isActive),
+      backgroundLightness,
+    }),
+  );
   const baseTitle = kind
     ? `${prRef.owner}/${prRef.repo}#${prRef.prNumber} · ${t(`ccAgent.gitContext.pr.status.${kind}`)}`
     : `${prRef.owner}/${prRef.repo}#${prRef.prNumber}`;
@@ -165,14 +192,17 @@ function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: bo
         {showDot ? (
           <span
             aria-hidden
-            className="absolute rounded-full bg-[var(--status-bar-accent)]"
-            style={{
-              width: 5,
-              height: 5,
-              top: -1.5,
-              right: -1.5,
-              boxShadow: `0 0 0 1.25px ${isActive ? 'hsl(var(--sidebar-item-active))' : 'hsl(var(--sidebar))'}`,
-            }}
+            className={cn(
+              'absolute rounded-full bg-[var(--status-bar-accent)]',
+              isActive
+                ? 'shadow-[0_0_0_1.25px_hsl(var(--sidebar-item-active))]'
+                : [
+                    'shadow-[0_0_0_1.25px_hsl(var(--sidebar))]',
+                    'group-hover:shadow-[0_0_0_1.25px_hsl(var(--sidebar-item-hover))]',
+                    'group-hover/card:shadow-[0_0_0_1.25px_hsl(var(--sidebar-item-hover))]',
+                  ],
+            )}
+            style={{ width: 5, height: 5, top: -1.5, right: -1.5 }}
           />
         ) : null}
       </span>

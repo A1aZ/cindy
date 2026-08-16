@@ -89,13 +89,13 @@ describe('classifyShellCommand — 只读放行', () => {
       'git -C /repo status',
       'git -C /repo show HEAD',
       'git -C/repo log --oneline',
-      'git --namespace=review -C /repo diff HEAD',
+      'git --namespace=review -C /repo diff HEAD -- README.md',
     ]) {
       expect(classifyShellCommand(c, roots), c).toBe('auto-approve');
     }
   });
   it('子命令自身的 -c 参数不被当作危险全局选项', () => {
-    for (const c of ['git diff -c', 'git show -c']) {
+    for (const c of ['git diff -c -- README.md', 'git show -c']) {
       expect(classifyShellCommand(c, roots), c).toBe('auto-approve');
     }
   });
@@ -526,10 +526,10 @@ describe('reviewAction / classifyShellCommand — agent OAuth 凭证文件', () 
 });
 
 describe('classifyShellCommand — git --output 写文件 / curl SSRF 改路由 / wget 一律升级', () => {
-  it('git diff --output 写文件(无 shell >)→ prompt;普通 git diff 仍放行', () => {
+  it('git diff --output 写文件(无 shell >)→ prompt;显式普通 path 的 git diff 仍放行', () => {
     expect(classifyShellCommand('git diff --output ~/.bashrc HEAD^ HEAD', roots)).toBe('prompt');
     expect(classifyShellCommand('git diff --output=/tmp/x HEAD', roots)).toBe('prompt');
-    expect(classifyShellCommand('git diff HEAD', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('git diff HEAD -- README.md', roots)).toBe('auto-approve');
   });
   it('curl 改路由 flag(--resolve/--connect-to/--unix-socket/-x/--proxy)→ prompt(SSRF 绕过)', () => {
     for (const c of [
@@ -575,11 +575,11 @@ describe('classifyShellCommand — procfs / 短选项绕过 / 反斜杠 / git RC
   it('反斜杠转义拆分 flag(find -ex\\ec)去转义后命中', () => {
     expect(classifyShellCommand("find . -ex\\ec sh -c 'x' {} +", roots)).toBe('prompt');
   });
-  it('git --ext-diff / 内联 -c(core.pager/diff.external)→ prompt(RCE);普通 git diff 仍放行', () => {
+  it('git --ext-diff / 内联 -c(core.pager/diff.external)→ prompt(RCE);显式普通 path 的 git diff 仍放行', () => {
     expect(classifyShellCommand('git diff --ext-diff', roots)).toBe('prompt');
     expect(classifyShellCommand('git -c core.pager=evil show HEAD', roots)).toBe('prompt');
     expect(classifyShellCommand('git -c diff.external=evil diff', roots)).toBe('prompt');
-    expect(classifyShellCommand('git diff HEAD', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('git diff HEAD -- README.md', roots)).toBe('auto-approve');
   });
 });
 
@@ -860,8 +860,8 @@ describe('classifyShellCommand — 第三轮 bot 审查回归护栏', () => {
     for (const c of ['git grep --open-files-in-pager=./payload pattern', 'git grep -O./payload pattern']) {
       expect(classifyShellCommand(c, roots)).toBe('prompt');
     }
-    // 反例:普通 git grep 仍放行。
-    expect(classifyShellCommand('git grep pattern', roots)).toBe('auto-approve');
+    // 反例:显式普通 path 的 git grep 仍放行。
+    expect(classifyShellCommand('git grep pattern -- README.md', roots)).toBe('auto-approve');
   });
 
   it('git 子命令前内联 config 的等号形式(--config-env=…)升级 —— 防 core.pager RCE', () => {

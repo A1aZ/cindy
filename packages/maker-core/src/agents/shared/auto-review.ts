@@ -1794,7 +1794,7 @@ function stripShellControlTokens(tokens: string[]): string[] {
   if (out[0]) out[0] = out[0].replace(/^[({]+/, '');
   while (out[0] === '') out.shift();
   const last = out.length - 1;
-  if (last >= 0 && !/[$<]\(/.test(out[last])) {
+  if (last >= 0 && !/[$<]\(/.test(out[last]) && !out[last].includes('{')) {
     out[last] = out[last].replace(/[)}]+$/, '');
     if (out[last] === '') out.pop();
   }
@@ -4802,22 +4802,55 @@ function selectorAlternativeCannotMatchDotenv(value: string): boolean {
   if (!/[*?\[]/.test(basename)) return !isDotenvCredentialPath(value);
   if (/^\[(?:!|\^)\.\]/.test(basename)) return true;
   const literalPrefix = basename.slice(0, basename.search(/[*?\[]/));
-  return Boolean(literalPrefix)
-    && !'.env'.startsWith(literalPrefix)
-    && !literalPrefix.startsWith('.env');
+  const couldStartDotenv = '.env'.startsWith(literalPrefix) || literalPrefix.startsWith('.env.');
+  return Boolean(literalPrefix) && !couldStartDotenv;
+}
+
+function expandBraceSequence(value: string): string[] | null {
+  const match = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/.exec(value);
+  if (!match) return null;
+  const numeric = /^-?\d+$/.test(match[1]) && /^-?\d+$/.test(match[2]);
+  const alphabetic = /^[A-Za-z]$/.test(match[1]) && /^[A-Za-z]$/.test(match[2]);
+  if (!numeric && !alphabetic) return ['*'];
+  const start = numeric ? Number(match[1]) : match[1].charCodeAt(0);
+  const end = numeric ? Number(match[2]) : match[2].charCodeAt(0);
+  const step = match[3] ? Math.abs(Number(match[3])) : 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || !Number.isSafeInteger(step) || step === 0) return ['*'];
+  const count = Math.floor(Math.abs(end - start) / step) + 1;
+  if (count > 64) return ['*'];
+  const direction = start <= end ? 1 : -1;
+  return Array.from({ length: count }, (_, index) => {
+    const item = start + (index * step * direction);
+    return numeric ? String(item) : String.fromCharCode(item);
+  });
 }
 
 function expandBraceAlternatives(value: string, depth = 0): string[] {
   if (depth >= 8) return ['*'];
-  const match = /^(.*?)\{([^{}]*,[^{}]*)\}(.*)$/.exec(value);
+  const match = /^(.*?)\{([^{}]+)\}(.*)$/.exec(value);
   if (!match) return [value];
-  return match[2].split(',').flatMap((alternative) =>
+  const alternatives = match[2].includes(',')
+    ? match[2].split(',')
+    : expandBraceSequence(match[2]);
+  if (!alternatives) return [value];
+  return alternatives.flatMap((alternative) =>
     expandBraceAlternatives(`${match[1]}${alternative}${match[3]}`, depth + 1));
 }
 
 function selectorCouldMatchDotenv(value: string): boolean {
   return !value.startsWith('!') && expandBraceAlternatives(value)
     .some((alternative) => !selectorAlternativeCannotMatchDotenv(alternative));
+}
+
+function shellOperandCouldMatchDotenv(
+  value: string,
+  exactMatcher: (candidate: string) => boolean = isDotenvCredentialPath,
+): boolean {
+  if (exactMatcher(value)) return true;
+  return expandBraceAlternatives(value).some((alternative) => {
+    const basename = alternative.replace(/\\/g, '/').split('/').pop() ?? '';
+    return basename.startsWith('.') && !selectorAlternativeCannotMatchDotenv(alternative);
+  });
 }
 
 function readerArgumentsReadDotenv(
@@ -4845,7 +4878,7 @@ function readerArgumentsReadDotenv(
         const isSensitive = kind === 'selector'
           ? selectorCouldMatchDotenv(value ?? '')
           : (kind === 'data-file' || kind === 'aux-file')
-            && Boolean(value && isSensitiveOperand(value));
+            && Boolean(value && shellOperandCouldMatchDotenv(value, isSensitiveOperand));
         if (kind !== 'data' && isSensitive) return true;
         if (attached === undefined) index += 1;
         if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
@@ -4863,7 +4896,7 @@ function readerArgumentsReadDotenv(
         const isSensitive = kind === 'selector'
           ? selectorCouldMatchDotenv(value ?? '')
           : (kind === 'data-file' || kind === 'aux-file')
-            && Boolean(value && isSensitiveOperand(value));
+            && Boolean(value && shellOperandCouldMatchDotenv(value, isSensitiveOperand));
         if (kind !== 'data' && isSensitive) return true;
         if (attached === undefined) index += 1;
         if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
@@ -4878,7 +4911,7 @@ function readerArgumentsReadDotenv(
       dataArgumentProvided = true;
       continue;
     }
-    if (isSensitiveOperand(token)) return true;
+    if (shellOperandCouldMatchDotenv(token, isSensitiveOperand)) return true;
   }
   return false;
 }
@@ -4944,6 +4977,47 @@ function grepRecursesIntoPotentialDotenv(bin: string, args: readonly string[]): 
   return recursive && (includes.length === 0 || includes.some(selectorCouldMatchDotenv));
 }
 
+function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
+  let hidden = false;
+  let unrestricted = 0;
+  const globs: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') break;
+    if (token === '--hidden') { hidden = true; continue; }
+    if (token === '--no-hidden') { hidden = false; continue; }
+    if (token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const kind = resolveReaderLongOption('rg', name);
+      if (!kind) continue;
+      const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
+      const value = attached ?? args[index + 1];
+      if (attached === undefined) index += 1;
+      if (kind === 'selector' && value) globs.push(value);
+      continue;
+    }
+    if (!/^-[^-]/.test(token)) continue;
+    for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+      const option = token.charAt(optionIndex);
+      if (option === 'u') { unrestricted += 1; if (unrestricted >= 2) hidden = true; continue; }
+      const kind = readerShortOptionKind('rg', option);
+      if (!kind) continue;
+      const attached = token.slice(optionIndex + 1) || undefined;
+      const value = attached ?? args[index + 1];
+      if (attached === undefined) index += 1;
+      if (kind === 'selector' && value) globs.push(value);
+      break;
+    }
+  }
+  const positive = globs.filter((glob) => !glob.startsWith('!'));
+  const positiveCouldMatchDotenv = positive.some(selectorCouldMatchDotenv);
+  const excludesDotenv = !positiveCouldMatchDotenv
+    && globs.some((glob) => glob === '!.env*' || glob === '!**/.env*');
+  const positiveIsSafe = positive.length > 0 && !positiveCouldMatchDotenv;
+  return hidden && !excludesDotenv && !positiveIsSafe;
+}
+
 function gitGrepExpandsSearchScope(args: readonly string[]): boolean {
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
@@ -5006,10 +5080,59 @@ function gitArgumentsReadDotenv(args: readonly string[]): boolean {
       index += 1;
       continue;
     }
-    if (isGitDotenvOperand(token)) return true;
+    if (shellOperandCouldMatchDotenv(token, isGitDotenvOperand)) return true;
     if (!pathspecOnly && isGitRevisionDotenvOperand(token)) return true;
   }
   return false;
+}
+
+function gitGrepHasExplicitPathspec(args: readonly string[]): boolean {
+  const separator = args.indexOf('--');
+  if (separator < 0) return false;
+  let patternProvided = false;
+  for (let index = 0; index < separator; index += 1) {
+    const token = args[index];
+    if (token.startsWith('-')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const kind = token.startsWith('--')
+        ? resolveReaderLongOption('grep', name)
+        : [...token.slice(1)].map((option) => readerShortOptionKind('grep', option)).find(Boolean);
+      if (kind && equalsIndex < 0 && !/^-[^-].+/.test(token)) index += 1;
+      if (kind === 'data' || kind === 'data-file') patternProvided = true;
+      continue;
+    }
+    patternProvided = true;
+  }
+  return args.length - separator - 1 >= (patternProvided ? 1 : 2);
+}
+
+function gitGrepListsOnly(args: readonly string[]): boolean {
+  for (const token of args) {
+    if (token === '--') break;
+    if (token === '--files-with-matches' || token === '--files-without-match' || token === '--name-only') return true;
+    if (!/^-[^-]/.test(token)) continue;
+    for (let index = 1; index < token.length; index += 1) {
+      const option = token.charAt(index);
+      if (option === 'e' || option === 'f') break;
+      if (option === 'l' || option === 'L') return true;
+    }
+  }
+  return false;
+}
+
+function gitContentReadWithoutPath(sub: string, args: readonly string[]): boolean {
+  if (sub === 'grep') return !gitGrepListsOnly(args) && !gitGrepHasExplicitPathspec(args);
+  if (sub !== 'diff') return false;
+  const separator = args.indexOf('--');
+  if (separator >= 0 && separator < args.length - 1) return false;
+  if (args.includes('--no-index') && args.filter((arg) => !arg.startsWith('-')).length >= 2) return false;
+  const metadataOnly = args.some((arg) => [
+    '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--summary', '--check', '--raw',
+  ].includes(arg));
+  const patchRequested = args.some((arg) =>
+    /^(?:-p|--patch|-u|-U\d*|--unified(?:=.*)?|-W|--function-context|--word-diff(?:=.*)?|--word-diff-regex(?:=.*)?|--color-words(?:=.*)?|--patch-with-stat|--patch-with-raw|--binary|--inter-hunk-context(?:=.*)?)$/.test(arg));
+  return !metadataOnly || patchRequested;
 }
 
 function shellCommandReadsDotenv(
@@ -5035,12 +5158,15 @@ function shellCommandReadsDotenv(
       } else if (gitArgumentsReadDotenv(invocation.args)) {
         return true;
       }
+      if (gitContentReadWithoutPath(invocation.sub, invocation.args)
+        && classifyGit(tokens, segment, workspaceRoots, opts) === 'auto-approve') return true;
       continue;
     }
 
     if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
+    if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;
     if (readerArgumentsReadDotenv(bin, args)) return true;
   }
   return false;

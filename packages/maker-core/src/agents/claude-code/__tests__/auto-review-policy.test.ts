@@ -165,7 +165,7 @@ describe('classifyBuiltinToolForAutoReview — Bash 只读命令放行', () => {
     }
   });
   it('git 只读子命令 auto-approve', () => {
-    for (const c of ['git status', 'git log --oneline', 'git diff HEAD', 'git show abc', 'git branch', 'git config --get user.name']) {
+    for (const c of ['git status', 'git log --oneline', 'git diff HEAD -- README.md', 'git show abc', 'git branch', 'git config --get user.name']) {
       expect(verdict('Bash', { command: c })).toBe('auto-approve');
     }
   });

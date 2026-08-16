@@ -3382,6 +3382,7 @@ function ExpandedView({
                 collapsed={collapse.collapsed}
                 isAllCollapsed={collapse.isAllCollapsed}
                 activeSessionId={activeSessionId}
+                viewedSessionId={viewedSessionId}
                 runningSessionIds={displayRunningSessionIds}
                 attachedSessionIds={attachedSessionIds}
                 notifications={sidebarNotifications}

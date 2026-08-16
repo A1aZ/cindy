@@ -112,6 +112,13 @@ if (devFlags.isolatedOnProductionProfile) {
   );
   exit(1);
 }
+if (!app.isPackaged && devFlags.profileKind === 'production-shared') {
+  // 正式 profile 上的 unpackaged writer 不得应用 pending migration。
+  // 已合入 main、但安装包还没带上的序号会把安装版打挂（2026-08-16 schema 91）。
+  process.env.XDT_OFFICIAL_SHARED_PROFILE = '1';
+} else {
+  delete process.env.XDT_OFFICIAL_SHARED_PROFILE;
+}
 if (devFlags.schedulerPassive) {
   // 统一收敛到 env:scheduler-host 只认 XDT_SCHEDULER_PASSIVE,不重复解析 argv。
   process.env.XDT_SCHEDULER_PASSIVE = '1';

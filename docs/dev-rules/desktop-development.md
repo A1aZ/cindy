@@ -76,6 +76,8 @@ Cindy 内部而拒绝重启，或因目标 userData 被其他 checkout 占用而
 
 正式版目录保持历史兼容：CN → `Cindy`，Global → `CindyGlobal`，不在启动时改名或搬迁用户数据。
 非隔离 dev 也使用当前区域对应的正式 profile；`--isolated` 沙箱再按相同区域映射派生目录。
+**dev writer 不得把正式 profile 升到当前 checkout 比安装版更新的 schema**：有 pending
+migration 就拒绝启动，改用 `--isolated=<名字>`。`--preserve-running` / 共库 passive 仍只读。
 跨区域共享、登录态迁移或旧版本回滚应使用显式隔离目录，避免不同构建误用同一 profile。
 
 ### 并行多开 dev

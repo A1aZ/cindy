@@ -17,6 +17,7 @@ import {
 	officialProductionUserDataDirs,
 	resolveRestartTargetUserDataDir,
 	sanitizeIsolationName,
+	canonicalizeUserDataDir,
 	formatDesktopStartupFailure,
 	inspectSharedUserDataRegion,
 	partitionDesktopDevProcesses,
@@ -213,6 +214,21 @@ test("invalid env isolation name falls back to the default sandbox", () => {
 	});
 	assert.equal(target, defaultIsolatedUserDataDir("", "cn"));
 	assert.equal(isOfficialProductionUserDataDir(target), false);
+});
+
+test("canonicalizeUserDataDir follows symlink parents when the leaf does not exist yet", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "cindy-canon-"));
+	const realParent = path.join(root, "real");
+	const linkParent = path.join(root, "link");
+	try {
+		fs.mkdirSync(realParent);
+		fs.symlinkSync(realParent, linkParent);
+		const viaLink = canonicalizeUserDataDir(path.join(linkParent, "Cindy"));
+		const viaReal = canonicalizeUserDataDir(path.join(realParent, "Cindy"));
+		assert.equal(viaLink, viaReal);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("isolated official-profile refuse happens before mkdir in the restart main flow", () => {

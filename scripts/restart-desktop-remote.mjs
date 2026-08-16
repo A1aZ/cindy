@@ -467,12 +467,57 @@ export function sanitizeIsolationName(raw) {
   return ISOLATION_NAME_RE.test(name) ? name : '';
 }
 
+function volumeIsCaseInsensitive(existingDir) {
+  let dir = existingDir;
+  for (;;) {
+    const parent = path.dirname(dir);
+    const atRoot = parent === dir;
+    if (!atRoot) {
+      try {
+        if (fs.statSync(parent).dev !== fs.statSync(dir).dev) return false;
+      } catch {
+        return false;
+      }
+    }
+    const name = path.basename(dir);
+    const flipped = name.replace(/[a-zA-Z]/g, (ch) => (
+      ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()
+    ));
+    if (flipped !== name) {
+      try {
+        return fs.realpathSync.native(path.join(parent, flipped))
+          === fs.realpathSync.native(dir);
+      } catch {
+        return false;
+      }
+    }
+    if (atRoot) return false;
+    dir = parent;
+  }
+}
+
 export function canonicalizeUserDataDir(dir) {
   const resolved = path.resolve(dir);
   try {
-    return fs.realpathSync.native(resolved);
+    const real = fs.realpathSync.native(resolved);
+    return volumeIsCaseInsensitive(real) ? real.toLowerCase() : real;
   } catch {
-    return resolved;
+    // 叶子还不存在:沿最近存在祖先做 realpath,再按该卷语义接回剩余段。
+  }
+  let current = resolved;
+  const suffix = [];
+  for (;;) {
+    const parent = path.dirname(current);
+    suffix.unshift(path.basename(current));
+    if (parent === current) return resolved;
+    current = parent;
+    try {
+      const ancestorReal = fs.realpathSync.native(current);
+      const joined = path.join(ancestorReal, ...suffix);
+      return volumeIsCaseInsensitive(ancestorReal) ? joined.toLowerCase() : joined;
+    } catch {
+      // 继续上溯
+    }
   }
 }
 

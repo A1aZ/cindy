@@ -256,10 +256,10 @@ export function shouldEnforcePassiveMigrationCompatibility(input: {
 
 export function resolveOfficialUserDataDirs(defaultUserDataDir: string): string[] {
   const parent = dirname(defaultUserDataDir);
-  return [
-    defaultUserDataDir,
-    ...OFFICIAL_USER_DATA_DIR_NAMES.map((name) => join(parent, name)),
-  ];
+  // 只认已知正式目录名。不能把运行时 defaultUserDataDir 无条件算进去：
+  // 原生 `--user-data-dir=/tmp/custom` 会让 app.getPath('userData') 变成自定义
+  // 目录，再把它标成 production-shared 会误拦 pending migration。
+  return OFFICIAL_USER_DATA_DIR_NAMES.map((name) => join(parent, name));
 }
 
 function isOfficialUserDataDir(

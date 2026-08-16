@@ -18,6 +18,7 @@ import {
   configureDefaultImageResizer,
   type McpProvider,
 } from '@cindy/maker-core';
+import type { ProviderView } from '@cindy/model-providers';
 import {
   getActiveCatalog,
   setActiveCatalogChangedListener,
@@ -110,6 +111,7 @@ import { buildPiAgent } from './pi-host.js';
 import { clearChatgptBridgeCredentialCache } from './anthropic-responses-bridge-host.js';
 import {
   getDesktopSelectableCatalog,
+  getDesktopProviderService,
   reloadActiveCatalogForEndpointChange,
   refreshDiscoveredCodexModels,
   setNativeProviderClaimListener,
@@ -1428,9 +1430,27 @@ export function getMaker(): Maker {
           subagentModelSettings,
           ctx.remoteHostId,
         );
+        let subagentProviderViews: ProviderView[] | undefined;
+        if (
+          !ctx.remoteHostId
+          && subagentModelSettings.codexSubagentsEnabled
+          && subagentModelSettings.codex?.trim()
+          && !subagentModelSettings.codexProviderId?.trim()
+        ) {
+          try {
+            subagentProviderViews = await getDesktopProviderService().listProviders({
+              allowSideEffects: false,
+            });
+          } catch (err) {
+            desktopMakerLogger.warn('Codex implicit subagent Provider resolution failed', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         const subagentRoute = resolveCodexSubagentRouteSnapshot(
           subagentModelSettings,
           ctx.remoteHostId,
+          subagentProviderViews,
         );
         return {
           // 子代理护栏/默认模型每次 createHost 现读 store:DeferredCodexRestart 兑现
@@ -1438,7 +1458,9 @@ export function getMaker(): Maker {
           // model/list 无影响,不加 hostPurpose 分支。
           extraArgs: [
             ...mcpExtraArgs,
-            ...(!isReview ? buildCodexSubagentSpawnArgs(subagentModelSettings) : []),
+            ...(!isReview
+              ? buildCodexSubagentSpawnArgs(subagentModelSettings, subagentRoute)
+              : []),
             ...buildCodexProxySpawnArgs(endpoint, authInjection),
           ],
           extraEnv: mcpExtraEnv,

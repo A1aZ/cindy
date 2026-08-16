@@ -24,6 +24,11 @@
  * 数字/布尔裸写。
  */
 
+import {
+  effectiveSourceIdForModel,
+  type ProviderView,
+} from '@cindy/model-providers';
+
 import type { SubagentModelSettings } from '../../shared/subagentModelSettings.js';
 import { rewriteProviderModelIdForRoute } from './provider-route.js';
 
@@ -71,10 +76,18 @@ export function codexSubagentRuntimeModelId(
 export function resolveCodexSubagentRouteSnapshot(
   settings: SubagentModelSettings,
   remoteHostId?: string,
+  providerViews?: ProviderView[],
 ): CodexSubagentRouteSnapshot | undefined {
   if (remoteHostId || !settings.codexSubagentsEnabled) return undefined;
   const catalogModel = settings.codex?.trim();
-  const providerId = settings.codexProviderId?.trim();
+  const explicitProviderId = settings.codexProviderId?.trim();
+  // Provider-less settings are a valid implicit route. Resolve them with the same connected,
+  // chat-eligible source priority as the model selector, then freeze that source for both the
+  // proxy route and Codex's spawn_agent runtime-model rewrite.
+  const providerId = explicitProviderId
+    || (catalogModel && providerViews
+      ? effectiveSourceIdForModel(providerViews, null, catalogModel, 'codex')
+      : null);
   if (!catalogModel || !providerId) return undefined;
   return {
     providerId,
@@ -83,7 +96,10 @@ export function resolveCodexSubagentRouteSnapshot(
   };
 }
 
-export function buildCodexSubagentSpawnArgs(settings: SubagentModelSettings): string[] {
+export function buildCodexSubagentSpawnArgs(
+  settings: SubagentModelSettings,
+  resolvedRoute?: CodexSubagentRouteSnapshot,
+): string[] {
   const args: string[] = [];
   if (!settings.codexSubagentsEnabled) {
     // 总开关关死后其余键无意义,不再注入。
@@ -100,7 +116,9 @@ export function buildCodexSubagentSpawnArgs(settings: SubagentModelSettings): st
   }
   args.push('-c', 'features.multi_agent_v2.expose_spawn_agent_model_overrides=true');
   if (settings.codex) {
-    const runtimeModel = codexSubagentRuntimeModelId(settings.codex, settings.codexProviderId);
+    const runtimeModel = resolvedRoute?.catalogModel === settings.codex.trim()
+      ? resolvedRoute.runtimeModel
+      : codexSubagentRuntimeModelId(settings.codex, settings.codexProviderId);
     args.push(
       '-c',
       `agents.default_subagent_model=${tomlString(runtimeModel)}`,

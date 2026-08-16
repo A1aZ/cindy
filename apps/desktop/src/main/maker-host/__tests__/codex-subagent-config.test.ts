@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ProviderView } from '@cindy/model-providers';
 
 import {
   SUBAGENT_MODEL_SETTINGS_DEFAULTS,
@@ -14,6 +15,30 @@ import { setCustomProviders } from '../active-catalog';
 
 function settings(partial: Partial<SubagentModelSettings> = {}): SubagentModelSettings {
   return { ...SUBAGENT_MODEL_SETTINGS_DEFAULTS, ...partial };
+}
+
+function providerView(
+  id: string,
+  modelId: string,
+  options: { connected?: boolean; source?: 'builtin' | 'user' } = {},
+): ProviderView {
+  return {
+    id,
+    name: id,
+    source: options.source ?? 'builtin',
+    connected: options.connected ?? true,
+    agents: ['codex'],
+    auth: { method: 'none' },
+    routing: {
+      codex: {
+        upstream: `https://${id}.invalid/v1`,
+        authStrategy: 'oauth-passthrough',
+      },
+    },
+    models: {
+      codex: [{ id: modelId, name: modelId }],
+    },
+  } as unknown as ProviderView;
 }
 
 // 默认设置注入的两个 features 段键(Cindy 策略 + spawn 模型覆盖)。
@@ -237,6 +262,74 @@ describe('resolveCodexSubagentModelFallback', () => {
 });
 
 describe('codexSubagentRuntimeModelId', () => {
+  it('resolves a provider-less native Codex model with the selector default source', () => {
+    const route = resolveCodexSubagentRouteSnapshot(
+      settings({ codex: 'gpt-5.6-terra', codexProviderId: null }),
+      undefined,
+      [
+        providerView('xd', 'gpt-5.6-terra'),
+        providerView('openai', 'gpt-5.6-terra'),
+      ],
+    );
+
+    expect(route).toEqual({
+      providerId: 'openai',
+      catalogModel: 'gpt-5.6-terra',
+      runtimeModel: 'gpt-5.6-terra',
+    });
+    expect(withoutDelegationArgs(buildCodexSubagentSpawnArgs(
+      settings({ codex: 'gpt-5.6-terra', codexProviderId: null }),
+      route,
+    ))).toEqual(['-c', 'agents.default_subagent_model="gpt-5.6-terra"']);
+  });
+
+  it('uses the connected implicit Provider rewrite for provider-less stored settings', () => {
+    setCustomProviders([{
+      id: 'implicit-rewrite-provider',
+      name: 'Implicit Rewrite Provider',
+      source: 'user',
+      agents: ['codex'],
+      auth: { method: 'apiKey' },
+      routing: {
+        codex: {
+          wireProtocol: 'openai-responses',
+          upstream: 'https://implicit-rewrite.invalid/v1',
+          authStrategy: 'api-key-header',
+          modelIdRewrite: { stripPrefix: 'route/' },
+        },
+      },
+      models: { codex: [{ id: 'route/model-a', name: 'Model A' }] },
+    } as never]);
+    try {
+      const configured = settings({ codex: 'route/model-a', codexProviderId: null });
+      const route = resolveCodexSubagentRouteSnapshot(
+        configured,
+        undefined,
+        [providerView('implicit-rewrite-provider', 'route/model-a', { source: 'user' })],
+      );
+
+      expect(route).toEqual({
+        providerId: 'implicit-rewrite-provider',
+        catalogModel: 'route/model-a',
+        runtimeModel: 'model-a',
+      });
+      expect(withoutDelegationArgs(buildCodexSubagentSpawnArgs(configured, route))).toEqual([
+        '-c',
+        'agents.default_subagent_model="model-a"',
+      ]);
+    } finally {
+      setCustomProviders([]);
+    }
+  });
+
+  it('does not resolve a provider-less route from disconnected sources', () => {
+    expect(resolveCodexSubagentRouteSnapshot(
+      settings({ codex: 'route/model-a', codexProviderId: null }),
+      undefined,
+      [providerView('disconnected-provider', 'route/model-a', { connected: false })],
+    )).toBeUndefined();
+  });
+
   it('applies an arbitrary Provider-declared model rewrite without prefix hardcoding', () => {
     setCustomProviders([{
       id: 'runtime-rewrite-provider',

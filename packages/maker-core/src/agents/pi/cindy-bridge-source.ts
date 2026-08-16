@@ -121,7 +121,83 @@ ${SHELL_INPUT_REDIRECTION_PARSER_SOURCE}
 function bashInputReadTargets(input: unknown): string[] {
   if (!input || typeof input !== 'object') return [];
   const command = (input as Record<string, unknown>).command;
-  return typeof command === 'string' ? parseShellInputRedirections(command).targets : [];
+  if (typeof command !== 'string') return [];
+  const parsed = parseShellInputRedirections(command);
+  return [...new Set(parsed.targets.flatMap((target, index) => {
+    const cwdCandidates = bashWorkingDirectoryCandidates(parsed.targetPrefixes[index] ?? '');
+    return path.isAbsolute(target)
+      ? [target]
+      : cwdCandidates.map((cwd) => path.resolve(cwd, target));
+  }))];
+}
+
+function bashWorkingDirectoryCandidates(command: string): string[] {
+  let candidates = [process.cwd()];
+  const codeMask = bashShellCodeMask(command);
+  const directoryChange = /(?:^|[;&|\n])\s*(?:command\s+)?(?:cd|pushd)\s+/g;
+  for (const match of codeMask.matchAll(directoryChange)) {
+    let cursor = (match.index ?? 0) + match[0].length;
+    let parsed = readShellRedirectionTarget(command, cursor);
+    let optionsEnded = false;
+    while (parsed.target === '--' || /^-[LPen]+$/.test(parsed.target)) {
+      if (parsed.target === '--') optionsEnded = true;
+      cursor = parsed.end;
+      while (/\s/.test(command[cursor] ?? '')) cursor += 1;
+      parsed = readShellRedirectionTarget(command, cursor);
+    }
+    if (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-'))) continue;
+    const operator = /^\s*(&&|\|\||[;\n|&])/.exec(command.slice(parsed.end))?.[1] ?? '';
+    if (!operator || operator === '|' || operator === '&') continue;
+
+    const changed: string[] = [];
+    for (const cwd of candidates) {
+      const candidate = path.resolve(cwd, parsed.target);
+      try {
+        if (statSync(candidate).isDirectory()) changed.push(candidate);
+      } catch {
+        // A failed cd leaves cwd unchanged for ;/newline, and skips the RHS of &&.
+      }
+    }
+    if (operator === '||') {
+      candidates = [...new Set([...candidates, ...changed])];
+    } else if (changed.length > 0) {
+      candidates = [...new Set(changed)];
+    } else if (operator === '&&') {
+      candidates = [];
+    }
+  }
+  return candidates;
+}
+
+function bashShellCodeMask(command: string): string {
+  let mask = '';
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (quote) {
+      mask += /\s/.test(char) ? char : ' ';
+      if (char === '\\' && quote === '"' && index + 1 < command.length) {
+        index += 1;
+        mask += /\s/.test(command[index]) ? command[index] : ' ';
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      mask += ' ';
+      continue;
+    }
+    if (char === '\\' && index + 1 < command.length) {
+      mask += ' ';
+      index += 1;
+      mask += /\s/.test(command[index]) ? command[index] : ' ';
+      continue;
+    }
+    mask += char;
+  }
+  return mask;
 }
 
 // 递归扫全部字符串叶子(含数组 / 嵌套对象),深度上限防环/超大入参。工具入参把路径

@@ -390,10 +390,17 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'env -- cat<.env.production',
       'grep API_KEY<.env.test',
       'cat<.e\\nv',
+      'cat <.e\\' + '\n' + 'nv',
+      'cat .e\\' + '\n' + 'nv',
       'cat <".env"',
       'cat 0<.env.local',
       'env -- cat <./.env.production',
       'grep API_KEY <.env.test',
+      'cat <$(printf .env)',
+      'cat <$TARGET',
+      'cat <"${TARGET}"',
+      'cat <`printf .env`',
+      'git cat-file --batch-check <$(printf .env)',
       'cat /repo/.env && true',
       "cat /repo/.env | sed -n '1p'",
       'cat /repo/.env   ',
@@ -526,6 +533,15 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'git cat-file blob HEAD',
       'git cat-file --batch',
       'git cat-file --batch-command',
+      'git cat-file --batch-check <.env',
+      'git cat-file --batch-check<.env.local',
+      'git cat-file --batch-check <".env.production"',
+      'git blame --contents=.env README.md',
+      'git blame --contents .env.local README.md',
+      'git blame --contents=.env.production -- README.md',
+      'git blame --contents=.env* README.md',
+      'git blame --cont=.env README.md',
+      'git blame --cont .env.local README.md',
       'git status -v',
       'git status -vv',
       'git show HEAD:.env.local',
@@ -552,6 +568,14 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     }
   });
 
+  it.each([
+    'cat <>created',
+    'cat<>created',
+    'cat 3<>created',
+  ])('%s 保留读写副作用审批', (command) => {
+    expect(classifyShellCommand(command, roots, opts)).toBe('prompt');
+  });
+
   it('brace expansion 在全局候选预算内惰性遍历，超限时 fail-closed', () => {
     const explosiveOperand = Array.from(
       { length: 8 },
@@ -569,6 +593,10 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     ["cat '<.env'", 'auto-approve'],
     ['cat <<<.env', 'auto-approve'],
     ['cat 0<README.md', 'auto-approve'],
+    ['cat <*.txt', 'auto-approve'],
+    ['cat README.md # example: cat <$TARGET', 'auto-approve'],
+    ['cat README.md # example path: .env', 'auto-approve'],
+    ["cat <'$TARGET'", 'auto-approve'],
     ["grep '<.env' data.txt", 'auto-approve'],
     ['grep KEY <data.txt', 'auto-approve'],
     ['cat config.env.local', 'auto-approve'],
@@ -632,6 +660,11 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     ['git cat-file blob HEAD:README.md', 'auto-approve'],
     ['git cat-file -t HEAD', 'auto-approve'],
     ['git cat-file --batch-check', 'auto-approve'],
+    ['git cat-file --batch-check <README.md', 'auto-approve'],
+    ['git cat-file --batch-check<ordinary.txt', 'auto-approve'],
+    ['git blame --contents=README.md src/index.ts', 'auto-approve'],
+    ['git blame --contents README.md src/index.ts', 'auto-approve'],
+    ['git blame --cont=README.md src/index.ts', 'auto-approve'],
     ['git status --short', 'auto-approve'],
     ['git log --format=prefix:.env', 'auto-approve'],
     ['git log --stat', 'auto-approve'],

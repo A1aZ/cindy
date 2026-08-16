@@ -5109,6 +5109,24 @@ function isGitExcludePathspec(value: string): boolean {
   return value.startsWith(':!') || value.startsWith(':^');
 }
 
+function gitBlameContentsReadDotenv(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') break;
+    if (!token.startsWith('--')) continue;
+    const equalsIndex = token.indexOf('=');
+    const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+    const isContentsOption = name === '--contents'
+      || (name.length >= '--cont'.length && '--contents'.startsWith(name));
+    if (!isContentsOption) continue;
+    const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
+    const value = attached ?? args[index + 1];
+    if (value && shellOperandCouldMatchDotenv(value)) return true;
+    if (attached === undefined) index += 1;
+  }
+  return false;
+}
+
 function gitArgumentsReadDotenv(args: readonly string[]): boolean {
   let pathspecOnly = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -5257,6 +5275,10 @@ function shellCommandReadsDotenv(
 ): boolean {
   for (const segment of splitTopLevelSegments(command)) {
     const inputRedirections = parseShellInputRedirections(segment);
+    if (inputRedirections.hasUnresolvedTarget) return true;
+    const readsCredentialInput = inputRedirections.targets.some(
+      (target) => shellOperandCouldMatchDotenv(target),
+    );
     const unwrapped = unwrapCommand(
       stripShellControlTokens(tokenize(inputRedirections.command)),
       opts.cwd ?? workspaceRoots[0],
@@ -5268,10 +5290,12 @@ function shellCommandReadsDotenv(
     if (bin === 'git') {
       const invocation = parseGitInvocation(tokens, workspaceRoots, opts);
       if (!invocation?.sub || !SAFE_GIT_SUBCOMMANDS.has(invocation.sub)) continue;
+      if (readsCredentialInput) return true;
       if (invocation.sub === 'grep') {
         if (gitGrepExpandsSearchScope(invocation.args)) return true;
         if (readerArgumentsReadDotenv('grep', invocation.args, isGitDotenvOperand)) return true;
-      } else if (gitArgumentsReadDotenv(invocation.args)) {
+      } else if ((invocation.sub === 'blame' && gitBlameContentsReadDotenv(invocation.args))
+        || gitArgumentsReadDotenv(invocation.args)) {
         return true;
       }
       if (gitContentReadWithoutPath(invocation.sub, invocation.args)
@@ -5280,7 +5304,7 @@ function shellCommandReadsDotenv(
     }
 
     if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
-    if (inputRedirections.targets.some((target) => shellOperandCouldMatchDotenv(target))) return true;
+    if (readsCredentialInput) return true;
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
     if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;

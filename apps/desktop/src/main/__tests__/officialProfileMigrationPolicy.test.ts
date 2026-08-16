@@ -62,9 +62,11 @@ describe('official profile writer wiring', () => {
       'utf8',
     );
     expect(indexSource).toContain("process.env.XDT_OFFICIAL_SHARED_PROFILE = '1'");
-    const refuseIdx = migrateSource.indexOf('shouldRefuseOfficialProfileWriterMigration');
+    const refuseIdx = migrateSource.indexOf('shouldRefuseOfficialProfileWriterMigration({');
+    const prepareIdx = migrateSource.indexOf('prepareBackupDiskSpace(');
     const backupIdx = migrateSource.indexOf('await backupDb(');
     expect(refuseIdx).toBeGreaterThan(-1);
+    expect(prepareIdx).toBeGreaterThan(refuseIdx);
     expect(backupIdx).toBeGreaterThan(refuseIdx);
   });
 });

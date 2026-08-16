@@ -420,6 +420,16 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'git show :0:.env',
       "git diff -- ':(top).env'",
       "git grep API_KEY -- ':(top).env.local'",
+      'git show :.env',
+      'git show :./.env.local',
+      'git grep --untracked --no-exclude-standard .',
+      'git grep --untracked --exclude-standard .',
+      'git grep --no-index .',
+      'git grep --untr --no-exclude-standard .',
+      'git grep -in --untracked .',
+      'env git --no-pager grep --untracked --no-exclude-standard .',
+      'command git grep --no-index .',
+      'git status --short && git grep --untracked .',
     ]) {
       expect(classifyShellCommand(command, roots, opts)).toBe('prompt-each-time');
     }
@@ -450,7 +460,18 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     ['git cat-file -p HEAD:README.md', 'auto-approve'],
     ['git log --format=prefix:.env', 'auto-approve'],
     ['git show --format=prefix:.env HEAD', 'auto-approve'],
+    ["git show --format 'prefix:.env' HEAD", 'auto-approve'],
+    ["git log --pretty 'prefix:.env'", 'auto-approve'],
+    ["git show -- 'notes:.env'", 'auto-approve'],
+    ["git diff -- 'notes:.env'", 'auto-approve'],
     ["git diff -- ':(exclude).env'", 'auto-approve'],
+    ["git diff -- ':!.env'", 'auto-approve'],
+    ['git show :README.md', 'auto-approve'],
+    ['git show :./README.md', 'auto-approve'],
+    ['git grep . -- --untracked', 'auto-approve'],
+    ['git grep -e --untracked -- README.md', 'auto-approve'],
+    ['git grep -e--untracked -- README.md', 'auto-approve'],
+    ['git grep --regexp=--no-index -- README.md', 'auto-approve'],
   ] as const)('%s 保持既有 %s 档位', (command, expected) => {
     expect(classifyShellCommand(command, roots, opts)).toBe(expected);
   });

@@ -4840,7 +4840,7 @@ function readerArgumentsReadDotenv(
     if (!optionsEnded && /^-[^-]/.test(token)) {
       let handled = false;
       for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
-        const kind = readerShortOptionKind(bin, token[optionIndex]);
+        const kind = readerShortOptionKind(bin, token.charAt(optionIndex));
         if (!kind) continue;
         const attached = token.slice(optionIndex + 1) || undefined;
         const value = attached ?? args[index + 1];
@@ -4867,12 +4867,36 @@ function readerArgumentsReadDotenv(
   return false;
 }
 
+function gitGrepExpandsSearchScope(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') return false;
+
+    if (token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      if ('--untracked'.startsWith(name) || '--no-index'.startsWith(name)) return true;
+
+      const kind = resolveReaderLongOption('grep', name);
+      if (kind && equalsIndex < 0) index += 1;
+      continue;
+    }
+
+    if (/^-[^-]/.test(token)) {
+      for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+        const kind = readerShortOptionKind('grep', token.charAt(optionIndex));
+        if (!kind) continue;
+        if (optionIndex === token.length - 1) index += 1;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
 function isGitDotenvOperand(value: string): boolean {
   if (isDotenvCredentialPath(value)) return true;
   if (value.startsWith('-')) return false;
-
-  const stagePath = /^:[0-3]:(.+)$/.exec(value);
-  if (stagePath) return isDotenvCredentialPath(stagePath[1]);
 
   const longPathspec = /^:\(([^)]*)\)(.+)$/.exec(value);
   if (longPathspec) {
@@ -4880,10 +4904,35 @@ function isGitDotenvOperand(value: string): boolean {
     return selectorCouldMatchDotenv(longPathspec[2]);
   }
   if (value.startsWith(':/')) return selectorCouldMatchDotenv(value.slice(2));
+  if (value.startsWith(':!') || value.startsWith(':^')) return false;
 
+  const indexPath = /^:(?:[0-3]:)?(.+)$/.exec(value);
+  return Boolean(indexPath && isDotenvCredentialPath(indexPath[1]));
+}
+
+function isGitRevisionDotenvOperand(value: string): boolean {
+  if (value.startsWith('-')) return false;
   const revisionPathSeparator = value.indexOf(':');
   return revisionPathSeparator > 0
     && isDotenvCredentialPath(value.slice(revisionPathSeparator + 1));
+}
+
+function gitArgumentsReadDotenv(args: readonly string[]): boolean {
+  let pathspecOnly = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') {
+      pathspecOnly = true;
+      continue;
+    }
+    if (!pathspecOnly && (token === '--format' || token === '--pretty')) {
+      index += 1;
+      continue;
+    }
+    if (isGitDotenvOperand(token)) return true;
+    if (!pathspecOnly && isGitRevisionDotenvOperand(token)) return true;
+  }
+  return false;
 }
 
 function shellCommandReadsDotenv(
@@ -4902,10 +4951,11 @@ function shellCommandReadsDotenv(
 
     if (bin === 'git') {
       const invocation = parseGitInvocation(tokens, workspaceRoots, opts);
-      if (!invocation || !SAFE_GIT_SUBCOMMANDS.has(invocation.sub)) continue;
+      if (!invocation?.sub || !SAFE_GIT_SUBCOMMANDS.has(invocation.sub)) continue;
       if (invocation.sub === 'grep') {
+        if (gitGrepExpandsSearchScope(invocation.args)) return true;
         if (readerArgumentsReadDotenv('grep', invocation.args, isGitDotenvOperand)) return true;
-      } else if (invocation.args.some(isGitDotenvOperand)) {
+      } else if (gitArgumentsReadDotenv(invocation.args)) {
         return true;
       }
       continue;

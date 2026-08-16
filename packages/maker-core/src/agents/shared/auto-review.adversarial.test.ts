@@ -392,21 +392,67 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'cat ./.env.production.local',
       'grep KEY .env.local && true',
       'sed -n 1p .env.test',
+      'grep -f .env data.txt',
+      'sed -f .env.local data.txt',
+      'jq -f .env.production data.json',
+      'column .env',
+      'grep --file=.env data.txt',
+      'jq --from-file=.env.local data.json',
+      'grep --regexp=. .env',
+      'grep -e. .env.local',
+      'grep --regexp . .env.production',
+      'grep -e . .env.test && true',
+      'grep -ef .env',
+      'sed -nef .env.local',
+      'rg -g .env KEY .',
+      'grep -r --include=.env KEY .',
+      "grep -r --include='.env*' API_KEY .",
+      "rg --hidden -g '.env*' API_KEY .",
+      'grep -r --exclude-from=.env API_KEY .',
+      'rg --ignore-file=.env API_KEY .',
+      'grep --fil=.env.local data.txt',
+      'sed --fil=.env.production data.txt',
+      'git --no-pager diff --no-index /dev/null .env',
+      'git diff -- .env.local | head',
+      'git show HEAD:.env',
+      'git show HEAD:.env.local',
+      'git cat-file -p HEAD:.env.production',
+      'git show :0:.env',
+      "git diff -- ':(top).env'",
+      "git grep API_KEY -- ':(top).env.local'",
     ]) {
       expect(classifyShellCommand(command, roots, opts)).toBe('prompt-each-time');
     }
   });
 
-  it('普通文件与数据表达式仍保持只读直通', () => {
-    for (const command of [
-      'cat .environment',
-      'cat config.env.local',
-      'echo .env',
-      'jq .env data.json',
-      'grep .env data.json',
-    ]) {
-      expect(classifyShellCommand(command, roots, opts)).toBe('auto-approve');
-    }
+  it.each([
+    ['cat .environment', 'auto-approve'],
+    ['cat config.env.local', 'auto-approve'],
+    ['echo .env', 'auto-approve'],
+    ['jq .env data.json', 'auto-approve'],
+    ['grep .env data.json', 'auto-approve'],
+    ['grep -f patterns.txt data.txt', 'auto-approve'],
+    ['sed -f script.sed data.txt', 'prompt'],
+    ['jq -f filter.jq data.json', 'auto-approve'],
+    ['column data.csv', 'auto-approve'],
+    ['grep --regexp=. data.json', 'auto-approve'],
+    ['grep -e.env data.json', 'auto-approve'],
+    ['grep -ef data.json', 'auto-approve'],
+    ['grep -ef.env data.json', 'auto-approve'],
+    ["rg -g '*.ts' KEY .", 'auto-approve'],
+    ["grep -r --include='*.json' KEY .", 'auto-approve'],
+    ["rg --hidden -g '*.ts' KEY .", 'auto-approve'],
+    ['grep -r --exclude=.env KEY .', 'auto-approve'],
+    ["rg --hidden -g '!.env*' KEY .", 'auto-approve'],
+    ['git --no-pager diff --no-index /dev/null README.md', 'auto-approve'],
+    ['git grep .env data.json', 'auto-approve'],
+    ['git show HEAD:README.md', 'auto-approve'],
+    ['git cat-file -p HEAD:README.md', 'auto-approve'],
+    ['git log --format=prefix:.env', 'auto-approve'],
+    ['git show --format=prefix:.env HEAD', 'auto-approve'],
+    ["git diff -- ':(exclude).env'", 'auto-approve'],
+  ] as const)('%s 保持既有 %s 档位', (command, expected) => {
+    expect(classifyShellCommand(command, roots, opts)).toBe(expected);
   });
 });
 

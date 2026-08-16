@@ -166,14 +166,10 @@ const SAFE_READONLY_BINS: ReadonlySet<string> = new Set([
 const DOTENV_FILE_READER_BINS: ReadonlySet<string> = new Set([
   'cat', 'head', 'tail', 'wc', 'stat', 'file', 'realpath', 'readlink',
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'tree', 'du',
-  'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'nl', 'tac',
+  'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'column', 'nl', 'tac',
   'jq', 'yq', 'base64', 'md5', 'md5sum', 'sha256sum', 'cksum', 'sed',
 ]);
 
-/** These readers consume their first positional argument as an expression, not a file. */
-const FIRST_DATA_ARGUMENT_BINS: ReadonlySet<string> = new Set([
-  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq',
-]);
 
 /** 命令包裹器:剥掉后信任绑定到内层真实命令。`sudo`/`doas` 不在此列(提权本身危险)。 */
 const COMMAND_WRAPPERS: ReadonlySet<string> = new Set([
@@ -4734,31 +4730,190 @@ export function commandExecutableNames(command: string): string[] {
   return [...names];
 }
 
-function shellCommandReadsDotenv(command: string): boolean {
-  for (const segment of splitTopLevelSegments(command)) {
-    const tokens = unwrapWrappers(stripShellControlTokens(tokenize(segment)));
-    const bin = executableName(tokens[0] ?? '');
-    if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
+const FIRST_DATA_ARGUMENT_BINS: ReadonlySet<string> = new Set([
+  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq',
+]);
 
-    let dataArgumentIndex = -1;
-    if (FIRST_DATA_ARGUMENT_BINS.has(bin)) {
-      for (let index = 1; index < tokens.length; index += 1) {
-        const token = tokens[index];
-        if (token === '--') {
-          dataArgumentIndex = index + 1;
-          break;
-        }
-        if (!token.startsWith('-')) {
-          dataArgumentIndex = index;
-          break;
-        }
+type ReaderOptionKind = 'data' | 'data-file' | 'selector' | 'filter' | 'aux-file';
+type ReaderLongOption = { name: string; kind: ReaderOptionKind };
+
+const GREP_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--regexp', kind: 'data' },
+  { name: '--file', kind: 'data-file' },
+  { name: '--include', kind: 'selector' },
+  { name: '--exclude', kind: 'filter' },
+  { name: '--include-from', kind: 'aux-file' },
+  { name: '--exclude-from', kind: 'aux-file' },
+];
+const RG_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--regexp', kind: 'data' },
+  { name: '--file', kind: 'data-file' },
+  { name: '--glob', kind: 'selector' },
+  { name: '--iglob', kind: 'selector' },
+  { name: '--ignore-file', kind: 'aux-file' },
+];
+const SED_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--expression', kind: 'data' },
+  { name: '--file', kind: 'data-file' },
+];
+const JQ_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--from-file', kind: 'data-file' },
+];
+
+function readerLongOptions(bin: string): readonly ReaderLongOption[] {
+  if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep') return GREP_LONG_OPTIONS;
+  if (bin === 'rg') return RG_LONG_OPTIONS;
+  if (bin === 'sed') return SED_LONG_OPTIONS;
+  if (bin === 'jq' || bin === 'yq') return JQ_LONG_OPTIONS;
+  return [];
+}
+
+function resolveReaderLongOption(bin: string, name: string): ReaderOptionKind | null {
+  const specs = readerLongOptions(bin);
+  const exact = specs.find((spec) => spec.name === name);
+  if (exact) return exact.kind;
+
+  // GNU readers accept unique long-option abbreviations (`--fil=.env`). If every
+  // matching expansion has the same semantic kind, that kind is still provable.
+  const candidates = specs.filter((spec) => spec.name.startsWith(name));
+  const kinds = new Set(candidates.map((spec) => spec.kind));
+  return kinds.size === 1 ? candidates[0]?.kind ?? null : null;
+}
+
+function readerShortOptionKind(bin: string, option: string): ReaderOptionKind | null {
+  if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep' || bin === 'sed') {
+    if (option === 'e') return 'data';
+    if (option === 'f') return 'data-file';
+  }
+  if (bin === 'rg') {
+    if (option === 'e') return 'data';
+    if (option === 'f') return 'data-file';
+    if (option === 'g') return 'selector';
+  }
+  if ((bin === 'jq' || bin === 'yq') && option === 'f') return 'data-file';
+  if (bin === 'ag' && option === 'G') return 'selector';
+  if (bin === 'file' && option === 'f') return 'selector';
+  return null;
+}
+
+function selectorCouldMatchDotenv(value: string): boolean {
+  if (isDotenvCredentialPath(value)) return true;
+  return value
+    .replace(/\\/g, '/')
+    .split(/[,{}]/)
+    .some((part) => isDotenvCredentialPath(part.replace(/[[\]*?]/g, '')));
+}
+
+function readerArgumentsReadDotenv(
+  bin: string,
+  args: readonly string[],
+  isSensitiveOperand: (value: string) => boolean = isDotenvCredentialPath,
+): boolean {
+  let dataArgumentProvided = !FIRST_DATA_ARGUMENT_BINS.has(bin);
+  let optionsEnded = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (!optionsEnded && token === '--') {
+      optionsEnded = true;
+      continue;
+    }
+
+    if (!optionsEnded && token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const kind = resolveReaderLongOption(bin, name);
+      if (kind) {
+        const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
+        const value = attached ?? args[index + 1];
+        const isSensitive = kind === 'selector'
+          ? selectorCouldMatchDotenv(value ?? '')
+          : (kind === 'data-file' || kind === 'aux-file')
+            && Boolean(value && isSensitiveOperand(value));
+        if (kind !== 'data' && isSensitive) return true;
+        if (attached === undefined) index += 1;
+        if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
+        continue;
       }
     }
 
-    for (let index = 1; index < tokens.length; index += 1) {
-      if (index === dataArgumentIndex) continue;
-      if (isDotenvCredentialPath(tokens[index])) return true;
+    if (!optionsEnded && /^-[^-]/.test(token)) {
+      let handled = false;
+      for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+        const kind = readerShortOptionKind(bin, token[optionIndex]);
+        if (!kind) continue;
+        const attached = token.slice(optionIndex + 1) || undefined;
+        const value = attached ?? args[index + 1];
+        const isSensitive = kind === 'selector'
+          ? selectorCouldMatchDotenv(value ?? '')
+          : (kind === 'data-file' || kind === 'aux-file')
+            && Boolean(value && isSensitiveOperand(value));
+        if (kind !== 'data' && isSensitive) return true;
+        if (attached === undefined) index += 1;
+        if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
+        handled = true;
+        break; // getopt: the first value-taking option consumes the rest of the cluster.
+      }
+      if (handled) continue;
+      if (token.startsWith('-')) continue;
     }
+
+    if (!dataArgumentProvided) {
+      dataArgumentProvided = true;
+      continue;
+    }
+    if (isSensitiveOperand(token)) return true;
+  }
+  return false;
+}
+
+function isGitDotenvOperand(value: string): boolean {
+  if (isDotenvCredentialPath(value)) return true;
+  if (value.startsWith('-')) return false;
+
+  const stagePath = /^:[0-3]:(.+)$/.exec(value);
+  if (stagePath) return isDotenvCredentialPath(stagePath[1]);
+
+  const longPathspec = /^:\(([^)]*)\)(.+)$/.exec(value);
+  if (longPathspec) {
+    if (/(?:^|,)(?:exclude|!)(?:,|$)/.test(longPathspec[1])) return false;
+    return selectorCouldMatchDotenv(longPathspec[2]);
+  }
+  if (value.startsWith(':/')) return selectorCouldMatchDotenv(value.slice(2));
+
+  const revisionPathSeparator = value.indexOf(':');
+  return revisionPathSeparator > 0
+    && isDotenvCredentialPath(value.slice(revisionPathSeparator + 1));
+}
+
+function shellCommandReadsDotenv(
+  command: string,
+  workspaceRoots: string[],
+  opts: ShellReviewOptions,
+): boolean {
+  for (const segment of splitTopLevelSegments(command)) {
+    const unwrapped = unwrapCommand(
+      stripShellControlTokens(tokenize(segment)),
+      opts.cwd ?? workspaceRoots[0],
+      opts.cwdUnknown === true,
+    );
+    const tokens = unwrapped.tokens;
+    const bin = executableName(tokens[0] ?? '');
+
+    if (bin === 'git') {
+      const invocation = parseGitInvocation(tokens, workspaceRoots, opts);
+      if (!invocation || !SAFE_GIT_SUBCOMMANDS.has(invocation.sub)) continue;
+      if (invocation.sub === 'grep') {
+        if (readerArgumentsReadDotenv('grep', invocation.args, isGitDotenvOperand)) return true;
+      } else if (invocation.args.some(isGitDotenvOperand)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
+    const args = tokens.slice(1);
+    if (readerArgumentsReadDotenv(bin, args)) return true;
   }
   return false;
 }
@@ -4772,7 +4927,7 @@ export function classifyShellCommand(
   // The shared path matcher deliberately accepts only complete path values. Shell
   // commands need argument-aware scanning so a trailing pipe/comment cannot hide a
   // dotenv operand, while jq/grep expressions such as jq .env data.json stay data.
-  if (shellCommandReadsDotenv(command)) return 'prompt-each-time';
+  if (shellCommandReadsDotenv(command, workspaceRoots, opts)) return 'prompt-each-time';
   // 两档风险模式都跑以下变体；明确红线优先，命中才 prompt-each-time：
   //  - deEscaped(去引号 + 去反斜杠转义):防 su'do' / su\do / rm -r'f' 这类把关键词拆开的绕过。
   //  - quotesOnly(只去引号、保留 `\`):Windows `\` 路径的凭证检测 —— `cat C:\Users\me\.ssh\id_rsa`

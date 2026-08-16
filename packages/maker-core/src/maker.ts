@@ -306,6 +306,12 @@ interface CodexThreadClaimLease {
   release(): void;
 }
 
+interface FailedHandleCleanup {
+  handle: AgentSessionHandle;
+  promise: Promise<void> | null;
+  onCleaned?: () => void;
+}
+
 export class Maker {
   protected readonly agents: Partial<Record<AgentKind, BaseAgent>>;
   protected readonly storage: SessionStorage;
@@ -322,6 +328,11 @@ export class Maker {
     string,
     { promise: Promise<Session> }
   >();
+  /**
+   * startSession 已返回、但 Session 尚未发布时 cleanup 失败的 handle。后续同 id
+   * create 必须先把它确认关闭，不能丢失所有权后再 spawn 一个并存进程。
+   */
+  private readonly failedHandleCleanups = new Map<string, FailedHandleCleanup>();
   /**
    * Codex 0.145 会忽略已加载 thread 的 thread/resume.config。不同 Cindy task
    * 若同时复用同一 native thread，后启动者会继续使用前一 Session 的 MCP URL，
@@ -413,6 +424,25 @@ export class Maker {
     };
   }
 
+  private async retryFailedHandleCleanup(sessionId: string): Promise<void> {
+    const entry = this.failedHandleCleanups.get(sessionId);
+    if (!entry) return;
+    const cleanup = entry.promise ?? entry.handle.close();
+    entry.promise = cleanup;
+    try {
+      await cleanup;
+    } catch (error) {
+      if (this.failedHandleCleanups.get(sessionId) === entry && entry.promise === cleanup) {
+        entry.promise = null;
+      }
+      throw error;
+    }
+    if (this.failedHandleCleanups.get(sessionId) === entry) {
+      this.failedHandleCleanups.delete(sessionId);
+      entry.onCleaned?.();
+    }
+  }
+
   /**
    * 创建一个新会话。
    *
@@ -423,6 +453,12 @@ export class Maker {
   async createSession(opts: CreateSessionOptions): Promise<Session> {
     if (!opts.id) {
       return this.createSessionOnce(opts);
+    }
+
+    // Any handle that failed cleanup before publication still owns this
+    // business id. Confirm its shutdown before checking/starting live state.
+    if (this.failedHandleCleanups.has(opts.id)) {
+      await this.retryFailedHandleCleanup(opts.id);
     }
 
     // 进程内已经活着或正在启动的 session, 直接复用 (避免 spawn 第二个 SDK)。
@@ -609,15 +645,24 @@ export class Maker {
       // 写失败时, 已启动的 agent handle(PI 远端 daemon session / CC / Codex)必须
       // close, 否则 PI 无 codexThreadClaim 时 handle 不关, 远端 pi-manager session/
       // MCP bridge 残留成「用户看不到、Maker 管不到」的半创建状态。
+      let cleanupFailed = false;
       try {
         await handle.close();
       } catch (closeError) {
+        cleanupFailed = true;
+        this.failedHandleCleanups.set(id, {
+          handle,
+          promise: null,
+          ...(codexThreadClaim
+            ? { onCleaned: () => codexThreadClaim?.release() }
+            : {}),
+        });
         this.logger.warn('failed to close agent handle after session storage failure', {
           sessionId: id,
           error: String(closeError),
         });
       }
-      if (codexThreadClaim) {
+      if (!cleanupFailed && codexThreadClaim) {
         codexThreadClaim.release();
       }
       throw error;

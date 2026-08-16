@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { Session } from './session.js';
-import type { AgentSessionHandle } from './agents/base-agent.js';
+import {
+  TurnDispatchUnconfirmedError,
+  type AgentSessionHandle,
+} from './agents/base-agent.js';
 
 function createLogger() {
   const logger = {
@@ -20,6 +23,96 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('Session close lifecycle', () => {
+  it('closes an ambiguous transport before surfacing an unconfirmed dispatch', async () => {
+    const eventLoop = createDeferred();
+    const abortController = new AbortController();
+    const close = vi.fn(async () => {
+      eventLoop.resolve();
+      // Give the event iterator a chance to publish its queued terminal event
+      // while Session.close() is still awaiting the handle.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const handle = {
+      id: 'thread-unconfirmed',
+      agentKind: 'pi',
+      model: 'gpt-5.4',
+      async send() {
+        abortController.abort();
+        throw new TurnDispatchUnconfirmedError('prompt acceptance timed out');
+      },
+      async *events() {
+        await eventLoop.promise;
+        yield {
+          type: 'error',
+          data: { message: 'late close error', isTerminal: true },
+          source: 'pi',
+        } as never;
+      },
+      close,
+      setInteractionResolver() {},
+    } as unknown as AgentSessionHandle;
+    const session = new Session({
+      id: 'session-unconfirmed',
+      agentKind: 'pi',
+      workDir: '/repo',
+      handle,
+      capabilities: {} as never,
+      logger: createLogger() as never,
+    });
+    const events: unknown[] = [];
+    session.onEvent((event) => events.push(event));
+
+    await expect(session.send('continue the goal', {
+      signal: abortController.signal,
+    })).rejects.toMatchObject({
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+    });
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(session.getStatus()).toBe('closed');
+    expect(events).toEqual([]);
+  });
+
+  it('keeps a provider-accepted send accepted when cancellation races with its response', async () => {
+    const sendStarted = createDeferred();
+    const providerAccepted = createDeferred();
+    const eventLoop = createDeferred();
+    const abortController = new AbortController();
+    const session = new Session({
+      id: 'session-accepted-cancel-race',
+      agentKind: 'pi',
+      workDir: '/repo',
+      handle: {
+        id: 'thread-accepted-cancel-race',
+        agentKind: 'pi',
+        model: 'gpt-5.4',
+        async send() {
+          sendStarted.resolve();
+          await providerAccepted.promise;
+        },
+        async *events() {
+          await eventLoop.promise;
+          yield* [];
+        },
+        async close() {
+          eventLoop.resolve();
+        },
+        setInteractionResolver() {},
+      } as unknown as AgentSessionHandle,
+      capabilities: {} as never,
+      logger: createLogger() as never,
+    });
+
+    const sending = session.send('continue the goal', { signal: abortController.signal });
+    await sendStarted.promise;
+    abortController.abort();
+    providerAccepted.resolve();
+
+    await expect(sending).resolves.toEqual({ accepted: true });
+    await session.close();
+  });
+
   it('serializes concurrent close calls onto the same transport shutdown', async () => {
     const transportClose = createDeferred();
     const close = vi.fn(() => transportClose.promise);

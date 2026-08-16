@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 
+import { TurnDispatchUnconfirmedError } from '@cindy/maker-core';
 import type { AgentEvent, SessionSendResult } from '@cindy/maker-core';
 
 import {
@@ -401,6 +402,75 @@ describe('GoalController', () => {
   });
 
   // ── setGoal / updateGoal ──
+  it('blocks an unconfirmed dispatch without retrying duplicate Goal work', async () => {
+    const local = makeController();
+    vi.spyOn(local.session, 'send').mockImplementation(async (
+      _message: Parameters<FakeSession['send']>[0],
+      opts: Parameters<FakeSession['send']>[1],
+    ) => {
+      opts?.onDispatching?.();
+      throw new TurnDispatchUnconfirmedError('Pi prompt acceptance timed out');
+    });
+
+    await local.controller.setGoal({ sessionId: 's1', objective: 'finish the work' });
+
+    expect(local.session.send).toHaveBeenCalledTimes(1);
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      turnsUsed: 0,
+      lastReason: expect.stringContaining('Pi prompt acceptance timed out'),
+    });
+  });
+
+  it('blocks a new Goal when its dormant agent session cannot be restored', async () => {
+    const local = makeController();
+    local.setHydratable(false);
+
+    await local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'finish the work',
+      agentKind: 'pi',
+    });
+
+    expect(local.session.sends).toHaveLength(0);
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      turnsUsed: 0,
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+  });
+
+  it('blocks and rejects a Goal edit when its session cannot be restored', async () => {
+    const local = makeController();
+    await local.storage.set(seededGoal({ status: 'active', objective: 'old objective' }));
+    local.setHydratable(false);
+
+    await expect(local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'new objective',
+    })).rejects.toThrow('unable to restore the agent session for Goal');
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      objective: 'old objective',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(local.session.sends).toHaveLength(0);
+  });
+
+  it('surfaces a non-retryable first-turn send failure as blocked instead of active at zero turns', async () => {
+    const local = makeController();
+    vi.spyOn(local.session, 'send').mockRejectedValue(new Error('provider authentication failed'));
+
+    await local.controller.setGoal({ sessionId: 's1', objective: 'finish the work' });
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      turnsUsed: 0,
+      lastReason: expect.stringContaining('provider authentication failed'),
+    });
+  });
+
   it('setGoal creates a new goal directly with default limits and fires the first turn', async () => {
     await h.controller.setGoal({ sessionId: 's1', objective: 'ship the feature' });
     const st = await h.storage.get('s1');
@@ -1389,6 +1459,8 @@ describe('GoalController', () => {
     });
     await startGoal(local);
     expect(liveSession.sends).toHaveLength(1);
+    (local.controller as unknown as { goalTurnsInFlight: Set<string> })
+      .goalTurnsInFlight.delete('s1');
 
     const firePromise = (
       local.controller as unknown as { fireTurn(sessionId: string): Promise<void> }
@@ -1424,6 +1496,8 @@ describe('GoalController', () => {
     });
     await startGoal(local);
     expect(ensureCalls).toBe(2);
+    (local.controller as unknown as { goalTurnsInFlight: Set<string> })
+      .goalTurnsInFlight.delete('s1');
 
     const firePromise = (
       local.controller as unknown as { fireTurn(sessionId: string): Promise<void> }
@@ -1503,8 +1577,10 @@ describe('GoalController', () => {
     const internals = local.controller as unknown as {
       fireTurn(sessionId: string): Promise<void>;
       firing: Map<string, object>;
+      goalTurnsInFlight: Set<string>;
       goalDispatchAbortControllers: Map<string, { owner: object; controller: AbortController }>;
     };
+    internals.goalTurnsInFlight.delete('s1');
 
     const oldFire = internals.fireTurn('s1');
     await vi.waitFor(() => expect(acquireCalls).toBe(2));
@@ -1548,6 +1624,7 @@ describe('GoalController', () => {
       fireTurn(sessionId: string): Promise<void>;
       goalTurnsInFlight: Set<string>;
     };
+    internals.goalTurnsInFlight.delete('s1');
 
     const oldFire = internals.fireTurn('s1');
     await vi.waitFor(() => expect(sendCalls).toBe(2));
@@ -2045,14 +2122,17 @@ describe('GoalController', () => {
     expect(h.session.sends).toHaveLength(sendsBeforeResume);
   });
 
-  it('keeps a manual Resume paused when the session cannot hydrate, then allows retry', async () => {
+  it('blocks a manual Resume when the session cannot hydrate, then allows retry', async () => {
     await startGoal(h);
     await h.controller.pauseGoal('s1');
     const sendsBeforeResume = h.session.sends.length;
 
     h.setHydratable(false);
-    await h.controller.resumeGoal('s1');
-    expect((await h.storage.get('s1'))?.status).toBe('paused');
+    await expect(h.controller.resumeGoal('s1')).rejects.toThrow(
+      'unable to restore the agent session for Goal',
+    );
+    expect((await h.storage.get('s1'))?.status).toBe('blocked');
+    expect((await h.storage.get('s1'))?.lastReason).toContain('unable to restore the agent session');
     expect(h.session.sends).toHaveLength(sendsBeforeResume);
 
     h.setHydratable(true);
@@ -2106,6 +2186,20 @@ describe('GoalController', () => {
     await h.controller.resumeOnOpen('s1');
     expect(h.session.sends.length).toBeGreaterThanOrEqual(1); // 已活化并续了一轮
     expect(h.session.sends.at(-1)?.content).toContain('keep going');
+  });
+
+  it('blocks a dormant active goal when opening cannot restore its session', async () => {
+    const local = makeController();
+    local.setHydratable(false);
+    await local.storage.set(seededGoal({ status: 'active', objective: 'cannot restore' }));
+
+    await local.controller.resumeOnOpen('s1');
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(local.session.sends).toHaveLength(0);
   });
 
   it('does not let a stale startup active snapshot overwrite a concurrent Stop', async () => {
@@ -2181,14 +2275,14 @@ describe('GoalController', () => {
     expect(h2.session.sends.length).toBe(n);
   });
 
-  it('maybeContinueActiveGoal fires only when an active goal is attached and idle', async () => {
+  it('maybeContinueActiveGoal does not overlap an accepted Goal turn before provider running state arrives', async () => {
     await h.controller.maybeContinueActiveGoal('s1'); // 无 goal → no-op
     expect(h.session.sends).toHaveLength(0);
     await startGoal(h);
     const before = h.session.sends.length;
     await h.controller.maybeContinueActiveGoal('s1');
     await tick();
-    expect(h.session.sends.length).toBe(before + 1);
+    expect(h.session.sends.length).toBe(before);
     await h.controller.pauseGoal('s1');
     const afterPause = h.session.sends.length;
     await h.controller.maybeContinueActiveGoal('s1');

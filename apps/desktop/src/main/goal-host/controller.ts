@@ -454,7 +454,15 @@ export class GoalController {
       if (this.turns.get(sessionId) !== entryBoundary) return null;
       if (!session) {
         this.deps.logger.warn('[goal] setGoal edit: no live session', { sessionId });
-        return null;
+        const failureBoundary = entryBoundary ?? freshTurn();
+        if (!entryBoundary) this.turns.set(sessionId, failureBoundary);
+        await this.blockDispatchFailure(
+          sessionId,
+          failureBoundary,
+          'turn dispatch failed: unable to restore the agent session',
+          () => this.turns.get(sessionId) === failureBoundary,
+        );
+        throw new Error('unable to restore the agent session for Goal');
       }
       const sessionWasBusy = this.isBusy(sessionId);
       if (sessionWasBusy) {
@@ -513,7 +521,7 @@ export class GoalController {
         if (this.turns.get(sessionId) === activeBoundary) {
           await this.fireTurn(sessionId);
         }
-        return updated;
+        return (await this.deps.storage.get(sessionId)) ?? updated;
       } catch (error) {
         if (this.turns.get(sessionId) === editBoundary) this.turns.delete(sessionId);
         throw error;
@@ -570,7 +578,7 @@ export class GoalController {
       if (this.turns.get(sessionId) === activeBoundary) {
         await this.fireTurn(sessionId);
       }
-      return state;
+      return (await this.deps.storage.get(sessionId)) ?? state;
     } catch (error) {
       if (this.turns.get(sessionId) === createBoundary) this.turns.delete(sessionId);
       throw error;
@@ -1013,11 +1021,19 @@ export class GoalController {
       }
       if (this.turns.get(sessionId) !== lookupBoundary) return;
       if (!ensured) {
-        if (!opts?.auto) {
-          this.cancelDeferredManualResume(sessionId, { restoreUsageResume: true });
+        if (opts?.auto) {
+          if (this.turns.get(sessionId) === lookupBoundary) this.turns.delete(sessionId);
+          return;
         }
-        if (this.turns.get(sessionId) === lookupBoundary) this.turns.delete(sessionId);
-        return;
+        this.completeDeferredManualResume(sessionId);
+        this.cancelUsageResume(sessionId);
+        await this.blockDispatchFailure(
+          sessionId,
+          lookupBoundary,
+          'turn dispatch failed: unable to restore the agent session',
+          () => this.turns.get(sessionId) === lookupBoundary,
+        );
+        throw new Error('unable to restore the agent session for Goal');
       }
       if (!opts?.auto && this.isBusy(sessionId)) {
         this.deferManualResumeUntilIdle(sessionId, lookupBoundary, state);
@@ -1135,7 +1151,8 @@ export class GoalController {
    * resume-on-open(#review):重启后未活会话的 active 目标是 **dormant** —— resumeActiveGoals
    * 不会硬 spawn,留着 status=active 但无 listener/timer。用户**打开该会话**时(renderer
    * useGoalStatus 拉状态)调用此方法把它接着续上:active ∧ 当前未挂 listener(dormant)→
-   * ensureSession 活化 + 挂 listener + 空闲则续一轮。否则(已在管 / 非 active / 活化失败)no-op。
+   * ensureSession 活化 + 挂 listener + 空闲则续一轮。已在管 / 非 active 时 no-op；
+   * 活化失败则转 blocked 并给出可见原因，不能继续显示成正在推进。
    * 这样重开会话能让 active 目标自己跑下去,而不是卡死等用户重发 /goal。
    */
   async resumeOnOpen(sessionId: string): Promise<void> {
@@ -1172,11 +1189,16 @@ export class GoalController {
       }
     } finally {
       releaseAgentSwitchLock();
-      if (!session && this.turns.get(sessionId) === lifecycleBoundary) {
-        this.turns.delete(sessionId);
-      }
     }
-    if (!session) return; // 活化失败(如 device-link 远程不可用)→ 留 dormant,下次打开再试
+    if (!session) {
+      await this.blockDispatchFailure(
+        sessionId,
+        lifecycleBoundary,
+        'turn dispatch failed: unable to restore the agent session',
+        () => this.turns.get(sessionId) === lifecycleBoundary,
+      );
+      return;
+    }
     if (this.turns.get(sessionId) !== lifecycleBoundary) return;
     this.emit(state);
     if (!this.isBusy(sessionId)) {
@@ -1364,6 +1386,9 @@ export class GoalController {
 
   private isBusy(sessionId: string): boolean {
     if (this.firing.has(sessionId)) return true;
+    // PI may acknowledge prompt acceptance before agent_start flips the
+    // provider running flag. Goal ownership bridges that acceptance gap.
+    if (this.goalTurnsInFlight.has(sessionId)) return true;
     if (this.deps.isSessionInTurn(sessionId)) return true;
     const session = this.deps.getSession(sessionId);
     return session ? session.isTurnRunning() : false;
@@ -1666,6 +1691,32 @@ export class GoalController {
     }
   }
 
+  private async blockDispatchFailure(
+    sessionId: string,
+    boundary: TurnAccumulator,
+    lastReason: string,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    try {
+      const blocked = await this.trackPersistence(
+        boundary,
+        this.deps.storage.update(sessionId, {
+          status: 'blocked',
+          lastReason,
+          updatedAt: this.now(),
+        }),
+      );
+      if (!isCurrent()) return;
+      if (blocked) this.emit(blocked);
+    } catch (persistError) {
+      this.deps.logger.error('[goal] failed to persist dispatch failure', {
+        sessionId,
+        error: String(persistError),
+      });
+    }
+    if (isCurrent()) this.stopSession(sessionId);
+  }
+
   private scheduleContinuation(sessionId: string): void {
     const existing = this.timers.get(sessionId);
     if (existing) clearTimeout(existing);
@@ -1931,7 +1982,12 @@ export class GoalController {
           sessionId,
           kind,
         });
-        if (isCurrentLifecycle()) this.stopSession(sessionId);
+        await this.blockDispatchFailure(
+          sessionId,
+          lifecycleBoundary,
+          'turn dispatch failed: unable to restore the agent session',
+          isCurrentLifecycle,
+        );
         return;
       }
       // deferred switch 可能刚把 live session 换成目标引擎的新对象;本会话若有 goal
@@ -2004,6 +2060,7 @@ export class GoalController {
         if (!isCurrentDispatch()) return;
         this.goalTurnsInFlight.delete(sessionId);
         this.deps.logger.warn('[goal] send not accepted', { sessionId, kind, reason: result.reason });
+        this.scheduleContinuation(sessionId);
       } else {
         if (!isCurrentDispatch()) {
           baselineStarted = false;
@@ -2018,11 +2075,28 @@ export class GoalController {
         this.deps.onUndispatchedUserTurn?.(sessionId);
         baselineStarted = false;
       }
-      if (dispatchBoundary ? isCurrentDispatch() : isCurrentLifecycle()) {
+      const failureBoundary = dispatchBoundary ?? lifecycleBoundary;
+      const isCurrentFailure = (): boolean =>
+        dispatchBoundary ? isCurrentDispatch() : isCurrentLifecycle();
+      if (isCurrentFailure()) {
         this.goalTurnsInFlight.delete(sessionId);
       }
-      // SESSION_RUNNING:会话已有 turn 在跑(用户抢发等);该 turn 的 done 会再触发裁决。
       this.deps.logger.warn('[goal] fireTurn send failed', { sessionId, kind, error: String(e) });
+      if (!isCurrentFailure()) return;
+
+      if ((e as { code?: unknown } | null)?.code === 'SESSION_RUNNING') {
+        // dispatch 前的窄 race；现有 turn 的终态会暂停 Goal，空闲检查则负责稍后重试。
+        this.scheduleContinuation(sessionId);
+        return;
+      }
+
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      await this.blockDispatchFailure(
+        sessionId,
+        failureBoundary,
+        `turn dispatch failed: ${errorMessage}`,
+        isCurrentFailure,
+      );
     } finally {
       releaseAgentSwitchLock();
       if (this.goalDispatchAbortControllers.get(sessionId)?.owner === firingOwner) {

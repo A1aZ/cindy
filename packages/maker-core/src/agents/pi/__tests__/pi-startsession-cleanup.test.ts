@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const knobs = vi.hoisted(() => ({
   ctorThrows: false,
   getStateRejects: false,
+  closeRejects: false,
   closeCount: 0,
   onExit: null as null | ((info: { code: number | null; signal: string | null }) => void),
   onEvent: null as null | ((event: unknown) => void),
@@ -77,6 +78,7 @@ vi.mock('../rpc-client.js', () => ({
     send(): void {}
     async close(): Promise<void> {
       knobs.closeCount++;
+      if (knobs.closeRejects) throw new Error('close unconfirmed (mock)');
       this.isClosed = true;
     }
     get pid(): number { return 1234; }
@@ -104,6 +106,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   beforeEach(() => {
     knobs.ctorThrows = false;
     knobs.getStateRejects = false;
+    knobs.closeRejects = false;
     knobs.closeCount = 0;
     knobs.onExit = null;
     knobs.onEvent = null;
@@ -244,6 +247,24 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(disposed).toBe(1);
     expect(proxyDisposed).toBe(1);
     expect(knobs.closeCount).toBe(1); // 已 spawn → 必须关掉,避免僵尸持有 ?session= 路由
+  });
+
+  it('quarantines a failed startup process until cleanup is confirmed', async () => {
+    knobs.getStateRejects = true;
+    knobs.closeRejects = true;
+    const agent = new PiAgent(buildDeps());
+
+    await expect(agent.startSession(opts())).rejects.toThrow(/cleanup remains unconfirmed/);
+    expect(knobs.spawnedEnvs).toHaveLength(1);
+    // Same business id cannot spawn while the old proc still fails cleanup.
+    await expect(agent.startSession(opts())).rejects.toThrow(/close unconfirmed/);
+    expect(knobs.spawnedEnvs).toHaveLength(1);
+
+    knobs.closeRejects = false;
+    knobs.getStateRejects = false;
+    const handle = await agent.startSession(opts());
+    expect(knobs.spawnedEnvs).toHaveLength(2);
+    await handle.close();
   });
 
   it('does not dispose ctx on the success path (dispose is deferred to close())', async () => {

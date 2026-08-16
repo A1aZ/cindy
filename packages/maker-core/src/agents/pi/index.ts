@@ -56,6 +56,7 @@ function validateSdkSessionId(value: string): string {
 import {
   AgentNotAuthenticatedError,
   BaseAgent,
+  TurnDispatchUnconfirmedError,
   TurnPermissionPolicyUnsupportedError,
   type AgentDeps,
   type AgentSessionHandle,
@@ -190,6 +191,15 @@ function isLoopbackOnlyBaseUrl(baseUrl: string): boolean {
 const PI_IMAGE_INPUT_UNSUPPORTED_CODE = 'PI_IMAGE_INPUT_UNSUPPORTED';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
+/** prompt 接受前可能自动压缩，同样必须覆盖一次完整摘要调用。 */
+const PI_PROMPT_ACCEPTANCE_TIMEOUT_MS = PI_COMPACT_TIMEOUT_MS;
+const PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS = new Set([
+  'compaction_start',
+  'compaction_end',
+  'summarization_retry_scheduled',
+  'summarization_retry_attempt_start',
+  'summarization_retry_finished',
+]);
 /** 分支摘要同样可能触发一次完整 LLM 调用。 */
 const PI_BRANCH_NAVIGATION_TIMEOUT_MS = 600_000;
 
@@ -499,13 +509,39 @@ function piExtraDirsPrompt(dirs: readonly string[]): string {
   ].join('\n');
 }
 
+interface FailedPiStartupCleanup {
+  proc: PiRpcProcess;
+  promise: Promise<void> | null;
+  cleanupLocal?: () => void;
+}
+
 export class PiAgent extends BaseAgent {
   readonly kind: AgentKind = 'pi';
   readonly capabilities: Capabilities;
+  private readonly failedStartupCleanups = new Map<string, FailedPiStartupCleanup>();
 
   constructor(deps: AgentDeps) {
     super(deps);
     this.capabilities = this.buildCapabilities(PiAgent.baseCapabilities());
+  }
+
+  private async retryFailedStartupCleanup(sessionId: string): Promise<void> {
+    const entry = this.failedStartupCleanups.get(sessionId);
+    if (!entry) return;
+    const cleanup = entry.promise ?? entry.proc.close();
+    entry.promise = cleanup;
+    try {
+      await cleanup;
+    } catch (error) {
+      if (this.failedStartupCleanups.get(sessionId) === entry && entry.promise === cleanup) {
+        entry.promise = null;
+      }
+      throw error;
+    }
+    if (this.failedStartupCleanups.get(sessionId) === entry) {
+      this.failedStartupCleanups.delete(sessionId);
+      entry.cleanupLocal?.();
+    }
   }
 
   private static baseCapabilities(): Capabilities {
@@ -860,6 +896,10 @@ export class PiAgent extends BaseAgent {
   }
 
   async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
+    const startupCleanupKey = opts.sessionId ?? '<anonymous>';
+    // A previous pre-publication Pi process for this business session must be
+    // confirmed dead before another spawn can begin.
+    await this.retryFailedStartupCleanup(startupCleanupKey);
     // 轮 22 LOW-6:空串 remoteHostId 规范化 —— Boolean('') 是 false 会让会话
     // 被判定本地但后续仍把 '' 传给 resolvePiNativeProviders 等, 行为分裂。
     if (opts.remoteHostId === '') opts.remoteHostId = undefined;
@@ -2357,16 +2397,35 @@ export class PiAgent extends BaseAgent {
       } catch {
         /* best-effort:注销失败不掩盖原始启动错误 */
       }
-      // 轮 42 P1(codex-connector fresh evidence):startup 失败路径的 proc.close()
-      // 被 .catch 吞掉 —— 远端 daemon 会话 killRemoteSession 失败时, pi 子进程
-      // 可能仍带着凭证 env 在跑, 这里再删 configHome/permission/subagent 会让
-      // 存活 pi 丢 bridge/permission 状态。与 onExit/close() 同口径: 远端会话
-      // 失败不清理 runtime 文件, 残留交给 daemon idle 回收 / 下次 startSession
-      // 的清陈旧目录兜底(轮 40-w4-t4); 本地 stdio close 后进程必死, 保持清理。
-      await proc.close().catch(() => {});
-      if (!remote) {
+      // startup 失败时必须确认 proc 已关闭。关闭失败的 proc 进入 session-keyed
+      // quarantine；后续同 session startSession 会先重试 cleanup，绝不直接 spawn。
+      // 远端失败时不清 runtime 文件；本地也只有确认进程结束后才清，避免存活
+      // 进程丢 bridge/permission 状态。
+      let closeError: unknown = null;
+      try {
+        await proc.close();
+      } catch (error) {
+        closeError = error;
+        this.failedStartupCleanups.set(startupCleanupKey, {
+          proc,
+          promise: null,
+          ...(!remote
+            ? { cleanupLocal: () => {
+                cleanupConfigHome();
+                cleanupRuntimeFiles();
+              } }
+            : {}),
+        });
+      }
+      if (!remote && !closeError) {
         cleanupConfigHome();
         cleanupRuntimeFiles();
+      }
+      if (closeError) {
+        throw new Error(
+          `pi startup failed and process cleanup remains unconfirmed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+          { cause: err },
+        );
       }
       throw err;
     }
@@ -2669,7 +2728,14 @@ export class PiAgent extends BaseAgent {
             ? await readPiUserEntryIds()
             : null;
           rejectIfCancelled(sendOpts, 'send');
-          const resp = await proc.request(command);
+          const resp = await proc.request(command, {
+            timeoutMs: PI_PROMPT_ACCEPTANCE_TIMEOUT_MS,
+            // Prompt acceptance may legitimately span multiple compaction
+            // retries. Bound each silent interval, not the whole progressing
+            // preflight, so a healthy long compaction is not killed at 10m.
+            refreshTimeoutOnEvent: (event) =>
+              PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
+          });
           if (!resp.success) {
             throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
           }
@@ -2679,6 +2745,19 @@ export class PiAgent extends BaseAgent {
           // 只在 Provider 尚未接受本轮时回滚。接受后的 transcript 回调失败不代表
           // turn 没启动；此时恢复旧 policy 会让正在运行的新 turn 用错安全边界。
           if (!providerAccepted) activeTurnPermissionPolicy = previousTurnPermissionPolicy;
+          const rpcError = err as { code?: unknown; commandType?: unknown } | null;
+          if (
+            rpcError?.code === 'PI_RPC_TIMEOUT'
+            && rpcError.commandType === 'prompt'
+          ) {
+            // 接受等待超时后，原 prompt 仍可能在 preflight 压缩结束时迟到执行。
+            // 上抛稳定错误，让 Session 先占住关闭门再杀 transport；Goal 随后
+            // 明确阻塞并要求人工确认，绝不盲目重放可能已有副作用的 turn。
+            throw new TurnDispatchUnconfirmedError(
+              `Pi did not confirm prompt acceptance within ${PI_PROMPT_ACCEPTANCE_TIMEOUT_MS}ms`,
+              { cause: err },
+            );
+          }
           throw err;
         }
       },

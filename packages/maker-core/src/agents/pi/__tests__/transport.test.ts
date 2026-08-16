@@ -108,7 +108,7 @@ describe('createPiStdioTransport', () => {
     }
   });
 
-  it('close() resolves even if child never confirms exit after SIGKILL (round 40-w4-t3 HIGH — no hang)', async () => {
+  it('rejects without hanging when SIGKILL exit cannot be confirmed', async () => {
     vi.useFakeTimers();
     try {
       const { transport, child } = makeTransport();
@@ -118,15 +118,22 @@ describe('createPiStdioTransport', () => {
       transport.onClose(onClose);
 
       const closePromise = transport.close();
+      const rejected = expect(closePromise).rejects.toThrow(/did not confirm exit after SIGKILL/);
       // SIGTERM 宽限期(3s)→ SIGKILL
       await vi.advanceTimersByTimeAsync(3_000);
       expect(child.kill).toHaveBeenCalledWith('SIGKILL');
-      // SIGKILL 确认窗口(5s)超时 → close() 必须 resolve(不再永久挂住)
+      // SIGKILL 确认窗口(5s)超时 → close() 必须收口但不能谎报成功。
       await vi.advanceTimersByTimeAsync(5_000);
-      await closePromise;
-      // 主动 close 语义:onClose 收到通知
-      expect(onClose).toHaveBeenCalledTimes(1);
+      await rejected;
+      expect(onClose).not.toHaveBeenCalled();
       expect(transport.isClosed()).toBe(true);
+
+      // 未看到真实 exit 前，重复 close 继续 fail closed。
+      await expect(transport.close()).rejects.toThrow(/did not confirm exit after SIGKILL/);
+      // 若进程随后终于退出，确认状态解除，后续幂等 close 才可成功。
+      child.emit('close', null, 'SIGKILL');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      await expect(transport.close()).resolves.toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

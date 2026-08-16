@@ -275,6 +275,45 @@ describe('Maker session creation singleflight', () => {
     void origCreate;
   });
 
+  it('blocks a replacement spawn until an unpublished handle is confirmed closed', async () => {
+    let cleanupCanSucceed = false;
+    const firstClose = vi.fn(async () => {
+      if (!cleanupCanSucceed) throw new Error('termination unconfirmed');
+    });
+    const firstHandle = createHandle({ id: 'pi-orphan', agentKind: 'pi' });
+    firstHandle.close = firstClose;
+    const replacementHandle = createHandle({ id: 'pi-replacement', agentKind: 'pi' });
+    const startSession = vi.fn()
+      .mockResolvedValueOnce(firstHandle)
+      .mockResolvedValueOnce(replacementHandle);
+    const storage = createStorage();
+    const originalCreate = storage.create;
+    storage.create = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('db lock'))
+      .mockImplementation((input) => originalCreate.call(storage, input));
+    const maker = new Maker({
+      agents: { pi: createAgent(startSession, 'pi') },
+      storage,
+      logger: createLogger(),
+    });
+    const options: CreateSessionOptions = {
+      id: 'session-storage-cleanup-fail',
+      agentKind: 'pi',
+      workingDir: '/repo',
+      model: 'pi-model',
+    };
+
+    await expect(maker.createSession(options)).rejects.toThrow('db lock');
+    await expect(maker.createSession(options)).rejects.toThrow('termination unconfirmed');
+    expect(startSession).toHaveBeenCalledTimes(1);
+
+    cleanupCanSucceed = true;
+    await expect(maker.createSession(options)).resolves.toBeInstanceOf(Session);
+    expect(firstClose).toHaveBeenCalledTimes(3);
+    expect(startSession).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects a second business task using the same live Codex thread until close completes', async () => {
     const threadId = '11111111-1111-1111-1111-111111111111';
     const closeGate = createDeferred();
@@ -2189,7 +2228,9 @@ describe('Session turn send guard', () => {
     releaseEnd();
     await closed;
 
-    await expect(sendPromise).resolves.toEqual({ accepted: false, reason: 'cancelled-before-dispatch' });
+    await expect(sendPromise).rejects.toMatchObject({
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+    });
     expect(terminalErrors).toContainEqual(expect.objectContaining({
       type: 'error',
       data: expect.objectContaining({
@@ -2277,7 +2318,9 @@ describe('Session turn send guard', () => {
       });
     });
 
-    await session.send('first');
+    await expect(session.send('first')).rejects.toMatchObject({
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+    });
     await statusChanged;
     await session.abort();
 
@@ -2402,7 +2445,9 @@ describe('Session turn send guard', () => {
     const sendPromise = session.send('first');
     await closed;
     releaseSend();
-    await sendPromise;
+    await expect(sendPromise).rejects.toMatchObject({
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+    });
 
     expect(terminalReasons).toEqual(['original_terminal']);
   });
@@ -2492,7 +2537,9 @@ describe('Session turn send guard', () => {
     releaseCrash();
     await closed;
 
-    await expect(secondSend).resolves.toEqual({ accepted: false, reason: 'cancelled-before-dispatch' });
+    await expect(secondSend).rejects.toMatchObject({
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+    });
     expect(terminalReasons).toEqual(['prior_terminal', 'session_event_loop_crashed']);
   });
 

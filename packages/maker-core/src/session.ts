@@ -50,6 +50,7 @@ import type {
   SendOptions,
   TurnContinuationState,
 } from './agents/base-agent.js';
+import { TurnDispatchUnconfirmedError } from './agents/base-agent.js';
 import type { Logger } from './interfaces/logger.js';
 
 export type SessionStatus = 'active' | 'aborting' | 'closed' | 'error';
@@ -571,14 +572,23 @@ export class Session {
           signal: reservation.abortController.signal,
         });
       } catch (e) {
+        // Cancellation cannot downgrade an explicitly ambiguous provider result
+        // into "cancelled before dispatch"; that would skip the mandatory
+        // transport fence and could leave accepted work running invisibly.
+        if (e instanceof TurnDispatchUnconfirmedError) throw e;
         if (reservation.cancelled) {
           return { accepted: false, reason: 'cancelled-before-dispatch' };
         }
         throw e;
       }
-      if (reservation.cancelled) {
-        return { accepted: false, reason: 'cancelled-before-dispatch' };
+      if (reservation.cancelled && (this.terminationStarted || this.closePromise)) {
+        throw new TurnDispatchUnconfirmedError(
+          `Session ${this.id} terminated before provider acceptance could be reconciled`,
+        );
       }
+      // A resolved handle.send is the provider-acceptance boundary. A signal
+      // racing after that point may request abort, but cannot rewrite history
+      // and report the turn as undispatched.
       turnDispatched = true;
       // turn 真正开始跑 → 起 stall 看门狗。后续每个事件都会重置它，done / 终态
       // error 会清掉它（见 armTurnStallWatchdog）。
@@ -587,6 +597,18 @@ export class Session {
     } catch (e) {
       if (this.sendReservation === reservation) {
         this.sendReservation = null;
+      }
+      if (e instanceof TurnDispatchUnconfirmedError) {
+        // Reserve Session shutdown before closing the handle. This suppresses
+        // a synthetic terminal event from transport teardown and fences any
+        // late provider activity before the orchestrator reports blocked.
+        if (originInstalled && !turnDispatched) {
+          this.currentTurnOrigin = previousTurnOrigin;
+          this.currentTurnAttemptToken = previousTurnAttemptToken;
+          this.turnGeneration = previousTurnGeneration;
+          originInstalled = false;
+        }
+        await this.close();
       }
       throw e;
     } finally {
@@ -1688,8 +1710,9 @@ export class Session {
           // clear that fence. The fence itself prevents any later generation entering.
           observedGeneration = this.turnGeneration;
         }
+        if (this.terminationStarted) continue;
         // origin 打标与终态清理都收在 fanOutEvent 里（看门狗合成的事件共用同一语义，
-        // 见那里的注释）。
+        // 见那里的注释）。关闭门一旦占住，旧 handle 的迟到事件不得再改写业务状态。
         this.fanOutEvent(event, observedGeneration);
       }
     } catch (e) {

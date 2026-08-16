@@ -116,6 +116,8 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
   // 轮 40-w1 MEDIUM-2:close() 进行中标志 —— 防并发 close 双 SIGTERM(轮 21
   // 幂等), 与 closed(已通知)分离, 保主动 close 仍触发 onClose。
   let closing = false;
+  /** SIGKILL 后未确认退出时，后续 close 继续失败，直到 child 真正发出 close。 */
+  let closeFailure: Error | null = null;
   let disposeProcessRegistration: (() => void) | undefined;
   if (child.pid != null && child.pid > 0) {
     try {
@@ -183,6 +185,7 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
     fireClose({ code: null, signal: null, reason: `pi process error: ${err.message}` });
   });
   child.on('close', (code, signal) => {
+    closeFailure = null;
     fireClose({ code, signal, reason: `pi process exited (code=${code}, signal=${signal})` });
   });
 
@@ -216,6 +219,7 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
     },
 
     async close(reason = 'pi transport close()'): Promise<void> {
+      if (closeFailure) throw closeFailure;
       // 轮 21 H-1 幂等竞态:closed 必须在任何 await 前置位 —— 否则两个并发
       // close() 都通过守卫、各发一次 SIGTERM + 各设一个 SIGKILL timer。
       // 轮 40-w1 MEDIUM-2:前置 closed 会吞掉子进程 close 事件的 fireClose,
@@ -226,9 +230,8 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
       // 优雅关闭:SIGTERM → 宽限期 → SIGKILL → 确认退出。幂等。
       // 轮 40-w4-t3 HIGH:旧实现 SIGKILL 后无确认超时 —— D-state/平台异常下
       // close 事件不来, await close() 永久挂住, 上层取消流程无法收口。这里
-      // 对齐 session-registry 的 waitForExit 语义:超时后仍 resolve(保 close()
-      // 的 Promise<void> 契约, PiRpcProcess.close 不 catch —— reject 会冒泡成
-      // 未处理错误), 残留子进程由进程管理器兜底, 日志告警可查。
+      // 对齐 session-registry 的 waitForExit 语义:确认窗口到点就结束等待，但
+      // reject 明确表示“未确认终止”，让 Session 保持 error 并阻止新 handle 并存。
       let survived = false;
       await new Promise<void>((resolve) => {
         let done = false;
@@ -244,10 +247,10 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
         const onClose = (): void => finish();
         const killTimer = setTimeout(() => {
           try { child.kill('SIGKILL'); } catch { /* already gone */ }
-          // SIGKILL 后再给确认窗口;超时仍 resolve(尽力而为, 不挂死)。
+          // SIGKILL 后再给确认窗口;超时结束等待，随后以稳定错误 reject。
           confirmTimer = setTimeout(() => {
             survived = true;
-            logger.error('pi process did not confirm exit after SIGKILL — transport close resolves anyway', {
+            logger.error('pi process did not confirm exit after SIGKILL', {
               pid: child.pid,
             });
             finish();
@@ -264,13 +267,19 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
       });
       // 子进程 close 事件若已 fireClose 则 closed=true(通知已发);否则这里补
       // 发一次(主动 close 语义:onClose 必须收到终止通知)。
-      // 轮 40-w4-t14 HIGH:未确认退出的 survived 状态经 close 通知暴露给上层
-      // (reason 带标记), 调用方/进程管理器可据此走更强回收路径, 不再当作
-      // 已正常关闭。
+      // 未确认退出只 reject，不能发 onClose（它的语义是进程已终止，PiAgent
+      // 收到后会清 runtime 文件）。child 以后真的 close 时再由全局 listener 通知。
+      const terminationError = survived
+        ? new Error('pi process did not confirm exit after SIGKILL')
+        : null;
+      if (terminationError) {
+        closeFailure = terminationError;
+        throw terminationError;
+      }
       fireClose({
         code: null,
         signal: null,
-        reason: survived ? `pi process survived SIGKILL — close() resolved without confirmed exit` : reason,
+        reason,
       });
     },
 

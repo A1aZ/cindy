@@ -93,9 +93,9 @@ export function stripStandaloneModelStopToken(text: string): string {
  */
 export function isPossibleStandaloneStopPrefix(text: string): boolean {
   const candidate = text.trim();
-  if (candidate.length === 0) return text.length <= MAX_STANDALONE_STOP_PREFIX;
+  if (candidate.length === 0) return true;
   if (MODEL_STOP_TOKENS.has(candidate)) return true;
-  if (text.length > MAX_STANDALONE_STOP_PREFIX) return false;
+  if (candidate.length > MAX_STANDALONE_STOP_PREFIX) return false;
   return [...MODEL_STOP_TOKENS].some((token) => token.startsWith(candidate));
 }
 
@@ -127,7 +127,13 @@ export function holdStandaloneStopTokenDelta(
 ): string | null {
   const combined = buffer.pending + delta;
   if (!buffer.emitted && isPossibleStandaloneStopPrefix(combined)) {
-    buffer.pending = combined;
+    const candidate = combined.trim();
+    if (candidate.length === 0) {
+      buffer.pending = combined.slice(-MAX_STANDALONE_STOP_PREFIX);
+    } else {
+      const tokenStart = combined.lastIndexOf(candidate);
+      buffer.pending = `${combined.slice(0, tokenStart).slice(-MAX_STANDALONE_STOP_PREFIX)}${candidate}`;
+    }
     return null;
   }
   const citationEnd = stableInternalWebCitationBoundary(combined);

@@ -321,7 +321,6 @@ async function fetchCodexTitle(
   signal: AbortSignal,
   instructions: string = CODEX_TITLE_INSTRUCTIONS,
   systemPrompt?: string,
-  maxTokens?: number,
 ): Promise<string> {
   const effectiveInstructions = systemPrompt
     ? `${systemPrompt}\n\n${instructions}`
@@ -337,7 +336,9 @@ async function fetchCodexTitle(
     stream: true,
   };
   if (effort) body.reasoning = { effort };
-  if (maxTokens != null) body.max_output_tokens = maxTokens;
+  // ChatGPT Codex 订阅的 chatgpt.com/backend-api/codex 端点不支持 max_output_tokens，
+  // 会对该参数返回 400（见 anthropic-responses-bridge/src/translate-request.ts:290）。
+  // 长度限制由调用方在响应后通过 maxVisualChars 截断实现，不在此处注入。
 
   const res = await fetchImpl(`${trimTrailingSlash(upstream)}/responses`, {
     method: 'POST',
@@ -719,7 +720,6 @@ export async function generateTitleViaProviderResult(
           controller.signal,
           codexInstructions,
           opts?.systemPrompt,
-          opts?.maxTokens,
         );
         break;
       }

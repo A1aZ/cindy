@@ -6,8 +6,11 @@ import {
 } from '../../../shared/subagentModelSettings';
 import {
   buildCodexSubagentSpawnArgs,
+  codexSubagentRuntimeModelId,
   resolveCodexSubagentModelFallback,
+  resolveCodexSubagentRouteSnapshot,
 } from '../codex-subagent-config';
+import { setCustomProviders } from '../active-catalog';
 
 function settings(partial: Partial<SubagentModelSettings> = {}): SubagentModelSettings {
   return { ...SUBAGENT_MODEL_SETTINGS_DEFAULTS, ...partial };
@@ -119,11 +122,33 @@ describe('buildCodexSubagentSpawnArgs', () => {
     ]);
   });
 
-  it('injects discounted-route model ids verbatim (no prefix stripping)', () => {
-    // codex/ 前缀由 loopback proxy 在 HTTP 边界分流,剥前缀会把折扣路由静默改道。
-    expect(
-      withoutDelegationArgs(buildCodexSubagentSpawnArgs(settings({ codex: 'codex/gpt-5.5' }))),
-    ).toEqual(['-c', 'agents.default_subagent_model="codex/gpt-5.5"']);
+  it('uses the selected Provider rewrite for the runtime slug accepted by spawn_agent', () => {
+    setCustomProviders([{
+      id: 'spawn-rewrite-provider',
+      name: 'Spawn Rewrite Provider',
+      source: 'user',
+      agents: ['codex'],
+      auth: { method: 'apiKey' },
+      routing: {
+        codex: {
+          wireProtocol: 'openai-responses',
+          upstream: 'https://spawn-rewrite.invalid/v1',
+          authStrategy: 'api-key-header',
+          modelIdRewrite: { stripPrefix: 'vendor-a/' },
+        },
+      },
+      models: { codex: [{ id: 'vendor-a/model-a', name: 'Model A' }] },
+    } as never]);
+    try {
+      expect(
+        withoutDelegationArgs(buildCodexSubagentSpawnArgs(settings({
+          codex: 'vendor-a/model-a',
+          codexProviderId: 'spawn-rewrite-provider',
+        }))),
+      ).toEqual(['-c', 'agents.default_subagent_model="model-a"']);
+    } finally {
+      setCustomProviders([]);
+    }
   });
 
   it('maps the nested-subagents switch to agents.max_depth=2', () => {
@@ -187,7 +212,7 @@ describe('buildCodexSubagentSpawnArgs', () => {
 });
 
 describe('resolveCodexSubagentModelFallback', () => {
-  it('returns the configured model for the local app-server', () => {
+  it('preserves the configured catalog model for display and proxy routing', () => {
     expect(resolveCodexSubagentModelFallback(settings({ codex: 'codex/gpt-5.5' }))).toBe(
       'codex/gpt-5.5',
     );
@@ -208,5 +233,42 @@ describe('resolveCodexSubagentModelFallback', () => {
         settings({ codexSubagentsEnabled: false, codex: 'codex/gpt-5.5' }),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe('codexSubagentRuntimeModelId', () => {
+  it('applies an arbitrary Provider-declared model rewrite without prefix hardcoding', () => {
+    setCustomProviders([{
+      id: 'runtime-rewrite-provider',
+      name: 'Runtime Rewrite Provider',
+      source: 'user',
+      agents: ['codex'],
+      auth: { method: 'apiKey' },
+      routing: {
+        codex: {
+          wireProtocol: 'openai-responses',
+          upstream: 'https://runtime-rewrite.invalid/v1',
+          authStrategy: 'api-key-header',
+          modelIdRewrite: { stripPrefix: 'route/' },
+        },
+      },
+      models: { codex: [{ id: 'route/model-a', name: 'Model A' }] },
+    } as never]);
+    try {
+      expect(codexSubagentRuntimeModelId(' route/model-a ', 'runtime-rewrite-provider'))
+        .toBe('model-a');
+      expect(codexSubagentRuntimeModelId('model-a', 'runtime-rewrite-provider'))
+        .toBe('model-a');
+      expect(resolveCodexSubagentRouteSnapshot(settings({
+        codex: 'route/model-a',
+        codexProviderId: 'runtime-rewrite-provider',
+      }))).toEqual({
+        providerId: 'runtime-rewrite-provider',
+        catalogModel: 'route/model-a',
+        runtimeModel: 'model-a',
+      });
+    } finally {
+      setCustomProviders([]);
+    }
   });
 });

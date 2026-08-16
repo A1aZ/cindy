@@ -219,6 +219,7 @@ import {
 import {
   buildCodexSubagentSpawnArgs,
   resolveCodexSubagentModelFallback,
+  resolveCodexSubagentRouteSnapshot,
 } from './codex-subagent-config.js';
 import { readSubagentModelSettings } from './subagent-model-settings-store.js';
 import {
@@ -1427,6 +1428,10 @@ export function getMaker(): Maker {
           subagentModelSettings,
           ctx.remoteHostId,
         );
+        const subagentRoute = resolveCodexSubagentRouteSnapshot(
+          subagentModelSettings,
+          ctx.remoteHostId,
+        );
         return {
           // 子代理护栏/默认模型每次 createHost 现读 store:DeferredCodexRestart 兑现
           // (dispose host)后的新 spawn 自动带新值。agents.* 对 control-plane 的
@@ -1438,6 +1443,7 @@ export function getMaker(): Maker {
           ],
           extraEnv: mcpExtraEnv,
           ...(subagentModelFallback ? { subagentModelFallback } : {}),
+          ...(subagentRoute ? { subagentRoute } : {}),
           ...(buildSessionMcpConfig ? { buildSessionMcpConfig } : {}),
           codexProxyActive: ready,
           codexBrowserUseAvailable: browserCompanionSpawnConfig.codexBrowserUseAvailable,
@@ -1487,8 +1493,13 @@ export function getMaker(): Maker {
       },
       unregisterCodexMcpThreadContext,
       prepareCodexResumeSession: prepareExternalCodexSessionForResume,
-      registerCodexSystemPromptForThread: ({ sessionId, threadId, text }) =>
-        registerCodexProxyComposed(sessionId, threadId, text),
+      registerCodexSystemPromptForThread: ({
+        sessionId,
+        threadId,
+        text,
+        subagentRoute,
+      }) =>
+        registerCodexProxyComposed(sessionId, threadId, text, { subagentRoute }),
       armCodexHttpRecovery,
       registerCodexChildThreadForParent: ({ parentThreadId, childThreadId }) => {
         registerCodexProxyChildThread(parentThreadId, childThreadId);

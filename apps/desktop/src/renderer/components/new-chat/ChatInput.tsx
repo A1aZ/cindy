@@ -116,7 +116,7 @@ import {
   isSessionScopeCurrent,
 } from './effortChangeQueue';
 import {
-  applyRefinementToSerializedText,
+  applyVoiceResultToSerializedText,
   editorOwnsSourceDraft,
   mergeDetachedVoiceTextIntoDocument,
   resolveSourceOwnedComposerExtras,
@@ -2595,6 +2595,7 @@ export function ChatInput({
 
   const voiceOwnerStorageKeyRef = useRef<string | undefined>(undefined);
   const frozenVoiceSendRef = useRef<{
+    kind: 'send' | 'persist';
     sourceStorageKey: string;
     serialized: SerializedComposerContent;
     attachments: AttachedFile[];
@@ -2617,11 +2618,14 @@ export function ChatInput({
     }
   } else {
     voiceOwnerStorageKeyRef.current = undefined;
+    if (frozenVoiceSendRef.current?.kind === 'persist') {
+      frozenVoiceSendRef.current = null;
+    }
   }
   const voiceBusyOnCurrentComposer = voiceLocksCurrentComposer({
     isBusy: voiceInput.isBusy,
     ownerStorageKey: voiceOwnerStorageKeyRef.current,
-    currentStorageKey: storageKey,
+    currentStorageKey: storageKeyForDraftRef.current,
   });
   const composerMutationLocked = composerEditorLocked || voiceBusyOnCurrentComposer;
   composerMutationLockedRef.current = composerMutationLocked;
@@ -3247,26 +3251,33 @@ export function ChatInput({
     };
 
     const pendingStopAndSend = voiceInputStopAndSendPromiseRef.current;
-    const wasListeningWithoutSend =
-      !pendingStopAndSend &&
-      voiceInputBusyRef.current &&
-      voiceInputStateRef.current === 'listening';
-    const listeningDraftText = wasListeningWithoutSend ? voiceDraftTextRef.current.trim() : '';
-    if ((pendingStopAndSend || voiceInputBusyRef.current) && prevEditorKey) {
-      const sourceDraft = getComposerDraft(prevEditorKey);
-      frozenVoiceSendRef.current = {
-        sourceStorageKey: prevEditorKey,
-        serialized: serializeEditorContent(editor),
-        attachments: [...(sourceDraft?.attachments ?? [])],
-        comments: [...(sourceDraft?.browserComments ?? browserCommentsRef.current)],
-      };
+    const wasBusyWithoutSend = !pendingStopAndSend && voiceInputBusyRef.current;
+    const listeningDraftText = wasBusyWithoutSend
+      ? voiceDraftTextRef.current.trim() || voiceInput.getLastSubmittedText().trim()
+      : '';
+    const voiceOwnerKey = voiceOwnerStorageKeyRef.current ?? prevEditorKey;
+    if ((pendingStopAndSend || voiceInputBusyRef.current) && prevEditorKey && voiceOwnerKey) {
+      const existingFreeze = frozenVoiceSendRef.current;
+      if (
+        prevEditorKey === voiceOwnerKey &&
+        (!existingFreeze || existingFreeze.sourceStorageKey === voiceOwnerKey)
+      ) {
+        const sourceDraft = getComposerDraft(prevEditorKey);
+        frozenVoiceSendRef.current = {
+          kind: pendingStopAndSend ? 'send' : 'persist',
+          sourceStorageKey: voiceOwnerKey,
+          serialized: serializeEditorContent(editor),
+          attachments: [...(sourceDraft?.attachments ?? [])],
+          comments: [...(sourceDraft?.browserComments ?? browserCommentsRef.current)],
+        };
+      }
     }
 
     // storageKey actually changed — swap the editor's content immediately so
     // the next task never paints the previous session's listening/refining text.
     saveCurrentEditorDraft();
     restoreNextDraft();
-    if (wasListeningWithoutSend && prevEditorKey) {
+    if (wasBusyWithoutSend && prevEditorKey && prevEditorKey === voiceOwnerKey) {
       const sourceKey = prevEditorKey;
       const persistDetachedVoice = (previousVoiceText: string, nextVoiceText: string) => {
         if (!nextVoiceText) return;
@@ -3296,6 +3307,8 @@ export function ChatInput({
         try {
           await voiceInputStopRef.current({ waitForRefinement: true });
         } catch {
+          const submitted = voiceInput.getLastSubmittedText().trim();
+          if (submitted) persistDetachedVoice(listeningDraftText || submitted, submitted);
           return;
         }
         const submitted = voiceInput.getLastSubmittedText().trim();
@@ -4444,6 +4457,7 @@ export function ChatInput({
           });
           if (editorOwnsSource) {
             await resolveSessionMessageReferencesForSend(editor);
+            if (sourceSessionId && hasPendingAgentSwitchOperation(sourceSessionId)) return;
             if (
               editorOwnsSourceDraft({
                 editorDestroyed: editor.isDestroyed,
@@ -4452,22 +4466,28 @@ export function ChatInput({
               })
             ) {
               serializedContent = serializeEditorContent(editor);
+              if (frozenVoiceSendRef.current?.sourceStorageKey === sourceStorageKey) {
+                frozenVoiceSendRef.current = null;
+              }
             }
           }
           if (!serializedContent) {
-            if (!frozenVoiceSend || frozenVoiceSend.sourceStorageKey !== sourceStorageKey) {
+            if (
+              !frozenVoiceSend ||
+              frozenVoiceSend.kind !== 'send' ||
+              frozenVoiceSend.sourceStorageKey !== sourceStorageKey
+            ) {
               return;
             }
-            const refinement = voiceInput.getLastRefinement();
+            const submitted = voiceInput.getLastSubmittedText();
+            const refined = voiceInput.getLastRefinement()?.refinedText ?? '';
             serializedContent = {
               ...frozenVoiceSend.serialized,
-              text: refinement
-                ? applyRefinementToSerializedText(
-                    frozenVoiceSend.serialized.text,
-                    refinement.basedOnText,
-                    refinement.refinedText,
-                  )
-                : frozenVoiceSend.serialized.text,
+              text: applyVoiceResultToSerializedText(
+                frozenVoiceSend.serialized.text,
+                submitted,
+                refined,
+              ),
             };
             frozenVoiceSendRef.current = null;
           }

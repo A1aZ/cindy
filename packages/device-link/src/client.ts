@@ -2935,9 +2935,13 @@ export class DeviceLinkClient {
       this.logRecoverySend(dst, peer, 'link-replay', true);
       return;
     }
+    const hadPriorResume = peer.lastReplayRemoteStreamId !== null;
     peer.lastReplayEpoch = this.connEpoch;
     peer.lastReplayRemoteStreamId = peer.remoteStreamId;
-    const enterRecovery = (!wasReady || streamChanged) && (peer.pending.size > 0 || peer.recoveryNeedsAck);
+    // 真正恢复不依赖当时队列是否有积压:abandon / transport-timeout 可能已清空
+    // pending。首次建链(还没 resume 过)保持原语义,空队列不进探测。
+    const enterRecovery = (!wasReady || streamChanged)
+      && (hadPriorResume || peer.pending.size > 0 || peer.recoveryNeedsAck);
     if (enterRecovery) {
       peer.recoveryNeedsAck = true;
       peer.recoveryFramesSent = 0;

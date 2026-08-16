@@ -4795,6 +4795,54 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     h.client.stop();
   }, 10_000);
 
+  it('空队列恢复后新入队流量仍走探测预算', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'warmup', { ok: true, result: 0 });
+    const ws = h.current();
+    const warmup = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!;
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId: warmup.meta.streamId, ackSeq: warmup.meta.seq },
+      },
+    });
+    await tick();
+
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'link-close',
+      src: 'dev-b',
+      payload: { reason: 'transport-timeout' },
+    });
+    await tick();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    const before = framesSent(ws);
+    for (let i = 0; i < 7; i += 1) {
+      h.client.sendInvokeResult('dev-b', `after-${i}`, { ok: true, result: i });
+    }
+    expect(framesSent(ws)).toBe(before + 2);
+
+    h.client.stop();
+  }, 10_000);
+
   it('恢复探测未 ACK 时定时器仍重发已发出的探针,不放行新帧', async () => {
     await withFakeTimers(async (h, advance) => {
       for (let i = 0; i < 7; i += 1) {

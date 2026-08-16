@@ -2110,14 +2110,16 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-dotenv-'));
       try {
         const secretPath = path.join(workingDir, 'secrets', '.env');
-        const linkPath = path.join(workingDir, 'innocent.txt');
+        const subDir = path.join(workingDir, 'sub');
+        const linkPath = path.join(subDir, 'link');
         mkdirSync(path.dirname(secretPath), { recursive: true });
+        mkdirSync(subDir);
         writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
-        symlinkSync(secretPath, linkPath);
+        symlinkSync('../secrets/.env', linkPath);
 
         scriptedResponses.length = 0;
         scriptedResponses.push(
-          anthropicToolUseBody('bash', { command: `cat<${linkPath}` }),
+          anthropicToolUseBody('bash', { command: 'cd sub >/dev/null && cat<link' }),
           anthropicStreamBody('bash symlink dotenv turn finished'),
         );
         const reqBefore = seenRequests.length;
@@ -2145,13 +2147,15 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-plain-'));
       try {
         const targetPath = path.join(workingDir, 'ordinary-target.txt');
-        const linkPath = path.join(workingDir, 'ordinary-link.txt');
+        const subDir = path.join(workingDir, 'sub');
+        const linkPath = path.join(subDir, 'link');
+        mkdirSync(subDir);
         writeFileSync(targetPath, 'ordinary-bash-symlink-content');
-        symlinkSync(targetPath, linkPath);
+        symlinkSync('../ordinary-target.txt', linkPath);
 
         scriptedResponses.length = 0;
         scriptedResponses.push(
-          anthropicToolUseBody('bash', { command: `cat<${linkPath}` }),
+          anthropicToolUseBody('bash', { command: 'cd sub >/dev/null && cat<link' }),
           anthropicStreamBody('bash ordinary symlink turn finished'),
         );
         const reqBefore = seenRequests.length;

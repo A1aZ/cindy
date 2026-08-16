@@ -314,6 +314,37 @@ describe('cindy-bridge extension source', () => {
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: nestedCommand }),
         )).toEqual([realpathSync(secretPath)]);
+        const redirectedDirectoryCommands = [
+          `cd ${nestedDir} >/dev/null && cat <nested-innocent.txt`,
+          `cd ${nestedDir} 2>/dev/null 3>&1 && cat <nested-innocent.txt`,
+          `pushd ${nestedDir} &>/dev/null && cat <nested-innocent.txt`,
+          `cd ${nestedDir} </dev/null >>redirect.log && cat <nested-innocent.txt`,
+          `cd ${nestedDir} <<<ready && cat <nested-innocent.txt`,
+          `cd ${nestedDir} >/dev/null \\\n&& cat <nested-innocent.txt`,
+          `cd ${nestedDir} >/dev/null # quiet\ncat <nested-innocent.txt`,
+        ];
+        for (const redirectedCommand of redirectedDirectoryCommands) {
+          expect(context.collectResolvedCredentialPaths?.(
+            context.bashInputReadTargets?.({ command: redirectedCommand }),
+          ), redirectedCommand).toEqual([realpathSync(secretPath)]);
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} >/dev/null && cat <${scopedLinkName}`,
+        })).toEqual({ targets: [nestedScopedOrdinaryLink], unresolved: false });
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({
+            command: `cd ${nestedDir} >/missing/output; cat <${scopedLinkName}`,
+          }),
+        )).toEqual([realpathSync(secretPath)]);
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} >$LOG && cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} {fd}>/dev/null && cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} <<EOF\nignored\nEOF\ncat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
         for (const groupedCommand of [
           `(cd ${nestedDir} && cat <>nested-innocent.txt)`,
           `{ cd ${nestedDir} && cat 3<>nested-innocent.txt; }`,

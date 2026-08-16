@@ -35,7 +35,7 @@ const SHELL_INPUT_REDIRECTION_PARSER_SOURCE = shellInputRedirectionParserSource(
 const CREDENTIAL_WORD_BOUNDARY = '\u0001';
 const SENSITIVE_CREDENTIAL_SELECTOR_GLOBS = [...new Set(
   SENSITIVE_CREDENTIAL_GLOB_PATTERNS.flatMap((pattern) => {
-    const variants = [pattern];
+    const variants: string[] = [pattern];
     const directory = pattern.endsWith('/**') ? pattern.slice(0, -3) : undefined;
     if (directory) {
       variants.push(directory, directory + CREDENTIAL_WORD_BOUNDARY + '**');
@@ -230,6 +230,67 @@ function bashSubshellScopeRemainsOpen(command: string, start: number, depth: num
   return true;
 }
 
+type BashPostCommandOperator = {
+  operator: string;
+  end: number;
+  unresolved: boolean;
+  hadRedirection: boolean;
+};
+
+function bashOperatorAfterRedirections(command: string, start: number): BashPostCommandOperator {
+  let cursor = start;
+  let hadRedirection = false;
+  while (cursor < command.length) {
+    while (true) {
+      while (/[ \t\r]/.test(command[cursor] ?? '')) cursor += 1;
+      if (command[cursor] === '\\' && command[cursor + 1] === '\n') {
+        cursor += 2;
+        continue;
+      }
+      break;
+    }
+    if (command[cursor] === '#') {
+      const newline = command.indexOf('\n', cursor);
+      if (newline < 0) {
+        return { operator: '', end: command.length, unresolved: false, hadRedirection };
+      }
+      cursor = newline;
+    }
+
+    let redirect = cursor;
+    while (/\d/.test(command[redirect] ?? '')) redirect += 1;
+    let redirectOperator = '';
+    if (command.startsWith('&>>', redirect)) redirectOperator = '&>>';
+    else if (command.startsWith('&>', redirect)) redirectOperator = '&>';
+    else {
+      for (const candidate of ['<<<', '<>', '<&', '>&', '>>', '>|', '<', '>']) {
+        if (command.startsWith(candidate, redirect)) {
+          redirectOperator = candidate;
+          break;
+        }
+      }
+    }
+    if (!redirectOperator) {
+      const operator = /^(&&|\|\||[;\n|&])/.exec(command.slice(cursor))?.[1] ?? '';
+      const unresolved = !operator && cursor < command.length;
+      return { operator, end: cursor, unresolved, hadRedirection };
+    }
+    hadRedirection = true;
+    if (command.startsWith('<<', redirect) && !command.startsWith('<<<', redirect)) {
+      return { operator: '', end: cursor, unresolved: true, hadRedirection };
+    }
+
+    cursor = redirect + redirectOperator.length;
+    while (/[ \t\r]/.test(command[cursor] ?? '')) cursor += 1;
+    const target = readShellRedirectionTarget(command, cursor);
+    if (!target.target || target.unresolved) {
+      return { operator: '', end: cursor, unresolved: true, hadRedirection };
+    }
+    cursor = target.end;
+  }
+  return { operator: '', end: cursor, unresolved: false, hadRedirection };
+}
+
 function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
   let candidates = [process.cwd()];
   let unresolved = false;
@@ -255,7 +316,12 @@ function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
       unresolved = true;
       continue;
     }
-    const operator = /^\s*(&&|\|\||[;\n|&])/.exec(command.slice(parsed.end))?.[1] ?? '';
+    const operatorEvidence = bashOperatorAfterRedirections(command, parsed.end);
+    if (operatorEvidence.unresolved) {
+      unresolved = true;
+      continue;
+    }
+    const operator = operatorEvidence.operator;
     if (!operator || operator === '|' || operator === '&') continue;
 
     const changed: string[] = [];
@@ -270,8 +336,11 @@ function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
         }
       }
     }
-    const branchMayHaveBeenSkipped = /\b(?:elif|else|fi|done|esac)\b/.test(codeMask.slice(parsed.end));
-    if (operator === '||' || branchMayHaveBeenSkipped || precededByConditionalOperator) {
+    const branchMayHaveBeenSkipped = /\b(?:elif|else|fi|done|esac)\b/.test(
+      codeMask.slice(operatorEvidence.end),
+    );
+    if (operator === '||' || branchMayHaveBeenSkipped || precededByConditionalOperator
+      || (operatorEvidence.hadRedirection && (operator === ';' || operator === '\n'))) {
       candidates = [...new Set([...candidates, ...changed])];
     } else if (changed.length > 0) {
       candidates = [...new Set(changed)];

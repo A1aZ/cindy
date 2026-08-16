@@ -206,6 +206,9 @@ describe('ChatInput session switch focus contract', () => {
     expect(chatInputSource).toContain("editor.commands.focus('end');");
     expect(chatInputSource).toContain('restoreFiles(restored.attachments);');
     expect(chatInputSource).toContain(
+      'latestStorageKeyRef.current === sourceStorageKey && editorOwnsSource',
+    );
+    expect(chatInputSource).toContain(
       'latestStorageKeyRef.current === sourceStorageKey &&\n            storageKeyForDraftRef.current === sourceStorageKey',
     );
     expect(chatInputSource).toContain(

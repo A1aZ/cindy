@@ -1187,6 +1187,16 @@ export class TurnDispatchUnconfirmedError extends Error {
   }
 }
 
+/** The provider explicitly rejected the turn before accepting any work. */
+export class TurnDispatchRejectedError extends Error {
+  readonly code = 'TURN_DISPATCH_REJECTED';
+
+  constructor(msg: string, options?: ErrorOptions) {
+    super(msg, options);
+    this.name = 'TurnDispatchRejectedError';
+  }
+}
+
 export interface StartSessionOptions {
   /**
    * Business 层 session id (host 调用 maker.createSession 时传的 opts.id, 由

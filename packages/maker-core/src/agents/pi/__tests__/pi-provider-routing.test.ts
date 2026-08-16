@@ -1568,12 +1568,11 @@ describe('Pi provider-aware model routing', () => {
       model: 'local-model',
     });
 
-    const error = await handle.send({ type: 'user', content: 'continue the goal' })
-      .then(() => null, (reason: unknown) => reason);
-    expect(error).toEqual(expect.objectContaining({
-      message: 'pi prompt rejected: prompt rejected before acceptance',
-    }));
-    expect((error as { code?: unknown }).code).toBeUndefined();
+    await expect(handle.send({ type: 'user', content: 'continue the goal' })).rejects.toMatchObject({
+      name: 'TurnDispatchRejectedError',
+      code: 'TURN_DISPATCH_REJECTED',
+      message: 'pi prompt rejected before acceptance: prompt rejected before acceptance',
+    });
     await handle.close();
   });
 

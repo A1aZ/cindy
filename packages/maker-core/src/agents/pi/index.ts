@@ -56,6 +56,7 @@ function validateSdkSessionId(value: string): string {
 import {
   AgentNotAuthenticatedError,
   BaseAgent,
+  TurnDispatchRejectedError,
   TurnDispatchUnconfirmedError,
   TurnPermissionPolicyUnsupportedError,
   type AgentDeps,
@@ -2745,7 +2746,6 @@ export class PiAgent extends BaseAgent {
         activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         let providerAccepted = false;
         let promptRequestStarted = false;
-        let providerRejected = false;
         try {
           if (reviewMode) {
             await assertReviewMessageContentPaths(
@@ -2779,8 +2779,9 @@ export class PiAgent extends BaseAgent {
               PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
           });
           if (!resp.success) {
-            providerRejected = true;
-            throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
+            throw new TurnDispatchRejectedError(
+              `pi prompt rejected before acceptance: ${resp.error ?? 'unknown'}`,
+            );
           }
           providerAccepted = true;
           await reportAcceptedPiUserEntry(userEntriesBefore, sendOpts?.onTranscriptUserEntry);
@@ -2792,7 +2793,11 @@ export class PiAgent extends BaseAgent {
           // request starts, a transport/write/envelope failure cannot prove
           // whether Pi accepted the prompt; only success:false is an explicit
           // rejection. Fence every other unknown result before Goal may resume.
-          if (promptRequestStarted && !providerAccepted && !providerRejected) {
+          if (
+            promptRequestStarted
+            && !providerAccepted
+            && !(err instanceof TurnDispatchRejectedError)
+          ) {
             const detail = err instanceof Error ? err.message : String(err);
             throw new TurnDispatchUnconfirmedError(
               `Pi did not confirm prompt acceptance: ${detail}`,

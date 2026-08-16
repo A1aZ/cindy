@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Session } from './session.js';
 import {
+  TurnDispatchRejectedError,
   TurnDispatchUnconfirmedError,
   type AgentSessionHandle,
 } from './agents/base-agent.js';
@@ -72,6 +73,49 @@ describe('Session close lifecycle', () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(session.getStatus()).toBe('closed');
     expect(events).toEqual([]);
+  });
+
+  it('returns a confirmed provider rejection as safely undispatched and remains reusable', async () => {
+    const eventLoop = createDeferred();
+    const close = vi.fn(async () => {
+      eventLoop.resolve();
+    });
+    let sendAttempts = 0;
+    const session = new Session({
+      id: 'session-provider-rejected',
+      agentKind: 'pi',
+      workDir: '/repo',
+      handle: {
+        id: 'thread-provider-rejected',
+        agentKind: 'pi',
+        model: 'gpt-5.4',
+        async send() {
+          sendAttempts += 1;
+          if (sendAttempts === 1) {
+            throw new TurnDispatchRejectedError('provider rejected before acceptance');
+          }
+        },
+        async *events() {
+          await eventLoop.promise;
+          yield* [];
+        },
+        close,
+        setInteractionResolver() {},
+      } as unknown as AgentSessionHandle,
+      capabilities: {} as never,
+      logger: createLogger() as never,
+    });
+
+    await expect(session.send('continue the goal')).resolves.toEqual({
+      accepted: false,
+      reason: 'provider-rejected-before-dispatch',
+    });
+    expect(session.getStatus()).toBe('active');
+    expect(close).not.toHaveBeenCalled();
+
+    await expect(session.send('continue the goal')).resolves.toEqual({ accepted: true });
+    await session.close();
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a provider-accepted send accepted when cancellation races with its response', async () => {

@@ -50,7 +50,10 @@ import type {
   SendOptions,
   TurnContinuationState,
 } from './agents/base-agent.js';
-import { TurnDispatchUnconfirmedError } from './agents/base-agent.js';
+import {
+  TurnDispatchRejectedError,
+  TurnDispatchUnconfirmedError,
+} from './agents/base-agent.js';
 import type { Logger } from './interfaces/logger.js';
 
 export type SessionStatus = 'active' | 'aborting' | 'closed' | 'error';
@@ -290,7 +293,10 @@ export interface SessionTurnLifecycleObserver {
  */
 export type SessionSendResult =
   | { accepted: true }
-  | { accepted: false; reason: 'cancelled-before-dispatch' };
+  | {
+      accepted: false;
+      reason: 'cancelled-before-dispatch' | 'provider-rejected-before-dispatch';
+    };
 
 type SendReservation = {
   phase: 'accepting' | 'dispatching';
@@ -496,6 +502,7 @@ export class Session {
     // turnDispatched:handle.send 成功、本次 send 真正成为运行中的 turn。
     let originInstalled = false;
     let turnDispatched = false;
+    let dispatchConfirmedUndispatched = false;
     let previousTurnOrigin: SendOrigin | null = null;
     let previousTurnAttemptToken: number | null = null;
     const turnLifecycleObserver = this.turnLifecycleObserver;
@@ -572,6 +579,13 @@ export class Session {
           signal: reservation.abortController.signal,
         });
       } catch (e) {
+        if (e instanceof TurnDispatchRejectedError) {
+          // The provider returned a trustworthy rejection before accepting any
+          // work. This path is safe to reschedule and must not arm the
+          // ambiguous-tail drain used for unknown dispatch failures.
+          dispatchConfirmedUndispatched = true;
+          return { accepted: false, reason: 'provider-rejected-before-dispatch' };
+        }
         // Cancellation cannot downgrade an explicitly ambiguous provider result
         // into "cancelled before dispatch"; that would skip the mandatory
         // transport fence and could leave accepted work running invisibly.
@@ -630,13 +644,12 @@ export class Session {
         this.currentTurnOrigin = previousTurnOrigin;
         this.currentTurnAttemptToken = previousTurnAttemptToken;
         this.turnGeneration = previousTurnGeneration;
-        // runEventLoop may already be awaiting the failed generation. Reusing
-        // the rolled-back generation immediately creates an ABA window where
-        // a delayed terminal event from this failed dispatch can claim the
-        // next turn's origin/token. Reuse the existing bounded tail fence:
-        // an old terminal event releases it; no tail closes the ambiguous
-        // Session so Maker can rebuild before the next send.
-        this.armTerminalErrorDrain(previousTurnGeneration);
+        // Confirmed provider rejection cannot produce a turn tail, so it may
+        // immediately reuse the rolled-back generation. Other failures retain
+        // the bounded tail fence before another turn can enter.
+        if (!dispatchConfirmedUndispatched) {
+          this.armTerminalErrorDrain(previousTurnGeneration);
+        }
       }
       if (turnLifecyclePrepared && !turnDispatched) {
         try {

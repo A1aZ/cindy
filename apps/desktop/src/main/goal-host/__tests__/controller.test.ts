@@ -650,7 +650,7 @@ describe('GoalController', () => {
     expect(await local.storage.get('s1')).toBeNull();
   });
 
-  it('aborts the git baseline when a goal continuation send is not accepted', async () => {
+  it('aborts the git baseline and retries when the provider explicitly rejects before dispatch', async () => {
     const order: string[] = [];
     const beforeDispatchUserTurn = vi.fn(async () => {
       order.push('baseline');
@@ -662,6 +662,7 @@ describe('GoalController', () => {
       beforeDispatchUserTurn,
       onUndispatchedUserTurn,
     });
+    let attempts = 0;
     vi.spyOn(local.session, 'send').mockImplementation(async (
       message: Parameters<FakeSession['send']>[0],
       opts: Parameters<FakeSession['send']>[1],
@@ -669,15 +670,26 @@ describe('GoalController', () => {
       const content = typeof message === 'string' ? message : message.content;
       local.session.sends.push({ content, originKind: opts?.origin?.kind });
       order.push('send');
-      return { accepted: false, reason: 'cancelled-before-dispatch' };
+      attempts += 1;
+      if (attempts === 1) {
+        return { accepted: false, reason: 'provider-rejected-before-dispatch' };
+      }
+      opts?.onDispatching?.();
+      return { accepted: true };
     });
 
     await local.controller.setGoal({ sessionId: 's1', objective: 'ship the feature' });
 
     expect(order).toEqual(['baseline', 'send', 'abort']);
-    expect(beforeDispatchUserTurn).toHaveBeenCalledWith('s1');
     expect(onUndispatchedUserTurn).toHaveBeenCalledWith('s1');
-    expect(local.session.sends).toHaveLength(1);
+    expect(await local.storage.get('s1')).toMatchObject({ status: 'active', turnsUsed: 0 });
+
+    await tick();
+
+    expect(order).toEqual(['baseline', 'send', 'abort', 'baseline', 'send']);
+    expect(beforeDispatchUserTurn).toHaveBeenCalledTimes(2);
+    expect(local.session.sends).toHaveLength(2);
+    expect(await local.storage.get('s1')).toMatchObject({ status: 'active', turnsUsed: 0 });
   });
 
   it('setGoal create resolves agentKind from the ensured (resumed) session for a dormant Codex session (no claude-code fallback)', async () => {

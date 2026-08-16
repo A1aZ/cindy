@@ -23,6 +23,11 @@ import {
 } from '@cindy/maker-shared/error-redaction';
 import type { AgentEvent, AgentTaskUpdateEventData, UsageSnapshot } from '../../types/index.js';
 import type { AsyncQueue } from '../shared/async-queue.js';
+import {
+  UPSTREAM_OVERLOAD_REASON,
+  formatOverloadRetryMessage,
+  parseOverloadError,
+} from '../shared/overload-error.js';
 import type { PiRpcEvent } from './rpc-client.js';
 import { parsePiSubagentProgress, type PiSubagentUsage } from './subagent-progress.js';
 
@@ -271,6 +276,24 @@ function piAssistantErrorOf(rawError: string): PiPendingAssistantError {
     ...(signals.errorStatus !== undefined ? { errorStatus: signals.errorStatus } : {}),
     ...(signals.usageLimit ? { usageLimit: true } : {}),
   };
+}
+
+function parsePiAutoRetryProgress(
+  event: PiRpcEvent,
+): { attempt: number; maxAttempts: number } | null {
+  const attempt = event.attempt;
+  const maxAttempts = event.maxAttempts;
+  if (
+    typeof attempt !== 'number'
+    || typeof maxAttempts !== 'number'
+    || !Number.isSafeInteger(attempt)
+    || !Number.isSafeInteger(maxAttempts)
+    || attempt < 1
+    || maxAttempts < attempt
+  ) {
+    return null;
+  }
+  return { attempt, maxAttempts };
 }
 
 function toolResultFullText(result: unknown): string {
@@ -571,16 +594,32 @@ export function translatePiEvent(
     }
 
     case 'auto_retry_start': {
+      // 走 CC/Codex 同一套 `(auto-retry N/M)` 跨 agent 协议：ErrorBanner 靠这个后缀切本地化重试文案，手写
+      // `Transient provider error, retrying (1/3)…` 会跌出过载/网络分支，把原始英文
+      // 塞进红色错误条。
+      //
+      // 第 1 次不透出：单次抖动 pi 一次重试就过，提示只会闪一下徒增噪音
+      // （与 claude-code translator 的 api_retry 防噪口径一致）。
+      const progress = parsePiAutoRetryProgress(event);
+      if (!progress || progress.attempt < 2) return;
       const sdkError = typeof event.errorMessage === 'string'
         ? redactSensitiveText(event.errorMessage)
         : undefined;
+      const rawMessage = (sdkError && sdkError.trim())
+        || ctx.pendingAssistantError?.message
+        || 'Transient provider error';
+      const signals = extractNonSecretErrorSignals(rawMessage);
+      const errorStatus = ctx.pendingAssistantError?.errorStatus ?? signals.errorStatus;
+      const overload = parseOverloadError(rawMessage, errorStatus);
       queue.push({
         type: 'error',
         data: {
-          message: `Transient provider error, retrying (${String(event.attempt)}/${String(event.maxAttempts)})…`,
+          message: formatOverloadRetryMessage(rawMessage, progress.attempt, progress.maxAttempts),
           isTerminal: false,
           willRetry: true,
-          sdkError,
+          ...(sdkError ? { sdkError } : {}),
+          ...(errorStatus !== undefined ? { errorStatus } : {}),
+          ...(overload ? { reason: UPSTREAM_OVERLOAD_REASON } : {}),
         },
         source: 'pi',
       });

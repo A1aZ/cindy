@@ -403,6 +403,13 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'column .env',
       'grep --file=.env data.txt',
       'jq --from-file=.env.local data.json',
+      'diff --from-file=.env /dev/null',
+      'diff --from-file .env.local /dev/null',
+      'diff --from-f=.env.production /dev/null',
+      'diff --to-file=.env.test /dev/null',
+      'diff --to-f .env.local /dev/null',
+      'env -- diff --from-file=.env /dev/null',
+      'diff --from-file=.env /dev/null && true',
       'grep --regexp=. .env',
       'grep -e. .env.local',
       'grep --regexp . .env.production',
@@ -480,6 +487,15 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     }
   });
 
+  it('brace expansion 在全局候选预算内惰性遍历，超限时 fail-closed', () => {
+    const explosiveOperand = Array.from(
+      { length: 8 },
+      () => '{a,b,c,d,e,f,g,h}',
+    ).join('');
+    expect(classifyShellCommand(`cat ${explosiveOperand}`, roots, opts)).toBe('prompt-each-time');
+    expect(classifyShellCommand('cat config{a,b}{1,2}.txt', roots, opts)).toBe('auto-approve');
+  });
+
   it.each([
     ['cat .environment', 'auto-approve'],
     ['cat config.env.local', 'auto-approve'],
@@ -494,6 +510,11 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     ['grep -f patterns.txt data.txt', 'auto-approve'],
     ['sed -f script.sed data.txt', 'prompt'],
     ['jq -f filter.jq data.json', 'auto-approve'],
+    ['diff --from-file=README.md /dev/null', 'auto-approve'],
+    ['diff --from-file README.md /dev/null', 'auto-approve'],
+    ['diff --from-f=README.md /dev/null', 'auto-approve'],
+    ['diff --to-file=README.md /dev/null', 'auto-approve'],
+    ['diff --to-file README.md /dev/null', 'auto-approve'],
     ['column data.csv', 'auto-approve'],
     ['grep --regexp=. data.json', 'auto-approve'],
     ['grep -e.env data.json', 'auto-approve'],

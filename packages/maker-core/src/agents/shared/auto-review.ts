@@ -4760,12 +4760,17 @@ const SED_LONG_OPTIONS: readonly ReaderLongOption[] = [
 const JQ_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--from-file', kind: 'data-file' },
 ];
+const DIFF_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--from-file', kind: 'data-file' },
+  { name: '--to-file', kind: 'data-file' },
+];
 
 function readerLongOptions(bin: string): readonly ReaderLongOption[] {
   if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep') return GREP_LONG_OPTIONS;
   if (bin === 'rg') return RG_LONG_OPTIONS;
   if (bin === 'sed') return SED_LONG_OPTIONS;
   if (bin === 'jq' || bin === 'yq') return JQ_LONG_OPTIONS;
+  if (bin === 'diff') return DIFF_LONG_OPTIONS;
   return [];
 }
 
@@ -4825,21 +4830,49 @@ function expandBraceSequence(value: string): string[] | null {
   });
 }
 
-function expandBraceAlternatives(value: string, depth = 0): string[] {
-  if (depth >= 8) return ['*'];
-  const match = /^(.*?)\{([^{}]+)\}(.*)$/.exec(value);
-  if (!match) return [value];
-  const alternatives = match[2].includes(',')
-    ? match[2].split(',')
-    : expandBraceSequence(match[2]);
-  if (!alternatives) return [value];
-  return alternatives.flatMap((alternative) =>
-    expandBraceAlternatives(`${match[1]}${alternative}${match[3]}`, depth + 1));
+const BRACE_EXPANSION_MAX_DEPTH = 8;
+const BRACE_EXPANSION_CANDIDATE_BUDGET = 4_096;
+
+function* commaBraceAlternatives(value: string): Generator<string> {
+  let start = 0;
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index < value.length && value.charAt(index) !== ',') continue;
+    yield value.slice(start, index);
+    start = index + 1;
+  }
+}
+
+function braceAlternatives(value: string): Iterable<string> | null {
+  if (value.includes(',')) return commaBraceAlternatives(value);
+  return expandBraceSequence(value);
+}
+
+function braceExpansionCouldMatch(value: string, predicate: (candidate: string) => boolean): boolean {
+  let remainingCandidates = BRACE_EXPANSION_CANDIDATE_BUDGET;
+  const visit = (candidate: string, depth: number): boolean => {
+    // An expansion we cannot finish proving safe must stay behind the credential consent gate.
+    if (remainingCandidates <= 0) return true;
+    remainingCandidates -= 1;
+
+    const match = /^(.*?)\{([^{}]+)\}(.*)$/.exec(candidate);
+    if (!match) return predicate(candidate);
+    if (depth >= BRACE_EXPANSION_MAX_DEPTH) return true;
+
+    const alternatives = braceAlternatives(match[2]);
+    if (!alternatives) return predicate(candidate);
+    for (const alternative of alternatives) {
+      if (visit(`${match[1]}${alternative}${match[3]}`, depth + 1)) return true;
+    }
+    return false;
+  };
+  return visit(value, 0);
 }
 
 function selectorCouldMatchDotenv(value: string): boolean {
-  return !value.startsWith('!') && expandBraceAlternatives(value)
-    .some((alternative) => !selectorAlternativeCannotMatchDotenv(alternative));
+  return !value.startsWith('!') && braceExpansionCouldMatch(
+    value,
+    (alternative) => !selectorAlternativeCannotMatchDotenv(alternative),
+  );
 }
 
 function shellOperandCouldMatchDotenv(
@@ -4847,7 +4880,7 @@ function shellOperandCouldMatchDotenv(
   exactMatcher: (candidate: string) => boolean = isDotenvCredentialPath,
 ): boolean {
   if (exactMatcher(value)) return true;
-  return expandBraceAlternatives(value).some((alternative) => {
+  return braceExpansionCouldMatch(value, (alternative) => {
     const basename = alternative.replace(/\\/g, '/').split('/').pop() ?? '';
     return basename.startsWith('.') && !selectorAlternativeCannotMatchDotenv(alternative);
   });

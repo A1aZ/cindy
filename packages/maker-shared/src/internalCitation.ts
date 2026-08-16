@@ -11,6 +11,11 @@
  */
 const MODEL_STOP_TOKENS = new Set(['<|endoftext|>', '<|eot_id|>', '<|im_end|>', '<|eos|>']);
 const MODEL_STOP_TOKEN_NAMES = ['endoftext', 'eot_id', 'im_end', 'eos'] as const;
+const LONGEST_MODEL_STOP_TOKEN = Math.max(
+  ...[...MODEL_STOP_TOKENS].map((token) => token.length),
+);
+/** Leading whitespace plus the longest token. Anything longer cannot be standalone. */
+const MAX_STANDALONE_STOP_PREFIX = LONGEST_MODEL_STOP_TOKEN + 16;
 const WEB_CITATION_OPEN = '\uE200cite\uE202';
 const WEB_CITATION_CLOSE = '\uE201';
 
@@ -82,28 +87,25 @@ export function stripStandaloneModelStopToken(text: string): string {
 }
 
 /**
- * Return the append-only prefix of a streaming snapshot. A trailing
- * incomplete `<|eos` / `<|im_end` prefix is withheld until the closer
- * arrives, because a completed standalone token will disappear.
+ * True while `text` is still only a possible whole-message stop token:
+ * surrounding whitespace, a known token, or an incomplete `<|eos` prefix.
+ * Used to hold streaming deltas until the leftover can be dropped or flushed.
+ */
+export function isPossibleStandaloneStopPrefix(text: string): boolean {
+  if (MODEL_STOP_TOKENS.has(text.trim())) return true;
+  if (text.length > MAX_STANDALONE_STOP_PREFIX) return false;
+  const candidate = text.trim();
+  if (candidate.length === 0) return true;
+  if (!candidate.startsWith('<|')) return false;
+  return MODEL_STOP_TOKEN_NAMES.some((name) => `<|${name}|>`.startsWith(candidate));
+}
+
+/**
+ * Return the append-only prefix of a streaming snapshot. A standalone
+ * leftover — including its surrounding whitespace and an incomplete
+ * `<|eos` prefix — is withheld until the closer arrives, because the
+ * completed token will disappear.
  */
 export function stableStandaloneModelStopTokenBoundary(text: string): number {
-  if (stripStandaloneModelStopToken(text) === '') return 0;
-
-  const trimmedStart = text.trimStart();
-  const leading = text.length - trimmedStart.length;
-  const candidate = trimmedStart.trimEnd();
-  if (!candidate.startsWith('<|')) return text.length;
-
-  let longest = 0;
-  for (const name of MODEL_STOP_TOKEN_NAMES) {
-    const token = `<|${name}|>`;
-    const maxProbe = Math.min(candidate.length, token.length - 1);
-    for (let length = maxProbe; length > 0; length -= 1) {
-      if (candidate === token.slice(0, length)) {
-        longest = Math.max(longest, length);
-        break;
-      }
-    }
-  }
-  return longest > 0 ? leading : text.length;
+  return isPossibleStandaloneStopPrefix(text) ? 0 : text.length;
 }

@@ -22,7 +22,7 @@ import {
   redactSensitiveText,
 } from '@cindy/maker-shared/error-redaction';
 import {
-  stableStandaloneModelStopTokenBoundary,
+  isPossibleStandaloneStopPrefix,
   stripInternalWebCitations,
 } from '@cindy/maker-shared/internal-citation';
 import type { createAsyncQueue } from '../shared/async-queue.js';
@@ -151,7 +151,7 @@ export interface RuntimeState {
    * 按 streamKey 隔离的停止符清洗缓冲。text_delta 可能把 `<|eos|>` 拆开，
    * 必须先拼回该 stream 的快照再清洗；并发 subagent 不能共用一份原文。
    */
-  streamStopTokenByKey: Map<string, { raw: string; emitted: number }>;
+  streamStopTokenByKey: Map<string, { pending: string }>;
 }
 
 export function newRuntimeState(): RuntimeState {
@@ -1287,17 +1287,22 @@ function handleStreamEvent(
     const delta = event.delta as { type?: string; text?: string; thinking?: string } | undefined;
     if (!delta) return;
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      const buffer = ctx.rt.streamStopTokenByKey.get(streamKey) ?? { raw: '', emitted: 0 };
-      buffer.raw += delta.text;
-      const visible = stripInternalWebCitations(
-        buffer.raw.slice(0, stableStandaloneModelStopTokenBoundary(buffer.raw)),
-      );
-      const visibleDelta = visible.slice(buffer.emitted);
+      const buffer = ctx.rt.streamStopTokenByKey.get(streamKey) ?? { pending: '' };
+      const holdStandalonePrefix = ctx.turn.uiEmittedText.length === 0;
+      const combined = buffer.pending + delta.text;
+      if (holdStandalonePrefix && isPossibleStandaloneStopPrefix(combined)) {
+        buffer.pending = combined;
+        ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
+        return;
+      }
+      buffer.pending = '';
       ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
+      const visibleDelta = holdStandalonePrefix
+        ? stripInternalWebCitations(combined)
+        : combined;
       if (visibleDelta.length > 0) {
         ctx.turn.hasEmittedText = true;
         ctx.turn.uiEmittedText += visibleDelta;
-        buffer.emitted = visible.length;
         queue.push({
           type: 'text',
           data: { text: visibleDelta, isFinal: false },

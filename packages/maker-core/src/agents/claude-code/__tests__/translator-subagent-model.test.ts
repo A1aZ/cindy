@@ -195,6 +195,33 @@ describe('Claude Code assistant text streaming contract', () => {
     expect(ctx.turn.uiEmittedText).toBe('');
   });
 
+  it('does not emit leading whitespace from a split standalone stop token', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    for (const [uuid, text] of [
+      ['stream-ws-1', '  <|eo'],
+      ['stream-ws-2', 's|>'],
+    ] as const) {
+      translateSdkMessage(
+        {
+          type: 'stream_event',
+          uuid,
+          session_id: 'sdk-session',
+          parent_tool_use_id: null,
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text } },
+        },
+        queue,
+        ctx,
+      );
+    }
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents).toEqual([]);
+    expect(ctx.turn.hasEmittedText).toBe(false);
+    expect(ctx.turn.uiEmittedText).toBe('');
+  });
+
   it('keeps an embedded stop token in streamed assistant prose', async () => {
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx();
@@ -297,7 +324,7 @@ describe('Claude Code assistant text streaming contract', () => {
       }),
     ]);
     expect(ctx.turn.uiEmittedText).toBe('answer');
-    expect(ctx.rt.streamStopTokenByKey.get('toolu-a')).toEqual({ raw: '<|eo', emitted: 0 });
+    expect(ctx.rt.streamStopTokenByKey.get('toolu-a')).toEqual({ pending: '<|eo' });
   });
 
   it('keeps a result fallback tail unmarked so it cannot replace accumulated streaming text', async () => {

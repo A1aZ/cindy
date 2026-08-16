@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isPossibleStandaloneStopPrefix,
   stableInternalWebCitationBoundary,
   stableStandaloneModelStopTokenBoundary,
   stripInternalWebCitations,
@@ -51,8 +52,11 @@ describe('leaked model stop tokens', () => {
   it('holds an incomplete standalone prefix until the closer arrives', () => {
     expect(stableStandaloneModelStopTokenBoundary('hello')).toBe(5);
     expect(stableStandaloneModelStopTokenBoundary('<|eo')).toBe(0);
+    expect(stableStandaloneModelStopTokenBoundary('  <|eo')).toBe(0);
     expect(stableStandaloneModelStopTokenBoundary('<|eos|>')).toBe(0);
     expect(stableStandaloneModelStopTokenBoundary('The token is <|eo')).toBe('The token is <|eo'.length);
+    expect(isPossibleStandaloneStopPrefix('  <|eo')).toBe(true);
+    expect(isPossibleStandaloneStopPrefix('The token is <|eo')).toBe(false);
   });
 
   it('is idempotent', () => {

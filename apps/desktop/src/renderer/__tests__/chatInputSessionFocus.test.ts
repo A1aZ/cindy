@@ -238,7 +238,9 @@ describe('ChatInput session switch focus contract', () => {
     expect(chatInputSource).toContain('getOrCreateRemoteOptimisticTransitionCheckpoint(');
     expect(chatInputSource).toContain('saveComposerTextAfterAsyncTransition(');
     expect(chatInputSource).toContain('recoveryCheckpoint!');
-    expect(chatInputSource).toContain('if (pendingStopAndSend || voiceInputBusyRef.current)');
+    expect(chatInputSource).toContain(
+      'if ((pendingStopAndSend || voiceInputBusyRef.current) && prevEditorKey)',
+    );
     expect(chatInputSource).toContain('}, [editor, storageKey]);');
     expect(chatInputSource).not.toContain('}, [editor, storageKey, voiceInput.isBusy]);');
     expect(chatInputSource.match(/storageKeyTransitionRecoveryRef\.current = null;/g)).toHaveLength(

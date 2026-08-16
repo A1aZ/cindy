@@ -22,8 +22,9 @@ import {
   redactSensitiveText,
 } from '@cindy/maker-shared/error-redaction';
 import {
-  isPossibleStandaloneStopPrefix,
+  holdStandaloneStopTokenDelta,
   stripInternalWebCitations,
+  type StandaloneStopTokenHold,
 } from '@cindy/maker-shared/internal-citation';
 import type { createAsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
@@ -152,7 +153,7 @@ export interface RuntimeState {
    * 必须先拼回该 stream 的快照再清洗。`emitted` 只表示本流是否已发出可见
    * 正文：独立停止符按这个判定，不能看整轮 `uiEmittedText`。
    */
-  streamStopTokenByKey: Map<string, { pending: string; emitted: boolean }>;
+  streamStopTokenByKey: Map<string, StandaloneStopTokenHold>;
 }
 
 export function newRuntimeState(): RuntimeState {
@@ -1290,18 +1291,9 @@ function handleStreamEvent(
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
       const buffer = ctx.rt.streamStopTokenByKey.get(streamKey)
         ?? { pending: '', emitted: false };
-      const combined = buffer.pending + delta.text;
-      if (!buffer.emitted && isPossibleStandaloneStopPrefix(combined)) {
-        buffer.pending = combined;
-        ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
-        return;
-      }
-      buffer.pending = '';
-      const visibleDelta = buffer.emitted
-        ? combined
-        : stripInternalWebCitations(combined);
-      if (visibleDelta.length > 0) {
-        buffer.emitted = true;
+      const visibleDelta = holdStandaloneStopTokenDelta(buffer, delta.text);
+      ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
+      if (visibleDelta && visibleDelta.length > 0) {
         ctx.turn.hasEmittedText = true;
         ctx.turn.uiEmittedText += visibleDelta;
         queue.push({
@@ -1311,7 +1303,6 @@ function handleStreamEvent(
           agentMeta: fallbackMeta,
         });
       }
-      ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
     } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
       // 第一次见 thinking_delta 时 lazy-init 一个 buffer (老链路 agentManager.ts:2322-2335)
       if (!ctx.rt.currentThinking) {

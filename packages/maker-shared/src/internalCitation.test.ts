@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  holdStandaloneStopTokenDelta,
   isPossibleStandaloneStopPrefix,
   stableInternalWebCitationBoundary,
   stableStandaloneModelStopTokenBoundary,
@@ -64,5 +65,15 @@ describe('leaked model stop tokens', () => {
     expect(stripInternalWebCitations(stripInternalWebCitations('The token is <|eos|>'))).toBe(
       'The token is <|eos|>',
     );
+  });
+
+  it('holds a split leftover on one stream without mixing another stream', () => {
+    const a = { pending: '', emitted: false };
+    const b = { pending: '', emitted: false };
+    expect(holdStandaloneStopTokenDelta(a, '<|eo')).toBeNull();
+    expect(holdStandaloneStopTokenDelta(b, 'answer')).toBe('answer');
+    expect(holdStandaloneStopTokenDelta(a, 's|>')).toBeNull();
+    expect(a).toEqual({ pending: '<|eos|>', emitted: false });
+    expect(b).toEqual({ pending: '', emitted: true });
   });
 });

@@ -109,3 +109,28 @@ export function isPossibleStandaloneStopPrefix(text: string): boolean {
 export function stableStandaloneModelStopTokenBoundary(text: string): number {
   return isPossibleStandaloneStopPrefix(text) ? 0 : text.length;
 }
+
+export interface StandaloneStopTokenHold {
+  pending: string;
+  emitted: boolean;
+}
+
+/**
+ * Hold a leftover stop token until this stream has either completed it or
+ * proven it is ordinary prose. The buffer is per stream; callers must not
+ * share it across concurrent text streams.
+ */
+export function holdStandaloneStopTokenDelta(
+  buffer: StandaloneStopTokenHold,
+  delta: string,
+): string | null {
+  const combined = buffer.pending + delta;
+  if (!buffer.emitted && isPossibleStandaloneStopPrefix(combined)) {
+    buffer.pending = combined;
+    return null;
+  }
+  buffer.pending = '';
+  const visible = buffer.emitted ? combined : stripInternalWebCitations(combined);
+  if (visible.length > 0) buffer.emitted = true;
+  return visible;
+}

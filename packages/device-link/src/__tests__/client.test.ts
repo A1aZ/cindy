@@ -4742,6 +4742,9 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     await tick();
     expect(retriedSeqs(sendsBySeq(ws))).toEqual(seqs.slice(0, 2));
 
+    h.client.sendInvokeResult('dev-b', 'extra-during-recovery', { ok: true, result: 'x' });
+    expect([...sendsBySeq(ws).keys()]).toHaveLength(7);
+
     const streamId = parseTransportPayload(
       ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
     )!.meta.streamId;

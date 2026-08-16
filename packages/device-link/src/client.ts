@@ -2878,7 +2878,12 @@ export class DeviceLinkClient {
         break;
       }
       framesSpent += Math.max(1, sentFrames);
-      if (admittingNew) this.noteRecoveryFrames(peer, sentFrames);
+      // 首趟恢复 replay(ignoreInterval)要把已在途的探针也记进预算,
+      // 否则 sent===true 的重放不占额度,新入队帧还能再灌一整批。
+      // 后续定时重发只给新帧记账,同一批探针可继续重传。
+      if (admittingNew || (peer.recoveryNeedsAck && opts.ignoreInterval)) {
+        this.noteRecoveryFrames(peer, sentFrames);
+      }
       if (framesSpent >= budget) break;
     }
   }

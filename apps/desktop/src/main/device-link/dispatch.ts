@@ -1695,12 +1695,14 @@ function handleLinkOpen(
   // 逐设备黑名单:已撤销访问权限的控制端,发 link-close('revoked') 给明确信号
   // (legacy openLink 仍会超时,但控制端据此 link-close 标记「已撤销」),不接受其 link-open。
   if (isControllerRevoked(src)) {
+    // 清理必须每次都做:限频只挡 closeLink/日志,不能把 purge 也吞掉。
+    // 否则短暂解禁再撤权时,restore 窗口里装上的订阅会在 throttle 内继续收 push。
+    purgeRevokedController(src);
     const now = Date.now();
     const last = revokedLinkOpenRejectAt.get(src) ?? 0;
     if (now - last >= REVOKED_LINK_OPEN_REJECT_INTERVAL_MS) {
       log.warn(`link-open from ${shortId(src)} rejected: access revoked`);
       revokedLinkOpenRejectAt.set(src, now);
-      purgeRevokedController(src);
       client.closeLink(src, 'revoked', 'inbound');
     }
     return;

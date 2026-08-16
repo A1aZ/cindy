@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => ({
     skipSplash: vi.fn(),
   },
   env: { step: undefined as 1 | 2 | undefined, totalSteps: undefined as 2 | undefined },
+  coverHeld: false,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -72,6 +73,10 @@ vi.mock('@/hooks/useSplash', () => ({
 
 vi.mock('@/contexts/EnvCheckContext', () => ({
   useEnvCheck: () => ({ step: mocks.env.step, totalSteps: mocks.env.totalSteps }),
+}));
+
+vi.mock('@/contexts/AppShellCoverContext', () => ({
+  useAppShellCover: () => ({ coverHeld: mocks.coverHeld, reportLocalDbGate: () => {} }),
 }));
 
 vi.mock('@/components/title-bar/WindowControls', () => ({
@@ -126,6 +131,7 @@ beforeEach(() => {
   mocks.splash.downloadProgress = 0;
   mocks.splash.downloadInfo = { progress: 0 };
   mocks.splash.resetSignal = 0;
+  mocks.coverHeld = false;
   setPhase('splash_checking');
   document.documentElement.removeAttribute('data-splash-active');
   (window as unknown as { electronAPI: { platform: string } }).electronAPI = {
@@ -365,5 +371,14 @@ describe('SplashScreen wave4 统一面板', () => {
     setPhase('splash_skipped');
     view.rerender(<SplashScreen />);
     expect(view.container.firstElementChild).toBeNull();
+  });
+
+  it('LocalDbGate 未就绪时 splash_done 仍保持加载面板(登录后不得露白底)', () => {
+    mocks.coverHeld = true;
+    renderSplash('splash_done');
+    expect(screen.getByTestId('splash-panel')).toBeTruthy();
+    expectSpinner();
+    expect(screen.getByText('splash.tips.waking')).toBeTruthy();
+    expect(document.documentElement.getAttribute('data-splash-active')).toBe('1');
   });
 });

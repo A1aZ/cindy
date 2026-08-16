@@ -243,10 +243,12 @@ function isProviderRoutedModel(model: string): boolean {
 /**
  * 结果感知的硬中断目前只覆盖既有 DeepSeek 与原生 Claude 系列。
  * 其他 provider-routed 模型需要独立确认产品口径,不能因共用 Claude Code harness
- * 就自动扩大行为。这里基于 maker-core 公开 model id 判断,不使用带 [1m] 的 SDK id。
+ * 就自动扩大行为。会话级判断用 maker-core 公开 model id(deepseek/…);sidechain 的
+ * 判断来自 SDK 流内的原始 id(可能是裸 deepseek-… 形态,同 toSdkModelString 的双形态),
+ * 因此 DeepSeek 按家族前缀匹配,不带 [1m] 的 SDK 改写。
  */
 function shouldUseToolLoopGuard(model: string): boolean {
-  return model.startsWith('deepseek/') || model.startsWith('claude-');
+  return model.startsWith('deepseek') || model.startsWith('claude-');
 }
 
 /** URL → host(路由决策日志用,失败返回 undefined,不抛)。 */
@@ -2171,11 +2173,27 @@ export class ClaudeCodeAgent extends BaseAgent {
       autoReviewDecisionCache.set(key, pending);
       return pending;
     };
-    let toolLoopGuards: Map<string | null, ToolLoopGuard> | null = shouldUseToolLoopGuard(mutableModel)
-      ? new Map()
-      : null;
+    // guard 桶常驻(每 turn 清空):适用性不再是会话级一票制,而是每个 scope 单独判。
+    const toolLoopGuards = new Map<string | null, ToolLoopGuard>();
+    /**
+     * guard 适用性判定用的模型:sidechain 用该 subagent 的实际模型
+     * (Agent 异步回执的 resolvedModel 优先,其次 sidechain 流内消息的 model),
+     * 两者都未知时回落会话模型(维持旧行为);顶层恒用会话模型。
+     * 否则 claude 会话下的 provider-routed subagent 会被越权硬中断,
+     * provider-routed 会话下的 claude subagent 反而失去保护(PR #2779 review 指出)。
+     * runtimeState 声明在后,仅在 forward loop 回调期调用,无 TDZ 风险。
+     */
+    const toolLoopGuardModelForScope = (parentToolUseId?: string): string => {
+      if (parentToolUseId) {
+        const sidechainModel =
+          runtimeState.resolvedSubagentModelByParentToolUseId.get(parentToolUseId)
+          ?? runtimeState.streamModelByParentToolUseId.get(parentToolUseId);
+        if (sidechainModel) return sidechainModel;
+      }
+      return mutableModel;
+    };
     const getToolLoopGuard = (parentToolUseId?: string): ToolLoopGuard | null => {
-      if (!toolLoopGuards) return null;
+      if (!shouldUseToolLoopGuard(toolLoopGuardModelForScope(parentToolUseId))) return null;
       const scopeKey = parentToolUseId ?? null;
       let guard = toolLoopGuards.get(scopeKey);
       if (!guard) {
@@ -2185,7 +2203,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       return guard;
     };
     const resetToolLoopGuards = (): void => {
-      toolLoopGuards?.clear();
+      toolLoopGuards.clear();
     };
     let mutableEffort: Effort = opts.effort ?? 'high';
     let mutablePermissionMode: PermissionMode = reviewMode ? 'ask' : opts.permissionMode ?? 'default';
@@ -4322,6 +4340,8 @@ export class ClaudeCodeAgent extends BaseAgent {
                     const loopHint = verdict.reason === 'consecutive'
                       ? `连续 ${verdict.count} 次发起完全相同的 ${verdict.toolName} 调用`
                       : `最近 ${verdict.count} 次工具调用一直在极少数几种(含 ${verdict.toolName})之间反复打转`;
+                    // 报错归属:sidechain 命中时报 subagent 实际模型,不冤枉会话模型。
+                    const loopModel = toolLoopGuardModelForScope(parentToolUseId);
                     // 与 upstream-idle watchdog 同款兜底: tool-loop 中断 = "整个 turn 序列已死",
                     // bridge counter 归零避免 filter 吞掉本条 error / counter 永久停在 >0。
                     // 实践上 bridge /compact turn 不用 tool, 该分支难以触发, 归零是防御性一致。
@@ -4342,14 +4362,14 @@ export class ClaudeCodeAgent extends BaseAgent {
                       type: 'error',
                       data: {
                         message:
-                          `上游模型 ${mutableModel} ${loopHint},疑似陷入死循环,` +
+                          `上游模型 ${loopModel} ${loopHint},疑似陷入死循环,` +
                           `已自动中断当前 turn。可以直接发下一条消息继续,` +
                           `已完成的 tool result 都保留。`,
                         isTerminal: true,
                         reason: 'tool_use_loop_detected',
                         loopKind: verdict.reason,
                         loopCount: verdict.count,
-                        model: mutableModel,
+                        model: loopModel,
                       },
                       source: 'claude-code',
                     });
@@ -5929,7 +5949,8 @@ export class ClaudeCodeAgent extends BaseAgent {
             triggerAutoCompactIfNeeded();
           }
         }
-        toolLoopGuards = shouldUseToolLoopGuard(mutableModel) ? new Map() : null;
+        // 适用性在 getToolLoopGuard 里按已更新的 mutableModel 逐 scope 判,这里只清状态。
+        resetToolLoopGuards();
       },
 
       async setEffort(newEffort: Effort) {

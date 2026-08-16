@@ -1141,6 +1141,11 @@ function handleAssistant(
   const parentToolUseId = typeof msg.parent_tool_use_id === 'string' && msg.parent_tool_use_id
     ? msg.parent_tool_use_id
     : undefined;
+  // 与 handleStreamEvent 的 streamModel 记录对齐:关闭 partial streaming 时 sidechain
+  // 只有 assistant 消息可作模型来源,loop guard 的按 scope 适用性判定依赖这张表。
+  if (parentToolUseId && typeof assistantMeta.model === 'string' && assistantMeta.model) {
+    ctx.rt.streamModelByParentToolUseId.set(parentToolUseId, assistantMeta.model);
+  }
   const content = msg.message?.content ?? [];
   // silent-stop 观测素材: 本条消息是否带实质内容(非空 text / 非 thinking 块)。
   // 未知块 fail-safe 为有内容，避免 SDK 新 block 被误续跑。

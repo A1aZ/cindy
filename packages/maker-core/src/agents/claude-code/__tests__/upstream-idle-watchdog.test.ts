@@ -194,12 +194,14 @@ function assistantToolUse(
   id: string,
   command = 'sleep 999',
   parentToolUseId?: string,
+  model?: string,
 ): Record<string, unknown> {
   return {
     type: 'assistant',
     parent_tool_use_id: parentToolUseId ?? null,
     message: {
       role: 'assistant',
+      ...(model ? { model } : {}),
       content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }],
     },
   };
@@ -266,6 +268,7 @@ async function runStableAbabLoop(
   session: Awaited<ReturnType<typeof startSessionWithStream>>,
   userContent: string,
   idPrefix: string,
+  sidechain?: { parentToolUseId: string; model?: string },
 ): Promise<{ loopError: AgentEvent | undefined; interruptCalls: number }> {
   const { handle, stream, events, fakeQuery, collected } = session;
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -281,9 +284,13 @@ async function runStableAbabLoop(
           isA
             ? 'grep -R "getShellCommandPolicy" packages apps'
             : 'grep -R "shell-command-policy" packages apps',
+          sidechain?.parentToolUseId,
+          sidechain?.model,
         ),
       );
-      stream.emit(userToolResult(id, isA ? 'base-agent.ts:731' : 'not found'));
+      stream.emit(
+        userToolResult(id, isA ? 'base-agent.ts:731' : 'not found', sidechain?.parentToolUseId),
+      );
     }
 
     await pumpUntil(
@@ -497,6 +504,64 @@ describe('Claude Code tool-loop guard runtime integration', () => {
 
     expect(result.loopError).toBeUndefined();
     expect(result.interruptCalls).toBe(0);
+  });
+
+  it('claude 会话下 provider-routed 模型 sidechain 的稳定 ABAB 循环不触发硬中断', async () => {
+    // sidechain 流内消息报的是 SDK 原始 id(无 codex/ 前缀),guard 适用性按它判。
+    const result = await runStableAbabLoop(
+      await startSessionWithStream('claude-opus-5'),
+      'delegate the investigation to a codex subagent',
+      'toolu_codex_sidechain',
+      { parentToolUseId: 'toolu_agent_codex', model: 'gpt-5.6-sol' },
+    );
+
+    expect(result.loopError).toBeUndefined();
+    expect(result.interruptCalls).toBe(0);
+  });
+
+  it('provider-routed 会话下 claude 模型 sidechain 的稳定 ABAB 循环仍会中断', async () => {
+    const result = await runStableAbabLoop(
+      await startSessionWithStream('codex/gpt-5.5'),
+      'delegate the investigation to a claude subagent',
+      'toolu_claude_sidechain',
+      { parentToolUseId: 'toolu_agent_claude', model: 'claude-opus-5-20260115' },
+    );
+
+    expect(result.loopError).toMatchObject({
+      type: 'error',
+      data: {
+        reason: 'tool_use_loop_detected',
+        loopKind: 'pingpong',
+        loopCount: 12,
+        model: 'claude-opus-5-20260115',
+        isTerminal: true,
+      },
+      source: 'claude-code',
+    });
+    expect(result.interruptCalls).toBe(1);
+  });
+
+  it('deepseek 会话下裸 id 形态的 deepseek sidechain 仍受 guard 保护', async () => {
+    // 流内原始 id 是 deepseek-v4-flash(无 deepseek/ 前缀),家族前缀匹配不得漏判。
+    const result = await runStableAbabLoop(
+      await startSessionWithStream('deepseek/deepseek-v4-flash'),
+      'delegate the investigation to a deepseek subagent',
+      'toolu_deepseek_sidechain',
+      { parentToolUseId: 'toolu_agent_deepseek', model: 'deepseek-v4-flash' },
+    );
+
+    expect(result.loopError).toMatchObject({
+      type: 'error',
+      data: {
+        reason: 'tool_use_loop_detected',
+        loopKind: 'pingpong',
+        loopCount: 12,
+        model: 'deepseek-v4-flash',
+        isTerminal: true,
+      },
+      source: 'claude-code',
+    });
+    expect(result.interruptCalls).toBe(1);
   });
 
   it.each(['deepseek/deepseek-v4-flash', 'claude-opus-5'])(

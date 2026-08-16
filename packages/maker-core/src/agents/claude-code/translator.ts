@@ -21,7 +21,10 @@ import {
   extractNonSecretErrorSignals,
   redactSensitiveText,
 } from '@cindy/maker-shared/error-redaction';
-import { stripInternalWebCitations } from '@cindy/maker-shared/internal-citation';
+import {
+  stableStandaloneModelStopTokenBoundary,
+  stripInternalWebCitations,
+} from '@cindy/maker-shared/internal-citation';
 import type { createAsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
 import { formatOverloadRetryMessage, parseOverloadError } from '../shared/overload-error.js';
@@ -57,6 +60,11 @@ export interface TurnState {
    * "整轮全空"和"前面推过、最后一段被截断";uiEmittedText 让兜底能精确算出缺哪一段。
    */
   uiEmittedText: string;
+  /**
+   * 当前 assistant text block 尚未归一化的累计原文。text_delta 可能把
+   * `<|eos|>` 拆开；必须先拼回快照再清洗，才能按住半截前缀、丢掉整条泄漏。
+   */
+  rawAssistantText: string;
   /**
    * SDK API retry / assistant error envelope 的暂存详情。两者都不是可靠的 turn
    * 终态: Claude Code 可能随后自动重试并返回成功 result。只有最终
@@ -171,6 +179,7 @@ function resetTurnState(turn: TurnState): void {
   turn.sawCompactBoundary = false;
   turn.hasEmittedText = false;
   turn.uiEmittedText = '';
+  turn.rawAssistantText = '';
   turn.pendingApiError = null;
   turn.interruptRequested = false;
   turn.lastAssistantMsgHadSubstance = true;
@@ -1155,6 +1164,7 @@ function handleAssistant(
   for (const blockRaw of content) {
     const block = blockRaw as { type?: string; text?: string; name?: string; id?: string; input?: unknown; thinking?: string; signature?: string };
     if (block.type === 'text' && typeof block.text === 'string') {
+      ctx.turn.rawAssistantText = '';
       const visibleText = stripInternalWebCitations(block.text);
       ctx.turn.text += visibleText;
       if (visibleText.length > 0) {
@@ -1276,10 +1286,17 @@ function handleStreamEvent(
     const delta = event.delta as { type?: string; text?: string; thinking?: string } | undefined;
     if (!delta) return;
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      const visibleDelta = stripInternalWebCitations(delta.text);
+      ctx.turn.rawAssistantText += delta.text;
+      const visible = stripInternalWebCitations(
+        ctx.turn.rawAssistantText.slice(
+          0,
+          stableStandaloneModelStopTokenBoundary(ctx.turn.rawAssistantText),
+        ),
+      );
+      const visibleDelta = visible.slice(ctx.turn.uiEmittedText.length);
       if (visibleDelta.length > 0) {
         ctx.turn.hasEmittedText = true;
-        ctx.turn.uiEmittedText += visibleDelta;
+        ctx.turn.uiEmittedText = visible;
         queue.push({
           type: 'text',
           data: { text: visibleDelta, isFinal: false },

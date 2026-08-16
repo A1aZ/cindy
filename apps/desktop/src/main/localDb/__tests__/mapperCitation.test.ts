@@ -45,6 +45,9 @@ describe('message mapper internal citation compatibility', () => {
 
     expect(messageToCamel(row).content).toBe('');
     expect(extractMessagePreview(JSON.stringify('<|eos|>'), 'assistant')).toBeNull();
+    expect(extractMessagePreview(JSON.stringify('The token is <|eos|>'), 'assistant')).toBe(
+      'The token is <|eos|>',
+    );
     expect(extractMessagePreview(JSON.stringify('用户说 <|eos|>'), 'user')).toBe('用户说 <|eos|>');
   });
 });

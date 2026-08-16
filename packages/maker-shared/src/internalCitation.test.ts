@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   stableInternalWebCitationBoundary,
+  stableStandaloneModelStopTokenBoundary,
   stripInternalWebCitations,
-  stripLeakedModelStopTokens,
+  stripStandaloneModelStopToken,
 } from './internalCitation.js';
 
 const source1 = '\uE200cite\uE202turn17search1\uE201';
@@ -37,21 +38,27 @@ describe('internal Web citation normalization', () => {
 
 describe('leaked model stop tokens', () => {
   it('strips a whole-message Grok stop token to empty text', () => {
-    expect(stripLeakedModelStopTokens('<|eos|>')).toBe('');
-    expect(stripInternalWebCitations('<|eos|>')).toBe('');
+    expect(stripStandaloneModelStopToken('<|eos|>')).toBe('');
+    expect(stripInternalWebCitations('  <|eos|>\n')).toBe('');
   });
 
-  it('strips a trailing stop token after real prose', () => {
-    expect(stripInternalWebCitations('\u73B0\u6709 reviewer \u7A7A\u95F2\u3002<|eos|>')).toBe('\u73B0\u6709 reviewer \u7A7A\u95F2\u3002');
-  });
-
-  it('leaves ordinary angle-bracket text and code fences untouched', () => {
+  it('leaves embedded stop-token prose intact', () => {
+    expect(stripInternalWebCitations('The token is <|eos|>')).toBe('The token is <|eos|>');
+    expect(stripInternalWebCitations('done<|eot_id|>')).toBe('done<|eot_id|>');
     expect(stripInternalWebCitations('use <|placeholder|> here')).toBe('use <|placeholder|> here');
-    expect(stripInternalWebCitations('See <eos> in the docs')).toBe('See <eos> in the docs');
+  });
+
+  it('holds an incomplete standalone prefix until the closer arrives', () => {
+    expect(stableStandaloneModelStopTokenBoundary('hello')).toBe(5);
+    expect(stableStandaloneModelStopTokenBoundary('<|eo')).toBe(0);
+    expect(stableStandaloneModelStopTokenBoundary('<|eos|>')).toBe(0);
+    expect(stableStandaloneModelStopTokenBoundary('The token is <|eo')).toBe('The token is <|eo'.length);
   });
 
   it('is idempotent', () => {
     expect(stripInternalWebCitations(stripInternalWebCitations('<|eos|>'))).toBe('');
-    expect(stripInternalWebCitations(stripInternalWebCitations('done<|eot_id|>'))).toBe('done');
+    expect(stripInternalWebCitations(stripInternalWebCitations('The token is <|eos|>'))).toBe(
+      'The token is <|eos|>',
+    );
   });
 });

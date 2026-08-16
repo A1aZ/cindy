@@ -9,7 +9,8 @@
  * text, typically as a whole message after a tool-only wrap-up. That marker
  * is not user-facing prose either.
  */
-const MODEL_STOP_TOKEN_RE = /<\|(?:endoftext|eot_id|im_end|eos)\|>/g;
+const MODEL_STOP_TOKENS = new Set(['<|endoftext|>', '<|eot_id|>', '<|im_end|>', '<|eos|>']);
+const MODEL_STOP_TOKEN_NAMES = ['endoftext', 'eot_id', 'im_end', 'eos'] as const;
 const WEB_CITATION_OPEN = '\uE200cite\uE202';
 const WEB_CITATION_CLOSE = '\uE201';
 
@@ -49,7 +50,7 @@ export function stableInternalWebCitationBoundary(text: string): number {
  * left untouched. The transform is idempotent.
  */
 export function stripInternalWebCitations(text: string): string {
-  return stripLeakedModelStopTokens(stripInternalWebCitationMarkers(text));
+  return stripStandaloneModelStopToken(stripInternalWebCitationMarkers(text));
 }
 
 function stripInternalWebCitationMarkers(text: string): string {
@@ -72,12 +73,37 @@ function stripInternalWebCitationMarkers(text: string): string {
 }
 
 /**
- * Drop leaked model stop tokens. Whole-message leftovers become empty so
- * persist / render callers can treat them as no user-facing text. Trailing
- * tokens after real prose are removed without collapsing surrounding spaces
- * that the caller already owns.
+ * Drop a leaked model stop token only when it is the whole assistant
+ * message (optional surrounding whitespace). Embedded mentions such as
+ * `The token is <|eos|>` stay intact.
  */
-export function stripLeakedModelStopTokens(text: string): string {
-  if (!text.includes('<|')) return text;
-  return text.replace(MODEL_STOP_TOKEN_RE, '');
+export function stripStandaloneModelStopToken(text: string): string {
+  return MODEL_STOP_TOKENS.has(text.trim()) ? '' : text;
+}
+
+/**
+ * Return the append-only prefix of a streaming snapshot. A trailing
+ * incomplete `<|eos` / `<|im_end` prefix is withheld until the closer
+ * arrives, because a completed standalone token will disappear.
+ */
+export function stableStandaloneModelStopTokenBoundary(text: string): number {
+  if (stripStandaloneModelStopToken(text) === '') return 0;
+
+  const trimmedStart = text.trimStart();
+  const leading = text.length - trimmedStart.length;
+  const candidate = trimmedStart.trimEnd();
+  if (!candidate.startsWith('<|')) return text.length;
+
+  let longest = 0;
+  for (const name of MODEL_STOP_TOKEN_NAMES) {
+    const token = `<|${name}|>`;
+    const maxProbe = Math.min(candidate.length, token.length - 1);
+    for (let length = maxProbe; length > 0; length -= 1) {
+      if (candidate === token.slice(0, length)) {
+        longest = Math.max(longest, length);
+        break;
+      }
+    }
+  }
+  return longest > 0 ? leading : text.length;
 }

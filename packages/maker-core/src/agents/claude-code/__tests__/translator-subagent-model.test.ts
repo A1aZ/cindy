@@ -17,6 +17,7 @@ function createTurnState(): TurnState {
     sawCompactBoundary: false,
     hasEmittedText: false,
     uiEmittedText: '',
+    rawAssistantText: '',
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,
@@ -166,6 +167,62 @@ describe('Claude Code assistant text streaming contract', () => {
     expect(ctx.turn.hasEmittedText).toBe(false);
     expect(ctx.turn.uiEmittedText).toBe('');
     expect(ctx.turn.lastAssistantMsgHadSubstance).toBe(false);
+  });
+
+  it('does not emit a stop token split across streaming deltas', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    for (const [uuid, text] of [
+      ['stream-eos-1', '<|eo'],
+      ['stream-eos-2', 's|>'],
+    ] as const) {
+      translateSdkMessage(
+        {
+          type: 'stream_event',
+          uuid,
+          session_id: 'sdk-session',
+          parent_tool_use_id: null,
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text } },
+        },
+        queue,
+        ctx,
+      );
+    }
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents).toEqual([]);
+    expect(ctx.turn.hasEmittedText).toBe(false);
+    expect(ctx.turn.uiEmittedText).toBe('');
+  });
+
+  it('keeps an embedded stop token in streamed assistant prose', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    for (const [uuid, text] of [
+      ['stream-embed-1', 'The token is '],
+      ['stream-embed-2', '<|eos|>'],
+    ] as const) {
+      translateSdkMessage(
+        {
+          type: 'stream_event',
+          uuid,
+          session_id: 'sdk-session',
+          parent_tool_use_id: null,
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text } },
+        },
+        queue,
+        ctx,
+      );
+    }
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents.map((event) => event.data)).toEqual([
+      { text: 'The token is ', isFinal: false },
+      { text: '<|eos|>', isFinal: false },
+    ]);
+    expect(ctx.turn.uiEmittedText).toBe('The token is <|eos|>');
   });
 
   it('keeps a result fallback tail unmarked so it cannot replace accumulated streaming text', async () => {

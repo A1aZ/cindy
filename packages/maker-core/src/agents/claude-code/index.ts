@@ -2290,6 +2290,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       sawCompactBoundary: false,
       hasEmittedText: false,
       uiEmittedText: '',
+      rawAssistantText: '',
       pendingApiError: null,
       interruptRequested: false,
       generation: 0,

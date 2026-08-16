@@ -49,3 +49,34 @@ export const PR_STATUS_COLOR: Record<PrStatusKind, string> = {
   merged: 'var(--focus-ring)',
   closed: 'var(--error-fg)',
 };
+
+/** 侧栏任务行 PR icon 所在表面:选中胶囊是反相底,跟主题名不是一回事。 */
+export type PrIconSurface = 'light' | 'dark';
+
+/**
+ * 侧栏 open 绿按表面取,不跟当前主题名走(2026-08-17 用户选 B):
+ *   浅表面(白天未选中 / 夜间选中白胶囊)→ `--pr-open-on-light` `#2EA043`
+ *   深表面(夜间未选中 / 白天选中深胶囊)→ `--pr-open-on-dark` `#3FB950`
+ * 顶栏 GitContextBadge / hover tooltip 仍用 PR_STATUS_COLOR(主题 `--diff-add-fg`)。
+ */
+export function prIconSurface(opts: { themeIsDark: boolean; isActive: boolean }): PrIconSurface {
+  if (opts.isActive) return opts.themeIsDark ? 'light' : 'dark';
+  return opts.themeIsDark ? 'dark' : 'light';
+}
+
+export function prStatusIconColor(kind: PrStatusKind | null, surface: PrIconSurface): string {
+  if (kind === 'open') {
+    return surface === 'light' ? 'var(--pr-open-on-light)' : 'var(--pr-open-on-dark)';
+  }
+  if (kind) return PR_STATUS_COLOR[kind];
+  return 'var(--text-tertiary)';
+}
+
+/** open / draft 且有未解决 review thread 才打角点;merged / closed 当历史噪声。 */
+export function shouldShowPrUnresolvedDot(
+  kind: PrStatusKind | null,
+  unresolvedCount: number | null | undefined,
+): boolean {
+  if (!unresolvedCount || unresolvedCount <= 0) return false;
+  return kind === 'open' || kind === 'draft';
+}

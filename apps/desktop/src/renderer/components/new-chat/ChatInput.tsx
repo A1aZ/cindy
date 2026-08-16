@@ -361,9 +361,11 @@ const TOOLBAR_COMPACT_MAX_WIDTH = 448;
 
 // 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
 // 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
-// 模块级 Map<sessionId, turnGen> 跟踪正在进行的预测,确保同一 session 同一 turnGen
-// 同时只有一次预测调用。当旧 turn 的预测仍在途时新 turn 触发预测,新 turn 的
-// turnGen 不同,会替换旧条目并允许新预测通过,避免旧请求吞掉新轮预测。
+// 模块级 Map<sessionId, turnGen> 跟踪正在进行的预测(renderer 端辅助跟踪),
+// 主要用于 cleanup 时防止误删其他窗口的条目。主进程级去重(main 侧 title.ts)
+// 使用 DB session.updatedAt 作为跨窗口一致的去重键,才是真正的付费调用防线。
+// 当旧 turn 的预测仍在途时新 turn 触发预测,新 turn 的 turnGen 不同,
+// 会替换旧条目并允许新预测通过(main 侧也通过 updatedAt 变化放行)。
 const _predictingSessions = new Map<string, number>();
 
 function isVoiceInputIdleLike(state: VoiceInputState): boolean {

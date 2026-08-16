@@ -28,9 +28,9 @@ const h = vi.hoisted(() => ({
     },
   ),
   /** 模拟 DB 返回的 session row */
-  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null } | undefined,
+  sessionRow: { remoteHostId: null, agentKind: null, updatedAt: 1 } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null; updatedAt?: number } | undefined,
   /** 模拟 DB 第二次读取(排空落盘队列之后)返回的 session row;用于「drain 期间被删除」竞态测试。 */
-  sessionRowAfterDrain: undefined as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null } | undefined,
+  sessionRowAfterDrain: undefined as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null; updatedAt?: number } | undefined,
   /** DB 读取次数计数(区分 drain 前后的两次读取)。 */
   dbReads: 0,
 }));
@@ -223,7 +223,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.handlers.clear();
   h.trusted = true;
-  h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
+  h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 1 };
   h.sessionRowAfterDrain = undefined;
   h.dbReads = 0;
   h.predict.mockResolvedValue('下一步做什么');
@@ -268,7 +268,7 @@ describe('maker:predict-prompt — payload 运行期校验', () => {
   });
 
   it('素材从 DB 读取,不采用 renderer 上报的 messages / workingDir', async () => {
-    h.sessionRow = { remoteHostId: null, agentKind: 'pi', workingDir: '/db/workdir' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'pi', workingDir: '/db/workdir', updatedAt: 1 };
     await invokePredict({
       sessionId: 'session-1',
       agentKind: 'pi',
@@ -302,14 +302,14 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
   });
 
   it('session 为远程会话(remoteHostId 非空)时静默返回 null', async () => {
-    h.sessionRow = { remoteHostId: 'ssh-host-1', agentKind: 'cc' };
+    h.sessionRow = { remoteHostId: 'ssh-host-1', agentKind: 'cc', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
   });
 
   it('本地 session(remoteHostId=null, agentKind 匹配)正常执行预测', async () => {
-    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: '下一步做什么' });
     expect(h.predict).toHaveBeenCalledTimes(1);
@@ -317,14 +317,14 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
 
   it('agentKind 不匹配时静默返回 null,不触发付费调用', async () => {
     // renderer 上报 claude-code,DB 存的是 codex
-    h.sessionRow = { remoteHostId: null, agentKind: 'codex' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'codex', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
   });
 
   it('session 为已删除(soft-deleted)时静默返回 null,不触发付费调用', async () => {
-    h.sessionRow = { remoteHostId: null, agentKind: 'cc', status: 'deleted' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', status: 'deleted', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
@@ -333,8 +333,8 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
   it('drain 等待期间 session 被软删除时,排空后重新校验并静默返回 null', async () => {
     // 第一次读取(drain 前)返回合法本地 session;排空落盘队列后第二次读取返回已删除状态,
     // 覆盖 TOCTOU 竞态:drain 前的 status 检查过期后,必须在素材物化/调用 provider 前重新校验。
-    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
-    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'cc', status: 'deleted' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 1 };
+    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'cc', status: 'deleted', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
@@ -345,8 +345,8 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
     // agentKind='codex'。sessionAgentSwitchHandler 会在会话切换时提交 agentKind 变更,因此
     // drain 前的 agentKind 校验已过期:必须在调用 provider 前用 drain 后的 DB agentKind 复核,
     // 与 renderer 上报(claude-code)不一致时拒绝,避免把转写路由到切换前的 provider/账号。
-    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
-    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'codex' };
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 1 };
+    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'codex', updatedAt: 1 };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
@@ -354,7 +354,7 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
 });
 
 describe('maker:predict-prompt — 多窗口去重', () => {
-  it('同一 session 同一 turnGen 并发调用时第二个请求直接返回 null,避免重复付费', async () => {
+  it('同一 session 同一 updatedAt 并发调用时第二个请求直接返回 null,避免重复付费', async () => {
     // 让第一次预测暂挂,模拟并发
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
@@ -374,18 +374,19 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果' });
   });
 
-  it('同一 session 新 turnGen 的请求替换旧请求（旧轮结果终将被 renderer turnGen 校验丢弃）', async () => {
+  it('同一 session 新 updatedAt 的请求替换旧请求（旧轮结果终将被 renderer turnGen 校验丢弃）', async () => {
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
     );
 
-    // 发起 turnGen=0 的预测并暂挂
+    // 发起 updatedAt=1 的预测并暂挂
     const first = invokePredict(VALID_REQUEST);
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 同一 session 发起 turnGen=1 的新预测，应替换旧条目并允许通过。
-    // 旧请求结果终将被 renderer 端 turnGen 校验丢弃，不再阻塞新轮。
+    // 同一 session 发起 updatedAt=2 的新预测（模拟新轮次更新了 session.updatedAt），
+    // 应替换旧条目并允许通过。旧请求结果终将被 renderer 端 turnGen 校验丢弃，不再阻塞新轮。
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 2 };
     let resolveSecond!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveSecond = resolve; }),
@@ -424,18 +425,19 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果A' });
   });
 
-  it('同一 session 更低 turnGen 的请求也允许通过（renderer 端 turnGen 校验兜底）', async () => {
+  it('同一 session 不同 updatedAt 的请求也允许通过（renderer 端 turnGen 校验兜底）', async () => {
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
     );
 
-    // 窗口 A 发起 turnGen=5 的预测并暂挂
+    // 窗口 A 发起 updatedAt=1 的预测并暂挂
     const first = invokePredict({ ...VALID_REQUEST, turnGen: 5 });
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 窗口 B 发起 turnGen=3 的预测（因挂载/会话切换历史不同，turnGen 更低）。
-    // 不同 turnGen 允许通过，入口不比对大小；renderer 端 turnGen 校验兜底。
+    // 窗口 B 发起 updatedAt=2 的预测（新轮次，updatedAt 已更新）。
+    // 不同 updatedAt 允许通过，入口不比对大小；renderer 端 turnGen 校验兜底。
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', updatedAt: 2 };
     let resolveSecond!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveSecond = resolve; }),

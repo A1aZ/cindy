@@ -470,6 +470,14 @@ export function buildPiSubscriptionNativeProviders(
           ...(sourceProviderId === 'openai' && isAnnotatedAddition
             ? { catalogAddition: true }
             : {}),
+          // SuperGrok 没有官方列模型通道，Cindy 目录是成员唯一来源。
+          // PI 二进制常常跟不上新 Grok id（grok-4.6）：inheritModels
+          // 会把没有 piApi 的行从 models.json 滤掉，spawn 靠 custom
+          // model id 能跑，set_model 却 fail-closed。不在这个 PI 二进制
+          // 里的 SuperGrok 模型必须作为 catalog addition 写进去。
+          ...(sourceProviderId === 'xai' && !bundledModel
+            ? { catalogAddition: true }
+            : {}),
           ...(sourceProviderId !== 'openai' &&
           model.piApi &&
           (isAnnotatedAddition || isProtocolCorrection)

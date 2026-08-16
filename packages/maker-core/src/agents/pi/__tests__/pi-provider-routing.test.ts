@@ -268,6 +268,10 @@ describe('Pi provider-aware model routing', () => {
             models: [
               { id: 'xai/grok-4.5', wireId: 'grok-4.5' },
               {
+                id: 'grok-4.6', wireId: 'grok-4.6', catalogAddition: true,
+                contextWindow: 500_000, maxTokens: 500_000,
+              },
+              {
                 id: 'xai/grok-4.20', wireId: 'grok-4.20', api: 'openai-responses',
                 contextWindow: 1_000_000, maxTokens: 64_000,
                 cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
@@ -305,12 +309,18 @@ describe('Pi provider-aware model routing', () => {
     expect(models.providers.xai).not.toHaveProperty('api');
     expect(models.providers.xai?.models).toEqual([
       expect.objectContaining({
+        id: 'grok-4.6',
+        contextWindow: 500_000,
+        maxTokens: 500_000,
+      }),
+      expect.objectContaining({
         id: 'grok-4.20',
         api: 'openai-responses',
         cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
         compat: { supportsStrictTools: true },
       }),
     ]);
+    expect(models.providers.xai?.models?.[0]).not.toHaveProperty('api');
     expect(JSON.parse(readFileSync(path.join(configHome, 'settings.json'), 'utf8')))
       .toEqual({ transport: 'sse' });
     expect(JSON.parse(readFileSync(runtimeFileOf('subagent', 'native-subscription-routing'), 'utf8')))
@@ -519,6 +529,59 @@ describe('Pi provider-aware model routing', () => {
       provider: 'xai',
       modelId: 'xai/grok-4.6',
     });
+    await handle.close();
+  });
+
+  it('does not reissue set_model when the live session is already on the requested SuperGrok route', async () => {
+    captured.requestHandler = async (command) => {
+      if (command.type === 'set_model') {
+        return { success: false, error: 'Model "grok-4.6" not found for provider "xai"' };
+      }
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'SuperGrok', authSource: 'oauth' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: 'gateway-key' }),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [{
+          id: 'grok-4.6',
+          displayName: 'Grok 4.6',
+          contextWindow: 500_000,
+          efforts: [],
+          defaultEffort: null,
+        }],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiNativeProviders: async () => ({
+        providers: [{
+          id: 'xai',
+          name: 'xAI',
+          baseUrl: 'http://127.0.0.1:9',
+          api: 'anthropic-messages',
+          models: [{ id: 'grok-4.6' }],
+        }],
+        env: {},
+      }),
+    });
+    const handle = await agent.startSession({
+      sessionId: 'grok-46-same-route',
+      workingDir: cwd,
+      model: 'grok-4.6',
+      providerId: 'xai',
+    });
+    captured.requests.length = 0;
+    await expect(handle.setModel!('grok-4.6', { providerId: 'xai' })).resolves.toBeUndefined();
+    expect(captured.requests.filter((request) => request.type === 'set_model')).toEqual([]);
     await handle.close();
   });
 

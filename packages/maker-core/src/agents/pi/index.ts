@@ -2411,6 +2411,26 @@ export class PiAgent extends BaseAgent {
       const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
         ? setOpts.providerId
         : undefined;
+      // 心跳复用活进程会把当前 (provider, model) 再下发一次。
+      // spawn 能靠 custom model id 跑在 Pi 自带目录没有的 SuperGrok
+      // 路由上（grok-4.6）；重复 set_model 反而 fail-closed。
+      // 只对显式非 null 来源做 no-op：model-only 与 providerId=null
+      // （钉回网关）仍走 RPC。
+      if (
+        model === mutableModel &&
+        requestedProviderId !== undefined &&
+        requestedProviderId !== null &&
+        Object.is(requestedProviderId, mutableProviderId)
+      ) {
+        if (setOpts?.effort) {
+          assertStartupEffortAllowed(activeEffortSnapshot, setOpts.effort);
+        }
+        deps.logger.debug('pi: setModel no-op; already on requested route', {
+          model,
+          providerId: requestedProviderId ?? mutableProviderId ?? null,
+        });
+        return;
+      }
       // 显式选一个启动快照 nativeProviderById 里“无法服务该 model”的 BYOM provider 时 fail
       // closed:要么该 provider 是会话启动后才新增的(不在快照),要么它虽在、但用户编辑
       // 配置后从中删/改了这个 model。两种都会让 resolveProviderForModel 静默回落 cindy 网关;

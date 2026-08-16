@@ -5,6 +5,7 @@ import type { AgentEvent, SessionSendResult } from '@cindy/maker-core';
 
 import {
   GoalController,
+  GoalSessionRestoreError,
   GoalUpdateSupersededError,
   decideNextGoalState,
   deriveObjectiveFromAnswers,
@@ -422,22 +423,18 @@ describe('GoalController', () => {
     });
   });
 
-  it('blocks a new Goal when its dormant agent session cannot be restored', async () => {
+  it('rejects a new Goal when its dormant agent session cannot be restored', async () => {
     const local = makeController();
     local.setHydratable(false);
 
-    await local.controller.setGoal({
+    await expect(local.controller.setGoal({
       sessionId: 's1',
       objective: 'finish the work',
       agentKind: 'pi',
-    });
+    })).rejects.toBeInstanceOf(GoalSessionRestoreError);
 
     expect(local.session.sends).toHaveLength(0);
-    expect(await local.storage.get('s1')).toMatchObject({
-      status: 'blocked',
-      turnsUsed: 0,
-      lastReason: expect.stringContaining('unable to restore the agent session'),
-    });
+    expect(await local.storage.get('s1')).toBeNull();
   });
 
   it('blocks and rejects a Goal edit when its session cannot be restored', async () => {
@@ -448,7 +445,28 @@ describe('GoalController', () => {
     await expect(local.controller.setGoal({
       sessionId: 's1',
       objective: 'new objective',
-    })).rejects.toThrow('unable to restore the agent session for Goal');
+    })).rejects.toBeInstanceOf(GoalSessionRestoreError);
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      objective: 'old objective',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(local.session.sends).toHaveLength(0);
+  });
+
+  it('blocks a Goal edit when session restoration throws and preserves the old objective', async () => {
+    const local = makeController({
+      ensureSession: async () => {
+        throw new Error('agent bootstrap failed');
+      },
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'old objective' }));
+
+    await expect(local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'new objective',
+    })).rejects.toBeInstanceOf(GoalSessionRestoreError);
 
     expect(await local.storage.get('s1')).toMatchObject({
       status: 'blocked',
@@ -469,6 +487,77 @@ describe('GoalController', () => {
       turnsUsed: 0,
       lastReason: expect.stringContaining('provider authentication failed'),
     });
+  });
+
+  it('keeps dispatch owners clean when the route-lock release throws', async () => {
+    const releaseAgentSwitchLock = vi.fn(() => {
+      throw new Error('route lock release failed');
+    });
+    const acquirePendingAgentSwitch = vi.fn(async () => releaseAgentSwitchLock);
+    const local = makeController({ acquirePendingAgentSwitch });
+
+    await local.controller.setGoal({ sessionId: 's1', objective: 'keep advancing' });
+    expect(local.session.sends).toHaveLength(1);
+
+    local.session.emitGoalTurn({
+      toolUse: true,
+      verdictJson: '```json\n{"goal_status":"continue","reason":"next"}\n```',
+      tokens: 10,
+    });
+    await tick();
+
+    expect(local.session.sends).toHaveLength(2);
+    expect(acquirePendingAgentSwitch).toHaveBeenCalledTimes(2);
+    expect(releaseAgentSwitchLock).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates a typed restore error when the route switch closes the initially ensured session', async () => {
+    const session = new FakeSession('s1', 'pi');
+    let ensureCalls = 0;
+    const local = makeController({
+      getSession: () => session,
+      ensureSession: async () => {
+        ensureCalls += 1;
+        return ensureCalls === 1 ? session : undefined;
+      },
+      acquirePendingAgentSwitch: async () => () => {},
+    });
+
+    await expect(local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'recover after the switch',
+      agentKind: 'pi',
+    })).rejects.toBeInstanceOf(GoalSessionRestoreError);
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(session.sends).toHaveLength(0);
+  });
+
+  it('propagates a typed restore error when manual Resume loses its session after route switching', async () => {
+    const session = new FakeSession('s1', 'pi');
+    let ensureCalls = 0;
+    const local = makeController({
+      getSession: () => session,
+      ensureSession: async () => {
+        ensureCalls += 1;
+        return ensureCalls === 1 ? session : undefined;
+      },
+      acquirePendingAgentSwitch: async () => () => {},
+    });
+    await local.storage.set(seededGoal({ status: 'blocked', agentKind: 'pi' }));
+
+    await expect(local.controller.resumeGoal('s1')).rejects.toBeInstanceOf(
+      GoalSessionRestoreError,
+    );
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(session.sends).toHaveLength(0);
   });
 
   it('setGoal creates a new goal directly with default limits and fires the first turn', async () => {
@@ -2128,8 +2217,8 @@ describe('GoalController', () => {
     const sendsBeforeResume = h.session.sends.length;
 
     h.setHydratable(false);
-    await expect(h.controller.resumeGoal('s1')).rejects.toThrow(
-      'unable to restore the agent session for Goal',
+    await expect(h.controller.resumeGoal('s1')).rejects.toBeInstanceOf(
+      GoalSessionRestoreError,
     );
     expect((await h.storage.get('s1'))?.status).toBe('blocked');
     expect((await h.storage.get('s1'))?.lastReason).toContain('unable to restore the agent session');
@@ -2198,6 +2287,118 @@ describe('GoalController', () => {
     expect(await local.storage.get('s1')).toMatchObject({
       status: 'blocked',
       lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(local.session.sends).toHaveLength(0);
+  });
+
+  it('blocks and releases a dormant lifecycle boundary when agent-switch bootstrap rejects', async () => {
+    let acquireCalls = 0;
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      acquireCalls += 1;
+      if (acquireCalls === 1) throw new Error('agent switch bootstrap failed');
+      return () => {};
+    });
+    const local = makeController({ acquirePendingAgentSwitch });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'recover safely' }));
+
+    await local.controller.resumeOnOpen('s1');
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(local.session.sends).toHaveLength(0);
+
+    await local.controller.resumeGoal('s1');
+
+    expect((await local.storage.get('s1'))?.status).toBe('active');
+    expect(local.session.sends).toHaveLength(1);
+    expect(acquirePendingAgentSwitch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a fail-closed owner when persisting a restore failure is unavailable', async () => {
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      throw new Error('agent switch bootstrap failed');
+    });
+    const local = makeController({ acquirePendingAgentSwitch });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'do not replay' }));
+    const update = vi.spyOn(local.storage, 'update').mockRejectedValueOnce(
+      new Error('goal storage unavailable'),
+    );
+
+    await expect(local.controller.resumeOnOpen('s1')).rejects.toBeInstanceOf(
+      GoalSessionRestoreError,
+    );
+    await local.controller.resumeOnOpen('s1');
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      objective: 'do not replay',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(acquirePendingAgentSwitch).toHaveBeenCalledTimes(1);
+    expect(local.session.sends).toHaveLength(0);
+  });
+
+  it('propagates an unpersisted second restore failure through resume-on-open', async () => {
+    const session = new FakeSession('s1', 'pi');
+    let ensureCalls = 0;
+    const local = makeController({
+      getSession: () => session,
+      ensureSession: async () => {
+        ensureCalls += 1;
+        return ensureCalls === 1 ? session : undefined;
+      },
+      acquirePendingAgentSwitch: async () => () => {},
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'recover once' }));
+    const update = vi.spyOn(local.storage, 'update').mockRejectedValueOnce(
+      new Error('goal storage unavailable'),
+    );
+
+    await expect(local.controller.resumeOnOpen('s1')).rejects.toBeInstanceOf(
+      GoalSessionRestoreError,
+    );
+    expect(await local.storage.get('s1')).toMatchObject({ status: 'active' });
+
+    await local.controller.resumeOnOpen('s1');
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'blocked',
+      lastReason: expect.stringContaining('unable to restore the agent session'),
+    });
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(ensureCalls).toBe(2);
+    expect(session.sends).toHaveLength(0);
+  });
+
+  it('does not let a late resume-on-open bootstrap failure overwrite a newer Stop boundary', async () => {
+    let markBootstrapStarted!: () => void;
+    const bootstrapStarted = new Promise<void>((resolve) => {
+      markBootstrapStarted = resolve;
+    });
+    let rejectBootstrap!: (error: Error) => void;
+    const bootstrap = new Promise<() => void>((_resolve, reject) => {
+      rejectBootstrap = reject;
+    });
+    const local = makeController({
+      acquirePendingAgentSwitch: () => {
+        markBootstrapStarted();
+        return bootstrap;
+      },
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'stay paused' }));
+
+    const resuming = local.controller.resumeOnOpen('s1');
+    await bootstrapStarted;
+    await local.controller.pauseGoal('s1');
+    rejectBootstrap(new Error('late bootstrap failure'));
+    await resuming;
+
+    expect(await local.storage.get('s1')).toMatchObject({
+      status: 'paused',
+      lastReason: 'paused by user',
     });
     expect(local.session.sends).toHaveLength(0);
   });

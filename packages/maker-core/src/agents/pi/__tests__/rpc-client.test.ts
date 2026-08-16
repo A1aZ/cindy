@@ -211,6 +211,20 @@ describe('PiRpcProcess close semantics (bridge-disconnect vs explicit close)', (
     expect(killRemoteSession).toHaveBeenCalledTimes(1);
   });
 
+  it('retries transport shutdown after an unconfirmed local close', async () => {
+    const { transport } = makeFakeTransport();
+    const transportClose = vi.mocked(transport.close);
+    transportClose
+      .mockRejectedValueOnce(new Error('pi process did not confirm exit after SIGKILL'))
+      .mockResolvedValueOnce(undefined);
+    const { proc } = makeProc({ transport });
+
+    await expect(proc.close()).rejects.toThrow(/did not confirm exit after SIGKILL/);
+    await expect(proc.close()).resolves.toBeUndefined();
+
+    expect(transportClose).toHaveBeenCalledTimes(2);
+  });
+
   it('retries remote termination after a failed close instead of reporting false success', async () => {
     const killRemoteSession = vi
       .fn()

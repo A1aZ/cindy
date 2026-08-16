@@ -113,11 +113,11 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
   const logger = opts.logger;
 
   let closed = false;
-  // 轮 40-w1 MEDIUM-2:close() 进行中标志 —— 防并发 close 双 SIGTERM(轮 21
-  // 幂等), 与 closed(已通知)分离, 保主动 close 仍触发 onClose。
+  // First close permanently fences writes. Individual termination attempts are
+  // shared while in flight, then cleared after failure so a later owner can
+  // run a fresh SIGTERM -> SIGKILL sequence.
   let closing = false;
-  /** SIGKILL 后未确认退出时，后续 close 继续失败，直到 child 真正发出 close。 */
-  let closeFailure: Error | null = null;
+  let closeAttempt: Promise<void> | null = null;
   let disposeProcessRegistration: (() => void) | undefined;
   if (child.pid != null && child.pid > 0) {
     try {
@@ -185,13 +185,61 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
     fireClose({ code: null, signal: null, reason: `pi process error: ${err.message}` });
   });
   child.on('close', (code, signal) => {
-    closeFailure = null;
     fireClose({ code, signal, reason: `pi process exited (code=${code}, signal=${signal})` });
   });
 
   const KILL_GRACE_MS = 3_000;
   // SIGKILL 后确认退出的窗口(轮 40-w4-t3 HIGH —— 对齐 session-registry)。
   const KILL_CONFIRM_MS = 5_000;
+
+  const runCloseAttempt = async (reason: string): Promise<void> => {
+    // Every fresh attempt gets its own timers and close listener. A previous
+    // unconfirmed SIGKILL does not prove the process exited, so retries must
+    // send both signals again instead of replaying a cached error.
+    let survived = false;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let confirmTimer: NodeJS.Timeout | undefined;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(killTimer);
+        if (confirmTimer) clearTimeout(confirmTimer);
+        child.removeListener('close', onClose);
+        resolve();
+      };
+      const onClose = (): void => finish();
+      const killTimer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        confirmTimer = setTimeout(() => {
+          survived = true;
+          logger.error('pi process did not confirm exit after SIGKILL', {
+            pid: child.pid,
+          });
+          finish();
+        }, KILL_CONFIRM_MS);
+        confirmTimer.unref?.();
+      }, KILL_GRACE_MS);
+      killTimer.unref?.();
+      child.once('close', onClose);
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        finish();
+      }
+    });
+
+    if (survived) {
+      // Do not fire onClose: its contract is confirmed process termination.
+      // A late real close remains authoritative through the global listener.
+      throw new Error('pi process did not confirm exit after SIGKILL');
+    }
+    fireClose({
+      code: null,
+      signal: null,
+      reason,
+    });
+  };
 
   return {
     writeLine(line: string): Promise<void> {
@@ -218,69 +266,25 @@ export function createPiStdioTransport(opts: PiStdioTransportOptions): PiTranspo
       return () => { closeHandlers.delete(handler); };
     },
 
-    async close(reason = 'pi transport close()'): Promise<void> {
-      if (closeFailure) throw closeFailure;
-      // 轮 21 H-1 幂等竞态:closed 必须在任何 await 前置位 —— 否则两个并发
-      // close() 都通过守卫、各发一次 SIGTERM + 各设一个 SIGKILL timer。
-      // 轮 40-w1 MEDIUM-2:前置 closed 会吞掉子进程 close 事件的 fireClose,
-      // 主动 close 不再通知 onClose(上层 PiRpcProcess 收不到 pending reject /
-      // onExit 收口)。拆两个状态:closing 防并发, closed 只在真正通知时置位。
-      if (closed || closing) return;
+    close(reason = 'pi transport close()'): Promise<void> {
+      if (closed) return Promise.resolve();
+      if (closeAttempt) return closeAttempt;
+
+      // Keep the write fence after a failed attempt: the process may still be
+      // alive, but it must never resume protocol traffic while owners retry
+      // termination through Session/PiAgent/Maker cleanup paths.
       closing = true;
-      // 优雅关闭:SIGTERM → 宽限期 → SIGKILL → 确认退出。幂等。
-      // 轮 40-w4-t3 HIGH:旧实现 SIGKILL 后无确认超时 —— D-state/平台异常下
-      // close 事件不来, await close() 永久挂住, 上层取消流程无法收口。这里
-      // 对齐 session-registry 的 waitForExit 语义:确认窗口到点就结束等待，但
-      // reject 明确表示“未确认终止”，让 Session 保持 error 并阻止新 handle 并存。
-      let survived = false;
-      await new Promise<void>((resolve) => {
-        let done = false;
-        let confirmTimer: NodeJS.Timeout | undefined;
-        const finish = (): void => {
-          if (done) return;
-          done = true;
-          clearTimeout(killTimer);
-          if (confirmTimer) clearTimeout(confirmTimer);
-          child.removeListener('close', onClose);
-          resolve();
-        };
-        const onClose = (): void => finish();
-        const killTimer = setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch { /* already gone */ }
-          // SIGKILL 后再给确认窗口;超时结束等待，随后以稳定错误 reject。
-          confirmTimer = setTimeout(() => {
-            survived = true;
-            logger.error('pi process did not confirm exit after SIGKILL', {
-              pid: child.pid,
-            });
-            finish();
-          }, KILL_CONFIRM_MS);
-          confirmTimer.unref?.();
-        }, KILL_GRACE_MS);
-        killTimer.unref?.();
-        child.once('close', onClose);
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          finish();
-        }
-      });
-      // 子进程 close 事件若已 fireClose 则 closed=true(通知已发);否则这里补
-      // 发一次(主动 close 语义:onClose 必须收到终止通知)。
-      // 未确认退出只 reject，不能发 onClose（它的语义是进程已终止，PiAgent
-      // 收到后会清 runtime 文件）。child 以后真的 close 时再由全局 listener 通知。
-      const terminationError = survived
-        ? new Error('pi process did not confirm exit after SIGKILL')
-        : null;
-      if (terminationError) {
-        closeFailure = terminationError;
-        throw terminationError;
-      }
-      fireClose({
-        code: null,
-        signal: null,
-        reason,
-      });
+      const attempt = runCloseAttempt(reason);
+      closeAttempt = attempt;
+      void attempt.then(
+        () => {
+          if (closeAttempt === attempt) closeAttempt = null;
+        },
+        () => {
+          if (closeAttempt === attempt) closeAttempt = null;
+        },
+      );
+      return attempt;
     },
 
     get pid(): number | undefined {

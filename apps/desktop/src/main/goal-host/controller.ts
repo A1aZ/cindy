@@ -580,6 +580,7 @@ export class GoalController {
       );
       this.turns.set(sessionId, editBoundary);
       let editObjectivePersisted = false;
+      let updatedState: GoalState | null = null;
       try {
         if (sessionWasBusy) {
           await session.abort();
@@ -614,6 +615,7 @@ export class GoalController {
           this.turns.delete(sessionId);
           return null;
         }
+        updatedState = updated;
         this.resetTurn(sessionId);
         const activeBoundary = this.turns.get(sessionId);
         this.attachListener(sessionId);
@@ -621,7 +623,6 @@ export class GoalController {
         if (this.turns.get(sessionId) === activeBoundary) {
           await this.fireTurn(sessionId, { throwOnRestoreFailure: true });
         }
-        return (await this.deps.storage.get(sessionId)) ?? updated;
       } catch (error) {
         if (this.turns.get(sessionId) === editBoundary) {
           if (rejectionTakeover) {
@@ -639,6 +640,9 @@ export class GoalController {
         }
         throw error;
       }
+      // This is only a return-value refresh. The Goal lifecycle is already
+      // established, so a read failure must not tear down its owner or retry.
+      return (await this.deps.storage.get(sessionId)) ?? updatedState;
     }
 
     const limits = input.limits ?? this.deps.getDefaults();
@@ -650,6 +654,7 @@ export class GoalController {
       previousBoundary?.pendingCompletion ?? null,
     );
     this.turns.set(sessionId, createBoundary);
+    let createdState: GoalState | null = null;
     try {
       // 先活化(resume)会话,再据活化后的会话定 agentKind:dormant(重启后尚未活化)会话此刻
       // getSession 为空,若直接 fallback 'claude-code' 会把 Codex 目标错存成 claude-code,后续
@@ -681,6 +686,7 @@ export class GoalController {
         startedAt: ts,
         updatedAt: ts,
       };
+      createdState = state;
       await this.trackPersistence(createBoundary, this.deps.storage.upsert(state), async () => {
         this.clarificationApplied.delete(sessionId);
         // 目标创建 → 落一条目标文案作对话起点(updated:false),**只此一次**。
@@ -697,11 +703,13 @@ export class GoalController {
       if (this.turns.get(sessionId) === activeBoundary) {
         await this.fireTurn(sessionId, { throwOnRestoreFailure: true });
       }
-      return (await this.deps.storage.get(sessionId)) ?? state;
     } catch (error) {
       if (this.turns.get(sessionId) === createBoundary) this.turns.delete(sessionId);
       throw error;
     }
+    // Same as the edit path: post-dispatch status refresh is observational and
+    // cannot revoke a lifecycle that may already own a rejection retry.
+    return (await this.deps.storage.get(sessionId)) ?? createdState;
   }
 
   async updateGoal(sessionId: string, patch: GoalUpdatePatch): Promise<GoalState | null> {

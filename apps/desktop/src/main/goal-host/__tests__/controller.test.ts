@@ -705,6 +705,91 @@ describe('GoalController', () => {
     }
   });
 
+  it.each(['create', 'edit'] as const)(
+    'preserves the %s lifecycle when the final status read fails after provider rejection',
+    async (mode) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const local = makeController({ now: () => Date.now() });
+      const originalGet = local.storage.get.bind(local.storage);
+      let failNextRead = false;
+      vi.spyOn(local.storage, 'get').mockImplementation(async (sessionId) => {
+        if (failNextRead) {
+          failNextRead = false;
+          throw new Error('final status read unavailable');
+        }
+        return originalGet(sessionId);
+      });
+      let attempts = 0;
+      vi.spyOn(local.session, 'send').mockImplementation(async (
+        message: Parameters<FakeSession['send']>[0],
+        opts: Parameters<FakeSession['send']>[1],
+      ): Promise<SessionSendResult> => {
+        const content = typeof message === 'string' ? message : message.content;
+        local.session.sends.push({ content, originKind: opts?.origin?.kind });
+        attempts += 1;
+        opts?.onDispatching?.();
+        if (attempts === 1) {
+          failNextRead = true;
+          return { accepted: false, reason: 'provider-rejected-before-dispatch' };
+        }
+        return { accepted: true };
+      });
+      const internals = local.controller as unknown as {
+        turns: Map<string, unknown>;
+        timers: Map<string, ReturnType<typeof setTimeout>>;
+        unsubscribers: Map<string, () => void>;
+        dispatchRejectionRetries: Map<string, unknown>;
+      };
+
+      try {
+        if (mode === 'edit') {
+          await local.storage.set(seededGoal({ status: 'paused', objective: 'old objective' }));
+        }
+
+        await expect(
+          local.controller.setGoal({ sessionId: 's1', objective: 'replacement objective' }),
+        ).rejects.toThrow('final status read unavailable');
+
+        expect(local.session.sends).toHaveLength(1);
+        expect(internals.turns.has('s1')).toBe(true);
+        expect(internals.timers.has('s1')).toBe(true);
+        expect(internals.unsubscribers.has('s1')).toBe(true);
+        expect(internals.dispatchRejectionRetries.has('s1')).toBe(true);
+        expect(await originalGet('s1')).toMatchObject({
+          status: 'active',
+          objective: 'replacement objective',
+          turnsUsed: 0,
+        });
+
+        // Opening an already managed Goal must not bypass the preserved timer.
+        await local.controller.resumeOnOpen('s1');
+        expect(local.session.sends).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(499);
+        expect(local.session.sends).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(local.session.sends).toHaveLength(2);
+        expect(internals.dispatchRejectionRetries.has('s1')).toBe(false);
+        expect(internals.unsubscribers.has('s1')).toBe(true);
+
+        local.session.emitGoalTurn({
+          toolUse: true,
+          verdictJson: '```json\n{"goal_status":"complete","reason":"done"}\n```',
+          tokens: 10,
+        });
+        await vi.waitFor(async () => {
+          expect(await originalGet('s1')).toBeNull();
+        });
+        expect(internals.turns.has('s1')).toBe(false);
+        expect(internals.timers.has('s1')).toBe(false);
+        expect(internals.unsubscribers.has('s1')).toBe(false);
+      } finally {
+        local.controller.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('backs off persistent provider rejection and blocks after four confirmed non-dispatches', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

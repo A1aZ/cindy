@@ -2154,6 +2154,79 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     },
   );
 
+  it.skipIf(process.platform === 'win32' || !canSymlink)(
+    'auto mode fail closes inherited CDPATH while explicit relative cd keeps ordinary reads fast',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-cdpath-'));
+      const cdPathRoot = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-cdpath-root-'));
+      const previousCdPath = process.env.CDPATH;
+      try {
+        const secretPath = path.join(workingDir, 'secrets', '.env');
+        const ordinaryPath = path.join(workingDir, 'ordinary.txt');
+        const localSubDir = path.join(workingDir, 'sub');
+        const cdPathSubDir = path.join(cdPathRoot, 'sub');
+        mkdirSync(path.dirname(secretPath), { recursive: true });
+        mkdirSync(localSubDir);
+        mkdirSync(cdPathSubDir);
+        writeFileSync(secretPath, 'FAKE_CDPATH_DOTENV_SECRET=must-not-leak');
+        writeFileSync(ordinaryPath, 'ordinary-cdpath-content');
+        symlinkSync(ordinaryPath, path.join(workingDir, 'root-input'));
+        symlinkSync(ordinaryPath, path.join(localSubDir, 'link'));
+        symlinkSync(secretPath, path.join(cdPathSubDir, 'link'));
+        process.env.CDPATH = cdPathRoot;
+
+        for (const [sessionId, command] of [
+          ['perm-auto-bash-cdpath-post-cd', 'cd sub && cat<link'],
+          ['perm-auto-bash-cdpath-cd-read', 'cd sub <root-input && cat<link'],
+          ['perm-auto-bash-cdpath-cd-read-write', 'cd sub <>root-input && cat<link'],
+        ] as const) {
+          scriptedResponses.length = 0;
+          scriptedResponses.push(
+            anthropicToolUseBody('bash', { command }),
+            anthropicStreamBody('bash CDPATH turn finished'),
+          );
+          const reqBefore = seenRequests.length;
+          const { resolverTools } = await runPermissionTurn({
+            sessionId,
+            workingDir,
+            permissionMode: 'auto',
+            resolverBehavior: 'deny',
+          });
+          const followUp = seenRequests.slice(reqBefore).map((request) => request.body);
+          expect(resolverTools, command).toEqual(['bash']);
+          expect(followUp.some((body) => body.includes('FAKE_CDPATH_DOTENV_SECRET')), command)
+            .toBe(false);
+          expect(followUp.some((body) => body.includes('User denied this tool call via Cindy.')), command)
+            .toBe(true);
+        }
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'cd ./sub <root-input && cat<link' }),
+          anthropicStreamBody('bash explicit relative cd turn finished'),
+        );
+        const ordinaryReqBefore = seenRequests.length;
+        const ordinaryTurn = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-cdpath-explicit-relative',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(ordinaryTurn.resolverTools).toEqual([]);
+        const ordinaryFollowUp = seenRequests.slice(ordinaryReqBefore).map((request) => request.body);
+        expect(ordinaryFollowUp.some((body) => body.includes('ordinary-cdpath-content'))).toBe(true);
+        expect(ordinaryFollowUp.some((body) => body.includes('FAKE_CDPATH_DOTENV_SECRET'))).toBe(false);
+      } finally {
+        if (previousCdPath === undefined) delete process.env.CDPATH;
+        else process.env.CDPATH = previousCdPath;
+        rmSync(workingDir, { recursive: true, force: true });
+        rmSync(cdPathRoot, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
   it.skipIf(!canSymlink)(
     'auto mode keeps ordinary bash input redirect symlinks on the readonly fast path',
     { timeout: 60_000 },

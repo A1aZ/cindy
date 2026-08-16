@@ -295,6 +295,27 @@ function bashOperatorAfterRedirections(command: string, start: number): BashPost
   return { operator: '', end: cursor, unresolved: false, hadRedirection };
 }
 
+function bashInheritedDirectoryChangeIsUncertain(target: string): boolean {
+  if (path.sep !== '/') return false;
+
+  // Non-interactive Bash startup files and exported builtin overrides can change
+  // directory semantics before this command runs; their contents are not static evidence.
+  const bashEnv = process.env.BASH_ENV;
+  if (typeof bashEnv === 'string' && bashEnv.trim().length > 0) return true;
+  if (Object.keys(process.env).some((name) => /^BASH_FUNC_(?:cd|pushd)%%$/.test(name))) return true;
+
+  const bashOptions = (process.env.BASHOPTS ?? '').split(':');
+  if (bashOptions.includes('cdable_vars') && /^[A-Za-z_][A-Za-z0-9_]*$/.test(target)) return true;
+
+  // Bash does not consult CDPATH for absolute paths or operands beginning with ./ or ../.
+  if (path.isAbsolute(target) || /^(?:\.{1,2})(?:\/|$)/.test(target) || target.startsWith('~')) {
+    return false;
+  }
+  const cdPath = process.env.CDPATH;
+  if (typeof cdPath !== 'string' || cdPath.length === 0) return false;
+  return cdPath.split(':').some((entry) => entry.length > 0 && path.normalize(entry) !== '.');
+}
+
 function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
   let candidates = [process.cwd()];
   let unresolved = false;
@@ -327,6 +348,10 @@ function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
     }
     const operator = operatorEvidence.operator;
     if (!operator || operator === '|' || operator === '&') continue;
+    if (bashInheritedDirectoryChangeIsUncertain(parsed.target)) {
+      unresolved = true;
+      continue;
+    }
 
     const changed: string[] = [];
     for (const cwd of candidates) {

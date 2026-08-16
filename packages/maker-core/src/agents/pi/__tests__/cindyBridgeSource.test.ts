@@ -240,7 +240,7 @@ describe('cindy-bridge extension source', () => {
         realpathSync,
         statSync,
         path,
-        process: { cwd: () => tempRoot, env: { ...process.env, HOME: tempRoot } },
+        process: { cwd: () => tempRoot, env: { HOME: tempRoot, PATH: process.env.PATH } },
       };
       runInNewContext(compiled, context);
 
@@ -263,9 +263,13 @@ describe('cindy-bridge extension source', () => {
         const nestedCdRedirectOrdinaryLink = path.join(nestedDir, cdRedirectName);
         const nestedOrdinaryReadName = 'ordinary-after-cd.txt';
         const nestedOrdinaryReadLink = path.join(nestedDir, nestedOrdinaryReadName);
+        const cdPathRoot = path.join(tempRoot, 'cdpath-root');
+        const cdPathSubDir = path.join(cdPathRoot, 'sub');
+        const cdPathSecretLink = path.join(cdPathSubDir, 'link');
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
+        mkdirSync(cdPathSubDir, { recursive: true });
         writeFileSync(secretPath, 'FAKE PRIVATE KEY');
         writeFileSync(ordinaryPath, 'ordinary');
         symlinkSync(secretPath, secretLink);
@@ -278,6 +282,7 @@ describe('cindy-bridge extension source', () => {
         symlinkSync(ordinaryPath, nestedScopedOrdinaryLink);
         symlinkSync(ordinaryPath, nestedCdRedirectOrdinaryLink);
         symlinkSync(ordinaryPath, nestedOrdinaryReadLink);
+        symlinkSync(secretPath, cdPathSecretLink);
         symlinkSync(ordinaryPath, ordinaryLink);
 
         expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
@@ -348,6 +353,56 @@ describe('cindy-bridge extension source', () => {
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: nestedCommand }),
         )).toEqual([realpathSync(secretPath)]);
+
+        context.process.env.CDPATH = cdPathRoot;
+        for (const cdRedirectOperator of ['<', '<>']) {
+          const command = `cd sub ${cdRedirectOperator}ordinary-link.txt && cat <link`;
+          expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
+            targets: [ordinaryLink, path.join(tempRoot, 'link')],
+            unresolved: true,
+          });
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ./nested <ordinary-link.txt && cat <${nestedOrdinaryReadName}`,
+        })).toEqual({
+          targets: [ordinaryLink, nestedOrdinaryReadLink],
+          unresolved: false,
+        });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} && cat <${nestedOrdinaryReadName}`,
+        })).toEqual({ targets: [nestedOrdinaryReadLink], unresolved: false });
+        context.process.env.CDPATH = '.:';
+        expect(context.bashInputReadEvidence?.({ command: 'cd nested && cat <nested-innocent.txt' }))
+          .toEqual({ targets: [nestedSecretLink], unresolved: false });
+        delete context.process.env.CDPATH;
+
+        context.process.env.BASHOPTS = 'checkwinsize:cdable_vars';
+        context.process.env.sub = cdPathSubDir;
+        expect(context.bashInputReadEvidence?.({ command: 'cd sub && cat <link' }))
+          .toEqual({ targets: [path.join(tempRoot, 'link')], unresolved: true });
+        delete context.process.env.BASHOPTS;
+        delete context.process.env.sub;
+
+        context.process.env.BASH_ENV = path.join(tempRoot, 'shell-startup');
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${nestedDir} && cat <${nestedOrdinaryReadName}`,
+        })).toEqual({
+          targets: [path.join(tempRoot, nestedOrdinaryReadName)],
+          unresolved: true,
+        });
+        delete context.process.env.BASH_ENV;
+        context.process.env.ENV = 'development';
+        expect(context.bashInputReadEvidence?.({ command: nestedCommand }))
+          .toEqual({ targets: [nestedSecretLink], unresolved: false });
+        delete context.process.env.ENV;
+        for (const builtin of ['cd', 'pushd']) {
+          context.process.env[`BASH_FUNC_${builtin}%%`] = '() { builtin cd "$HOME"; }';
+          expect(context.bashInputReadEvidence?.({
+            command: `${builtin} ${nestedDir} && cat <${nestedOrdinaryReadName}`,
+          }), builtin).toEqual({ targets: [path.join(tempRoot, nestedOrdinaryReadName)], unresolved: true });
+          delete context.process.env[`BASH_FUNC_${builtin}%%`];
+        }
+
         const redirectedDirectoryCommands = [
           `cd ${nestedDir} >/dev/null && cat <nested-innocent.txt`,
           `cd ${nestedDir} 2>/dev/null 3>&1 && cat <nested-innocent.txt`,

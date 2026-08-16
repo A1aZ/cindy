@@ -5328,8 +5328,11 @@ function shellCommandReadsDotenv(
     const readsCredentialInput = inputRedirections.targets.some(
       (target) => shellOperandCouldMatchDotenv(target),
     );
+    const inspectionCommand = inputRedirections.targets.length > 0
+      ? parseShellInputRedirections(segment, true).command
+      : inputRedirections.command;
     const unwrapped = unwrapCommand(
-      stripShellControlTokens(tokenize(inputRedirections.command)),
+      stripShellControlTokens(tokenize(inspectionCommand)),
       opts.cwd ?? workspaceRoots[0],
       opts.cwdUnknown === true,
     );

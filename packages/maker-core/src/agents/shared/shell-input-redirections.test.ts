@@ -16,6 +16,7 @@ describe('parseShellInputRedirections', () => {
     expect(parsed.command.trim()).toBe(stripped);
     expect(parsed.targets).toEqual([target]);
     expect(parsed.targetPrefixes).toHaveLength(1);
+    expect(parsed.targetMayExpand).toEqual([command === 'cat <*.txt']);
     expect(parsed.hasUnresolvedTarget).toBe(false);
   });
 
@@ -24,11 +25,14 @@ describe('parseShellInputRedirections', () => {
     'cat <$TARGET',
     'cat <"${TARGET}"',
     'cat <`printf .env`',
+    'cat <>$TARGET',
+    'cat 3<>$(printf .env)',
   ])('preserves dynamic input targets for fail-closed classification: %s', (command) => {
     expect(parseShellInputRedirections(command)).toEqual({
       command,
       targets: [],
       targetPrefixes: [],
+      targetMayExpand: [],
       hasUnresolvedTarget: true,
     });
   });
@@ -39,6 +43,7 @@ describe('parseShellInputRedirections', () => {
       command: 'cat  ',
       targets: ['.env'],
       targetPrefixes: ['cat '],
+      targetMayExpand: [false],
       hasUnresolvedTarget: false,
     });
   });
@@ -49,6 +54,7 @@ describe('parseShellInputRedirections', () => {
       command: 'cat .env',
       targets: [],
       targetPrefixes: [],
+      targetMayExpand: [],
       hasUnresolvedTarget: false,
     });
   });
@@ -59,6 +65,7 @@ describe('parseShellInputRedirections', () => {
       command: 'true \ncat  ',
       targets: ['.env'],
       targetPrefixes: ['true \ncat '],
+      targetMayExpand: [false],
       hasUnresolvedTarget: false,
     });
   });
@@ -69,8 +76,27 @@ describe('parseShellInputRedirections', () => {
       command: 'cat README.md ',
       targets: [],
       targetPrefixes: [],
+      targetMayExpand: [],
       hasUnresolvedTarget: false,
     });
+  });
+
+  it.each([
+    ['cat <>created', 'created', 'cat ', 'cat'],
+    ['cat<>.env', '.env', 'cat', 'cat'],
+    ['cat 3<> ".env.local"', '.env.local', 'cat 3', 'cat'],
+    ['cat 7 <>./.env.production', './.env.production', 'cat 7 ', 'cat 7'],
+    ['3<>.env cat', '.env', '3', 'cat'],
+    ['cat3<>.env.local', '.env.local', 'cat3', 'cat3'],
+  ])('records the read target while preserving read-write syntax: %s', (command, target, prefix, inspection) => {
+    expect(parseShellInputRedirections(command)).toEqual({
+      command,
+      targets: [target],
+      targetPrefixes: [prefix],
+      targetMayExpand: [false],
+      hasUnresolvedTarget: false,
+    });
+    expect(parseShellInputRedirections(command, true).command.trim()).toBe(inspection);
   });
 
   it.each([
@@ -81,13 +107,12 @@ describe('parseShellInputRedirections', () => {
     'cat <&0',
     'cat <(printf x)',
     'cat \\<.env',
-    'cat <>created',
-    'cat 3<>created',
   ])('does not treat data or non-input-file syntax as a target: %s', (command) => {
     expect(parseShellInputRedirections(command)).toEqual({
       command,
       targets: [],
       targetPrefixes: [],
+      targetMayExpand: [],
       hasUnresolvedTarget: false,
     });
   });

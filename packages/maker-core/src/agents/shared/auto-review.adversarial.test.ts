@@ -600,9 +600,25 @@ describe('对抗语料 — dotenv 凭证路径', () => {
   });
 
   it.each([
+    'cat <>.env',
+    'cat<>.env.local',
+    'cat 3<>.env.production',
+    'cat 7 <> ".env.test"',
+    '<>.env cat',
+    '3<>.env.local cat',
+    'cat <>ordinary.txt <>.env.local',
+    'true && cat 9<>./.env',
+    'cat <>$TARGET',
+  ])('%s 的读写重定向凭证目标必须进入确定性凭证门', (command) => {
+    expect(classifyShellCommand(command, roots, opts)).toBe('prompt-each-time');
+  });
+
+  it.each([
     'cat <>created',
     'cat<>created',
     'cat 3<>created',
+    'cat 7 <> "ordinary.txt"',
+    '3<>ordinary.txt cat',
   ])('%s 保留读写副作用审批', (command) => {
     expect(classifyShellCommand(command, roots, opts)).toBe('prompt');
   });

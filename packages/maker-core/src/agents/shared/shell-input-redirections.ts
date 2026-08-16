@@ -2,16 +2,18 @@ export type ParsedShellInputRedirections = {
   command: string;
   targets: string[];
   targetPrefixes: string[];
+  targetMayExpand: boolean[];
   hasUnresolvedTarget: boolean;
 };
 
 export function readShellRedirectionTarget(
   command: string,
   start: number,
-): { target: string; end: number; unresolved: boolean } {
+): { target: string; end: number; unresolved: boolean; mayExpand: boolean } {
   let target = '';
   let quote: "'" | '"' | null = null;
   let unresolved = false;
+  let mayExpand = false;
   let cursor = start;
   while (cursor < command.length) {
     const char = command[cursor];
@@ -32,6 +34,8 @@ export function readShellRedirectionTarget(
       continue;
     }
     if (char === '$' || char.charCodeAt(0) === 96) unresolved = true;
+    if (char === '*' || char === '?' || char === '[' || char === '{'
+      || (char === '~' && target.length === 0)) mayExpand = true;
     if (char === "'" || char === '"') {
       quote = char;
       cursor += 1;
@@ -46,12 +50,16 @@ export function readShellRedirectionTarget(
     target += char;
     cursor += 1;
   }
-  return { target, end: cursor, unresolved };
+  return { target, end: cursor, unresolved, mayExpand };
 }
 
-export function parseShellInputRedirections(command: string): ParsedShellInputRedirections {
+export function parseShellInputRedirections(
+  command: string,
+  stripReadWriteTargets = false,
+): ParsedShellInputRedirections {
   const targets: string[] = [];
   const targetPrefixes: string[] = [];
+  const targetMayExpand: boolean[] = [];
   let stripped = '';
   let quote: "'" | '"' | null = null;
   let hasUnresolvedTarget = false;
@@ -103,8 +111,22 @@ export function parseShellInputRedirections(command: string): ParsedShellInputRe
       continue;
     }
     if (next === '>') {
-      stripped += '<>';
-      index += 2;
+      let cursor = index + 2;
+      while (/\s/.test(command[cursor] ?? '')) cursor += 1;
+      const parsedTarget = readShellRedirectionTarget(command, cursor);
+      if (!parsedTarget.target || parsedTarget.unresolved) {
+        hasUnresolvedTarget = true;
+      } else {
+        targets.push(parsedTarget.target);
+        targetPrefixes.push(stripped);
+        targetMayExpand.push(parsedTarget.mayExpand);
+      }
+      if (stripReadWriteTargets && parsedTarget.target && !parsedTarget.unresolved) {
+        stripped = stripped.replace(/(^|[\s;&|(){}])\d+$/, '$1') + ' ';
+      } else {
+        stripped += command.slice(index, parsedTarget.end);
+      }
+      index = parsedTarget.end;
       continue;
     }
     if (next === '&' || next === '(') {
@@ -122,12 +144,13 @@ export function parseShellInputRedirections(command: string): ParsedShellInputRe
     } else {
       targets.push(parsedTarget.target);
       targetPrefixes.push(stripped);
+      targetMayExpand.push(parsedTarget.mayExpand);
       stripped += ' ';
     }
     index = parsedTarget.end;
   }
 
-  return { command: stripped, targets, targetPrefixes, hasUnresolvedTarget };
+  return { command: stripped, targets, targetPrefixes, targetMayExpand, hasUnresolvedTarget };
 }
 
 export function shellInputRedirectionParserSource(): string {

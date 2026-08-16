@@ -1,4 +1,5 @@
 import {
+  globSync,
   linkSync,
   lstatSync,
   mkdtempSync,
@@ -172,6 +173,7 @@ describe('cindy-bridge extension source', () => {
         source.slice(helperStart, helperEnd),
         '(globalThis as any).collectResolvedCredentialPaths = collectResolvedCredentialPaths;',
         '(globalThis as any).bashInputReadTargets = bashInputReadTargets;',
+        '(globalThis as any).bashInputReadEvidence = bashInputReadEvidence;',
         '(globalThis as any).parseShellInputRedirections = parseShellInputRedirections;',
       ].join('\n');
       const compiled = ts.transpileModule(executableSource, {
@@ -182,19 +184,28 @@ describe('cindy-bridge extension source', () => {
       }).outputText;
       const tempRoot = mkdtempSync(path.join(tmpdir(), 'cindy-pi-credential-link-'));
       const context: {
+        globSync: typeof globSync;
         realpathSync: typeof realpathSync;
         statSync: typeof statSync;
         path: typeof path;
-        process: { cwd: () => string };
+        process: { cwd: () => string; env: NodeJS.ProcessEnv };
         collectResolvedCredentialPaths?: (input: unknown) => string[];
         bashInputReadTargets?: (input: unknown) => string[];
+        bashInputReadEvidence?: (input: unknown) => { targets: string[]; unresolved: boolean };
         parseShellInputRedirections?: (command: string) => {
           command: string;
           targets: string[];
           targetPrefixes: string[];
+          targetMayExpand: boolean[];
           hasUnresolvedTarget: boolean;
         };
-      } = { realpathSync, statSync, path, process: { cwd: () => tempRoot } };
+      } = {
+        globSync,
+        realpathSync,
+        statSync,
+        path,
+        process: { cwd: () => tempRoot, env: { ...process.env, HOME: tempRoot } },
+      };
       runInNewContext(compiled, context);
 
       try {
@@ -207,6 +218,9 @@ describe('cindy-bridge extension source', () => {
         const nestedSecretLink = path.join(nestedDir, 'nested-innocent.txt');
         const dashSecretLink = path.join(dashDir, 'innocent.txt');
         const lateSecretLink = path.join(nestedDir, 'late-only-secret-link');
+        const scopedLinkName = 'scoped-innocent.txt';
+        const rootScopedSecretLink = path.join(tempRoot, scopedLinkName);
+        const nestedScopedOrdinaryLink = path.join(nestedDir, scopedLinkName);
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
@@ -216,6 +230,8 @@ describe('cindy-bridge extension source', () => {
         symlinkSync(secretPath, nestedSecretLink);
         symlinkSync(secretPath, dashSecretLink);
         symlinkSync(secretPath, lateSecretLink);
+        symlinkSync(secretPath, rootScopedSecretLink);
+        symlinkSync(ordinaryPath, nestedScopedOrdinaryLink);
         symlinkSync(ordinaryPath, ordinaryLink);
 
         expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
@@ -233,10 +249,55 @@ describe('cindy-bridge extension source', () => {
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: ordinaryCommand }),
         )).toEqual([]);
+        const readWriteSecretCommand = `cat 3<>${secretLink}`;
+        expect(context.parseShellInputRedirections?.(readWriteSecretCommand)).toEqual({
+          command: readWriteSecretCommand,
+          targets: [secretLink],
+          targetPrefixes: ['cat 3'],
+          targetMayExpand: [false],
+          hasUnresolvedTarget: false,
+        });
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({ command: readWriteSecretCommand }),
+        )).toEqual([realpathSync(secretPath)]);
+        for (const expandedCommand of [
+          `cat <>${path.join(tempRoot, 'innocent.*')}`,
+          'cat <>~/innocent.*',
+        ]) {
+          expect(context.collectResolvedCredentialPaths?.(
+            context.bashInputReadTargets?.({ command: expandedCommand }),
+          ), expandedCommand).toEqual([realpathSync(secretPath)]);
+        }
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({ command: "cat <>'innocent.*'" }),
+        )).toEqual([]);
         const nestedCommand = `cd ${nestedDir} && cat <nested-innocent.txt`;
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: nestedCommand }),
         )).toEqual([realpathSync(secretPath)]);
+        for (const groupedCommand of [
+          `(cd ${nestedDir} && cat <>nested-innocent.txt)`,
+          `{ cd ${nestedDir} && cat 3<>nested-innocent.txt; }`,
+          `if cd ${nestedDir}; then cat 7<>nested-innocent.txt; fi`,
+          'cd ~/nested && cat 8<>nested-innocent.txt',
+          'cd nest* && cat 9<>nested-innocent.txt',
+        ]) {
+          expect(context.collectResolvedCredentialPaths?.(
+            context.bashInputReadTargets?.({ command: groupedCommand }),
+          ), groupedCommand).toEqual([realpathSync(secretPath)]);
+        }
+        for (const scopedCommand of [
+          `(cd ${nestedDir} && true); cat <>${scopedLinkName}`,
+          `if false; then cd ${nestedDir}; fi; cat 3<>${scopedLinkName}`,
+          `false && cd ${nestedDir}; cat 4<>${scopedLinkName}`,
+          `true || cd ${nestedDir}; cat 5<>${scopedLinkName}`,
+          `cd ${path.join(tempRoot, 'missing')} && :; cat 6<>${scopedLinkName}`,
+          `case x in y) cd ${nestedDir};; esac; cat 7<>${scopedLinkName}`,
+        ]) {
+          expect(context.collectResolvedCredentialPaths?.(
+            context.bashInputReadTargets?.({ command: scopedCommand }),
+          ), scopedCommand).toEqual([realpathSync(secretPath)]);
+        }
         const optionTerminatedCdCommand = 'cd -- -credential-dir && cat <innocent.txt';
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: optionTerminatedCdCommand }),
@@ -258,16 +319,25 @@ describe('cindy-bridge extension source', () => {
           command: dynamicCommand,
           targets: [],
           targetPrefixes: [],
+          targetMayExpand: [],
           hasUnresolvedTarget: true,
         });
         expect(context.bashInputReadTargets?.({ command: dynamicCommand })).toEqual([]);
+        expect(context.bashInputReadEvidence?.({ command: dynamicCommand })).toEqual({
+          targets: [],
+          unresolved: true,
+        });
+        expect(context.bashInputReadEvidence?.({ command: 'cat <>~cindy-no-such-user/innocent.txt' }))
+          .toEqual({ targets: [], unresolved: true });
         expect(context.parseShellInputRedirections?.('cat <>created')).toEqual({
           command: 'cat <>created',
-          targets: [],
-          targetPrefixes: [],
+          targets: ['created'],
+          targetPrefixes: ['cat '],
+          targetMayExpand: [false],
           hasUnresolvedTarget: false,
         });
-        expect(source).toContain("event.toolName === 'bash' ? bashInputReadTargets(event.input) : []");
+        expect(source).toContain("event.toolName === 'bash'\n      ? bashInputReadEvidence(event.input)");
+        expect(source).toContain('bashReadEvidence.unresolved || touchesCredentialPath(bashReadTargets)');
         expect(source).toContain('resolvedCredentialPaths: resolvedCredentialReadPaths');
       } finally {
         rmSync(tempRoot, { recursive: true, force: true });

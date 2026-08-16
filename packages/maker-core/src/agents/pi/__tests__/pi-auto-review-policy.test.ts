@@ -10,8 +10,17 @@ import { classifyPiToolForAutoReview } from '../auto-review-policy.js';
 const WS = '/Users/t/ws';
 const roots = [WS];
 
-function verdict(toolName: string, input: Record<string, unknown>) {
-  return classifyPiToolForAutoReview({ toolName, input, workspaceRoots: roots });
+function verdict(
+  toolName: string,
+  input: Record<string, unknown>,
+  resolvedCredentialPaths?: readonly string[] | null,
+) {
+  return classifyPiToolForAutoReview({
+    toolName,
+    input,
+    resolvedCredentialPaths,
+    workspaceRoots: roots,
+  });
 }
 
 describe('classifyPiToolForAutoReview', () => {
@@ -50,10 +59,29 @@ describe('classifyPiToolForAutoReview', () => {
   it('approves plain reads but always prompts for credential paths (bridge-drift defense)', () => {
     expect(verdict('read', { path: `${WS}/src/a.ts` })).toBe('auto-approve');
     expect(verdict('read', { path: '/Users/t/.ssh/id_rsa' })).toBe('prompt-each-time');
+    expect(verdict('read', { path: `${WS}/.env.local` })).toBe('prompt-each-time');
+    expect(verdict('read', { path: `${WS}/.environment` })).toBe('auto-approve');
     expect(verdict('grep', { path: '/Users/t/.aws' })).toBe('prompt-each-time');
     // 凭证特征在非 path 字段(grep pattern / find 表达式)同样必问 —— 与 bridge 全字段扫描同口径
     expect(verdict('grep', { pattern: 'token', path: '/Users/t/.gnupg' })).toBe('prompt-each-time');
     expect(verdict('find', { expression: '~/.ssh/id_ed25519' })).toBe('prompt-each-time');
+  });
+
+  it('uses bridge-resolved credential paths and fails closed on invalid evidence', () => {
+    const innocentLink = `${WS}/innocent.txt`;
+    expect(verdict(
+      'read',
+      { path: innocentLink },
+      ['/Users/t/.ssh/id_rsa'],
+    )).toBe('prompt-each-time');
+
+    // A normal symlink produces no credential evidence and keeps the readonly fast path.
+    expect(verdict('read', { path: innocentLink }, [])).toBe('auto-approve');
+    // Non-empty evidence that no longer matches Host policy indicates protocol drift.
+    expect(verdict('read', { path: innocentLink }, [`${WS}/ordinary.txt`])).toBe(
+      'prompt-each-time',
+    );
+    expect(verdict('read', { path: innocentLink }, null)).toBe('prompt-each-time');
   });
 
   it('catches /proc environ variants including task/<tid> (env dump = credentials)', () => {

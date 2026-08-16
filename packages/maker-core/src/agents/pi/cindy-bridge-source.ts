@@ -127,24 +127,27 @@ function touchesCredentialPath(input: unknown, depth = 0): boolean {
 
 // 未解析的路径字符串命不中凭证特征,但工作区内的符号链接可指向 /proc/self/environ 等
 // 敏感目标;path.resolve 不跟随链接,故 touchesCredentialPath 会漏判(greptile 报)。这里
-// 对每个字符串叶子额外 realpathSync 跟随链接,用**解析后**的真实目标再匹配一次特征。
+// 对每个字符串叶子额外 realpathSync 跟随链接,并把命中的真实路径作为 Host 审批证据。
 // realpathSync 对不存在/非路径字符串会抛,catch 即跳过(仍有原始字符串检查兜底)。
-function resolvesToCredentialPath(input: unknown, depth = 0): boolean {
-  if (depth > 6 || input == null) return false;
+function collectResolvedCredentialPaths(input: unknown, depth = 0): string[] {
+  if (depth > 6 || input == null) return [];
   if (typeof input === 'string') {
-    if (!input) return false;
+    if (!input) return [];
     try {
       const resolved = realpathSync(input);
-      return CREDENTIAL_PATH_PATTERNS.some((re) => re.test(resolved));
+      return CREDENTIAL_PATH_PATTERNS.some((re) => re.test(resolved)) ? [resolved] : [];
     } catch {
-      return false;
+      return [];
     }
   }
-  if (Array.isArray(input)) return input.some((v) => resolvesToCredentialPath(v, depth + 1));
-  if (typeof input === 'object') {
-    return Object.values(input as Record<string, unknown>).some((v) => resolvesToCredentialPath(v, depth + 1));
+  if (Array.isArray(input)) {
+    return input.flatMap((v) => collectResolvedCredentialPaths(v, depth + 1));
   }
-  return false;
+  if (typeof input === 'object') {
+    return Object.values(input as Record<string, unknown>)
+      .flatMap((v) => collectResolvedCredentialPaths(v, depth + 1));
+  }
+  return [];
 }
 
 // 从 bash 子进程读取任意进程的初始环境(/proc/<pid|self>/environ)是绕过密钥剥离的旁路:
@@ -1172,8 +1175,11 @@ export default async function cindyBridge(pi: any) {
     // access 若放行 read /proc/self/environ 这类路径,模型可直接取 token 调回环代理,
     // 绕过审批盗刷当前会话额度(greptile 报)→ 即使 bypassPermissions 也硬拦。原始路径
     // 命不中时还要跟随符号链接:工作区内的 link 可指向敏感目标,realpath 后再判一次。
+    const resolvedCredentialReadPaths = READONLY_BUILTINS.has(event.toolName)
+      ? [...new Set(collectResolvedCredentialPaths(event.input))]
+      : [];
     const credentialRead = READONLY_BUILTINS.has(event.toolName)
-      && (touchesCredentialPath(event.input) || resolvesToCredentialPath(event.input));
+      && (touchesCredentialPath(event.input) || resolvedCredentialReadPaths.length > 0);
     if (credentialRead && permission.mode === 'bypassPermissions') {
       return { block: true, reason: 'Cindy blocks reading credential or key paths, even with Full access.' };
     }
@@ -1183,7 +1189,11 @@ export default async function cindyBridge(pi: any) {
     try {
       approved = await ctx.ui.confirm(
         PERMISSION_TITLE,
-        JSON.stringify({ toolName: event.toolName, input: event.input ?? {} }),
+        JSON.stringify({
+          toolName: event.toolName,
+          input: event.input ?? {},
+          resolvedCredentialPaths: resolvedCredentialReadPaths,
+        }),
       );
     } catch {
       approved = false;

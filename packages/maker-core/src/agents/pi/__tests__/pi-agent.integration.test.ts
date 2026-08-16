@@ -1826,6 +1826,37 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'dotenv reads escalate instead of using the readonly fast path',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-dotenv-'));
+      const dotenvPath = path.join(workingDir, '.env.local');
+      try {
+        writeFileSync(dotenvPath, 'FAKE_DOTENV_SECRET=must-not-leak');
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: dotenvPath }),
+          anthropicStreamBody('dotenv turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-dotenv',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual(['read']);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('FAKE_DOTENV_SECRET'))).toBe(false);
+        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
     'full access still blocks credential reads (parent env holds the proxy session token)',
     { timeout: 60_000 },
     async () => {
@@ -1889,6 +1920,41 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it.skipIf(!canSymlink)(
+    'auto mode escalates credential reads reached through a workspace symlink',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-symlink-cred-'));
+      try {
+        const secretPath = path.join(workingDir, 'secrets', 'id_rsa');
+        const linkPath = path.join(workingDir, 'innocent.txt');
+        mkdirSync(path.dirname(secretPath), { recursive: true });
+        writeFileSync(secretPath, 'FAKE SYMLINK PRIVATE KEY');
+        symlinkSync(secretPath, linkPath);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: linkPath }),
+          anthropicStreamBody('auto symlink cred turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-symlink-cred',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual(['read']);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('FAKE SYMLINK PRIVATE KEY'))).toBe(false);
+        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it.skipIf(!canSymlink)(
     'full access blocks credential reads reached through a workspace symlink',
     { timeout: 60_000 },
     async () => {
@@ -1931,7 +1997,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     { timeout: 60_000 },
     async () => {
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-read-'));
-      const seedPath = path.join(workingDir, 'readable.txt');
+      const seedPath = path.join(workingDir, '.environment');
       writeFileSync(seedPath, 'plain-read-marker-content');
       try {
         scriptedResponses.length = 0;
@@ -1949,6 +2015,39 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(resolverTools).toEqual([]);
         const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
         expect(followUp.some((b) => b.includes('plain-read-marker-content'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it.skipIf(!canSymlink)(
+    'ordinary symlink reads keep the readonly fast path',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-symlink-plain-'));
+      try {
+        const targetPath = path.join(workingDir, 'ordinary-target.txt');
+        const linkPath = path.join(workingDir, 'ordinary-link.txt');
+        writeFileSync(targetPath, 'ordinary-symlink-content');
+        symlinkSync(targetPath, linkPath);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: linkPath }),
+          anthropicStreamBody('ordinary symlink turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-symlink-plain',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('ordinary-symlink-content'))).toBe(true);
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;

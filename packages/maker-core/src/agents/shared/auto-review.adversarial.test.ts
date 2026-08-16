@@ -379,13 +379,18 @@ describe('对抗语料 — 变体矩阵', () => {
   });
 });
 
-/**
- * 已知缺口 —— 本文件建立时实测发现,**在 upstream/main 上同样存在**,不是分类器某次
- * 放宽引入的。放在这里是为了不让它再次被遗忘;修它需要新增判定面,按各自的 PR 处理。
- */
-describe('对抗语料 — 已知缺口(另案)', () => {
-  it.todo('工作区内的 .env 系列被当普通文件直接放行,凭证会进模型上下文'
-    + '(`cat /repo/.env`、`grep KEY .env.local`;实测 upstream/main 行为一致)');
+/** Dotenv files are credential-bearing paths, including when shell tools read them. */
+describe('对抗语料 — dotenv 凭证路径', () => {
+  it('绝对或显式相对 dotenv 路径不得直接放行', () => {
+    for (const command of [
+      'cat /repo/.env',
+      'grep KEY /repo/.env.local',
+      'cat ./.env.production.local',
+    ]) {
+      expect(classifyShellCommand(command, roots, opts)).toBe('prompt-each-time');
+    }
+    expect(classifyShellCommand('jq .env data.json', roots, opts)).toBe('auto-approve');
+  });
 });
 
 /**

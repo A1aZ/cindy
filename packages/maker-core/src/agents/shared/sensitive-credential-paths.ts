@@ -14,6 +14,10 @@ export const SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
     source: String.raw`(?:^|[\\/\s'"~])\.(?:netrc|npmrc|pgpass|pypirc|git-credentials)\b`,
     flags: "i",
   },
+  {
+    source: String.raw`(?:^|[\\/])\.env(?:\.[^\\/]+)?$`,
+    flags: "i",
+  },
   { source: String.raw`[\\/]\.cargo[\\/]credentials(?:\.toml)?\b`, flags: "i" },
   {
     source: String.raw`[\\/]\.m2[\\/]settings(?:-security)?\.xml\b`,
@@ -50,7 +54,6 @@ export const SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
  */
 export const REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
   ...SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
-  { source: String.raw`(?:^|[\\/])\.env(?:\.[^\\/]+)?$`, flags: "i" },
   // Git config can contain credential-bearing remote URLs, while object storage
   // can reconstruct a sensitive tracked file even when its worktree path is
   // denied. Review receives a sanitized diff and never needs raw .git access.

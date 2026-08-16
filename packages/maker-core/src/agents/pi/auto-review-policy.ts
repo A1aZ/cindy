@@ -27,6 +27,11 @@ export interface PiAutoReviewContext {
   toolName: string;
   /** 工具入参(bridge 透传的原始对象)。 */
   input: Record<string, unknown>;
+  /**
+   * Bridge-followed real paths that matched the credential policy. `null` means
+   * the bridge evidence was present but malformed and must fail closed.
+   */
+  resolvedCredentialPaths?: readonly string[] | null;
   /** 会话工作区根:cwd,绝对路径(pi 无 extraDirs)。 */
   workspaceRoots: string[];
   /** 可读根:工作区 + Pi 附加只读引用目录。写操作仍只看 workspaceRoots。 */
@@ -93,9 +98,27 @@ export function normalizePiToolForAutoReview(ctx: PiAutoReviewContext): Reviewab
   const { toolName, input } = ctx;
 
   if (READ_ONLY_TOOLS.has(toolName)) {
+    // Bridge follows symlinks in its process, so Host must include those canonical
+    // targets in the same credential decision. A malformed or policy-inconsistent
+    // evidence payload cannot fall back to the innocent-looking link path.
+    if (ctx.resolvedCredentialPaths === null) {
+      return {
+        kind: 'other',
+        description: 'Pi credential-read evidence was malformed.',
+        requireConsent: true,
+      };
+    }
+    const resolvedCredentialHit = findCredentialLeaf(ctx.resolvedCredentialPaths);
+    if ((ctx.resolvedCredentialPaths?.length ?? 0) > 0 && !resolvedCredentialHit) {
+      return {
+        kind: 'other',
+        description: 'Pi credential-read evidence did not match the Host policy.',
+        requireConsent: true,
+      };
+    }
     // 凭证特征可能落在任意字符串入参(grep 的 pattern、find 的表达式等),与 bridge
-    // 的 touchesCredentialPath 同口径递归扫全字段;命中的字符串作为 path 交 core 判必问。
-    const credentialHit = findCredentialLeaf(input);
+    // 的 touchesCredentialPath 同口径递归扫全字段;命中的真实路径优先作为 path 交 core 判必问。
+    const credentialHit = resolvedCredentialHit ?? findCredentialLeaf(input);
     return { kind: 'read', path: credentialHit ?? stringField(input, 'path') };
   }
   if (FILE_WRITE_TOOLS.has(toolName)) {

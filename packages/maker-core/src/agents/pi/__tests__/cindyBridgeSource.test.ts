@@ -120,6 +120,54 @@ describe('cindy-bridge extension source', () => {
     expect(errors).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'collects canonical credential targets without flagging ordinary symlinks',
+    () => {
+      const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+      const helperStart = source.indexOf('const CREDENTIAL_PATH_PATTERNS');
+      const helperEnd = source.indexOf('// 从 bash 子进程读取任意进程的初始环境');
+      expect(helperStart).toBeGreaterThan(-1);
+      expect(helperEnd).toBeGreaterThan(helperStart);
+
+      const executableSource = [
+        source.slice(helperStart, helperEnd),
+        '(globalThis as any).collectResolvedCredentialPaths = collectResolvedCredentialPaths;',
+      ].join('\n');
+      const compiled = ts.transpileModule(executableSource, {
+        compilerOptions: {
+          module: ts.ModuleKind.None,
+          target: ts.ScriptTarget.ES2022,
+        },
+      }).outputText;
+      const context: {
+        realpathSync: typeof realpathSync;
+        collectResolvedCredentialPaths?: (input: unknown) => string[];
+      } = { realpathSync };
+      runInNewContext(compiled, context);
+
+      const tempRoot = mkdtempSync(path.join(tmpdir(), 'cindy-pi-credential-link-'));
+      try {
+        const secretPath = path.join(tempRoot, 'secrets', 'id_rsa');
+        const ordinaryPath = path.join(tempRoot, 'ordinary.txt');
+        const secretLink = path.join(tempRoot, 'innocent.txt');
+        const ordinaryLink = path.join(tempRoot, 'ordinary-link.txt');
+        mkdirSync(path.dirname(secretPath), { recursive: true });
+        writeFileSync(secretPath, 'FAKE PRIVATE KEY');
+        writeFileSync(ordinaryPath, 'ordinary');
+        symlinkSync(secretPath, secretLink);
+        symlinkSync(ordinaryPath, ordinaryLink);
+
+        expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
+          realpathSync(secretPath),
+        ]);
+        expect(context.collectResolvedCredentialPaths?.({ path: ordinaryLink })).toEqual([]);
+        expect(source).toContain('resolvedCredentialPaths: resolvedCredentialReadPaths');
+      } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('overrides find with the managed ripgrep backend instead of runtime fd download', () => {
     const source = CINDY_BRIDGE_EXTENSION_SOURCE;
 

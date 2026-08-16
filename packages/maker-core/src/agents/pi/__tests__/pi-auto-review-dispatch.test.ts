@@ -273,13 +273,18 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     }
   }
 
-  function firePermissionRequest(id: string, toolName: string, input: Record<string, unknown>): void {
+  function firePermissionRequest(
+    id: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    options?: { resolvedCredentialPaths: unknown },
+  ): void {
     captured.onEvent!({
       type: 'extension_ui_request',
       method: 'confirm',
       id,
       title: 'cindy:permission',
-      message: JSON.stringify({ toolName, input }),
+      message: JSON.stringify({ toolName, input, ...options }),
     });
   }
 
@@ -801,6 +806,20 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     await flush();
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r1', confirmed: true });
     expect(resolverCalls).toBe(0);
+  });
+
+  it('fails closed when a readonly bridge request omits canonical-path evidence', async () => {
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await start('auto', review);
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+
+    firePermissionRequest('readonly-without-evidence', 'read', { path: path.join(cwd, 'innocent.txt') });
+    expect(await waitForResponse('readonly-without-evidence')).toEqual({
+      type: 'extension_ui_response', id: 'readonly-without-evidence', confirmed: false,
+    });
+    expect(review).not.toHaveBeenCalled();
+    expect(resolver).toHaveBeenCalledOnce();
   });
 
   it('auto mode lets the current-model reviewer allow a gray write without prompting', async () => {

@@ -4897,6 +4897,66 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     h.client.stop();
   }, 10_000);
 
+  it('已发探针被驱逐后恢复期允许再发一帧换 ACK', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'warmup', { ok: true, result: 0 });
+    const ws = h.current();
+    const warmup = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!;
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId: warmup.meta.streamId, ackSeq: warmup.meta.seq },
+      },
+    });
+    await tick();
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'link-close',
+      src: 'dev-b',
+      payload: { reason: 'transport-timeout' },
+    });
+    await tick();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'probe-0', { ok: true, result: 0 });
+    h.client.sendInvokeResult('dev-b', 'probe-1', { ok: true, result: 1 });
+    const internals = h.client as unknown as {
+      peerTransport: Map<string, {
+        pending: Map<number, { sent: boolean; bytes: number }>;
+        pendingBytes: number;
+      }>;
+    };
+    const peer = internals.peerTransport.get('dev-b')!;
+    for (const [seq, pending] of [...peer.pending]) {
+      if (!pending.sent) continue;
+      peer.pending.delete(seq);
+      peer.pendingBytes -= pending.bytes;
+    }
+
+    const before = framesSent(ws);
+    h.client.sendInvokeResult('dev-b', 'reprobe', { ok: true, result: 2 });
+    expect(framesSent(ws)).toBe(before + 1);
+
+    h.client.stop();
+  }, 10_000);
+
   it('恢复期内部分写出的分片也计入探测预算', async () => {
     const h = makeHarness({
       timing: {

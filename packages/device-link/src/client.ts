@@ -2916,12 +2916,20 @@ export class DeviceLinkClient {
     return Math.max(0, budget - peer.recoveryFramesSent);
   }
 
+  private hasOutstandingRecoveryProbe(peer: PeerTransportState): boolean {
+    for (const pending of peer.pending.values()) {
+      if (pending.sent) return true;
+    }
+    return false;
+  }
+
   private shouldHoldRecoverySend(peer: PeerTransportState, additionalFrames = 1): boolean {
     if (!peer.recoveryNeedsAck) return false;
+    // hold 的前提是已有在途探针能换来 ACK。latest-wins / TTL 清掉全部已发探针后,
+    // 若仍按 recoveryFramesSent 卡住,队列只剩未发帧,恢复态永远解不开。
+    if (!this.hasOutstandingRecoveryProbe(peer)) return false;
     const remaining = this.remainingRecoveryBudget(peer);
     if (remaining <= 0) return true;
-    // 本轮恢复还没发出过任何帧时,队头可以超预算(与 retryPending 一致)。
-    if (peer.recoveryFramesSent === 0) return false;
     return additionalFrames > remaining;
   }
 

@@ -362,6 +362,46 @@ describe('createSubagentLiveCardTracker', () => {
     ).toMatchObject({ model: 'provider-b/model-actual' });
   });
 
+  it('does not let a late nested spawn fallback replace an observed runtime model', () => {
+    const tracker = createSubagentLiveCardTracker({
+      now: () => 0,
+      subagentModelFallback: 'provider-config/model-child',
+    });
+    tracker.noteSpawnItem(v2SpawnItem('card-parent', 't-parent'));
+    tracker.noteDescendantThread('t-parent', 'root-thread', 'provider-runtime/model-actual');
+    tracker.noteDescendantThread('t-grandchild', 't-parent', 'provider-runtime/model-actual');
+
+    // The nested spawn item can arrive after thread/started. Its configured
+    // fallback is lower-confidence than the already observed runtime model.
+    expect(
+      tracker.noteDescendantThread('t-grandchild', 't-parent', undefined, false, true),
+    ).toBeNull();
+    expect(
+      tracker.handleDescendantNotification('t-grandchild', 'turn/started', {
+        turn: { id: 'grandchild-turn' },
+      }),
+    ).toMatchObject({ model: 'provider-runtime/model-actual' });
+  });
+
+  it('preserves a buffered runtime model when lower-priority nested spawn metadata arrives later', () => {
+    const tracker = createSubagentLiveCardTracker({
+      now: () => 0,
+      subagentModelFallback: 'provider-config/model-child',
+    });
+    tracker.noteDescendantThread('t-grandchild', 't-parent', 'provider-runtime/model-actual');
+    tracker.noteDescendantThread('t-grandchild', 't-parent', undefined, false, true);
+    tracker.noteSpawnItem(v2SpawnItem('card-parent', 't-parent'));
+
+    expect(
+      tracker.handleDescendantNotification('t-grandchild', 'turn/started', {
+        turn: { id: 'grandchild-turn' },
+      }),
+    ).toMatchObject({ model: null });
+    expect(
+      tracker.noteDescendantThread('t-parent', 'root-thread', 'provider-runtime/model-actual'),
+    ).toMatchObject({ model: 'provider-runtime/model-actual' });
+  });
+
   it('preserves nested inheritance when lineage arrives before the parent spawn item', () => {
     const tracker = createSubagentLiveCardTracker({ now: () => 0 });
     expect(
@@ -612,6 +652,31 @@ describe('createSubagentLiveCardTracker', () => {
     tracker.handleDescendantNotification('t-a', 'turn/completed', { turn: { status: 'failed' } });
     tracker.handleDescendantNotification('t-b', 'turn/completed', { turn: { status: 'completed' } });
     expect(tracker.noteSpawnItem(v1SpawnItem('card-v1', ['t-a', 't-b']))?.status).toBe('failed');
+  });
+
+  it('re-asserts running for a fresh completed-only spawn whose agents are still active', () => {
+    const tracker = createSubagentLiveCardTracker({ now: () => 0 });
+    const completedOnly = {
+      ...v1SpawnItem('card-v1', ['t-a']),
+      status: 'completed',
+      agentsStates: { 't-a': { status: 'running' } },
+    };
+
+    expect(tracker.noteSpawnItem(completedOnly, undefined, 'completed')).toMatchObject({
+      taskId: 'card-v1',
+      status: 'running',
+    });
+  });
+
+  it('does not add a redundant frame for a fresh completed-only spawn whose agents are terminal', () => {
+    const tracker = createSubagentLiveCardTracker({ now: () => 0 });
+    const completedOnly = {
+      ...v1SpawnItem('card-v1', ['t-a']),
+      status: 'completed',
+      agentsStates: { 't-a': { status: 'completed' } },
+    };
+
+    expect(tracker.noteSpawnItem(completedOnly, undefined, 'completed')).toBeNull();
   });
 
   it('never overwrites a failed spawn terminal state with a running aggregate', () => {

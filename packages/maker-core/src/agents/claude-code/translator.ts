@@ -601,16 +601,21 @@ export function translateSdkMessage(
       const subagentResult = extractSubagentToolResult(msg);
       if (subagentResult) {
         const { taskId, parentToolUseId, model, prompt, status, usage } = subagentResult;
+        const actualModel = model
+          ?? ctx.rt.resolvedSubagentModelByParentToolUseId.get(parentToolUseId)
+          ?? ctx.rt.streamModelByParentToolUseId.get(parentToolUseId);
         ctx.rt.subagentParentToolUseIdByTaskId.set(taskId, parentToolUseId);
         ctx.rt.confirmedSubagentTaskIds.add(taskId);
         ctx.rt.excludedSubagentTaskIds.delete(taskId);
         ctx.rt.subagentStatusByParentToolUseId.set(parentToolUseId, status);
         if (model) {
           ctx.rt.resolvedSubagentModelByParentToolUseId.set(parentToolUseId, model);
-          ctx.rt.publishedSubagentModelByParentToolUseId.set(parentToolUseId, model);
+        }
+        if (actualModel) {
+          ctx.rt.publishedSubagentModelByParentToolUseId.set(parentToolUseId, actualModel);
         }
         if (status === 'running' && prompt) {
-          ctx.onSubagentTaskLaunched?.({ taskId, parentToolUseId, prompt, model });
+          ctx.onSubagentTaskLaunched?.({ taskId, parentToolUseId, prompt, model: actualModel });
         }
         queue.push({
           type: 'agent_task_update',
@@ -620,11 +625,14 @@ export function translateSdkMessage(
             parentToolUseId,
             status,
             subagentObservation: {
-              kind: status === 'running' ? 'spawn' : 'terminal',
+              // A synchronous completed Agent result may be the first and only
+              // lifecycle observation. It is authoritative to create the run,
+              // while the completed status still keeps the record terminal.
+              kind: 'spawn',
               logicalSubagentId: taskId,
               parentToolUseId,
             },
-            ...(model ? { model } : {}),
+            ...(actualModel ? { model: actualModel } : {}),
             ...(usage ? { usage } : {}),
           },
           source: 'claude-code',

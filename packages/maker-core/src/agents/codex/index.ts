@@ -140,6 +140,7 @@ import {
 import {
   createSubagentLiveCardTracker,
   type SubagentLiveCardUpdate,
+  type SubagentSpawnItemPhase,
 } from './subagent-live-cards.js';
 import {
   TurnRetryTracker,
@@ -4470,12 +4471,13 @@ export class CodexAgent extends BaseAgent {
     const noteSubagentSpawnItem = (
       item: unknown,
       rootTurnId: string,
+      phase: SubagentSpawnItemPhase,
     ): SubagentLiveCardUpdate | null => {
       if (!registerSubagentSpawnLineage(item, rootTurnId)) return null;
       // 先接 host 路由再进 tracker:registerDescendantLineage 会把子线程 TTL 缓冲里的
       // 早到通知同步补投进 handleDescendantNotification(tracker 缓冲),随后
       // noteSpawnItem 建卡时统一重放,首帧就带上真实用量。
-      return subagentLiveCards.noteSpawnItem(item);
+      return subagentLiveCards.noteSpawnItem(item, undefined, phase);
     };
     const terminateHandleAfterThreadCleanupFailure = (reason: string): void => {
       if (closed) return;
@@ -9360,7 +9362,11 @@ export class CodexAgent extends BaseAgent {
         const translatedParams = translatedItem === params.item
           ? params
           : { ...params, item: translatedItem };
-        const replayedSubagentUpdate = noteSubagentSpawnItem(translatedItem, params.turnId);
+        const replayedSubagentUpdate = noteSubagentSpawnItem(
+          translatedItem,
+          params.turnId,
+          'started',
+        );
         pushItemStatus(translatedItem);
         translateItemNotification('started', translatedParams, eventQueue, {
           rt: translatorRt,
@@ -9401,7 +9407,11 @@ export class CodexAgent extends BaseAgent {
         const translatedParams = translatedItem === params.item
           ? params
           : { ...params, item: translatedItem };
-        const replayedSubagentUpdateOnUpdated = noteSubagentSpawnItem(translatedItem, params.turnId);
+        const replayedSubagentUpdateOnUpdated = noteSubagentSpawnItem(
+          translatedItem,
+          params.turnId,
+          'updated',
+        );
         translateItemNotification('updated', translatedParams, eventQueue, {
           rt: translatorRt,
           log,
@@ -9464,6 +9474,7 @@ export class CodexAgent extends BaseAgent {
         const replayedSubagentUpdateOnCompleted = noteSubagentSpawnItem(
           translatedItem,
           params.turnId,
+          'completed',
         );
         const itemEventQueue = isLateCollabTerminal
           ? {

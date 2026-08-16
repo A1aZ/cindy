@@ -19216,6 +19216,81 @@ describe('CodexAgent turn lifecycle', () => {
     await handle.close();
   });
 
+  it('REPRO: keeps a completed-only spawn running while its agentsStates are active', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-completed-only-running-collab',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    expect(handlers).toBeDefined();
+    const iterator = handle.events()[Symbol.asyncIterator]();
+
+    handlers!.turnStarted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-parent' },
+    });
+    handlers!.turnCompleted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-parent', status: 'completed' },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({ type: 'status' });
+    expect(await nextEvent(iterator)).toMatchObject({ type: 'done' });
+
+    handlers!.itemCompleted?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-parent',
+      item: {
+        type: 'collabAgentToolCall',
+        id: 'collab-completed-only-running',
+        tool: 'spawnAgent',
+        status: 'completed',
+        senderThreadId: 'start-thread-id',
+        receiverThreadIds: ['child-thread'],
+        prompt: 'continue after the spawn tool returns',
+        agentsStates: { 'child-thread': { status: 'running' } },
+      },
+    } as never);
+
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'tool_use',
+      turnScope: 'background',
+      data: { toolUseId: 'collab-completed-only-running' },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'tool_result_full',
+      turnScope: 'background',
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'tool_result',
+      turnScope: 'background',
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'agent_task_update',
+      turnScope: 'background',
+      data: { taskId: 'collab-completed-only-running', status: 'completed' },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'agent_task_update',
+      turnScope: 'background',
+      data: { taskId: 'collab-completed-only-running', status: 'running' },
+    });
+
+    handlers!.descendantNotification?.('child-thread', 'turn/completed', {
+      threadId: 'child-thread',
+      turn: { id: 'child-turn', status: 'completed' },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'agent_task_update',
+      turnScope: 'background',
+      data: { taskId: 'collab-completed-only-running', status: 'completed' },
+    });
+
+    await handle.close();
+  });
+
   it('REPRO: preserves a late collab-agent terminal update after a terminal error', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent);

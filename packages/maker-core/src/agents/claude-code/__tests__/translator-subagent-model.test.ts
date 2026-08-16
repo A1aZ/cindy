@@ -512,7 +512,7 @@ describe('Claude Code translator subagent model attribution', () => {
       model: 'vendor-a/model-sol',
       usage: { totalTokens: 22_113, toolUses: 0, durationMs: 4_949 },
       subagentObservation: {
-        kind: 'terminal',
+        kind: 'spawn',
         logicalSubagentId: 'agent-sync',
         parentToolUseId: 'toolu_sync_agent',
       },
@@ -552,11 +552,11 @@ describe('Claude Code translator subagent model attribution', () => {
       status: 'completed',
       model: 'provider-b/model-terra',
       usage: { totalTokens: 84, toolUses: 2, durationMs: 1_250 },
-      subagentObservation: { kind: 'terminal' },
+      subagentObservation: { kind: 'spawn' },
     });
   });
 
-  it('does not guess a requested model when a completed Agent result has no actual model', async () => {
+  it('uses a child runtime model when a completed Agent result has no resolvedModel', async () => {
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx();
 
@@ -574,6 +574,15 @@ describe('Claude Code translator subagent model attribution', () => {
             },
           ],
         },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_sync_agent',
+        message: { model: 'vendor-runtime/model-actual', content: [] },
       },
       queue,
       ctx,
@@ -600,9 +609,103 @@ describe('Claude Code translator subagent model attribution', () => {
       taskId: 'agent-sync',
       parentToolUseId: 'toolu_sync_agent',
       status: 'completed',
+      model: 'vendor-runtime/model-actual',
+      subagentObservation: { kind: 'spawn' },
+    });
+    expect(taskUpdates.at(-1)?.data).not.toMatchObject({ model: 'requested-model' });
+  });
+
+  it('lets a full child assistant replace an earlier stream model when no resolvedModel exists', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_sync_agent',
+        event: {
+          type: 'message_start',
+          message: { model: 'vendor-stream/model-early', usage: { input_tokens: 0 } },
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_sync_agent', content: 'done' }],
+        },
+        toolUseResult: { status: 'completed', agentId: 'agent-sync' },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_sync_agent',
+        message: { model: 'vendor-assistant/model-actual', content: [] },
+      },
+      queue,
+      ctx,
+    );
+
+    const taskUpdates = (await collect(queue)).filter(
+      (event) => event.type === 'agent_task_update',
+    );
+    expect(taskUpdates.at(-2)?.data).toMatchObject({
+      taskId: 'agent-sync',
+      status: 'completed',
+      model: 'vendor-stream/model-early',
+      subagentObservation: { kind: 'spawn' },
+    });
+    expect(taskUpdates.at(-1)?.data).toMatchObject({
+      taskId: 'agent-sync',
+      status: 'completed',
+      model: 'vendor-assistant/model-actual',
       subagentObservation: { kind: 'terminal' },
     });
-    expect(taskUpdates.at(-1)?.data).not.toHaveProperty('model');
+  });
+
+  it('keeps resolvedModel authoritative over a later full child assistant', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_sync_agent', content: 'done' }],
+        },
+        toolUseResult: {
+          status: 'completed',
+          agentId: 'agent-sync',
+          resolvedModel: 'vendor-resolved/model-authoritative',
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_sync_agent',
+        message: { model: 'vendor-assistant/model-late', content: [] },
+      },
+      queue,
+      ctx,
+    );
+
+    const taskUpdates = (await collect(queue)).filter(
+      (event) => event.type === 'agent_task_update',
+    );
+    expect(taskUpdates.at(-1)?.data).toMatchObject({
+      taskId: 'agent-sync',
+      status: 'completed',
+      model: 'vendor-resolved/model-authoritative',
+    });
   });
 
   it('repairs zero task tokens from host usage and preserves zero tool uses', async () => {

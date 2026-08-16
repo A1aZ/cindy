@@ -5127,27 +5127,6 @@ function gitArgumentsReadDotenv(args: readonly string[]): boolean {
   return false;
 }
 
-function gitGrepHasExplicitPathspec(args: readonly string[]): boolean {
-  const separator = args.indexOf('--');
-  if (separator < 0) return false;
-  let patternProvided = false;
-  for (let index = 0; index < separator; index += 1) {
-    const token = args[index];
-    if (token.startsWith('-')) {
-      const equalsIndex = token.indexOf('=');
-      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
-      const kind = token.startsWith('--')
-        ? resolveReaderLongOption('grep', name)
-        : [...token.slice(1)].map((option) => readerShortOptionKind('grep', option)).find(Boolean);
-      if (kind && equalsIndex < 0 && !/^-[^-].+/.test(token)) index += 1;
-      if (kind === 'data' || kind === 'data-file') patternProvided = true;
-      continue;
-    }
-    patternProvided = true;
-  }
-  return args.length - separator - 1 >= (patternProvided ? 1 : 2);
-}
-
 function gitGrepListsOnly(args: readonly string[]): boolean {
   for (let tokenIndex = 0; tokenIndex < args.length; tokenIndex += 1) {
     const token = args[tokenIndex];
@@ -5176,54 +5155,75 @@ function gitGrepListsOnly(args: readonly string[]): boolean {
   return false;
 }
 
-function parseGitPathspec(value: string): { exclude: boolean; pattern: string } {
-  const longPathspec = /^:\(([^)]*)\)(.*)$/.exec(value);
-  if (longPathspec) {
-    const magic = new Set(longPathspec[1].split(','));
-    return { exclude: magic.has('exclude') || magic.has('!'), pattern: longPathspec[2] };
-  }
-  if (value.startsWith(':!') || value.startsWith(':^')) {
-    return { exclude: true, pattern: value.slice(2) };
-  }
-  if (value.startsWith(':/')) return { exclude: false, pattern: value.slice(2) };
-  return { exclude: false, pattern: value };
+const GIT_METADATA_ONLY_FLAGS = [
+  '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--summary', '--check', '--raw',
+] as const;
+
+function gitPatchRequested(args: readonly string[]): boolean {
+  return args.some((arg) =>
+    /^(?:-p|--patch|-u|-U\d*|--unified(?:=.*)?|-W|-c|--cc|--function-context|--word-diff(?:=.*)?|--word-diff-regex(?:=.*)?|--color-words(?:=.*)?|--patch-with-stat|--patch-with-raw|--binary|--inter-hunk-context(?:=.*)?)$/.test(arg));
 }
 
-function gitDiffPathspecIsSafeFile(value: string): boolean {
-  const { exclude, pattern } = parseGitPathspec(value);
-  if (exclude) return true;
-  const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (SAFE_DEVICE_PATH.test(normalized) || /^NUL$/i.test(normalized)) return true;
-  if (!normalized || normalized === '.' || normalized === '..' || normalized.endsWith('/')) return false;
-  if (/[*?\[\]{]/.test(normalized)) return false;
-  const basename = normalized.split('/').pop() ?? '';
-  return basename.includes('.');
+function gitMetadataOnlyRequested(args: readonly string[]): boolean {
+  return args.some((arg) => GIT_METADATA_ONLY_FLAGS.includes(arg as typeof GIT_METADATA_ONLY_FLAGS[number]));
 }
 
-function gitDiffPathspecsCouldReadDotenv(pathspecs: readonly string[]): boolean {
-  const positive = pathspecs.filter((value) => !parseGitPathspec(value).exclude);
-  return positive.length === 0 || positive.some((value) => !gitDiffPathspecIsSafeFile(value));
+function isSafeGitObjectPath(value: string): boolean {
+  if (value.startsWith(':(') || value.startsWith(':!') || value.startsWith(':^') || value.startsWith(':/')) return false;
+  const indexPath = /^:(?:[0-3]:)?(.+)$/.exec(value);
+  if (indexPath) return !isDotenvCredentialPath(indexPath[1]);
+  const separator = value.indexOf(':');
+  if (separator <= 0) return false;
+  const revision = value.slice(0, separator);
+  const objectPath = value.slice(separator + 1);
+  return /^[A-Za-z0-9_./@{}~^+\-]+$/.test(revision)
+    && Boolean(objectPath)
+    && !isDotenvCredentialPath(objectPath);
+}
+
+function gitShowHasOnlySafeObjectPaths(args: readonly string[]): boolean {
+  let sawObjectPath = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') return false;
+    if (token === '--format' || token === '--pretty') {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('-')) continue;
+    if (!isSafeGitObjectPath(token)) return false;
+    sawObjectPath = true;
+  }
+  return sawObjectPath;
+}
+
+function gitCatFileReadsUnscopedContent(args: readonly string[]): boolean {
+  if (args.includes('--batch-check') || args.some((arg) => arg.startsWith('--batch-check='))) return false;
+  if (args.some((arg) => arg === '--batch' || arg.startsWith('--batch=') || arg === '--batch-command' || arg.startsWith('--batch-command='))) return true;
+
+  let contentMode = args.includes('-p');
+  let objectArgs = args.filter((arg) => !arg.startsWith('-'));
+  if (objectArgs[0] === 'blob') {
+    contentMode = true;
+    objectArgs = objectArgs.slice(1);
+  } else if (objectArgs[0] === 'tree' || objectArgs[0] === 'commit' || objectArgs[0] === 'tag') {
+    return false;
+  }
+  return contentMode && !objectArgs.some(isSafeGitObjectPath);
 }
 
 function gitContentReadWithoutPath(sub: string, args: readonly string[]): boolean {
-  if (sub === 'grep') return !gitGrepListsOnly(args) && !gitGrepHasExplicitPathspec(args);
-  if (sub !== 'diff') return false;
-  const metadataOnly = args.some((arg) => [
-    '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--summary', '--check', '--raw',
-  ].includes(arg));
-  const patchRequested = args.some((arg) =>
-    /^(?:-p|--patch|-u|-U\d*|--unified(?:=.*)?|-W|--function-context|--word-diff(?:=.*)?|--word-diff-regex(?:=.*)?|--color-words(?:=.*)?|--patch-with-stat|--patch-with-raw|--binary|--inter-hunk-context(?:=.*)?)$/.test(arg));
-  if (metadataOnly && !patchRequested) return false;
-
-  const separator = args.indexOf('--');
-  if (separator >= 0 && separator < args.length - 1) {
-    return gitDiffPathspecsCouldReadDotenv(args.slice(separator + 1));
+  if (sub === 'grep') return !gitGrepListsOnly(args);
+  if (sub === 'diff') return !gitMetadataOnlyRequested(args) || gitPatchRequested(args);
+  if (sub === 'show') {
+    if (gitShowHasOnlySafeObjectPaths(args)) return false;
+    const patchSuppressed = args.includes('-s') || args.includes('--no-patch') || gitMetadataOnlyRequested(args);
+    return !patchSuppressed || gitPatchRequested(args);
   }
-  if (args.includes('--no-index')) {
-    const operands = args.filter((arg) => !arg.startsWith('-'));
-    if (operands.length >= 2) return operands.some((operand) => !gitDiffPathspecIsSafeFile(operand));
-  }
-  return true;
+  if (sub === 'log' || sub === 'whatchanged') return gitPatchRequested(args);
+  if (sub === 'cat-file') return gitCatFileReadsUnscopedContent(args);
+  if (sub === 'status') return args.some((arg) => arg === '--verbose' || /^-[^-]*v/.test(arg));
+  return false;
 }
 
 function shellCommandReadsDotenv(

@@ -4886,6 +4886,16 @@ function shellOperandCouldMatchDotenv(
   });
 }
 
+function inputRedirectionTargets(command: string): string[] {
+  const targets: string[] = [];
+  const re = /(?:^|[\s;&|()])(?:\d*|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:<>|<(?![<&(]))\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|<>()]+)/g;
+  for (const match of command.matchAll(re)) {
+    const target = match[1].replace(/['"]/g, '');
+    if (target) targets.push(target);
+  }
+  return targets;
+}
+
 function readerArgumentsReadDotenv(
   bin: string,
   args: readonly string[],
@@ -5127,7 +5137,30 @@ function gitArgumentsReadDotenv(args: readonly string[]): boolean {
   return false;
 }
 
+type GitGrepOutputMode = 'content' | 'files-only';
+
+const GIT_GREP_OUTPUT_OPTIONS: readonly { name: string; mode: GitGrepOutputMode }[] = [
+  { name: '--files-with-matches', mode: 'files-only' },
+  { name: '--files-without-match', mode: 'files-only' },
+  { name: '--name-only', mode: 'files-only' },
+  { name: '--no-files-with-matches', mode: 'content' },
+  { name: '--no-files-without-match', mode: 'content' },
+  { name: '--no-name-only', mode: 'content' },
+];
+
+function resolveGitGrepOutputMode(name: string): GitGrepOutputMode | null {
+  const exact = GIT_GREP_OUTPUT_OPTIONS.find((option) => option.name === name);
+  if (exact) return exact.mode;
+  const modes = new Set(
+    GIT_GREP_OUTPUT_OPTIONS
+      .filter((option) => option.name.startsWith(name))
+      .map((option) => option.mode),
+  );
+  return modes.size === 1 ? [...modes][0] ?? null : null;
+}
+
 function gitGrepListsOnly(args: readonly string[]): boolean {
+  let outputMode: GitGrepOutputMode = 'content';
   for (let tokenIndex = 0; tokenIndex < args.length; tokenIndex += 1) {
     const token = args[tokenIndex];
     if (token === '--') break;
@@ -5139,7 +5172,7 @@ function gitGrepListsOnly(args: readonly string[]): boolean {
         if (equalsIndex < 0) tokenIndex += 1;
         continue;
       }
-      if (token === '--files-with-matches' || token === '--files-without-match' || token === '--name-only') return true;
+      outputMode = resolveGitGrepOutputMode(name) ?? outputMode;
       continue;
     }
     if (!/^-[^-]/.test(token)) continue;
@@ -5149,10 +5182,10 @@ function gitGrepListsOnly(args: readonly string[]): boolean {
         if (optionIndex === token.length - 1) tokenIndex += 1;
         break;
       }
-      if (option === 'l' || option === 'L') return true;
+      if (option === 'l' || option === 'L') outputMode = 'files-only';
     }
   }
-  return false;
+  return outputMode === 'files-only';
 }
 
 const GIT_METADATA_ONLY_FLAGS = [
@@ -5255,6 +5288,7 @@ function shellCommandReadsDotenv(
     }
 
     if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
+    if (inputRedirectionTargets(segment).some((target) => shellOperandCouldMatchDotenv(target))) return true;
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
     if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;

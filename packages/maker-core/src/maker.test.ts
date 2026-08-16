@@ -386,6 +386,37 @@ describe('Maker session creation singleflight', () => {
     expect(close).toHaveBeenCalledTimes(2);
   });
 
+  it('retains an active session owner when shutdown detach is unconfirmed and retries it later', async () => {
+    let closeAttempts = 0;
+    const close = vi.fn(async () => {
+      closeAttempts += 1;
+      if (closeAttempts === 1) throw new Error('termination unconfirmed');
+    });
+    const handle = createHandle({ id: 'active-pi-thread', agentKind: 'pi' });
+    handle.close = close;
+    const maker = new Maker({
+      agents: { pi: createAgent(async () => handle, 'pi') },
+      storage: createStorage(),
+      logger: createLogger(),
+    });
+    const session = await maker.createSession({
+      id: 'session-active-cleanup-retry',
+      agentKind: 'pi',
+      workingDir: '/repo',
+      model: 'pi-model',
+    });
+
+    await maker.shutdown();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(session.getStatus()).toBe('error');
+    expect(maker.listActiveSessions()).toEqual([session]);
+
+    await maker.shutdown();
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(session.getStatus()).toBe('closed');
+    expect(maker.listActiveSessions()).toEqual([]);
+  });
+
   it('detaches active sessions before the creation barrier and reclaims late publications', async () => {
     const lifecycleStarted = createDeferred();
     const lifecycleGate = createDeferred();

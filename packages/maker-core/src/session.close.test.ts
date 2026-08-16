@@ -377,4 +377,39 @@ describe('Session close lifecycle', () => {
     expect(session.getStatus()).toBe('closed');
     expect(close).toHaveBeenCalledTimes(2);
   });
+
+  it('keeps the status owner when detach fails and publishes closed only after retry', async () => {
+    let attempts = 0;
+    const detach = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('transport detach failed');
+    });
+    const handle = {
+      id: 'thread-detach-retry',
+      agentKind: 'pi',
+      model: 'gpt-5.4',
+      close: vi.fn(async () => {}),
+      detach,
+      setInteractionResolver() {},
+    } as unknown as AgentSessionHandle;
+    const session = new Session({
+      id: 'session-detach-retry',
+      agentKind: 'pi',
+      workDir: '/repo',
+      handle,
+      capabilities: {} as never,
+      logger: createLogger() as never,
+    });
+    const statuses: string[] = [];
+    session.onStatusChange((status) => statuses.push(status));
+
+    await expect(session.detach()).rejects.toThrow('transport detach failed');
+    expect(statuses).toEqual(['error']);
+    expect(session.getStatus()).toBe('error');
+
+    await expect(session.detach()).resolves.toBeUndefined();
+    expect(statuses).toEqual(['error', 'closed']);
+    expect(session.getStatus()).toBe('closed');
+    expect(detach).toHaveBeenCalledTimes(2);
+  });
 });

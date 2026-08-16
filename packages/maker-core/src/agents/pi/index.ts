@@ -2873,22 +2873,14 @@ export class PiAgent extends BaseAgent {
             message: err instanceof Error ? err.message : String(err),
           });
         }
-        // 轮 40-w4-t10 MEDIUM(修复的修复):runtime 文件清理必须在 finally ——
-        // proc.close 抛错(如 killRemoteSession 失败)时旧实现会跳过 cleanup,
-        // 权限文件/subagent snapshot 残留在磁盘。清理不受 close 成败影响。
-        // 轮 42 P1(codex-connector 修正):**远端会话不清理** —— killRemoteSession
-        // 失败说明远端 pi 可能仍持有 configHome/permission/subagent runtime
-        // 继续跑(凭证仍在 env), 删文件会让存活 pi 丢 bridge/permission 状态。
-        // 与 onExit 同口径:远端残留交给 daemon idle 回收/下次 startSession 的
-        // 清陈旧目录兜底(轮 40-w4-t4); 本地 stdio 无 daemon, close 后进程必死。
-        try {
-          await proc.close();
-        } finally {
-          if (!remote) {
-            // 会话结束:清理隔离的 configHome 与 runtime 文件(onExit 幂等,二者先到先清)。
-            cleanupConfigHome();
-            cleanupRuntimeFiles();
-          }
+        // A local close is only complete after proc.close confirms process exit.
+        // Until then the still-live process may continue reading its isolated
+        // config, permission policy, and subagent routing snapshot.
+        await proc.close();
+        if (!remote) {
+          // 会话结束:清理隔离的 configHome 与 runtime 文件(onExit 幂等,二者先到先清)。
+          cleanupConfigHome();
+          cleanupRuntimeFiles();
         }
       },
 

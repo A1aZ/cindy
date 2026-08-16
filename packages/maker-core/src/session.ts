@@ -845,21 +845,29 @@ export class Session {
     // （vision bridge 等前置 hook 的 fetch），而不是等 handle.detach()/视觉通道超时——
     // 否则 handle.detach() 慢/挂起时，in-flight 视觉请求会继续拖住退出链。
     this.cancelSendReservation(this.sendReservation);
+    let detachSucceeded = false;
     try {
       if (this.handle.detach) {
         await this.handle.detach();
       } else {
         await this.handle.close();
       }
+      detachSucceeded = true;
     } finally {
       this.sendReservation = null;
       this.currentTurnOrigin = null;
       this.currentTurnAttemptToken = null;
       this.clearTerminalErrorDrain();
-      this.setStatus('closed');
       this.eventListeners.clear();
-      this.statusListeners.clear();
       this.interactionListener = null;
+      if (detachSucceeded) {
+        this.setStatus('closed');
+        this.statusListeners.clear();
+      } else {
+        // Shutdown must retain Maker's status listener and active-session owner
+        // until a later detach/close attempt confirms the process is gone.
+        this.setStatus('error');
+      }
     }
   }
 

@@ -12,7 +12,7 @@
  * resume 路径、启动 RPC 也不会即时拒),控制流本身才是被测对象。
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -365,6 +365,32 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(clearIntervalSpy).toHaveBeenCalledOnce();
     expect(disposed).toBe(1); // close() 才注销
     expect(proxyDisposed).toBe(1);
+  });
+
+  it('keeps local runtime files until a close retry confirms process exit', async () => {
+    knobs.closeFailuresRemaining = 1;
+    const handle = await new PiAgent(buildDeps()).startSession(opts());
+    const env = knobs.spawnedEnvs[0]!;
+    const configHome = env.PI_CODING_AGENT_DIR!;
+    const permissionFile = env.CINDY_PI_PERMISSION_FILE!;
+    const subagentRuntimeFile = env.CINDY_PI_SUBAGENT_RUNTIME_FILE!;
+
+    expect(existsSync(configHome)).toBe(true);
+    expect(existsSync(permissionFile)).toBe(true);
+    expect(existsSync(subagentRuntimeFile)).toBe(true);
+
+    await expect(handle.close()).rejects.toThrow(/close unconfirmed/);
+    expect(existsSync(configHome)).toBe(true);
+    expect(existsSync(permissionFile)).toBe(true);
+    expect(existsSync(subagentRuntimeFile)).toBe(true);
+
+    await expect(handle.close()).resolves.toBeUndefined();
+    await vi.waitFor(() => {
+      expect(existsSync(configHome)).toBe(false);
+      expect(existsSync(permissionFile)).toBe(false);
+      expect(existsSync(subagentRuntimeFile)).toBe(false);
+    });
+    expect(knobs.closeCount).toBe(2);
   });
 
   it('always disables project trust and implicit extensions while explicitly restoring only Cindy extensions', async () => {

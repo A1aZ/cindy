@@ -946,9 +946,30 @@ export class Maker {
     const agentEntries = Object.entries(this.agents);
     const errors: Array<{ kind: string; name: string; error: unknown }> = [];
 
-    // Queue agent-level process shutdown before waiting for session creation.
-    // PiAgent.dispose() owns its own startup barrier, so a startup that fails
-    // after this point can still publish a quarantine entry and be reclaimed.
+    // Snapshot current sessions before the creation barrier. Existing local
+    // Claude/PI processes must start terminating immediately; a stuck startup
+    // must not consume the entire host quit window before their detach begins.
+    const initialSessionSnapshot = Array.from(this.activeSessions.values());
+    const initialSessionIdentities = new Set(initialSessionSnapshot);
+    const queueSessionDetaches = (
+      sessions: readonly Session[],
+      phase: 'initial' | 'late',
+    ): Array<Promise<void>> => {
+      for (const session of sessions) {
+        if (!this.closeReasons.has(session)) this.closeReasons.set(session, 'requested');
+      }
+      return sessions.map((session) =>
+        Promise.resolve()
+          .then(() => session.detach())
+          .catch((e) => {
+            errors.push({ kind: `session-${phase}`, name: session.id, error: e });
+          }),
+      );
+    };
+
+    // Queue agent-level process shutdown and the initial Session snapshot
+    // before waiting for session creation. PiAgent.dispose() owns its startup
+    // barrier; Session detach owns already-published local agent processes.
     const initialAgentDisposes = agentEntries.map(([kind, agent]) =>
       Promise.resolve()
         .then(() => agent.dispose())
@@ -956,10 +977,11 @@ export class Maker {
           errors.push({ kind: 'agent', name: kind, error: e });
         }),
     );
+    const initialSessionDetaches = queueSessionDetaches(initialSessionSnapshot, 'initial');
 
     // createSession registers its promise before yielding. Blocking new calls
     // above makes this a stable barrier: after it settles, every handle started
-    // before shutdown is either active or present in failedHandleCleanups.
+    // before shutdown is active, closed, or present in failedHandleCleanups.
     const creationSnapshot = Array.from(this.pendingSessionCreations);
     await Promise.allSettled(creationSnapshot);
 
@@ -971,18 +993,13 @@ export class Maker {
         }),
     );
 
-    // Snapshot only after the creation barrier. Status listeners mutate
-    // activeSessions during close, so iteration must use a stable array.
-    const sessSnapshot = Array.from(this.activeSessions.values());
+    // Only sessions published while the creation barrier was settling belong
+    // to the late pass. Identity filtering avoids detaching an initial Session
+    // twice when it remains in activeSessions until its first detach settles.
+    const lateSessionSnapshot = Array.from(this.activeSessions.values())
+      .filter((session) => !initialSessionIdentities.has(session));
+    const lateSessionDetaches = queueSessionDetaches(lateSessionSnapshot, 'late');
     const failedHandleCleanupSnapshot = Array.from(this.failedHandleCleanups.entries());
-
-    // shutdown() calls detach() directly instead of closeSession(), so record
-    // the explicit cause before any asynchronous close callback can run. This
-    // prevents app exit from looking like an unexpected provider rebuild and
-    // accidentally preserving an automatic retry lease.
-    for (const session of sessSnapshot) {
-      if (!this.closeReasons.has(session)) this.closeReasons.set(session, 'requested');
-    }
 
     const failedHandleCloses = failedHandleCleanupSnapshot.map(([sessionId, entry]) =>
       Promise.resolve()
@@ -992,18 +1009,11 @@ export class Maker {
         }),
     );
 
-    const sessionCloses = sessSnapshot.map((s) =>
-      Promise.resolve()
-        .then(() => s.detach())
-        .catch((e) => {
-          errors.push({ kind: 'session', name: s.id, error: e });
-        }),
-    );
-
     await Promise.allSettled([
+      ...initialSessionDetaches,
       ...finalAgentDisposes,
       ...failedHandleCloses,
-      ...sessionCloses,
+      ...lateSessionDetaches,
     ]);
 
     if (errors.length > 0) {

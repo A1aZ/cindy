@@ -2744,6 +2744,8 @@ export class PiAgent extends BaseAgent {
         const previousTurnPermissionPolicy = activeTurnPermissionPolicy;
         activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         let providerAccepted = false;
+        let promptRequestStarted = false;
+        let providerRejected = false;
         try {
           if (reviewMode) {
             await assertReviewMessageContentPaths(
@@ -2767,6 +2769,7 @@ export class PiAgent extends BaseAgent {
             ? await readPiUserEntryIds()
             : null;
           rejectIfCancelled(sendOpts, 'send');
+          promptRequestStarted = true;
           const resp = await proc.request(command, {
             timeoutMs: PI_PROMPT_ACCEPTANCE_TIMEOUT_MS,
             // Prompt acceptance may legitimately span multiple compaction
@@ -2776,6 +2779,7 @@ export class PiAgent extends BaseAgent {
               PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
           });
           if (!resp.success) {
+            providerRejected = true;
             throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
           }
           providerAccepted = true;
@@ -2784,16 +2788,14 @@ export class PiAgent extends BaseAgent {
           // 只在 Provider 尚未接受本轮时回滚。接受后的 transcript 回调失败不代表
           // turn 没启动；此时恢复旧 policy 会让正在运行的新 turn 用错安全边界。
           if (!providerAccepted) activeTurnPermissionPolicy = previousTurnPermissionPolicy;
-          const rpcError = err as { code?: unknown; commandType?: unknown } | null;
-          if (
-            rpcError?.code === 'PI_RPC_TIMEOUT'
-            && rpcError.commandType === 'prompt'
-          ) {
-            // 接受等待超时后，原 prompt 仍可能在 preflight 压缩结束时迟到执行。
-            // 上抛稳定错误，让 Session 先占住关闭门再杀 transport；Goal 随后
-            // 明确阻塞并要求人工确认，绝不盲目重放可能已有副作用的 turn。
+          // Before proc.request the turn is known not to have reached Pi. Once
+          // request starts, a transport/write/envelope failure cannot prove
+          // whether Pi accepted the prompt; only success:false is an explicit
+          // rejection. Fence every other unknown result before Goal may resume.
+          if (promptRequestStarted && !providerAccepted && !providerRejected) {
+            const detail = err instanceof Error ? err.message : String(err);
             throw new TurnDispatchUnconfirmedError(
-              `Pi did not confirm prompt acceptance within ${PI_PROMPT_ACCEPTANCE_TIMEOUT_MS}ms`,
+              `Pi did not confirm prompt acceptance: ${detail}`,
               { cause: err },
             );
           }

@@ -386,6 +386,67 @@ describe('Maker session creation singleflight', () => {
     expect(close).toHaveBeenCalledTimes(2);
   });
 
+  it('detaches active sessions before the creation barrier and reclaims late publications', async () => {
+    const lifecycleStarted = createDeferred();
+    const lifecycleGate = createDeferred();
+    const initialClose = vi.fn(async () => undefined);
+    const lateClose = vi.fn(async () => undefined);
+    const initialHandle = createHandle({ id: 'initial-pi-thread', agentKind: 'pi' });
+    initialHandle.close = initialClose;
+    const lateHandle = createHandle({ id: 'late-pi-thread', agentKind: 'pi' });
+    lateHandle.close = lateClose;
+    const startSession = vi.fn(async (opts: CreateSessionOptions) =>
+      opts.id === 'session-initial' ? initialHandle : lateHandle,
+    );
+    const agent = createAgent(startSession, 'pi');
+    const dispose = vi.fn(async () => undefined);
+    agent.dispose = dispose;
+    const maker = new Maker({
+      agents: { pi: agent },
+      storage: createStorage(),
+      logger: createLogger(),
+      lifecycleHooks: {
+        prepareStartOptions: async (sessionId) => {
+          if (sessionId !== 'session-late') return;
+          lifecycleStarted.resolve();
+          await lifecycleGate.promise;
+        },
+      },
+    });
+
+    await maker.createSession({
+      id: 'session-initial',
+      agentKind: 'pi',
+      workingDir: '/repo',
+      model: 'pi-model',
+    });
+    const creatingLate = maker.createSession({
+      id: 'session-late',
+      agentKind: 'pi',
+      workingDir: '/repo',
+      model: 'pi-model',
+    });
+    await lifecycleStarted.promise;
+
+    const shuttingDown = maker.shutdown();
+    await vi.waitFor(() => expect(initialClose).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledTimes(1));
+    expect(lateClose).not.toHaveBeenCalled();
+
+    lifecycleGate.resolve();
+    await creatingLate;
+    await shuttingDown;
+
+    expect(initialClose).toHaveBeenCalledTimes(1);
+    expect(lateClose).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(2);
+    expect(maker.listActiveSessions()).toEqual([]);
+
+    await maker.shutdown();
+    expect(initialClose).toHaveBeenCalledTimes(1);
+    expect(lateClose).toHaveBeenCalledTimes(1);
+  });
+
   it('disposes an agent again after a lifecycle-blocked startup clears the creation barrier', async () => {
     const lifecycleStarted = createDeferred();
     const lifecycleGate = createDeferred();

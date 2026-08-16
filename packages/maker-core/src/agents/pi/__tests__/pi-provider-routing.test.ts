@@ -1525,6 +1525,58 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it.each([
+    ['transport close before response', new Error('pi process exited (code=null, signal=null)')],
+    ['unknown write result', new Error('write EPIPE')],
+    ['malformed response envelope', new Error('pi rpc: response for prompt missing boolean success')],
+  ])('marks %s after prompt request starts as an unconfirmed dispatch', async (_label, failure) => {
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      if (command.type === 'prompt') throw failure;
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: `prompt-unknown-${String(_label).replaceAll(' ', '-')}`,
+      workingDir: cwd,
+      model: 'local-model',
+    });
+
+    await expect(handle.send({ type: 'user', content: 'continue the goal' })).rejects.toMatchObject({
+      name: 'TurnDispatchUnconfirmedError',
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+      cause: failure,
+    });
+    expect(captured.requests.filter((request) => request.type === 'prompt')).toHaveLength(1);
+    await handle.close();
+  });
+
+  it('keeps an explicit prompt rejection as a confirmed undispatched error', async () => {
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      if (command.type === 'prompt') return { success: false, error: 'prompt rejected before acceptance' };
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'prompt-explicit-rejection',
+      workingDir: cwd,
+      model: 'local-model',
+    });
+
+    const error = await handle.send({ type: 'user', content: 'continue the goal' })
+      .then(() => null, (reason: unknown) => reason);
+    expect(error).toEqual(expect.objectContaining({
+      message: 'pi prompt rejected: prompt rejected before acceptance',
+    }));
+    expect((error as { code?: unknown }).code).toBeUndefined();
+    await handle.close();
+  });
+
   it('keeps a leading /skill: command at the prompt start even when Extra Dirs are configured', async () => {
     const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
     const handle = await agent.startSession({

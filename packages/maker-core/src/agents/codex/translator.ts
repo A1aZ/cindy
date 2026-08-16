@@ -28,6 +28,7 @@ import {
 } from '@cindy/maker-shared/error-redaction';
 import {
   stableInternalWebCitationBoundary,
+  stableStandaloneModelStopTokenBoundary,
   stripInternalWebCitations,
 } from '@cindy/maker-shared/internal-citation';
 
@@ -1012,22 +1013,27 @@ function findUnfinishedCitationOpen(text: string): number {
 export function finalizeCodexCitationText(text: string): string {
   const fileOpenAt = findUnfinishedCitationOpen(text);
   const fileStableEnd = fileOpenAt === -1 ? text.length : fileOpenAt;
-  const stableEnd = Math.min(fileStableEnd, stableInternalWebCitationBoundary(text));
+  const stableEnd = Math.min(
+    fileStableEnd,
+    stableInternalWebCitationBoundary(text),
+    stableStandaloneModelStopTokenBoundary(text),
+  );
   return stripInternalWebCitations(normalizeCodexFileCitations(text.slice(0, stableEnd)));
 }
 
 export function stableCitationBoundary(text: string): number {
+  const stopTokenEnd = stableStandaloneModelStopTokenBoundary(text);
   const open = findUnfinishedCitationOpen(text);
   if (open !== -1) {
-    return Math.min(open, stableInternalWebCitationBoundary(text));
+    return Math.min(open, stableInternalWebCitationBoundary(text), stopTokenEnd);
   }
   const maxProbe = Math.min(text.length, CODEX_FILE_CITATION_OPEN.length - 1);
   for (let k = maxProbe; k > 0; k -= 1) {
     if (text.endsWith(CODEX_FILE_CITATION_OPEN.slice(0, k))) {
-      return Math.min(text.length - k, stableInternalWebCitationBoundary(text));
+      return Math.min(text.length - k, stableInternalWebCitationBoundary(text), stopTokenEnd);
     }
   }
-  return stableInternalWebCitationBoundary(text);
+  return Math.min(stableInternalWebCitationBoundary(text), stopTokenEnd);
 }
 
 function emitAgentMessageProgress(

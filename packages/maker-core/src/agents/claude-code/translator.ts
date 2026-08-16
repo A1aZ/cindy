@@ -149,9 +149,10 @@ export interface RuntimeState {
   lastResultUsageAggregate: ResultUsageAggregate | null;
   /**
    * 按 streamKey 隔离的停止符清洗缓冲。text_delta 可能把 `<|eos|>` 拆开，
-   * 必须先拼回该 stream 的快照再清洗；并发 subagent 不能共用一份原文。
+   * 必须先拼回该 stream 的快照再清洗。`emitted` 只表示本流是否已发出可见
+   * 正文：独立停止符按这个判定，不能看整轮 `uiEmittedText`。
    */
-  streamStopTokenByKey: Map<string, { pending: string }>;
+  streamStopTokenByKey: Map<string, { pending: string; emitted: boolean }>;
 }
 
 export function newRuntimeState(): RuntimeState {
@@ -1287,20 +1288,20 @@ function handleStreamEvent(
     const delta = event.delta as { type?: string; text?: string; thinking?: string } | undefined;
     if (!delta) return;
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      const buffer = ctx.rt.streamStopTokenByKey.get(streamKey) ?? { pending: '' };
-      const holdStandalonePrefix = ctx.turn.uiEmittedText.length === 0;
+      const buffer = ctx.rt.streamStopTokenByKey.get(streamKey)
+        ?? { pending: '', emitted: false };
       const combined = buffer.pending + delta.text;
-      if (holdStandalonePrefix && isPossibleStandaloneStopPrefix(combined)) {
+      if (!buffer.emitted && isPossibleStandaloneStopPrefix(combined)) {
         buffer.pending = combined;
         ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
         return;
       }
       buffer.pending = '';
-      ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
-      const visibleDelta = holdStandalonePrefix
-        ? stripInternalWebCitations(combined)
-        : combined;
+      const visibleDelta = buffer.emitted
+        ? combined
+        : stripInternalWebCitations(combined);
       if (visibleDelta.length > 0) {
+        buffer.emitted = true;
         ctx.turn.hasEmittedText = true;
         ctx.turn.uiEmittedText += visibleDelta;
         queue.push({
@@ -1310,6 +1311,7 @@ function handleStreamEvent(
           agentMeta: fallbackMeta,
         });
       }
+      ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
     } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
       // 第一次见 thinking_delta 时 lazy-init 一个 buffer (老链路 agentManager.ts:2322-2335)
       if (!ctx.rt.currentThinking) {

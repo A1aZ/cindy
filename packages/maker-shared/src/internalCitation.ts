@@ -10,7 +10,6 @@
  * is not user-facing prose either.
  */
 const MODEL_STOP_TOKENS = new Set(['<|endoftext|>', '<|eot_id|>', '<|im_end|>', '<|eos|>']);
-const MODEL_STOP_TOKEN_NAMES = ['endoftext', 'eot_id', 'im_end', 'eos'] as const;
 const LONGEST_MODEL_STOP_TOKEN = Math.max(
   ...[...MODEL_STOP_TOKENS].map((token) => token.length),
 );
@@ -88,16 +87,15 @@ export function stripStandaloneModelStopToken(text: string): string {
 
 /**
  * True while `text` is still only a possible whole-message stop token:
- * surrounding whitespace, a known token, or an incomplete `<|eos` prefix.
- * Used to hold streaming deltas until the leftover can be dropped or flushed.
+ * surrounding whitespace, a known token, or any incomplete prefix of one
+ * (`<`, `<|`, `<|eo`, …). Used to hold streaming deltas until the leftover
+ * can be dropped or flushed.
  */
 export function isPossibleStandaloneStopPrefix(text: string): boolean {
-  if (MODEL_STOP_TOKENS.has(text.trim())) return true;
   if (text.length > MAX_STANDALONE_STOP_PREFIX) return false;
   const candidate = text.trim();
   if (candidate.length === 0) return true;
-  if (!candidate.startsWith('<|')) return false;
-  return MODEL_STOP_TOKEN_NAMES.some((name) => `<|${name}|>`.startsWith(candidate));
+  return [...MODEL_STOP_TOKENS].some((token) => token.startsWith(candidate));
 }
 
 /**
@@ -117,8 +115,10 @@ export interface StandaloneStopTokenHold {
 
 /**
  * Hold a leftover stop token until this stream has either completed it or
- * proven it is ordinary prose. The buffer is per stream; callers must not
- * share it across concurrent text streams.
+ * proven it is ordinary prose. After visible prose starts, still hold an
+ * unfinished Web-citation tail so split markers are not emitted raw.
+ * The buffer is per stream; callers must not share it across concurrent
+ * text streams.
  */
 export function holdStandaloneStopTokenDelta(
   buffer: StandaloneStopTokenHold,
@@ -129,8 +129,12 @@ export function holdStandaloneStopTokenDelta(
     buffer.pending = combined;
     return null;
   }
-  buffer.pending = '';
-  const visible = buffer.emitted ? combined : stripInternalWebCitations(combined);
+  const citationEnd = stableInternalWebCitationBoundary(combined);
+  buffer.pending = combined.slice(citationEnd);
+  const stable = combined.slice(0, citationEnd);
+  const visible = buffer.emitted
+    ? stripInternalWebCitationMarkers(stable)
+    : stripInternalWebCitations(stable);
   if (visible.length > 0) buffer.emitted = true;
-  return visible;
+  return visible.length > 0 ? visible : null;
 }

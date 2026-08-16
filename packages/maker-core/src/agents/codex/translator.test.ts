@@ -1966,6 +1966,7 @@ describe('codex internal citation 归一化 (#785)', () => {
     const braceComplete = 'abc :codex-file-citation{path="/tmp/a{b}.md"}';
     expect(stableCitationBoundary(braceComplete)).toBe(braceComplete.length);
     expect(stableCitationBoundary('<|eo')).toBe(0);
+    expect(stableCitationBoundary('<')).toBe(0);
     expect(stableCitationBoundary('  <|eos|>')).toBe(0);
     expect(stableCitationBoundary('The token is <|eos|>')).toBe('The token is <|eos|>'.length);
   });

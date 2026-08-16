@@ -57,6 +57,8 @@ describe('leaked model stop tokens', () => {
     expect(stableStandaloneModelStopTokenBoundary('<|eos|>')).toBe(0);
     expect(stableStandaloneModelStopTokenBoundary('The token is <|eo')).toBe('The token is <|eo'.length);
     expect(isPossibleStandaloneStopPrefix('  <|eo')).toBe(true);
+    expect(isPossibleStandaloneStopPrefix('<')).toBe(true);
+    expect(isPossibleStandaloneStopPrefix('<|')).toBe(true);
     expect(isPossibleStandaloneStopPrefix('The token is <|eo')).toBe(false);
   });
 
@@ -75,5 +77,27 @@ describe('leaked model stop tokens', () => {
     expect(holdStandaloneStopTokenDelta(a, 's|>')).toBeNull();
     expect(a).toEqual({ pending: '<|eos|>', emitted: false });
     expect(b).toEqual({ pending: '', emitted: true });
+  });
+
+  it('holds a one-character leftover prefix until the closer arrives', () => {
+    const buffer = { pending: '', emitted: false };
+    expect(holdStandaloneStopTokenDelta(buffer, '<')).toBeNull();
+    expect(holdStandaloneStopTokenDelta(buffer, '|eos|>')).toBeNull();
+    expect(buffer).toEqual({ pending: '<|eos|>', emitted: false });
+  });
+
+  it('still strips a split web citation after ordinary prose has been emitted', () => {
+    const buffer = { pending: '', emitted: false };
+    expect(holdStandaloneStopTokenDelta(buffer, '结论。')).toBe('结论。');
+    expect(holdStandaloneStopTokenDelta(buffer, '\uE200ci')).toBeNull();
+    expect(holdStandaloneStopTokenDelta(buffer, 'te\uE202turn17search1\uE201 后续')).toBe(' 后续');
+    expect(buffer.emitted).toBe(true);
+    expect(buffer.pending).toBe('');
+  });
+
+  it('keeps an embedded stop token after ordinary prose has been emitted', () => {
+    const buffer = { pending: '', emitted: false };
+    expect(holdStandaloneStopTokenDelta(buffer, 'The token is ')).toBe('The token is ');
+    expect(holdStandaloneStopTokenDelta(buffer, '<|eos|>')).toBe('<|eos|>');
   });
 });

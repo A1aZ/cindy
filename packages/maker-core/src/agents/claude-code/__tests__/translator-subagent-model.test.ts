@@ -195,6 +195,33 @@ describe('Claude Code assistant text streaming contract', () => {
     expect(ctx.turn.uiEmittedText).toBe('');
   });
 
+  it('does not emit a stop token split as a single-character prefix', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    for (const [uuid, text] of [
+      ['stream-lt-1', '<'],
+      ['stream-lt-2', '|eos|>'],
+    ] as const) {
+      translateSdkMessage(
+        {
+          type: 'stream_event',
+          uuid,
+          session_id: 'sdk-session',
+          parent_tool_use_id: null,
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text } },
+        },
+        queue,
+        ctx,
+      );
+    }
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents).toEqual([]);
+    expect(ctx.turn.hasEmittedText).toBe(false);
+    expect(ctx.turn.uiEmittedText).toBe('');
+  });
+
   it('does not emit leading whitespace from a split standalone stop token', async () => {
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx();

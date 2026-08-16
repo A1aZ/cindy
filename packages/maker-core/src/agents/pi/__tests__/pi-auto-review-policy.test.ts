@@ -74,14 +74,21 @@ describe('classifyPiToolForAutoReview', () => {
       { path: innocentLink },
       ['/Users/t/.ssh/id_rsa'],
     )).toBe('prompt-each-time');
+    expect(verdict(
+      'bash',
+      { command: `cat<${innocentLink}` },
+      [`${WS}/secrets/.env`],
+    )).toBe('prompt-each-time');
 
-    // A normal symlink produces no credential evidence and keeps the readonly fast path.
+    // Normal symlinks produce no credential evidence and keep their existing fast paths.
     expect(verdict('read', { path: innocentLink }, [])).toBe('auto-approve');
+    expect(verdict('bash', { command: `cat<${innocentLink}` }, [])).toBe('auto-approve');
     // Non-empty evidence that no longer matches Host policy indicates protocol drift.
     expect(verdict('read', { path: innocentLink }, [`${WS}/ordinary.txt`])).toBe(
       'prompt-each-time',
     );
     expect(verdict('read', { path: innocentLink }, null)).toBe('prompt-each-time');
+    expect(verdict('bash', { command: `cat<${innocentLink}` }, null)).toBe('prompt-each-time');
   });
 
   it('catches /proc environ variants including task/<tid> (env dump = credentials)', () => {

@@ -1955,6 +1955,74 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it.skipIf(!canSymlink)(
+    'auto mode escalates bash input redirects reached through a dotenv symlink',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-dotenv-'));
+      try {
+        const secretPath = path.join(workingDir, 'secrets', '.env');
+        const linkPath = path.join(workingDir, 'innocent.txt');
+        mkdirSync(path.dirname(secretPath), { recursive: true });
+        writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
+        symlinkSync(secretPath, linkPath);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: `cat<${linkPath}` }),
+          anthropicStreamBody('bash symlink dotenv turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-symlink-dotenv',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual(['bash']);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('FAKE_REDIRECT_DOTENV_SECRET'))).toBe(false);
+        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it.skipIf(!canSymlink)(
+    'auto mode keeps ordinary bash input redirect symlinks on the readonly fast path',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-plain-'));
+      try {
+        const targetPath = path.join(workingDir, 'ordinary-target.txt');
+        const linkPath = path.join(workingDir, 'ordinary-link.txt');
+        writeFileSync(targetPath, 'ordinary-bash-symlink-content');
+        symlinkSync(targetPath, linkPath);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: `cat<${linkPath}` }),
+          anthropicStreamBody('bash ordinary symlink turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-symlink-plain',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('ordinary-bash-symlink-content'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it.skipIf(!canSymlink)(
     'full access blocks credential reads reached through a workspace symlink',
     { timeout: 60_000 },
     async () => {

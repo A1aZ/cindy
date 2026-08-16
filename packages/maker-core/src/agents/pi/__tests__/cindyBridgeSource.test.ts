@@ -132,6 +132,8 @@ describe('cindy-bridge extension source', () => {
       const executableSource = [
         source.slice(helperStart, helperEnd),
         '(globalThis as any).collectResolvedCredentialPaths = collectResolvedCredentialPaths;',
+        '(globalThis as any).bashInputReadTargets = bashInputReadTargets;',
+        '(globalThis as any).parseShellInputRedirections = parseShellInputRedirections;',
       ].join('\n');
       const compiled = ts.transpileModule(executableSource, {
         compilerOptions: {
@@ -142,12 +144,14 @@ describe('cindy-bridge extension source', () => {
       const context: {
         realpathSync: typeof realpathSync;
         collectResolvedCredentialPaths?: (input: unknown) => string[];
+        bashInputReadTargets?: (input: unknown) => string[];
+        parseShellInputRedirections?: (command: string) => { command: string; targets: string[] };
       } = { realpathSync };
       runInNewContext(compiled, context);
 
       const tempRoot = mkdtempSync(path.join(tmpdir(), 'cindy-pi-credential-link-'));
       try {
-        const secretPath = path.join(tempRoot, 'secrets', 'id_rsa');
+        const secretPath = path.join(tempRoot, 'secrets', '.env');
         const ordinaryPath = path.join(tempRoot, 'ordinary.txt');
         const secretLink = path.join(tempRoot, 'innocent.txt');
         const ordinaryLink = path.join(tempRoot, 'ordinary-link.txt');
@@ -161,6 +165,18 @@ describe('cindy-bridge extension source', () => {
           realpathSync(secretPath),
         ]);
         expect(context.collectResolvedCredentialPaths?.({ path: ordinaryLink })).toEqual([]);
+
+        const secretCommand = `cat<${secretLink}`;
+        const ordinaryCommand = `cat<${ordinaryLink}`;
+        expect(context.parseShellInputRedirections?.(secretCommand).command.trim()).toBe('cat');
+        expect(context.bashInputReadTargets?.({ command: secretCommand })).toEqual([secretLink]);
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({ command: secretCommand }),
+        )).toEqual([realpathSync(secretPath)]);
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({ command: ordinaryCommand }),
+        )).toEqual([]);
+        expect(source).toContain("event.toolName === 'bash' ? bashInputReadTargets(event.input) : []");
         expect(source).toContain('resolvedCredentialPaths: resolvedCredentialReadPaths');
       } finally {
         rmSync(tempRoot, { recursive: true, force: true });

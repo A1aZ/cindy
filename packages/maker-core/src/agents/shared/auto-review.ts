@@ -42,6 +42,7 @@ import {
   isSensitiveCredentialPath,
   SENSITIVE_CREDENTIAL_PATH_PATTERNS,
 } from './sensitive-credential-paths.js';
+import { parseShellInputRedirections } from './shell-input-redirections.js';
 
 export { isSensitiveCredentialPath } from './sensitive-credential-paths.js';
 
@@ -4886,16 +4887,6 @@ function shellOperandCouldMatchDotenv(
   });
 }
 
-function inputRedirectionTargets(command: string): string[] {
-  const targets: string[] = [];
-  const re = /(?:^|[\s;&|()])(?:\d*|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:<>|<(?![<&(]))\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|<>()]+)/g;
-  for (const match of command.matchAll(re)) {
-    const target = match[1].replace(/['"]/g, '');
-    if (target) targets.push(target);
-  }
-  return targets;
-}
-
 function readerArgumentsReadDotenv(
   bin: string,
   args: readonly string[],
@@ -5265,8 +5256,9 @@ function shellCommandReadsDotenv(
   opts: ShellReviewOptions,
 ): boolean {
   for (const segment of splitTopLevelSegments(command)) {
+    const inputRedirections = parseShellInputRedirections(segment);
     const unwrapped = unwrapCommand(
-      stripShellControlTokens(tokenize(segment)),
+      stripShellControlTokens(tokenize(inputRedirections.command)),
       opts.cwd ?? workspaceRoots[0],
       opts.cwdUnknown === true,
     );
@@ -5288,7 +5280,7 @@ function shellCommandReadsDotenv(
     }
 
     if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
-    if (inputRedirectionTargets(segment).some((target) => shellOperandCouldMatchDotenv(target))) return true;
+    if (inputRedirections.targets.some((target) => shellOperandCouldMatchDotenv(target))) return true;
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
     if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;
@@ -5382,7 +5374,8 @@ export function classifyShellCommand(
   let trackedCwdUnknown = opts.cwdUnknown === true;
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   for (const seg of segments) {
-    const segTokens = stripShellControlTokens(tokenize(seg));
+    const parsedSegment = parseShellInputRedirections(seg);
+    const segTokens = stripShellControlTokens(tokenize(parsedSegment.command));
     const dirChange = directoryChangeTarget(segTokens);
     if (dirChange.changesDirectory) {
       const segBin = executableName(segTokens[0] ?? '');
@@ -5401,7 +5394,7 @@ export function classifyShellCommand(
       needsPrompt = true; // 区外/动态目标、source/popd:与改动前同档(灰区)。
       continue;
     }
-    const v = classifyShellSegment(seg, workspaceRoots, opts);
+    const v = classifyShellSegment(parsedSegment.command, workspaceRoots, opts);
     if (v === 'prompt-each-time') return 'prompt-each-time';
     if (v === 'prompt') needsPrompt = true;
   }

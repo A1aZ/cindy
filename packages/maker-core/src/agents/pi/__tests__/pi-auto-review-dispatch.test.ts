@@ -939,7 +939,9 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     );
 
     firePermissionRequest('policy-first', 'write', { path: '/tmp/first.txt' });
-    firePermissionRequest('policy-continuation', 'bash', { command: 'pnpm test' });
+    firePermissionRequest('policy-continuation', 'bash', { command: 'pnpm test' }, {
+      resolvedCredentialPaths: [],
+    });
     expect((await waitForResponse('policy-first')).confirmed).toBe(true);
     expect((await waitForResponse('policy-continuation')).confirmed).toBe(true);
     expect(forceConfirmToolCall).toHaveBeenCalledTimes(2);

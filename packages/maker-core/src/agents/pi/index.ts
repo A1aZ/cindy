@@ -3443,12 +3443,12 @@ export class PiAgent extends BaseAgent {
         /* keep defaults */
       }
       if (
-        (toolName === 'read' || toolName === 'grep' || toolName === 'find' || toolName === 'ls')
+        (toolName === 'read' || toolName === 'grep' || toolName === 'find' || toolName === 'ls' || toolName === 'bash')
         && resolvedCredentialPaths === undefined
       ) {
-        // Readonly calls only reach Host after the bridge identifies credential risk.
-        // Missing canonical-path evidence therefore means an old or malformed bridge,
-        // not a safe read; require explicit consent instead of trusting the link name.
+        // Readonly calls and bash input redirects only reach Host with bridge-supplied
+        // canonical-path evidence. Missing evidence means an old or malformed bridge,
+        // not a safe read; require explicit consent instead of trusting a link name.
         resolvedCredentialPaths = null;
       }
       const {

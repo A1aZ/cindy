@@ -385,6 +385,11 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     for (const command of [
       'cat .env',
       'cat <.env',
+      'cat<.env',
+      'cat<"./.env.local"',
+      'env -- cat<.env.production',
+      'grep API_KEY<.env.test',
+      'cat<.e\\nv',
       'cat <".env"',
       'cat 0<.env.local',
       'env -- cat <./.env.production',
@@ -559,6 +564,8 @@ describe('对抗语料 — dotenv 凭证路径', () => {
   it.each([
     ['cat .environment', 'auto-approve'],
     ['cat <README.md', 'auto-approve'],
+    ['cat<README.md', 'auto-approve'],
+    ['env -- cat<ordinary.txt', 'auto-approve'],
     ["cat '<.env'", 'auto-approve'],
     ['cat <<<.env', 'auto-approve'],
     ['cat 0<README.md', 'auto-approve'],

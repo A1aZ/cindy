@@ -28,6 +28,9 @@ import {
   REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
   SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
 } from "../shared/sensitive-credential-paths.js";
+import { shellInputRedirectionParserSource } from "../shared/shell-input-redirections.js";
+
+const SHELL_INPUT_REDIRECTION_PARSER_SOURCE = shellInputRedirectionParserSource();
 
 export const CINDY_BRIDGE_EXTENSION_FILENAME = "cindy-bridge.ts";
 
@@ -112,6 +115,14 @@ const CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(SENSITIVE_CREDENTIAL_PATH_PATT
 const REVIEW_CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS)}
   .map(({ source, flags }) => new RegExp(source, flags));
 const REVIEW_CREDENTIAL_GLOB_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS)};
+
+${SHELL_INPUT_REDIRECTION_PARSER_SOURCE}
+
+function bashInputReadTargets(input: unknown): string[] {
+  if (!input || typeof input !== 'object') return [];
+  const command = (input as Record<string, unknown>).command;
+  return typeof command === 'string' ? parseShellInputRedirections(command).targets : [];
+}
 
 // 递归扫全部字符串叶子(含数组 / 嵌套对象),深度上限防环/超大入参。工具入参把路径
 // 放进 { paths: [...] } 或 { opts: { path } } 时也能命中,不止顶层 string 字段。
@@ -1170,16 +1181,19 @@ export default async function cindyBridge(pi: any) {
     if (event.toolName === 'bash' && commandReadsProcessEnviron(event.input?.command)) {
       return { block: true, reason: 'Cindy blocks reading process environment (/proc/*/environ), even with Full access.' };
     }
-    // 凭证/密钥路径的内置只读工具(read/grep/find/ls)在 Pi 父进程内执行,而父进程 env
-    // 必须保留代理会话 token 与 BYOM keys($ENV 请求期解析、bridge client 使用)。Full
-    // access 若放行 read /proc/self/environ 这类路径,模型可直接取 token 调回环代理,
-    // 绕过审批盗刷当前会话额度(greptile 报)→ 即使 bypassPermissions 也硬拦。原始路径
-    // 命不中时还要跟随符号链接:工作区内的 link 可指向敏感目标,realpath 后再判一次。
+    // 凭证/密钥路径的内置只读工具与 bash 输入重定向都必须携带 canonical
+    // 证据。bash 的原始 input 是整条命令,不能直接 realpath;先用与 Host 相同的
+    // parser 提取真实输入目标,才能识别工作区 symlink 指向的凭证文件。
+    const bashReadTargets = event.toolName === 'bash' ? bashInputReadTargets(event.input) : [];
     const resolvedCredentialReadPaths = READONLY_BUILTINS.has(event.toolName)
       ? [...new Set(collectResolvedCredentialPaths(event.input))]
-      : [];
-    const credentialRead = READONLY_BUILTINS.has(event.toolName)
-      && (touchesCredentialPath(event.input) || resolvedCredentialReadPaths.length > 0);
+      : event.toolName === 'bash'
+        ? [...new Set(collectResolvedCredentialPaths(bashReadTargets))]
+        : [];
+    const credentialRead = (READONLY_BUILTINS.has(event.toolName)
+      && touchesCredentialPath(event.input))
+      || (event.toolName === 'bash' && touchesCredentialPath(bashReadTargets))
+      || resolvedCredentialReadPaths.length > 0;
     if (credentialRead && permission.mode === 'bypassPermissions') {
       return { block: true, reason: 'Cindy blocks reading credential or key paths, even with Full access.' };
     }

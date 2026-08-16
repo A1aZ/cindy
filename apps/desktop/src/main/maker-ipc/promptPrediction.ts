@@ -88,6 +88,8 @@ function buildPredictionPrompt(
 
   // 系统指令写入 Anthropic Messages API 顶层 system 字段（非 Anthropic wire 忽略），
   // 不混入 user message，避免被 Anthropic API 拒绝。
+  // TODO(PR #1965): 该固定 system prompt 指令进入模型 system 段，按
+  // docs/dev-rules/maker-core-and-agent-behavior.md §4 需在合并前取得维护者确认。
   const system = [
     'You are a terse predictive text engine for a coding chat input.',
     'Return only the predicted next user message — no quotes, markdown, commentary, or multiple options.',

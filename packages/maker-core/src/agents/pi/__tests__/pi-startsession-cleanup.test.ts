@@ -21,7 +21,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const knobs = vi.hoisted(() => ({
   ctorThrows: false,
   getStateRejects: false,
+  getStateGate: null as Promise<void> | null,
   closeRejects: false,
+  closeFailuresRemaining: 0,
+  closeGate: null as Promise<void> | null,
   closeCount: 0,
   onExit: null as null | ((info: { code: number | null; signal: string | null }) => void),
   onEvent: null as null | ((event: unknown) => void),
@@ -69,6 +72,8 @@ vi.mock('../rpc-client.js', () => ({
     }
     async request(cmd: { type: string }): Promise<{ success: boolean; data?: unknown; error?: string }> {
       if (cmd.type === 'get_state') {
+        const gate = knobs.getStateGate;
+        if (gate) await gate;
         if (knobs.getStateRejects) throw new Error('get_state rejected (mock)');
         return { success: true, data: { sessionFile: '/mock/session.jsonl', model: { contextWindow: 200000 } } };
       }
@@ -78,6 +83,12 @@ vi.mock('../rpc-client.js', () => ({
     send(): void {}
     async close(): Promise<void> {
       knobs.closeCount++;
+      const gate = knobs.closeGate;
+      if (gate) await gate;
+      if (knobs.closeFailuresRemaining > 0) {
+        knobs.closeFailuresRemaining -= 1;
+        throw new Error('close unconfirmed (mock)');
+      }
       if (knobs.closeRejects) throw new Error('close unconfirmed (mock)');
       this.isClosed = true;
     }
@@ -106,7 +117,10 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   beforeEach(() => {
     knobs.ctorThrows = false;
     knobs.getStateRejects = false;
+    knobs.getStateGate = null;
     knobs.closeRejects = false;
+    knobs.closeFailuresRemaining = 0;
+    knobs.closeGate = null;
     knobs.closeCount = 0;
     knobs.onExit = null;
     knobs.onEvent = null;
@@ -265,6 +279,72 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const handle = await agent.startSession(opts());
     expect(knobs.spawnedEnvs).toHaveLength(2);
     await handle.close();
+  });
+
+  it('retries every quarantined startup process during dispose and remains idempotent', async () => {
+    knobs.getStateRejects = true;
+    knobs.closeRejects = true;
+    const agent = new PiAgent(buildDeps());
+
+    await expect(agent.startSession(opts())).rejects.toThrow(/cleanup remains unconfirmed/);
+    await expect(agent.startSession({ ...opts(), sessionId: 's2' })).rejects.toThrow(
+      /cleanup remains unconfirmed/,
+    );
+    expect(knobs.closeCount).toBe(2);
+
+    knobs.closeRejects = false;
+    await agent.dispose();
+    await agent.dispose();
+
+    expect(knobs.closeCount).toBe(4);
+  });
+
+  it('reclaims a startup cleanup entry registered after dispose begins', async () => {
+    let releaseGetState!: () => void;
+    knobs.getStateGate = new Promise<void>((resolve) => {
+      releaseGetState = resolve;
+    });
+    knobs.getStateRejects = true;
+    knobs.closeFailuresRemaining = 1;
+    const agent = new PiAgent(buildDeps());
+
+    const startup = agent.startSession(opts());
+    const startupFailure = expect(startup).rejects.toThrow(/cleanup remains unconfirmed/);
+    await vi.waitFor(() => expect(knobs.spawnedEnvs).toHaveLength(1));
+    const disposing = agent.dispose();
+    releaseGetState();
+
+    await startupFailure;
+    await disposing;
+    expect(knobs.closeCount).toBe(2);
+    await expect(agent.startSession(opts())).rejects.toThrow(/disposing/);
+  });
+
+  it('shares a late dispose cleanup and fences replacement startup', async () => {
+    knobs.getStateRejects = true;
+    knobs.closeRejects = true;
+    const agent = new PiAgent(buildDeps());
+
+    await expect(agent.startSession(opts())).rejects.toThrow(/cleanup remains unconfirmed/);
+    expect(knobs.spawnedEnvs).toHaveLength(1);
+
+    let releaseClose!: () => void;
+    knobs.closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    knobs.closeRejects = false;
+    const firstDispose = agent.dispose();
+    const secondDispose = agent.dispose();
+    await vi.waitFor(() => expect(knobs.closeCount).toBe(2));
+    await expect(agent.startSession(opts())).rejects.toThrow(/disposing/);
+    expect(knobs.spawnedEnvs).toHaveLength(1);
+
+    releaseClose();
+    await Promise.all([firstDispose, secondDispose]);
+    knobs.closeGate = null;
+
+    expect(knobs.spawnedEnvs).toHaveLength(1);
+    expect(knobs.closeCount).toBe(2);
   });
 
   it('does not dispose ctx on the success path (dispose is deferred to close())', async () => {

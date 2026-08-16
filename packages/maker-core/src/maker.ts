@@ -328,6 +328,10 @@ export class Maker {
     string,
     { promise: Promise<Session> }
   >();
+  /** All create paths, including anonymous ids, that may still publish or quarantine a handle. */
+  private readonly pendingSessionCreations = new Set<Promise<Session>>();
+  /** Once shutdown starts, no new handle may race past its creation barrier. */
+  private shutdownStarted = false;
   /**
    * startSession 已返回、但 Session 尚未发布时 cleanup 失败的 handle。后续同 id
    * create 必须先把它确认关闭，不能丢失所有权后再 spawn 一个并存进程。
@@ -424,9 +428,12 @@ export class Maker {
     };
   }
 
-  private async retryFailedHandleCleanup(sessionId: string): Promise<void> {
+  private async retryFailedHandleCleanup(
+    sessionId: string,
+    expectedEntry?: FailedHandleCleanup,
+  ): Promise<void> {
     const entry = this.failedHandleCleanups.get(sessionId);
-    if (!entry) return;
+    if (!entry || (expectedEntry && entry !== expectedEntry)) return;
     const cleanup = entry.promise ?? entry.handle.close();
     entry.promise = cleanup;
     try {
@@ -451,6 +458,19 @@ export class Maker {
    * 继续聊"以及多个后台入口同时恢复同一会话的场景。
    */
   async createSession(opts: CreateSessionOptions): Promise<Session> {
+    if (this.shutdownStarted) {
+      throw new Error('Maker is shutting down; refusing to create a new session');
+    }
+    const creation = this.createSessionWhileRunning(opts);
+    this.pendingSessionCreations.add(creation);
+    try {
+      return await creation;
+    } finally {
+      this.pendingSessionCreations.delete(creation);
+    }
+  }
+
+  private async createSessionWhileRunning(opts: CreateSessionOptions): Promise<Session> {
     if (!opts.id) {
       return this.createSessionOnce(opts);
     }
@@ -922,12 +942,39 @@ export class Maker {
    * 失败一律 swallow + 聚合日志, 不抛 (before-quit 阶段不能阻断退出流程)。
    */
   async shutdown(): Promise<void> {
-    // snapshot 必须先做 (status listener 在 close 完成后会从 activeSessions 删条目,
-    // 不 snapshot 则迭代到一半 Map mutate)。
-    const sessSnapshot = Array.from(this.activeSessions.values());
+    this.shutdownStarted = true;
     const agentEntries = Object.entries(this.agents);
-
     const errors: Array<{ kind: string; name: string; error: unknown }> = [];
+
+    // Queue agent-level process shutdown before waiting for session creation.
+    // PiAgent.dispose() owns its own startup barrier, so a startup that fails
+    // after this point can still publish a quarantine entry and be reclaimed.
+    const initialAgentDisposes = agentEntries.map(([kind, agent]) =>
+      Promise.resolve()
+        .then(() => agent.dispose())
+        .catch((e) => {
+          errors.push({ kind: 'agent', name: kind, error: e });
+        }),
+    );
+
+    // createSession registers its promise before yielding. Blocking new calls
+    // above makes this a stable barrier: after it settles, every handle started
+    // before shutdown is either active or present in failedHandleCleanups.
+    const creationSnapshot = Array.from(this.pendingSessionCreations);
+    await Promise.allSettled(creationSnapshot);
+
+    const finalAgentDisposes = agentEntries.map(([kind, agent], index) =>
+      initialAgentDisposes[index]!
+        .then(() => agent.dispose())
+        .catch((e) => {
+          errors.push({ kind: 'agent-final', name: kind, error: e });
+        }),
+    );
+
+    // Snapshot only after the creation barrier. Status listeners mutate
+    // activeSessions during close, so iteration must use a stable array.
+    const sessSnapshot = Array.from(this.activeSessions.values());
+    const failedHandleCleanupSnapshot = Array.from(this.failedHandleCleanups.entries());
 
     // shutdown() calls detach() directly instead of closeSession(), so record
     // the explicit cause before any asynchronous close callback can run. This
@@ -937,19 +984,11 @@ export class Maker {
       if (!this.closeReasons.has(session)) this.closeReasons.set(session, 'requested');
     }
 
-    // **agent.dispose 优先排队**: 微任务 ordering 不是强保证 (dispose 内部还有 await
-    // hostPromise 等 hop), 但先排队意味着 SIGTERM 那一步至少不会被 session-close
-    // 的工作排在后面。真正的 safety net 是下面 Promise.allSettled 永不抛 + lifecycle
-    // 6s 超时 (lifecycle.ts) — 即便某个 disposer hang, agent dispose 已经独立把
-    // SIGTERM 送进 event loop 了, 6s 内可靠送达。
-    // **同步抛防御**: 用 Promise.resolve().then 包一层, 防 dispose() 实现哪天换成
-    // sync function 然后同步抛 — 那种情况下裸 .catch() 自己也炸, 后续的 sessionCloses
-    // 根本来不及构造。
-    const agentDisposes = agentEntries.map(([kind, agent]) =>
+    const failedHandleCloses = failedHandleCleanupSnapshot.map(([sessionId, entry]) =>
       Promise.resolve()
-        .then(() => agent.dispose())
+        .then(() => this.retryFailedHandleCleanup(sessionId, entry))
         .catch((e) => {
-          errors.push({ kind: 'agent', name: kind, error: e });
+          errors.push({ kind: 'unpublished-handle', name: sessionId, error: e });
         }),
     );
 
@@ -961,7 +1000,11 @@ export class Maker {
         }),
     );
 
-    await Promise.allSettled([...agentDisposes, ...sessionCloses]);
+    await Promise.allSettled([
+      ...finalAgentDisposes,
+      ...failedHandleCloses,
+      ...sessionCloses,
+    ]);
 
     if (errors.length > 0) {
       // Maker 没注入 logger; host 端 stdout 能看到 (before-quit 阶段, 不阻塞流程)

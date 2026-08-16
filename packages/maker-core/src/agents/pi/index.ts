@@ -519,15 +519,20 @@ export class PiAgent extends BaseAgent {
   readonly kind: AgentKind = 'pi';
   readonly capabilities: Capabilities;
   private readonly failedStartupCleanups = new Map<string, FailedPiStartupCleanup>();
+  private readonly inFlightStartups = new Set<Promise<AgentSessionHandle>>();
+  private disposeStarted = false;
 
   constructor(deps: AgentDeps) {
     super(deps);
     this.capabilities = this.buildCapabilities(PiAgent.baseCapabilities());
   }
 
-  private async retryFailedStartupCleanup(sessionId: string): Promise<void> {
+  private async retryFailedStartupCleanup(
+    sessionId: string,
+    expectedEntry?: FailedPiStartupCleanup,
+  ): Promise<void> {
     const entry = this.failedStartupCleanups.get(sessionId);
-    if (!entry) return;
+    if (!entry || (expectedEntry && entry !== expectedEntry)) return;
     const cleanup = entry.promise ?? entry.proc.close();
     entry.promise = cleanup;
     try {
@@ -541,6 +546,27 @@ export class PiAgent extends BaseAgent {
     if (this.failedStartupCleanups.get(sessionId) === entry) {
       this.failedStartupCleanups.delete(sessionId);
       entry.cleanupLocal?.();
+    }
+  }
+
+  override async dispose(): Promise<void> {
+    this.disposeStarted = true;
+    const startupSnapshot = Array.from(this.inFlightStartups);
+    await Promise.allSettled(startupSnapshot);
+
+    // startSession registers before yielding and new starts are fenced above,
+    // so every failed pre-publication process is now visible in this snapshot.
+    const cleanupSnapshot = Array.from(this.failedStartupCleanups.entries());
+    const results = await Promise.allSettled(
+      cleanupSnapshot.map(([sessionId, entry]) =>
+        this.retryFailedStartupCleanup(sessionId, entry),
+      ),
+    );
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'Pi startup process cleanup remains unconfirmed');
     }
   }
 
@@ -895,7 +921,20 @@ export class PiAgent extends BaseAgent {
     };
   }
 
-  async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
+  override async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
+    if (this.disposeStarted) {
+      throw new Error('Pi agent is disposing; refusing to start a new session');
+    }
+    const startup = this.startSessionWhileRunning(opts);
+    this.inFlightStartups.add(startup);
+    try {
+      return await startup;
+    } finally {
+      this.inFlightStartups.delete(startup);
+    }
+  }
+
+  private async startSessionWhileRunning(opts: StartSessionOptions): Promise<AgentSessionHandle> {
     const startupCleanupKey = opts.sessionId ?? '<anonymous>';
     // A previous pre-publication Pi process for this business session must be
     // confirmed dead before another spawn can begin.
@@ -1522,7 +1561,7 @@ export class PiAgent extends BaseAgent {
      * 用它当"撤销开关"(上一版就是这么用的,那是个空操作,review 连点两轮)。运行期要收回子代理
      * 能力只有一条可证明有效的路:终止会话。
      */
-    let subagentRoutingEnabled = !reviewMode;
+    const subagentRoutingEnabled = !reviewMode;
     const writeSubagentRuntimeFile = async (
       next: { model?: string; provider?: string; pending?: boolean },
     ): Promise<boolean> => {

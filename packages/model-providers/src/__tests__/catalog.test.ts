@@ -147,8 +147,8 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
       contextWindow: 500_000,
       maxOutput: 500_000,
       supportsImageInput: true,
-      efforts: [],
-      defaultEffort: null,
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
     });
   });
 

@@ -65,7 +65,13 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
     const pi = deriveAvailableModels(BUNDLED_CATALOG, 'pi');
     expect(pi.find((m) => m.id === 'grok-4.3')?.efforts).toEqual([]);
     expect(pi.find((m) => m.id === 'grok-4.5')?.efforts).toEqual(['minimal', 'low', 'medium', 'high']);
-    expect(pi.find((m) => m.id === 'grok-4.6')?.efforts).toEqual([]);
+    expect(pi.find((m) => m.id === 'grok-4.6')?.efforts).toEqual([
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+    ]);
   });
 
   it('preserves the explicit effort subset of a Pi BYOM model in remote capabilities', () => {

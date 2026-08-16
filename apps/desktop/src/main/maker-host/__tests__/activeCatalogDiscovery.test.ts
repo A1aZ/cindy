@@ -150,6 +150,24 @@ describe('active-catalog discovered augment', () => {
     expect(xai?.models.pi?.find((model) => model.id === 'grok-4.6')).toMatchObject({
       contextWindow: 500_000,
       supportsImageInput: true,
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+  });
+
+  it('keeps official Grok 4.6 xhigh when SuperGrok discovery omits the new ladder rung', () => {
+    setActiveCatalog(BUNDLED_CATALOG);
+    setXaiDiscoveredModels([
+      { id: 'xai/grok-4.6', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+    ]);
+    const xai = getActiveCatalog().providers.find((provider) => provider.id === 'xai');
+    expect(xai?.models['claude-code']?.find((model) => model.id === 'xai/grok-4.6')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+    expect(xai?.models.pi?.find((model) => model.id === 'grok-4.6')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
     });
   });
 

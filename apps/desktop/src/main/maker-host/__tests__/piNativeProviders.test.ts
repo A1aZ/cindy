@@ -256,10 +256,16 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       maxTokens: 500_000,
       input: ['text', 'image'],
       reasoning: true,
+      thinkingLevelMap: {
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+      },
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
+        supportsReasoningEffort: true,
       },
     });
     expect(env).toEqual({
@@ -407,7 +413,16 @@ describe('buildPiNativeProvidersFromConfigs', () => {
           'openai-codex',
           new Map([['gpt-5.6-sol', piBundledModel('gpt-5.6-sol', 'openai-codex-responses')]]),
         ],
-        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-responses')]])],
+        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-responses', {
+          thinkingLevelMap: {
+            minimal: null,
+            low: 'low',
+            medium: 'medium',
+            high: 'high',
+            xhigh: null,
+            max: null,
+          },
+        })]])],
       ]),
     );
 
@@ -456,6 +471,47 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         'x-cindy-pi-provider-id': provider.sourceProviderId,
       });
     }
+  });
+
+  it('emits a Grok 4.6 inheritModels replacement so xhigh survives writeModelsJson', () => {
+    const { providers } = buildPiSubscriptionNativeProviders(
+      BUNDLED_CATALOG,
+      'http://127.0.0.1:4567/',
+      new Map([
+        [
+          'xai',
+          new Map([
+            [
+              'grok-4.6',
+              piBundledModel('grok-4.6', 'openai-completions', {
+                reasoning: true,
+                compat: {
+                  supportsStore: false,
+                  supportsDeveloperRole: false,
+                  supportsReasoningEffort: false,
+                },
+              }),
+            ],
+          ]),
+        ],
+      ]),
+    );
+    const grok = providers
+      .find((provider) => provider.id === 'xai')
+      ?.models.find((model) => model.wireId === 'grok-4.6' || model.id === 'grok-4.6');
+    expect(grok).toMatchObject({
+      api: 'openai-completions',
+      reasoning: true,
+      thinkingLevelMap: {
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+      },
+      compat: {
+        supportsReasoningEffort: true,
+      },
+    });
   });
 
   it('namespaces only colliding BYOM runtime ids and preserves their persisted source ids', () => {
@@ -722,6 +778,9 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         wireId: 'grok-4.6',
         api: 'openai-responses',
         catalogAddition: true,
+        reasoning: true,
+        thinkingLevelMap: expect.objectContaining({ xhigh: 'xhigh' }),
+        compat: expect.objectContaining({ supportsReasoningEffort: true }),
       }),
     ]);
     expect(provider?.modelIdAliases).toMatchObject({

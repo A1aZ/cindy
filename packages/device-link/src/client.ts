@@ -2334,7 +2334,7 @@ export class DeviceLinkClient {
     peer.pending.set(seq, pending);
     peer.pendingBytes += reservedBytes;
     peer.nextSeq = seq + 1;
-    if (peer.linkReady && !this.shouldHoldRecoverySend(peer)) {
+    if (peer.linkReady && !this.shouldHoldRecoverySend(peer, this.estimateReliableFrameCount(pending))) {
       try {
         const sentFrames = this.sendReliableFrames(peer, pending);
         this.noteRecoveryFrames(peer, sentFrames);
@@ -2865,7 +2865,7 @@ export class DeviceLinkClient {
         return;
       }
       const admittingNew = !pending.sent;
-      if (admittingNew && this.shouldHoldRecoverySend(peer)) break;
+      if (admittingNew && this.shouldHoldRecoverySend(peer, this.estimateReliableFrameCount(pending))) break;
       // 发送前先按预估分片数结算:已经发过东西、且这一条会超预算时,把它留到下一趟。
       // 用预估而非真实编码结果是刻意的 —— 这是流控决策,不需要精确,重新编码一条 4MB
       // 消息只为数分片数不划算;发送后再用真实帧数扣减。
@@ -2906,8 +2906,13 @@ export class DeviceLinkClient {
     return Math.max(0, budget - peer.recoveryFramesSent);
   }
 
-  private shouldHoldRecoverySend(peer: PeerTransportState): boolean {
-    return peer.recoveryNeedsAck && peer.recoveryFramesSent >= this.recoveryPassBudget();
+  private shouldHoldRecoverySend(peer: PeerTransportState, additionalFrames = 1): boolean {
+    if (!peer.recoveryNeedsAck) return false;
+    const remaining = this.remainingRecoveryBudget(peer);
+    if (remaining <= 0) return true;
+    // 本轮恢复还没发出过任何帧时,队头可以超预算(与 retryPending 一致)。
+    if (peer.recoveryFramesSent === 0) return false;
+    return additionalFrames > remaining;
   }
 
   private noteRecoveryFrames(peer: PeerTransportState, frames: number): void {

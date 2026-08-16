@@ -4763,6 +4763,38 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     h.client.stop();
   }, 10_000);
 
+  it('恢复预算还剩一点时,放不下的大消息先入队不发出', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 3,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'small-0', { ok: true, result: 0 });
+    h.client.sendInvokeResult('dev-b', 'small-1', { ok: true, result: 1 });
+    const ws = h.current();
+    const before = framesSent(ws);
+    const internals = h.client as unknown as {
+      peerTransport: Map<string, { linkReady: boolean }>;
+    };
+    internals.peerTransport.get('dev-b')!.linkReady = false;
+    await establishInboundReliableLink(h, 'remote-stream-2');
+    await tick();
+
+    const chunky = 'x'.repeat(2 * 128 * 1024 + 1_000);
+    h.client.sendInvokeResult('dev-b', 'too-big', { ok: true, result: chunky });
+    expect(framesSent(ws)).toBe(before + 2);
+
+    h.client.stop();
+  }, 10_000);
+
   it('恢复探测未 ACK 时定时器仍重发已发出的探针,不放行新帧', async () => {
     await withFakeTimers(async (h, advance) => {
       for (let i = 0; i < 7; i += 1) {

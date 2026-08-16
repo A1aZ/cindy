@@ -594,12 +594,13 @@ export function translatePiEvent(
     }
 
     case 'auto_retry_start': {
-      // 走 CC/Codex 同一套 `(auto-retry N/M)` 跨 agent 协议：ErrorBanner 靠这个后缀切本地化重试文案，手写
-      // `Transient provider error, retrying (1/3)…` 会跌出过载/网络分支，把原始英文
-      // 塞进红色错误条。
+      // 走 CC/Codex 同一套 `(auto-retry N/M)` 跨 agent 协议。这个后缀在 mobile /
+      // Telegram 投影里**只表示过载**，不能拿去编码未分类 5xx —— 否则手机会把普通
+      // 供应商故障显示成「模型服务繁忙」。
       //
       // 第 1 次不透出：单次抖动 pi 一次重试就过，提示只会闪一下徒增噪音
       // （与 claude-code translator 的 api_retry 防噪口径一致）。
+      // 未分类错误同样静默：渠道 / 手机没有对应本地化契约，CC 也只透过载类。
       const progress = parsePiAutoRetryProgress(event);
       if (!progress || progress.attempt < 2) return;
       const sdkError = typeof event.errorMessage === 'string'
@@ -607,19 +608,19 @@ export function translatePiEvent(
         : undefined;
       const rawMessage = (sdkError && sdkError.trim())
         || ctx.pendingAssistantError?.message
-        || 'Transient provider error';
+        || '';
       const signals = extractNonSecretErrorSignals(rawMessage);
       const errorStatus = ctx.pendingAssistantError?.errorStatus ?? signals.errorStatus;
-      const overload = parseOverloadError(rawMessage, errorStatus);
+      if (parseOverloadError(rawMessage, errorStatus) === null) return;
       queue.push({
         type: 'error',
         data: {
           message: formatOverloadRetryMessage(rawMessage, progress.attempt, progress.maxAttempts),
           isTerminal: false,
           willRetry: true,
+          reason: UPSTREAM_OVERLOAD_REASON,
           ...(sdkError ? { sdkError } : {}),
           ...(errorStatus !== undefined ? { errorStatus } : {}),
-          ...(overload ? { reason: UPSTREAM_OVERLOAD_REASON } : {}),
         },
         source: 'pi',
       });

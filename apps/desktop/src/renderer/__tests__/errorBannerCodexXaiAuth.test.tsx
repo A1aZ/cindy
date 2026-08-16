@@ -208,31 +208,3 @@ describe('ErrorBanner terminal rate-limit retry guidance', () => {
     expect(screen.getByText(RATE_LIMIT)).toBeTruthy();
   });
 });
-
-describe('ErrorBanner generic provider auto-retry guidance', () => {
-  const GENERIC = 'provider 500 from upstream (auto-retry 2/3)';
-
-  it('localizes unclassified recoverable auto-retries instead of showing the protocol string', () => {
-    render(createElement(ErrorBanner, {
-      error: GENERIC,
-      onRetry: vi.fn(),
-      isRecoverable: true,
-    }));
-
-    expect(screen.getByText('chat.errorBanner.providerRetrying:2/3')).toBeTruthy();
-    expect(screen.queryByText('chat.errorBanner.overloadRetrying:2/3')).toBeNull();
-    expect(screen.queryByText(GENERIC)).toBeNull();
-    expect(screen.queryByTitle('chat.errorBanner.retryTitle')).toBeNull();
-  });
-
-  it('keeps the raw provider error available for unclassified auto-retries', () => {
-    render(createElement(ErrorBanner, {
-      error: GENERIC,
-      onRetry: vi.fn(),
-      isRecoverable: true,
-    }));
-
-    fireEvent.click(screen.getByText('chat.errorBanner.networkShowRaw'));
-    expect(screen.getByText(GENERIC)).toBeTruthy();
-  });
-});

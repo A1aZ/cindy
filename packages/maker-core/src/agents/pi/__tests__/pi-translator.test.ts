@@ -282,7 +282,7 @@ describe('pi translator', () => {
     ]);
   });
 
-  it('keeps unclassified Pi auto-retries on the shared progress suffix', () => {
+  it('keeps unclassified Pi auto-retries silent instead of reusing the overload marker', () => {
     const ctx = createPiTranslateContext(noopLogger);
     const { queue, events } = makeQueue();
 
@@ -297,12 +297,7 @@ describe('pi translator', () => {
       ctx,
     );
 
-    expect(events[0]?.data).toMatchObject({
-      message: 'provider 500 from upstream (auto-retry 2/3)',
-      isTerminal: false,
-      willRetry: true,
-    });
-    expect((events[0]?.data as { reason?: string }).reason).toBeUndefined();
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
   });
 
   it('does not duplicate a terminal error after Pi auto-retry is exhausted', () => {

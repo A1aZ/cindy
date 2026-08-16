@@ -372,13 +372,6 @@ export function ErrorBanner({
             ? 'chat.errorBanner.networkUnreachable'
             : 'chat.errorBanner.networkUnreachableNoRetry',
         );
-  } else if (isRecoverable && overloadRetryProgress) {
-    // Pi 等 agent 的瞬时供应商重试走同一套 `(auto-retry N/M)` 后缀,但原文未必能被
-    // 过载/网络分支识别。没有这条兜底时,用户会直接看到英文协议串。
-    displayError = t('chat.errorBanner.providerRetrying', {
-      attempt: overloadRetryProgress.attempt,
-      maxAttempts: overloadRetryProgress.maxAttempts,
-    });
   } else {
     // Keep the raw message available to every specialized gate above. Only
     // the final fallback uses the stable reason map, so auth/network/overload
@@ -524,7 +517,6 @@ export function ErrorBanner({
         {(isNetworkishError ||
           isOverloadError ||
           terminalRateLimitRetryProgress ||
-          Boolean(isRecoverable && overloadRetryProgress) ||
           isClaudeGatewayOpusPlanMismatch ||
           isClaudeSubscriptionOpusPlanMismatch) && (
           // 网络类与过载类的原始错误折叠可查:友好文案替换了原文,但排障(端口/URL/

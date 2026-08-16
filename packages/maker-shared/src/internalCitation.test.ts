@@ -59,6 +59,7 @@ describe('leaked model stop tokens', () => {
     expect(isPossibleStandaloneStopPrefix('  <|eo')).toBe(true);
     expect(isPossibleStandaloneStopPrefix('<')).toBe(true);
     expect(isPossibleStandaloneStopPrefix('<|')).toBe(true);
+    expect(isPossibleStandaloneStopPrefix(`${' '.repeat(23)}<|eos|>`)).toBe(true);
     expect(isPossibleStandaloneStopPrefix('The token is <|eo')).toBe(false);
   });
 
@@ -77,6 +78,13 @@ describe('leaked model stop tokens', () => {
     expect(holdStandaloneStopTokenDelta(a, 's|>')).toBeNull();
     expect(a).toEqual({ pending: '<|eos|>', emitted: false });
     expect(b).toEqual({ pending: '', emitted: true });
+  });
+
+  it('holds a long-padded leftover token until the closer arrives', () => {
+    const buffer = { pending: '', emitted: false };
+    const padded = `${' '.repeat(23)}<|eos|>`;
+    expect(holdStandaloneStopTokenDelta(buffer, padded)).toBeNull();
+    expect(buffer).toEqual({ pending: padded, emitted: false });
   });
 
   it('holds a one-character leftover prefix until the closer arrives', () => {

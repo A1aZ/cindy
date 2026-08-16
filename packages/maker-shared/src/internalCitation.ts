@@ -92,9 +92,10 @@ export function stripStandaloneModelStopToken(text: string): string {
  * can be dropped or flushed.
  */
 export function isPossibleStandaloneStopPrefix(text: string): boolean {
-  if (text.length > MAX_STANDALONE_STOP_PREFIX) return false;
   const candidate = text.trim();
-  if (candidate.length === 0) return true;
+  if (candidate.length === 0) return text.length <= MAX_STANDALONE_STOP_PREFIX;
+  if (MODEL_STOP_TOKENS.has(candidate)) return true;
+  if (text.length > MAX_STANDALONE_STOP_PREFIX) return false;
   return [...MODEL_STOP_TOKENS].some((token) => token.startsWith(candidate));
 }
 

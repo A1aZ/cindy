@@ -6888,29 +6888,39 @@ app.on('ready', async () => {
       // Staged-attachment bookkeeping is not first-paint readiness. The persisted-path
       // lookup is a LIKE + json_tree scan over every retained message body; on a
       // multi-GB owner DB that blocked LocalDbGate for ~24s after splash had already
-      // unmounted, leaving a white window. Sweep is fire-and-forget and only queries
-      // the DB when the owner cache already has stale files.
-      void sweepStagedChatAttachmentsOnStartup({
-        ownerId: userId,
-        createdBeforeMs: PROCESS_STARTED_AT_MS,
-        loadProtectedPaths: listPersistedChatAttachmentPaths,
-        canContinue: () =>
-          getActiveAppSession().dataOwnerId === userId && !isAppSessionBoundaryPending(),
-      })
-        .then((result) => {
-          if (result.removed > 0 || result.protected > 0) {
-            dbClientLog.info('[ChatAttachment] startup staged attachment sweep completed', {
-              ...result,
-              ownerId: userId,
-            });
-          }
+      // unmounted, leaving a white window. Sweep is fire-and-forget, only queries the
+      // DB when the owner cache already has stale files, and is delayed so the shared
+      // db worker can serve session-list / first-paint RPCs first. A stale-cache user
+      // would otherwise just move the 24s stall from the white screen onto the first
+      // task-list query (the db worker's better-sqlite3 .all() is synchronous).
+      const STARTUP_STAGED_ATTACHMENT_SWEEP_DELAY_MS = 5_000;
+      const stagedAttachmentSweepTimer = setTimeout(() => {
+        void sweepStagedChatAttachmentsOnStartup({
+          ownerId: userId,
+          createdBeforeMs: PROCESS_STARTED_AT_MS,
+          loadProtectedPaths: listPersistedChatAttachmentPaths,
+          canContinue: () =>
+            getActiveAppSession().dataOwnerId === userId && !isAppSessionBoundaryPending(),
         })
-        .catch((err) => {
-          dbClientLog.warn('[ChatAttachment] startup staged attachment sweep failed (non-fatal)', {
-            ownerId: userId,
-            error: err instanceof Error ? err.message : String(err),
+          .then((result) => {
+            if (result.removed > 0 || result.protected > 0) {
+              dbClientLog.info('[ChatAttachment] startup staged attachment sweep completed', {
+                ...result,
+                ownerId: userId,
+              });
+            }
+          })
+          .catch((err) => {
+            dbClientLog.warn(
+              '[ChatAttachment] startup staged attachment sweep failed (non-fatal)',
+              {
+                ownerId: userId,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            );
           });
-        });
+      }, STARTUP_STAGED_ATTACHMENT_SWEEP_DELAY_MS);
+      stagedAttachmentSweepTimer.unref?.();
       logStartupPhase('chat-attachment-sweep');
       if (dbClientTakeover.shouldReleaseMainDb && process.env.XDT_DB_INPROC !== 'true') {
         // 只把连接交给 worker，不能释放 shared-passive schema reader lease：worker

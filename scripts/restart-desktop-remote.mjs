@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   applyDesktopDevStartupConfig,
+  DESKTOP_DEV_REGIONS,
   desktopUserDataDirNameForRegion,
   resolveDesktopDevRegion,
 } from './shared/desktop-dev-region.mjs';
@@ -449,6 +450,31 @@ function userDataDirNamed(dirName) {
   return path.join(xdgConfig, dirName);
 }
 
+export function hasIsolationIntent(argv = [], env = process.env) {
+  return argv.some((arg) => arg === '--isolated' || arg.startsWith('--isolated='))
+    || env.XDT_ISOLATED === '1';
+}
+
+export function officialProductionUserDataDirs() {
+  return DESKTOP_DEV_REGIONS.map((region) => productionUserDataDir(region));
+}
+
+export function isOfficialProductionUserDataDir(dir) {
+  const resolved = path.resolve(dir);
+  return officialProductionUserDataDirs().some((official) => path.resolve(official) === resolved);
+}
+
+export function resolveRestartTargetUserDataDir({
+  envUserDataDir,
+  isolatedArg,
+  selectedRegion,
+}) {
+  return envUserDataDir
+    || (isolatedArg
+      ? defaultIsolatedUserDataDir(parseIsolationName(isolatedArg), selectedRegion)
+      : productionUserDataDir(selectedRegion));
+}
+
 export function defaultIsolatedUserDataDir(isolationName, region = 'global') {
   // 目录纪元 v2(-dev2),与 devCliFlags.ts 的派生保持一字不差:#871 起隔离沙箱用
   // CindyDev 钥匙串身份,旧 -dev 目录留给旧 checkout(#912 review)。
@@ -791,9 +817,9 @@ async function main() {
       '--preserve-running only supports remote mode: sharing remote login storage with a local auth server could invalidate the persisted credential',
     );
   }
-  if (preserveRunning && isolatedArg) {
+  if (preserveRunning && hasIsolationIntent(argv, process.env)) {
     throw new Error(
-      '--preserve-running reuses the current Cindy login via shared userData and cannot be combined with --isolated',
+      '--preserve-running reuses the current Cindy login via shared userData and cannot be combined with --isolated or XDT_ISOLATED=1',
     );
   }
   if (startupConfig) {
@@ -853,8 +879,6 @@ async function main() {
       // 路径以默认身份打开造成双身份互写(#912 review P1)。
       process.env.XDT_USER_DATA_DIR_EPOCH = '1';
     }
-    fs.mkdirSync(process.env.XDT_USER_DATA_DIR, { recursive: true });
-    console.log(`==> Isolated dev user data${isolationName ? ` (sandbox "${isolationName}")` : ''}: ${process.env.XDT_USER_DATA_DIR}`);
   }
   if (startupConfig) ensureDesktopEnv();
 
@@ -887,10 +911,25 @@ async function main() {
   // --isolated 名字,或用户自己停掉那个实例。preserve-running 不进此门 ——
   // 它的语义就是共享 userData 的被动预览。检测是尽力而为:靠 helper 进程命令行
   // 上的 --user-data-dir,对方实例刚启动还没起 helper 时可能漏检。
-  const targetUserDataDir = process.env.XDT_USER_DATA_DIR
-    || (isolatedArg
-      ? defaultIsolatedUserDataDir(parseIsolationName(isolatedArg), selectedRegion)
-      : productionUserDataDir(selectedRegion));
+  const targetUserDataDir = resolveRestartTargetUserDataDir({
+    envUserDataDir: process.env.XDT_USER_DATA_DIR,
+    isolatedArg,
+    selectedRegion,
+  });
+  if (
+    hasIsolationIntent(argv, process.env)
+    && isOfficialProductionUserDataDir(targetUserDataDir)
+  ) {
+    throw new Error(
+      `--isolated cannot use the official Cindy profile (${targetUserDataDir}). ` +
+        'Omit XDT_USER_DATA_DIR, or point it at a sandbox directory.',
+    );
+  }
+  if (startupConfig && isolatedArg && process.env.XDT_USER_DATA_DIR) {
+    fs.mkdirSync(process.env.XDT_USER_DATA_DIR, { recursive: true });
+    const isolationName = parseIsolationName(isolatedArg);
+    console.log(`==> Isolated dev user data${isolationName ? ` (sandbox "${isolationName}")` : ''}: ${process.env.XDT_USER_DATA_DIR}`);
+  }
   if (!preserveRunning) {
     const conflicts = listDesktopDevProcesses().filter(
       (proc) => !commandContainsPath(proc.command, rootDir)

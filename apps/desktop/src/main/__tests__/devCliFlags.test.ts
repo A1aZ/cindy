@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 import {
+  isIsolatedIdentityOnProductionProfile,
   resolveDevCliFlags,
+  resolveDevProfileKind,
   resolveSingleInstanceLockUserDataDir,
   shouldEnforcePassiveMigrationCompatibility,
   shouldRequestSingleInstanceLock,
@@ -45,6 +47,8 @@ describe('resolveDevCliFlags', () => {
     expect(resolveDevCliFlags(base)).toEqual({
       schedulerPassive: false,
       isolated: false,
+      profileKind: 'production-shared',
+      isolatedOnProductionProfile: false,
       userDataDirOverride: null,
       isolatedDirIsEpochDerived: false,
       needsIsolatedDeviceId: false,
@@ -357,6 +361,46 @@ describe('resolveDevCliFlags', () => {
     });
     expect(flags.userDataDirOverride).toBe('/custom/sandbox');
     expect(flags.needsIsolatedDeviceId).toBe(true);
+    expect(flags.profileKind).toBe('custom');
+    expect(flags.isolatedOnProductionProfile).toBe(false);
+  });
+
+  it('--isolated + 正式 profile 目录判定为非法第三态', () => {
+    const flags = resolveDevCliFlags({
+      ...base,
+      argv: [...base.argv, '--isolated'],
+      envUserDataDir: '/AppData/xdt-maker',
+    });
+    expect(flags.isolated).toBe(true);
+    expect(flags.needsIsolatedDeviceId).toBe(true);
+    expect(flags.profileKind).toBe('production-shared');
+    expect(flags.isolatedOnProductionProfile).toBe(true);
+    expect(flags.isolatedDirIsEpochDerived).toBe(false);
+  });
+
+  it('--isolated 指向另一地区正式目录也是非法第三态', () => {
+    const toCn = resolveDevCliFlags({
+      ...base,
+      argv: [...base.argv, '--isolated'],
+      envUserDataDir: '/AppData/Cindy',
+    });
+    expect(toCn.profileKind).toBe('production-shared');
+    expect(toCn.isolatedOnProductionProfile).toBe(true);
+    expect(toCn.needsIsolatedDeviceId).toBe(true);
+
+    const toGlobal = resolveDevCliFlags({
+      ...base,
+      argv: [...base.argv, '--isolated'],
+      envUserDataDir: '/AppData/CindyGlobal',
+    });
+    expect(toGlobal.profileKind).toBe('production-shared');
+    expect(toGlobal.isolatedOnProductionProfile).toBe(true);
+  });
+
+  it('--isolated 默认沙箱是 isolated-sandbox,不是正式 profile', () => {
+    const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated'] });
+    expect(flags.profileKind).toBe('isolated-sandbox');
+    expect(flags.isolatedOnProductionProfile).toBe(false);
   });
 
   it('仅设 XDT_USER_DATA_DIR(无隔离意图)沿用原语义,不派生设备标识', () => {
@@ -378,6 +422,8 @@ describe('resolveDevCliFlags', () => {
     expect(flags).toEqual({
       schedulerPassive: false,
       isolated: false,
+      profileKind: 'production-shared',
+      isolatedOnProductionProfile: false,
       userDataDirOverride: null,
       isolatedDirIsEpochDerived: false,
       needsIsolatedDeviceId: false,
@@ -412,32 +458,83 @@ describe('resolveDevCliFlags', () => {
     });
     expect(flags.schedulerPassive).toBe(true);
     expect(flags.isolated).toBe(true);
+    expect(flags.profileKind).toBe('isolated-sandbox');
     expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-feature-a');
     expect(flags.isolationName).toBe('feature-a');
   });
 });
 
+describe('resolveDevProfileKind / isIsolatedIdentityOnProductionProfile', () => {
+  it('正式目录一律是 production-shared,isolated 旗标不能把它变成沙箱', () => {
+    expect(
+      resolveDevProfileKind({
+        isolatedDirIsEpochDerived: false,
+        effectiveUserDataDir: '/AppData/xdt-maker',
+        productionUserDataDir: '/AppData/xdt-maker',
+      }),
+    ).toBe('production-shared');
+    expect(
+      isIsolatedIdentityOnProductionProfile({
+        isolated: true,
+        effectiveUserDataDir: '/AppData/xdt-maker',
+        productionUserDataDir: '/AppData/xdt-maker',
+      }),
+    ).toBe(true);
+  });
+
+  it('另一地区正式目录也算正式 profile,不能当成 custom', () => {
+    expect(
+      resolveDevProfileKind({
+        isolatedDirIsEpochDerived: false,
+        effectiveUserDataDir: '/AppData/Cindy',
+        productionUserDataDir: '/AppData/CindyGlobal',
+      }),
+    ).toBe('production-shared');
+    expect(
+      resolveDevProfileKind({
+        isolatedDirIsEpochDerived: false,
+        effectiveUserDataDir: '/AppData/CindyGlobal',
+        productionUserDataDir: '/AppData/Cindy',
+      }),
+    ).toBe('production-shared');
+    expect(
+      isIsolatedIdentityOnProductionProfile({
+        isolated: true,
+        effectiveUserDataDir: '/AppData/Cindy',
+        productionUserDataDir: '/AppData/CindyGlobal',
+      }),
+    ).toBe(true);
+  });
+});
+
 describe('shouldEnforcePassiveMigrationCompatibility', () => {
-  it('只对共享 userData 的 passive dev 启用，isolated 与 packaged 不启用', () => {
+  it('只对共享正式 profile 的 passive dev 启用，沙箱 / custom / packaged 不启用', () => {
     expect(
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: false,
         schedulerPassive: true,
-        isolated: false,
+        profileKind: 'production-shared',
       }),
     ).toBe(true);
     expect(
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: false,
         schedulerPassive: true,
-        isolated: true,
+        profileKind: 'isolated-sandbox',
+      }),
+    ).toBe(false);
+    expect(
+      shouldEnforcePassiveMigrationCompatibility({
+        isPackaged: false,
+        schedulerPassive: true,
+        profileKind: 'custom',
       }),
     ).toBe(false);
     expect(
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: true,
         schedulerPassive: true,
-        isolated: false,
+        profileKind: 'production-shared',
       }),
     ).toBe(false);
   });

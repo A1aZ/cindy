@@ -11,7 +11,11 @@ import {
 	commandUsesUserDataDir,
 	defaultIsolatedUserDataDir,
 	devEnvPrefix,
+	hasIsolationIntent,
+	isOfficialProductionUserDataDir,
 	isRepositoryDesktopDevProcess,
+	officialProductionUserDataDirs,
+	resolveRestartTargetUserDataDir,
 	formatDesktopStartupFailure,
 	inspectSharedUserDataRegion,
 	partitionDesktopDevProcesses,
@@ -149,6 +153,46 @@ test("default isolated userData path is region-aware", () => {
 	assert.equal(path.basename(defaultIsolatedUserDataDir("", "global")), "CindyGlobal-dev2");
 	assert.equal(path.basename(defaultIsolatedUserDataDir("", "cn")), "Cindy-dev2");
 	assert.equal(path.basename(defaultIsolatedUserDataDir("review", "dev")), "CindyDev-dev2-review");
+});
+
+test("hasIsolationIntent sees argv and ambient XDT_ISOLATED=1", () => {
+	assert.equal(hasIsolationIntent([]), false);
+	assert.equal(hasIsolationIntent(["--isolated"]), true);
+	assert.equal(hasIsolationIntent(["--isolated=review"]), true);
+	assert.equal(hasIsolationIntent([], { XDT_ISOLATED: "1" }), true);
+	assert.equal(hasIsolationIntent([], { XDT_ISOLATED: "0" }), false);
+});
+
+test("isOfficialProductionUserDataDir matches every official region profile", () => {
+	assert.equal(isOfficialProductionUserDataDir(productionUserDataDir("cn")), true);
+	assert.equal(isOfficialProductionUserDataDir(productionUserDataDir("global")), true);
+	assert.equal(isOfficialProductionUserDataDir(productionUserDataDir("dev")), true);
+	assert.equal(isOfficialProductionUserDataDir(defaultIsolatedUserDataDir("", "cn")), false);
+	assert.ok(officialProductionUserDataDirs().some((dir) => path.basename(dir) === "Cindy"));
+	assert.ok(officialProductionUserDataDirs().some((dir) => path.basename(dir) === "CindyGlobal"));
+});
+
+test("isolated restart target pointing at the other region's official profile is refused", () => {
+	const cnFromGlobal = resolveRestartTargetUserDataDir({
+		envUserDataDir: productionUserDataDir("cn"),
+		isolatedArg: "--isolated",
+		selectedRegion: "global",
+	});
+	assert.equal(isOfficialProductionUserDataDir(cnFromGlobal), true);
+	const globalFromCn = resolveRestartTargetUserDataDir({
+		envUserDataDir: productionUserDataDir("global"),
+		isolatedArg: "--isolated",
+		selectedRegion: "cn",
+	});
+	assert.equal(isOfficialProductionUserDataDir(globalFromCn), true);
+});
+
+test("isolated official-profile refuse happens before mkdir in the restart main flow", () => {
+	const source = fs.readFileSync(new URL("../restart-desktop-remote.mjs", import.meta.url), "utf8");
+	const refuseIdx = source.indexOf("isOfficialProductionUserDataDir(targetUserDataDir)");
+	const mkdirIdx = source.indexOf("fs.mkdirSync(process.env.XDT_USER_DATA_DIR");
+	assert.ok(refuseIdx > 0);
+	assert.ok(mkdirIdx > refuseIdx);
 });
 
 test("preserve-running only shares a target with live records from the same region", () => {

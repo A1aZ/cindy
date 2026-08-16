@@ -366,9 +366,9 @@ function createAuthClient(
  * 发生过一次,当时只把静默半死改成明确弹重登(见 authSessionExpiredDetection.test.ts),
  * 没有堵住 passive 的销毁权。
  *
- * packaged 恒不设置该 env(index.ts 启动时对 packaged / isolated 显式 delete 兜底,
- * 防 ambient env 污染),线上零影响;`--isolated` 沙箱有独立 userData 与 deviceId,
- * 本来就不共享,不受此闸门约束。
+ * packaged 恒不设置该 env(index.ts 启动时对 packaged / 非正式共享 profile 显式
+ * delete 兜底,防 ambient env 污染),线上零影响。env 由解析后的 profileKind ===
+ * production-shared 且 passive 落地,不看 isolated 旗标。
  */
 function isPassiveSharedUserDataInstance(): boolean {
   return !app.isPackaged && process.env.XDT_PASSIVE_SHARED_USER_DATA === '1';
@@ -2516,6 +2516,10 @@ async function runColdStartRefreshFlow(
           clearConfirmedDeadRefreshTokens(storedRealm, confirmedDeadTokens);
         }
         resetActiveAuthRealmToBuild();
+      } else if (action.kind === 'foreign-device') {
+        log.warn(
+          'cold-start refresh: DEVICE_MISMATCH — this process starts logged out and keeps the persisted refresh token',
+        );
       } else if (action.kind === 'replacement-retry') {
         log.warn(
           `cold-start refresh failed for a stale token after ${attempts} attempt(s) — keeping latest refresh token, starting logged out`,
@@ -3233,6 +3237,15 @@ export async function refresh(): Promise<boolean> {
           const previousUserId =
             currentUser?.id ?? getActiveAppSession().dataOwnerId ?? 'signed-out';
           await expireRuntimeAuth(previousUserId, resolveSessionExpiredReason(code));
+        } else if (action.kind === 'foreign-device') {
+          log.warn(
+            'runtime refresh: DEVICE_MISMATCH — expiring this process and keeping the persisted refresh token',
+          );
+          const previousUserId =
+            currentUser?.id ?? getActiveAppSession().dataOwnerId ?? 'signed-out';
+          await expireRuntimeAuth(previousUserId, 'device-mismatch', {
+            preservePersistedRefreshToken: true,
+          });
         } else if (action.kind === 'replacement-retry') {
           log.warn(
             `runtime refresh failed for a stale token after replacement retries status=${result.status} code=${code ?? '<none>'} — retrying in ${RUNTIME_REFRESH_RETRY_MS / 1000}s`,

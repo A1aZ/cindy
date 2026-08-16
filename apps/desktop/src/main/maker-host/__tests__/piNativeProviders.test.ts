@@ -482,6 +482,20 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
   });
 
+  it('does not mark SuperGrok models as catalog additions when the PI probe is unavailable', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    expect(catalog.providers.find((provider) => provider.id === 'xai')?.models.pi?.find((model) => model.id === 'grok-4.6')?.piApi).toBeUndefined();
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.catalogAddition).toBeUndefined();
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
+  });
+
   it('namespaces only colliding BYOM runtime ids and preserves their persisted source ids', () => {
     const collisions: Array<[string, string]> = [];
     const merged = mergePiNativeProviderResults(

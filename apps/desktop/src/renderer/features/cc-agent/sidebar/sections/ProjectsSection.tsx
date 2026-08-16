@@ -58,6 +58,7 @@ import {
 import {
   advanceViewedPriorityHold,
   buildMainListEntries,
+  holdViewedPriorityRank,
   splitEntriesByDevice,
   type MainListDeviceSection,
   type MainListEntry,
@@ -93,11 +94,18 @@ const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
 // 优先级排序的「看的时候钉住、离开后再落到已看过最前」是模块生命周期内的展示态,
 // 不落盘。放模块级而不是组件 ref:ProjectsSection 重挂(含 React Strict Mode
 // 双挂)不能丢掉正在看的档位,否则看的过程中会跳到其余档。
-const viewedPriorityHold: ViewedPriorityHoldState = {
+export const viewedPriorityHold: ViewedPriorityHoldState = {
   prevViewedId: undefined,
   heldPriorityRanks: new Map(),
   recentlyViewedAtMs: new Map(),
 };
+
+export function holdSidebarViewedPriority(
+  sessionId: string,
+  ctx: Parameters<typeof holdViewedPriorityRank>[2],
+): void {
+  holdViewedPriorityRank(viewedPriorityHold, sessionId, ctx);
+}
 
 /** 顶层条目折叠的「显示全部 N 项」页脚(单段路径与设备分组的每段共用同一份样式)。 */
 function ShowAllEntriesButton({ count, onClick }: { count: number; onClick: () => void }) {

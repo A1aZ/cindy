@@ -12,6 +12,7 @@ import type { ProjectNode } from '../features/cc-agent/lib/projectGrouping';
 import {
   advanceViewedPriorityHold,
   buildMainListEntries,
+  holdViewedPriorityRank,
   sessionPriorityRank,
   splitEntriesByDevice,
   type MainListEntry,
@@ -269,6 +270,68 @@ describe('buildMainListEntries — 排序口径', () => {
       },
     });
     expect(labels(recencyIgnoresLeave)).toEqual(['s:older-rest', 's:just-read']);
+  });
+
+  it('holds the unread rank even if attention is cleared before the first viewed render', () => {
+    const unread = session({ updatedAt: '2026-07-01T00:00:00Z', title: 'just-read' });
+    const olderRest = session({ updatedAt: '2026-08-12T00:00:00Z', title: 'older-rest' });
+    const waiting = session({ updatedAt: '2026-07-20T00:00:00Z', title: 'needs-input' });
+    const hold = {
+      heldPriorityRanks: new Map<string, number>(),
+      recentlyViewedAtMs: new Map<string, number>(),
+    };
+    holdViewedPriorityRank(hold, unread.id, {
+      runningSessionIds: new Set<string>(),
+      attentionSessionIds: new Set([unread.id, waiting.id]),
+      waitingSessionIds: new Set([waiting.id]),
+    });
+    const afterClear = advanceViewedPriorityHold(
+      hold,
+      unread.id,
+      {
+        runningSessionIds: new Set<string>(),
+        attentionSessionIds: new Set([waiting.id]),
+        waitingSessionIds: new Set([waiting.id]),
+      },
+      1_000,
+    );
+    expect(afterClear.heldPriorityRanks.get(unread.id)).toBe(LIVE_TASK_PRIORITY.unread);
+    const entries = buildMainListEntries({
+      projects: [],
+      dialogues: [olderRest, unread, waiting],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'priority',
+      manualProjectOrder: [],
+      priorityContext: {
+        runningSessionIds: new Set<string>(),
+        attentionSessionIds: new Set([waiting.id]),
+        waitingSessionIds: new Set([waiting.id]),
+        heldPriorityRanks: afterClear.heldPriorityRanks,
+      },
+    });
+    expect(labels(entries)).toEqual(['s:needs-input', 's:just-read', 's:older-rest']);
+  });
+
+  it('does not let leave time promote a still-waiting or running task', () => {
+    const waitingOld = session({ updatedAt: '2026-07-01T00:00:00Z', title: 'waiting-old' });
+    const waitingNew = session({ updatedAt: '2026-08-12T00:00:00Z', title: 'waiting-new' });
+    const leaveAt = Date.parse('2026-08-13T00:00:00Z');
+    const entries = buildMainListEntries({
+      projects: [],
+      dialogues: [waitingOld, waitingNew],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'priority',
+      manualProjectOrder: [],
+      priorityContext: {
+        runningSessionIds: new Set<string>(),
+        attentionSessionIds: new Set([waitingOld.id, waitingNew.id]),
+        waitingSessionIds: new Set([waitingOld.id, waitingNew.id]),
+        recentlyViewedAtMs: new Map([[waitingOld.id, leaveAt]]),
+      },
+    });
+    expect(labels(entries)).toEqual(['s:waiting-new', 's:waiting-old']);
   });
 
   it('waitingSessionIds 缺省时全部 attention 落 unread 档(老调用方零迁移)', () => {

@@ -165,9 +165,10 @@
   排序仍成立(老调用方 / 测试夹具零迁移);组装层(ProjectsSection)从
   `useSessionAttentionKinds` + urgency 集派生 waiting 子集喂入。
 - **正在看不跳位,离开后再落到已看过最前(2026-08-15 用户裁决)**。点开完成未读
-  会立刻清掉 attention,自然档会掉到「其余」;看的过程中用打开时的档位钉住,
-  切到别的任务后再落到其余档,并用离开时刻参与同档 recency。只影响 priority,
-  不改 recency / manual。钉住与离开时刻是渲染层生命周期内的展示态,不落盘。
+  会立刻清掉 attention,自然档会掉到「其余」;点击清点前必须先按当前档位钉住,
+  看的过程中保持打开时的档位。切到别的任务后再落到其余档,离开时刻只抬 rest
+  档,不抬 waiting / unread / running。只影响 priority,不改 recency / manual。
+  钉住与离开时刻是渲染层生命周期内的展示态,不落盘。
 - **未读是内存态,重启即失**(`sessionAttentionStore` 不落盘)。重启后只有两类点
   会由 `usePendingAlertAttention` 从 DB 重建:未收尾的中断、未处置的错误尾行——
   它们恰好都是 waiting 档,重建后仍排最前。「跑完没看」的 unread 档不重建,

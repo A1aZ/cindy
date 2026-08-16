@@ -53,8 +53,8 @@ export interface MainListPriorityContext {
    */
   heldPriorityRanks?: ReadonlyMap<string, number>;
   /**
-   * 任务被切走的时刻(unix ms)。只参与 priority 同档 recency,不改 recency 排序。
-   * 缺省按 0,回落到 sessionActivityMs。
+   * 任务被切走的时刻(unix ms)。只在自然档为 rest 时参与 priority 同档 recency,
+   * 不改 recency 排序,也不抬 waiting / unread / running。
    */
   recentlyViewedAtMs?: ReadonlyMap<string, number>;
 }
@@ -106,7 +106,7 @@ export interface ViewedPriorityHoldState {
 }
 
 /**
- * 看的时候钉住打开时的档位;切走后再落到其余档,并用离开时刻参与同档 recency。
+ * 看的时候钉住打开时的档位;切走后再落到其余档,并用离开时刻参与 rest 档 recency。
  * 就地更新传入的 map,方便渲染层跨渲染保留。
  */
 export function advanceViewedPriorityHold(
@@ -134,7 +134,27 @@ export function advanceViewedPriorityHold(
   return state;
 }
 
+/**
+ * 点击清点会先于路由更新清掉 attention。必须在那之前按当前档位钉住,
+ * 否则首次 hold 只能读到 rest,刚打开的完成未读仍会立刻沉底。
+ */
+export function holdViewedPriorityRank(
+  state: ViewedPriorityHoldState,
+  sessionId: string,
+  ctx: Pick<
+    MainListPriorityContext,
+    'runningSessionIds' | 'attentionSessionIds' | 'waitingSessionIds'
+  >,
+): void {
+  const natural = naturalPriorityRankForId(sessionId, ctx);
+  const held = state.heldPriorityRanks.get(sessionId);
+  state.heldPriorityRanks.set(sessionId, held === undefined ? natural : Math.min(held, natural));
+}
+
 export function sessionPriorityRecencyMs(session: Session, ctx: MainListPriorityContext): number {
+  if (sessionNaturalPriorityRank(session, ctx) !== LIVE_TASK_PRIORITY.rest) {
+    return sessionActivityMs(session);
+  }
   const viewedAt = ctx.recentlyViewedAtMs?.get(session.id) ?? 0;
   return Math.max(sessionActivityMs(session), viewedAt);
 }

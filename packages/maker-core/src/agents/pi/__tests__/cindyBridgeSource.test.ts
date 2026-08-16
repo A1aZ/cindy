@@ -23,6 +23,10 @@ import { describe, expect, it } from 'vitest';
 import { CINDY_BRIDGE_EXTENSION_SOURCE } from '../cindy-bridge-source.js';
 
 type ReviewSearchHelpers = {
+  collectReadonlyCredentialEvidence: (
+    toolName: string,
+    input: unknown,
+  ) => { paths: string[]; touchesCredential: boolean };
   filterReviewGrepResult: (
     result: unknown,
     input: unknown,
@@ -63,14 +67,21 @@ function loadReviewSearchHelpers(
     );
   }
   const executableSource = [
+    "const CREDENTIAL_PATH_PATTERNS: RegExp[] = [/(?:^|[\\\\/])\\.env(?:\\.[^\\\\/]+)?$/i, /\\.pem$/i];",
     "const REVIEW_CREDENTIAL_PATH_PATTERNS: RegExp[] = [/(?:^|[\\\\/])node_modules(?:[\\\\/]|$)/i];",
     "const REVIEW_CREDENTIAL_GLOB_PATTERNS: string[] = [];",
+    "function touchesCredentialPath(input: unknown): boolean {",
+    "  if (typeof input === 'string') return CREDENTIAL_PATH_PATTERNS.some((re) => re.test(input));",
+    "  if (Array.isArray(input)) return input.some(touchesCredentialPath);",
+    "  return false;",
+    "}",
     source.slice(helperStart, helperEnd),
     "function currentPermissionState() {",
     "  return { reviewOnly: true, reviewReadPaths: (globalThis as any).__reviewReadPaths };",
     "}",
     "function managedRipgrepPath() { return (globalThis as any).__managedRipgrepPath; }",
     source.slice(findStart, findEnd),
+    "(globalThis as any).collectReadonlyCredentialEvidence = collectReadonlyCredentialEvidence;",
     "(globalThis as any).filterReviewGrepResult = filterReviewGrepResult;",
     "(globalThis as any).reviewSearchPathIsVisible = reviewSearchPathIsVisible;",
     "(globalThis as any).rgGlob = rgGlob;",
@@ -96,6 +107,7 @@ function loadReviewSearchHelpers(
   };
   runInNewContext(compiled, context);
   if (
+    !context.collectReadonlyCredentialEvidence ||
     !context.filterReviewGrepResult ||
     !context.reviewSearchPathIsVisible ||
     !context.rgGlob
@@ -118,6 +130,33 @@ describe('cindy-bridge extension source', () => {
       .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
       .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
     expect(errors).toEqual([]);
+  });
+
+  it('restricts readonly credential evidence to path and selector fields', () => {
+    const helpers = loadReviewSearchHelpers('/repo');
+    const evidence = (toolName: string, input: unknown) => {
+      const value = helpers.collectReadonlyCredentialEvidence(toolName, input);
+      return { paths: [...value.paths], touchesCredential: value.touchesCredential };
+    };
+
+    expect(evidence('grep', { pattern: '.env', path: 'src', context: '.env.local' })).toEqual({
+      paths: ['src'],
+      touchesCredential: false,
+    });
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.env*' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.e[n-o]v' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[.-0]env*' }).touchesCredential).toBe(true);
+    expect(evidence('find', { pattern: '.e{n,foo}v', path: 'src' }).touchesCredential).toBe(true);
+    expect(evidence('find', { pattern: '{safe,.e[n-o]v}', path: 'src' }).touchesCredential).toBe(true);
+    expect(evidence('find', { pattern: '@(safe|.env)', path: 'src' }).touchesCredential).toBe(true);
+    expect(evidence('find', { pattern: '.e{o,p}v', path: 'src' }).touchesCredential).toBe(false);
+    expect(evidence('find', { pattern: '.e[o-p]v', path: 'src' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.environment*' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[!.]*.ts' }).touchesCredential).toBe(false);
+    expect(evidence('find', { pattern: '.env', path: 'src' }).touchesCredential).toBe(true);
+    expect(evidence('read', { path: '.env.local', offset: 1 }).touchesCredential).toBe(true);
+    expect(evidence('ls', { path: 'src/.environment' }).touchesCredential).toBe(false);
+    expect(evidence('read', { path: 42 }).touchesCredential).toBe(true);
   });
 
   it.skipIf(process.platform === 'win32')(

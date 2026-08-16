@@ -4765,6 +4765,9 @@ const DIFF_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--from-file', kind: 'data-file' },
   { name: '--to-file', kind: 'data-file' },
 ];
+const FILE_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--files-from', kind: 'data-file' },
+];
 
 function readerLongOptions(bin: string): readonly ReaderLongOption[] {
   if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep') return GREP_LONG_OPTIONS;
@@ -4772,6 +4775,7 @@ function readerLongOptions(bin: string): readonly ReaderLongOption[] {
   if (bin === 'sed') return SED_LONG_OPTIONS;
   if (bin === 'jq' || bin === 'yq') return JQ_LONG_OPTIONS;
   if (bin === 'diff') return DIFF_LONG_OPTIONS;
+  if (bin === 'file') return FILE_LONG_OPTIONS;
   return [];
 }
 
@@ -4799,7 +4803,7 @@ function readerShortOptionKind(bin: string, option: string): ReaderOptionKind | 
   }
   if ((bin === 'jq' || bin === 'yq') && option === 'f') return 'data-file';
   if (bin === 'ag' && option === 'G') return 'selector';
-  if (bin === 'file' && option === 'f') return 'selector';
+  if (bin === 'file' && option === 'f') return 'data-file';
   return null;
 }
 

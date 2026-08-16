@@ -561,6 +561,88 @@ function collectReviewFileSelectors(toolName: string, input: unknown): string[] 
   return visit(input, null, 0) ? selectors : null;
 }
 
+function readonlySelectorClassCandidates(value: string): string[] | null {
+  if (value === '!.' || value === '^.') return ['x'];
+  if (value.startsWith('!') || value.startsWith('^') || value.includes('[:')) return null;
+  const chars: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const start = value.charCodeAt(index);
+    if (value[index + 1] === '-' && index + 2 < value.length) {
+      const end = value.charCodeAt(index + 2);
+      if (end < start || end - start > 64) return null;
+      for (let code = start; code <= end; code += 1) chars.push(String.fromCharCode(code));
+      index += 2;
+    } else {
+      chars.push(value[index]);
+    }
+    if (chars.length > 128) return null;
+  }
+  return chars;
+}
+
+function expandReadonlySelector(selector: string): string[] | null {
+  const pending = [selector];
+  const expanded: string[] = [];
+  while (pending.length > 0) {
+    if (pending.length + expanded.length > 256) return null;
+    const candidate = pending.pop()!;
+    const brace = /^(.*?)\{([^{}]+)\}(.*)$/.exec(candidate);
+    if (brace) {
+      if (!brace[2].includes(',')) return null;
+      for (const alternative of brace[2].split(',')) {
+        pending.push(brace[1] + alternative + brace[3]);
+      }
+      continue;
+    }
+    const characterClass = /^(.*?)\[([^\]]+)\](.*)$/.exec(candidate);
+    if (characterClass) {
+      const chars = readonlySelectorClassCandidates(characterClass[2]);
+      if (!chars) return null;
+      for (const char of chars) pending.push(characterClass[1] + char + characterClass[3]);
+      continue;
+    }
+    expanded.push(candidate);
+  }
+  return expanded;
+}
+
+function readonlySelectorTouchesCredential(selector: string): boolean {
+  const expanded = expandReadonlySelector(selector);
+  if (!expanded) return true;
+  const dotenvProbes = ['.env', '.env.local', '.env.production', '.env.secret'];
+  return expanded.some((candidate) => {
+    const directCandidates = [candidate, ...candidate.split('|')];
+    if (directCandidates.some((value) =>
+      CREDENTIAL_PATH_PATTERNS.some((re) => re.test(value)))) return true;
+    if (directCandidates.some((value) => {
+      const literalized = value.replace(/[*?()!+@]/g, '');
+      return literalized !== value
+        && CREDENTIAL_PATH_PATTERNS.some((re) => re.test(literalized));
+    })) return true;
+    try {
+      const basename = candidate.replace(/\\/g, '/').split('/').pop() ?? '';
+      return dotenvProbes.some((probe) => path.matchesGlob(probe, basename));
+    } catch {
+      return true;
+    }
+  });
+}
+
+function collectReadonlyCredentialEvidence(
+  toolName: string,
+  input: unknown,
+): { paths: string[]; touchesCredential: boolean } {
+  const pathFields = collectReviewPathFields(input);
+  const selectors = collectReviewFileSelectors(toolName, input);
+  if (!pathFields || !selectors) return { paths: [], touchesCredential: true };
+  const paths = pathFields.map((field) => field.candidate);
+  return {
+    paths,
+    touchesCredential: touchesCredentialPath(paths)
+      || selectors.some(readonlySelectorTouchesCredential),
+  };
+}
+
 function normalizeReviewReadInput(
   toolName: string,
   input: unknown,
@@ -1261,13 +1343,15 @@ export default async function cindyBridge(pi: any) {
     // 证据。bash 的原始 input 是整条命令,不能直接 realpath;先用与 Host 相同的
     // parser 提取真实输入目标,才能识别工作区 symlink 指向的凭证文件。
     const bashReadTargets = event.toolName === 'bash' ? bashInputReadTargets(event.input) : [];
-    const resolvedCredentialReadPaths = READONLY_BUILTINS.has(event.toolName)
-      ? [...new Set(collectResolvedCredentialPaths(event.input))]
+    const readonlyCredentialEvidence = READONLY_BUILTINS.has(event.toolName)
+      ? collectReadonlyCredentialEvidence(event.toolName, event.input)
+      : null;
+    const resolvedCredentialReadPaths = readonlyCredentialEvidence
+      ? [...new Set(collectResolvedCredentialPaths(readonlyCredentialEvidence.paths))]
       : event.toolName === 'bash'
         ? [...new Set(collectResolvedCredentialPaths(bashReadTargets))]
         : [];
-    const credentialRead = (READONLY_BUILTINS.has(event.toolName)
-      && touchesCredentialPath(event.input))
+    const credentialRead = readonlyCredentialEvidence?.touchesCredential === true
       || (event.toolName === 'bash' && touchesCredentialPath(bashReadTargets))
       || resolvedCredentialReadPaths.length > 0;
     if (credentialRead && permission.mode === 'bypassPermissions') {

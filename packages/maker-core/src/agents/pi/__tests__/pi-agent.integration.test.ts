@@ -1595,6 +1595,34 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'full access grep treats dotenv text as data rather than a credential path',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-grep-dotenv-data-'));
+      writeFileSync(path.join(workingDir, 'source.txt'), 'literal .env data\n');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: '.env', path: '.', literal: true }),
+          anthropicStreamBody('grep dotenv data turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        await runPermissionTurn({
+          sessionId: 'pi-grep-dotenv-data',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'deny',
+        });
+        const followUp = seenRequests.slice(reqBefore).map((request) => request.body).join('\n');
+        expect(followUp).toContain('source.txt:1: literal .env data');
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
     'Review directory grep returns safe matches without credential-file contents',
     { timeout: 60_000 },
     async () => {

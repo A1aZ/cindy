@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   stableInternalWebCitationBoundary,
   stripInternalWebCitations,
+  stripLeakedModelStopTokens,
 } from './internalCitation.js';
 
 const source1 = '\uE200cite\uE202turn17search1\uE201';
@@ -31,5 +32,26 @@ describe('internal Web citation normalization', () => {
     expect(stableInternalWebCitationBoundary('done \uE200ci')).toBe(5);
     expect(stableInternalWebCitationBoundary('done \uE200cite\uE202turn17sea')).toBe(5);
     expect(stableInternalWebCitationBoundary(`done ${source2}`)).toBe(`done ${source2}`.length);
+  });
+});
+
+describe('leaked model stop tokens', () => {
+  it('strips a whole-message Grok stop token to empty text', () => {
+    expect(stripLeakedModelStopTokens('<|eos|>')).toBe('');
+    expect(stripInternalWebCitations('<|eos|>')).toBe('');
+  });
+
+  it('strips a trailing stop token after real prose', () => {
+    expect(stripInternalWebCitations('\u73B0\u6709 reviewer \u7A7A\u95F2\u3002<|eos|>')).toBe('\u73B0\u6709 reviewer \u7A7A\u95F2\u3002');
+  });
+
+  it('leaves ordinary angle-bracket text and code fences untouched', () => {
+    expect(stripInternalWebCitations('use <|placeholder|> here')).toBe('use <|placeholder|> here');
+    expect(stripInternalWebCitations('See <eos> in the docs')).toBe('See <eos> in the docs');
+  });
+
+  it('is idempotent', () => {
+    expect(stripInternalWebCitations(stripInternalWebCitations('<|eos|>'))).toBe('');
+    expect(stripInternalWebCitations(stripInternalWebCitations('done<|eot_id|>'))).toBe('done');
   });
 });

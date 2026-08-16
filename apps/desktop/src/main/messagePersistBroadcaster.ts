@@ -53,6 +53,7 @@ import { createLogger } from './logger.js';
 import * as broadcastTap from './device-link/broadcast-tap.js';
 import { takeMediaToolResult } from './mcp-integrations/mediaToolResultFallback.js';
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
+import { stripInternalWebCitations } from '@cindy/maker-shared/internal-citation';
 import { getSessionProvider } from './maker-host/session-provider-store.js';
 import type { AgentMeta } from '../renderer/lib/ccAgent.types';
 
@@ -1443,7 +1444,8 @@ export function onAssistantTextEvent(
   data: { text?: unknown; isFinal?: unknown; isFullText?: unknown },
   agentMeta: AgentMeta | null,
 ): string | undefined {
-  const text = typeof data.text === 'string' ? data.text : '';
+  const rawText = typeof data.text === 'string' ? data.text : '';
+  const text = stripInternalWebCitations(rawText);
   const isFinal = data.isFinal === true;
   const isFullText = data.isFullText === true;
 

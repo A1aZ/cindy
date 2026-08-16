@@ -142,6 +142,32 @@ describe('Claude Code assistant text streaming contract', () => {
     ]);
   });
 
+  it('does not emit a leaked Grok stop token as assistant text', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        uuid: 'assistant-eos',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        message: {
+          model: 'grok-4.6',
+          content: [{ type: 'text', text: '<|eos|>' }],
+        },
+      },
+      queue,
+      ctx,
+    );
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents).toEqual([]);
+    expect(ctx.turn.hasEmittedText).toBe(false);
+    expect(ctx.turn.uiEmittedText).toBe('');
+    expect(ctx.turn.lastAssistantMsgHadSubstance).toBe(false);
+  });
+
   it('keeps a result fallback tail unmarked so it cannot replace accumulated streaming text', async () => {
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx();

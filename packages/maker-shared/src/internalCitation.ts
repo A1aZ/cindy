@@ -4,7 +4,12 @@
  * transport metadata, not user-facing prose. Some Codex app-server versions
  * expose only the flattened text and omit the structured URL annotations, so
  * client boundaries must remove the opaque marker deterministically.
+ *
+ * Grok / xAI may also leak the stop token `<|eos|>` as visible assistant
+ * text, typically as a whole message after a tool-only wrap-up. That marker
+ * is not user-facing prose either.
  */
+const MODEL_STOP_TOKEN_RE = /<\|(?:endoftext|eot_id|im_end|eos)\|>/g;
 const WEB_CITATION_OPEN = '\uE200cite\uE202';
 const WEB_CITATION_CLOSE = '\uE201';
 
@@ -44,6 +49,10 @@ export function stableInternalWebCitationBoundary(text: string): number {
  * left untouched. The transform is idempotent.
  */
 export function stripInternalWebCitations(text: string): string {
+  return stripLeakedModelStopTokens(stripInternalWebCitationMarkers(text));
+}
+
+function stripInternalWebCitationMarkers(text: string): string {
   if (!text.includes('\uE200')) return text;
 
   const stableEnd = stableInternalWebCitationBoundary(text);
@@ -60,4 +69,15 @@ export function stripInternalWebCitations(text: string): string {
     output += stable.slice(from, open);
     from = close + WEB_CITATION_CLOSE.length;
   }
+}
+
+/**
+ * Drop leaked model stop tokens. Whole-message leftovers become empty so
+ * persist / render callers can treat them as no user-facing text. Trailing
+ * tokens after real prose are removed without collapsing surrounding spaces
+ * that the caller already owns.
+ */
+export function stripLeakedModelStopTokens(text: string): string {
+  if (!text.includes('<|')) return text;
+  return text.replace(MODEL_STOP_TOKEN_RE, '');
 }

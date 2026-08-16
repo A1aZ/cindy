@@ -141,6 +141,29 @@ describe('Claude Code translator silent-stop observation (log only)', () => {
     expect(doneSilentStopFlag(events)).toBe(true);
   });
 
+  it('treats a leaked Grok stop token as empty wrap-up, not visible text', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushToolUseMessage(queue, ctx);
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: '<|eos|>' }] } },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      { type: 'result', stop_reason: 'end_turn', result: '<|eos|>', total_cost_usd: 0.1, usage: NON_EMPTY_USAGE },
+      queue,
+      ctx,
+    );
+
+    const events = await drain(queue);
+    expect(events.filter((event) => event.type === 'text')).toEqual([]);
+    expect(silentStopWarned(ctx)).toBe(true);
+    expect(doneSilentStopFlag(events)).toBe(true);
+  });
+
   it('does NOT log when the final assistant message carries text (normal completion)', async () => {
     const tracker = new UsageTracker();
     const queue = createAsyncQueue<AgentEvent>();

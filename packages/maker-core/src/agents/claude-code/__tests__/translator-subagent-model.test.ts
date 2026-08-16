@@ -17,7 +17,6 @@ function createTurnState(): TurnState {
     sawCompactBoundary: false,
     hasEmittedText: false,
     uiEmittedText: '',
-    rawAssistantText: '',
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,
@@ -223,6 +222,82 @@ describe('Claude Code assistant text streaming contract', () => {
       { text: '<|eos|>', isFinal: false },
     ]);
     expect(ctx.turn.uiEmittedText).toBe('The token is <|eos|>');
+  });
+
+  it('keeps later tool-loop prose after a final assistant envelope', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        uuid: 'assistant-first',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        message: {
+          model: 'claude-opus-4-6',
+          content: [{ type: 'text', text: '先看一眼。' }],
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'stream-second',
+        session_id: 'sdk-session',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '再改一处。' } },
+      },
+      queue,
+      ctx,
+    );
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents.map((event) => event.data)).toEqual([
+      { text: '先看一眼。', isFinal: true },
+      { text: '再改一处。', isFinal: false },
+    ]);
+    expect(ctx.turn.uiEmittedText).toBe('先看一眼。再改一处。');
+  });
+
+  it('does not mix concurrent stream prefixes when sanitizing stop tokens', async () => {
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx();
+
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'stream-a',
+        session_id: 'sdk-session',
+        parent_tool_use_id: 'toolu-a',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '<|eo' } },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'stream_event',
+        uuid: 'stream-b',
+        session_id: 'sdk-session',
+        parent_tool_use_id: 'toolu-b',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'answer' } },
+      },
+      queue,
+      ctx,
+    );
+
+    const textEvents = (await collect(queue)).filter((event) => event.type === 'text');
+    expect(textEvents).toEqual([
+      expect.objectContaining({
+        data: { text: 'answer', isFinal: false },
+        agentMeta: expect.objectContaining({ parentUuid: 'toolu-b' }),
+      }),
+    ]);
+    expect(ctx.turn.uiEmittedText).toBe('answer');
+    expect(ctx.rt.streamStopTokenByKey.get('toolu-a')).toEqual({ raw: '<|eo', emitted: 0 });
   });
 
   it('keeps a result fallback tail unmarked so it cannot replace accumulated streaming text', async () => {

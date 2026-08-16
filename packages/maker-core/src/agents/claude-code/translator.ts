@@ -61,11 +61,6 @@ export interface TurnState {
    */
   uiEmittedText: string;
   /**
-   * 当前 assistant text block 尚未归一化的累计原文。text_delta 可能把
-   * `<|eos|>` 拆开；必须先拼回快照再清洗，才能按住半截前缀、丢掉整条泄漏。
-   */
-  rawAssistantText: string;
-  /**
    * SDK API retry / assistant error envelope 的暂存详情。两者都不是可靠的 turn
    * 终态: Claude Code 可能随后自动重试并返回成功 result。只有最终
    * result.is_error 才把它推成 terminal error；成功 result 直接丢弃，避免下游
@@ -152,6 +147,11 @@ export interface RuntimeState {
    * translator 在 handleResult 里按上一条 result 做 delta, 再把 per-turn usage 交给 UsageTracker。
    */
   lastResultUsageAggregate: ResultUsageAggregate | null;
+  /**
+   * 按 streamKey 隔离的停止符清洗缓冲。text_delta 可能把 `<|eos|>` 拆开，
+   * 必须先拼回该 stream 的快照再清洗；并发 subagent 不能共用一份原文。
+   */
+  streamStopTokenByKey: Map<string, { raw: string; emitted: number }>;
 }
 
 export function newRuntimeState(): RuntimeState {
@@ -165,6 +165,7 @@ export function newRuntimeState(): RuntimeState {
     excludedSubagentTaskIds: new Set(),
     lastAssistantMeta: null,
     lastResultUsageAggregate: null,
+    streamStopTokenByKey: new Map(),
   };
 }
 
@@ -179,7 +180,6 @@ function resetTurnState(turn: TurnState): void {
   turn.sawCompactBoundary = false;
   turn.hasEmittedText = false;
   turn.uiEmittedText = '';
-  turn.rawAssistantText = '';
   turn.pendingApiError = null;
   turn.interruptRequested = false;
   turn.lastAssistantMsgHadSubstance = true;
@@ -1164,7 +1164,8 @@ function handleAssistant(
   for (const blockRaw of content) {
     const block = blockRaw as { type?: string; text?: string; name?: string; id?: string; input?: unknown; thinking?: string; signature?: string };
     if (block.type === 'text' && typeof block.text === 'string') {
-      ctx.turn.rawAssistantText = '';
+      const streamKey = parentToolUseId ?? '__main__';
+      ctx.rt.streamStopTokenByKey.delete(streamKey);
       const visibleText = stripInternalWebCitations(block.text);
       ctx.turn.text += visibleText;
       if (visibleText.length > 0) {
@@ -1286,17 +1287,17 @@ function handleStreamEvent(
     const delta = event.delta as { type?: string; text?: string; thinking?: string } | undefined;
     if (!delta) return;
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      ctx.turn.rawAssistantText += delta.text;
+      const buffer = ctx.rt.streamStopTokenByKey.get(streamKey) ?? { raw: '', emitted: 0 };
+      buffer.raw += delta.text;
       const visible = stripInternalWebCitations(
-        ctx.turn.rawAssistantText.slice(
-          0,
-          stableStandaloneModelStopTokenBoundary(ctx.turn.rawAssistantText),
-        ),
+        buffer.raw.slice(0, stableStandaloneModelStopTokenBoundary(buffer.raw)),
       );
-      const visibleDelta = visible.slice(ctx.turn.uiEmittedText.length);
+      const visibleDelta = visible.slice(buffer.emitted);
+      ctx.rt.streamStopTokenByKey.set(streamKey, buffer);
       if (visibleDelta.length > 0) {
         ctx.turn.hasEmittedText = true;
-        ctx.turn.uiEmittedText = visible;
+        ctx.turn.uiEmittedText += visibleDelta;
+        buffer.emitted = visible.length;
         queue.push({
           type: 'text',
           data: { text: visibleDelta, isFinal: false },

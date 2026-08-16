@@ -160,7 +160,7 @@ describe('classifyBuiltinToolForAutoReview — Windows 盘符路径边界', () =
 
 describe('classifyBuiltinToolForAutoReview — Bash 只读命令放行', () => {
   it('常见只读命令 auto-approve', () => {
-    for (const c of ['ls -la', 'cat package.json', 'pwd', 'grep -rn foo src', 'rg TODO', 'wc -l x', 'head -5 f', 'echo hi']) {
+    for (const c of ['ls -la', 'cat package.json', 'pwd', 'grep -rn foo src --include="[!.]*.ts"', 'rg TODO', 'wc -l x', 'head -5 f', 'echo hi']) {
       expect(verdict('Bash', { command: c })).toBe('auto-approve');
     }
   });

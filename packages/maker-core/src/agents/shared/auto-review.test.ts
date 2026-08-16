@@ -80,7 +80,7 @@ describe('reviewAction — exec 实际 cwd 边界', () => {
 
 describe('classifyShellCommand — 只读放行', () => {
   it('常见只读命令 / git 只读 / curl GET', () => {
-    for (const c of ['ls -la', 'cat f', 'grep -rn x .', 'rg TODO', 'git status', 'git log', 'curl -sS https://x.com', 'env FOO=1 ls', 'timeout 5 grep x f']) {
+    for (const c of ['ls -la', 'cat f', 'grep -rn x . --include="[!.]*.ts"', 'rg TODO', 'git status', 'git log', 'curl -sS https://x.com', 'env FOO=1 ls', 'timeout 5 grep x f']) {
       expect(classifyShellCommand(c, roots)).toBe('auto-approve');
     }
   });
@@ -1016,7 +1016,7 @@ describe('classifyShellCommand — 第三轮 bot 审查回归护栏', () => {
     expect(classifyShellCommand('{c..c}at notes.txt', roots)).toBe('prompt');
     // 反例:位置参数里的 brace 只影响文件名 → 不升级;find 占位符 {} 不算展开。
     expect(classifyShellCommand('ls dir/{a,b}', roots)).toBe('auto-approve');
-    expect(classifyShellCommand('grep -rn foo src/{a,b}', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('grep -rn foo src/{a,b} --include="[!.]*.ts"', roots)).toBe('auto-approve');
     expect(classifyShellCommand('find . -maxdepth 0 -print', roots)).toBe('auto-approve'); // {} 占位符另测,这里确认普通 find 放行
   });
 
@@ -4124,7 +4124,7 @@ describe('伪设备白名单:静音重定向不得打断(实机语料探针发�
 
   it('日常命令语料整体不被硬拦(尽量不打扰的回归护栏)', () => {
     for (const c of [
-      'ls -la', 'git status', 'cat package.json', 'grep -rn TODO src',
+      'ls -la', 'git status', 'cat package.json', 'grep -rn TODO src --include="[!.]*.ts"',
       'pnpm install', 'npx tsc --noEmit', 'rm -rf node_modules', 'rm -rf build',
       'git add .', 'git commit -m "fix: x"', 'git push origin feature/x',
       'env NODE_ENV=test npx vitest run', 'timeout 60 pnpm test', 'nohup pnpm dev',

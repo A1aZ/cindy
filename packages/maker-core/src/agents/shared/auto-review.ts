@@ -1868,6 +1868,7 @@ function unwrapCommand(
       let bail = false;
       while (i < toks.length) {
         const t = toks[i];
+        if (t === '--') { i++; break; }
         if (t === '-' || t === '-i' || t === '--ignore-environment' || t === '-0' || t === '--null' || t === '-v' || t === '--debug') { i++; continue; }
         if (t === '-u' || t === '--unset') { i += 2; continue; }
         if (t === '-C' || t === '--chdir') {
@@ -4796,12 +4797,27 @@ function readerShortOptionKind(bin: string, option: string): ReaderOptionKind | 
   return null;
 }
 
+function selectorAlternativeCannotMatchDotenv(value: string): boolean {
+  const basename = value.replace(/\\/g, '/').split('/').pop() ?? '';
+  if (!/[*?\[]/.test(basename)) return !isDotenvCredentialPath(value);
+  if (/^\[(?:!|\^)\.\]/.test(basename)) return true;
+  const literalPrefix = basename.slice(0, basename.search(/[*?\[]/));
+  return Boolean(literalPrefix)
+    && !'.env'.startsWith(literalPrefix)
+    && !literalPrefix.startsWith('.env');
+}
+
+function expandBraceAlternatives(value: string, depth = 0): string[] {
+  if (depth >= 8) return ['*'];
+  const match = /^(.*?)\{([^{}]*,[^{}]*)\}(.*)$/.exec(value);
+  if (!match) return [value];
+  return match[2].split(',').flatMap((alternative) =>
+    expandBraceAlternatives(`${match[1]}${alternative}${match[3]}`, depth + 1));
+}
+
 function selectorCouldMatchDotenv(value: string): boolean {
-  if (isDotenvCredentialPath(value)) return true;
-  return value
-    .replace(/\\/g, '/')
-    .split(/[,{}]/)
-    .some((part) => isDotenvCredentialPath(part.replace(/[[\]*?]/g, '')));
+  return !value.startsWith('!') && expandBraceAlternatives(value)
+    .some((alternative) => !selectorAlternativeCannotMatchDotenv(alternative));
 }
 
 function readerArgumentsReadDotenv(
@@ -4865,6 +4881,67 @@ function readerArgumentsReadDotenv(
     if (isSensitiveOperand(token)) return true;
   }
   return false;
+}
+
+function grepRecursesIntoPotentialDotenv(bin: string, args: readonly string[]): boolean {
+  if (bin !== 'grep' && bin !== 'egrep' && bin !== 'fgrep') return false;
+
+  const longOptionNames = [
+    '--recursive', '--directories', ...GREP_LONG_OPTIONS.map((option) => option.name),
+  ];
+  let recursive = false;
+  const includes: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') break;
+
+    if (token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const exact = longOptionNames.find((option) => option === name);
+      const matches = exact ? [exact] : longOptionNames.filter((option) => option.startsWith(name));
+      const canonical = matches.length === 1 ? matches[0] : null;
+      if (!canonical) continue;
+
+      if (canonical === '--recursive') {
+        recursive = true;
+        continue;
+      }
+
+      const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
+      const value = attached ?? args[index + 1];
+      if (attached === undefined) index += 1;
+      if (canonical === '--directories') {
+        recursive = Boolean(value && 'recurse'.startsWith(value));
+      }
+      if (canonical === '--include' && value) includes.push(value);
+      continue;
+    }
+
+    if (/^-[^-]/.test(token)) {
+      for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+        const option = token.charAt(optionIndex);
+        if (option === 'r' || option === 'R') {
+          recursive = true;
+          continue;
+        }
+        if (option === 'd') {
+          const attached = token.slice(optionIndex + 1) || undefined;
+          const value = attached ?? args[index + 1];
+          if (attached === undefined) index += 1;
+          recursive = Boolean(value && 'recurse'.startsWith(value));
+          break;
+        }
+        if (readerShortOptionKind('grep', option)) {
+          if (optionIndex === token.length - 1) index += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  return recursive && (includes.length === 0 || includes.some(selectorCouldMatchDotenv));
 }
 
 function gitGrepExpandsSearchScope(args: readonly string[]): boolean {
@@ -4963,6 +5040,7 @@ function shellCommandReadsDotenv(
 
     if (!DOTENV_FILE_READER_BINS.has(bin)) continue;
     const args = tokens.slice(1);
+    if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
     if (readerArgumentsReadDotenv(bin, args)) return true;
   }
   return false;

@@ -381,4 +381,31 @@ describe('SplashScreen wave4 统一面板', () => {
     expect(screen.getByText('splash.tips.waking')).toBeTruthy();
     expect(document.documentElement.getAttribute('data-splash-active')).toBe('1');
   });
+
+  it('cover 放行后淡出层不拦截点击', () => {
+    mocks.coverHeld = true;
+    const view = renderSplash('splash_done');
+    mocks.coverHeld = false;
+    view.rerender(<SplashScreen />);
+    expect(screen.getByTestId('splash-root').className).toContain('pointer-events-none');
+    expect(screen.getByTestId('splash-root').className).toContain('opacity-0');
+  });
+
+  it('reduced-motion 下 cover 放行立即卸载,不留 500ms 透明遮罩', () => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: String(query).includes('prefers-reduced-motion'),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    mocks.coverHeld = true;
+    const view = renderSplash('splash_done');
+    expect(screen.getByTestId('splash-panel')).toBeTruthy();
+    mocks.coverHeld = false;
+    view.rerender(<SplashScreen />);
+    expect(view.container.firstElementChild).toBeNull();
+  });
 });

@@ -11,6 +11,7 @@ import {
 import { useAppShellCover } from '@/contexts/AppShellCoverContext';
 import { useEnvCheck } from '@/contexts/EnvCheckContext';
 import { useLoginHandoff } from '@/contexts/LoginHandoffContext';
+import { useReducedMotion } from '@/hooks/useReducedMotion';
 import { WindowControls } from '@/components/title-bar/WindowControls';
 import { desktopScale } from '@/components/login/loginScale';
 import { useViewportSize } from '@/components/login/LoginStage';
@@ -93,6 +94,7 @@ export function SplashScreen() {
   const splash = useSplash();
   const { step, totalSteps } = useEnvCheck();
   const { coverHeld } = useAppShellCover();
+  const reducedMotion = useReducedMotion();
   const handoff = useLoginHandoff();
   const [shellCoverFading, setShellCoverFading] = useState(false);
   const prevCoverHeldRef = useRef(coverHeld);
@@ -140,6 +142,12 @@ export function SplashScreen() {
 
   useEffect(() => {
     if (prevCoverHeldRef.current && !coverHeld && (realPhase === 'splash_done' || realPhase === 'splash_skipped')) {
+      // reduced-motion 把 --splash-fade-duration 置 0ms。再留 500ms 透明全屏层
+      // 会吞掉主界面刚露出时的点击(层未 pointer-events:none)。
+      if (reducedMotion) {
+        prevCoverHeldRef.current = coverHeld;
+        return;
+      }
       setShellCoverFading(true);
       const timer = window.setTimeout(() => setShellCoverFading(false), 500);
       prevCoverHeldRef.current = coverHeld;
@@ -147,7 +155,7 @@ export function SplashScreen() {
     }
     if (holdAfterDone) setShellCoverFading(false);
     prevCoverHeldRef.current = coverHeld;
-  }, [coverHeld, holdAfterDone, realPhase]);
+  }, [coverHeld, holdAfterDone, realPhase, reducedMotion]);
 
   const shellCoverVisible = holdAfterDone || shellCoverFading;
 
@@ -221,7 +229,7 @@ export function SplashScreen() {
       className={cn(
         'fixed inset-0 z-[9999] overflow-hidden',
         (realPhase === 'fading_out' || shellCoverFading) && !fixture
-          ? 'opacity-0'
+          ? 'pointer-events-none opacity-0'
           : 'opacity-100',
       )}
       style={

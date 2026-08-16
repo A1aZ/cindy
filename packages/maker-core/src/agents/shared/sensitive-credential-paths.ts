@@ -86,19 +86,9 @@ export const REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
  * Grep/Glob/Find tools need a second, execution/result-level boundary because
  * their input can be only a granted directory with no concrete file selector.
  */
-export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
+export const SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
   "**/.env",
   "**/.env.*",
-  "**/.git",
-  "**/.git/**",
-  "**/node_modules",
-  "**/node_modules/**",
-  "**/apps/claude-code-bin/**",
-  "**/apps/codex-bin/**",
-  "**/apps/pi-bin/**",
-  "**/apps/ripgrep-bin/**",
-  "**/tools/pi/updates/**",
-  "**/.vite/**",
   "**/.ssh/**",
   "**/.aws/**",
   "**/.gnupg/**",
@@ -118,7 +108,10 @@ export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
   "**/.m2/settings-security.xml",
   "**/application_default_credentials*",
   "**/credentials.json",
-  "**/auth.json",
+  "**/codex/auth.json",
+  "**/claude/auth.json",
+  "**/gcloud/auth.json",
+  "**/containers/auth.json",
   "**/.config/gh/**",
   "**/.config/hub/**",
   "**/.config/glab/**",
@@ -135,6 +128,21 @@ export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
   "**/id_dsa",
   "**/.xdt-server",
   "**/.xdt-server/**",
+] as const;
+
+export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
+  ...SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
+  "**/auth.json",
+  "**/.git",
+  "**/.git/**",
+  "**/node_modules",
+  "**/node_modules/**",
+  "**/apps/claude-code-bin/**",
+  "**/apps/codex-bin/**",
+  "**/apps/pi-bin/**",
+  "**/apps/ripgrep-bin/**",
+  "**/tools/pi/updates/**",
+  "**/.vite/**",
 ] as const;
 
 const DOTENV_CREDENTIAL_PATH_PATTERN = new RegExp(

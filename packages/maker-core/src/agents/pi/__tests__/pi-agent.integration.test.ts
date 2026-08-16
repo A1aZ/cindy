@@ -1628,8 +1628,17 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     async () => {
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-grep-dotenv-selector-'));
       mkdirSync(path.join(workingDir, 'src'));
+      mkdirSync(path.join(workingDir, '.ssh'));
+      mkdirSync(path.join(workingDir, '.config', 'gh-work'), { recursive: true });
       writeFileSync(path.join(workingDir, 'src', '.env.local'), 'SELECTOR_SECRET=must-not-leak\n');
+      writeFileSync(path.join(workingDir, 'src', '.netrc'), 'NETRC_SECRET=must-not-leak\n');
+      writeFileSync(path.join(workingDir, 'src', 'a.key'), 'KEY_SECRET=must-not-leak\n');
       writeFileSync(path.join(workingDir, 'src', 'source.ts'), 'SAFE_SELECTOR=visible\n');
+      writeFileSync(path.join(workingDir, '.ssh', 'config'), 'SSH_CONFIG_SECRET=must-not-leak\n');
+      writeFileSync(
+        path.join(workingDir, '.config', 'gh-work', 'token.txt'),
+        'CONFIG_SECRET=must-not-leak\n',
+      );
       try {
         scriptedResponses.length = 0;
         scriptedResponses.push(
@@ -1649,12 +1658,76 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(followUp).toContain('User denied this tool call via Cindy.');
 
         scriptedResponses.push(
-          anthropicToolUseBody('grep', { pattern: 'SAFE_SELECTOR', path: 'src', glob: '!.env*' }),
-          anthropicStreamBody('grep negative selector turn finished'),
+          anthropicToolUseBody('grep', { pattern: 'NETRC_SECRET', path: 'src', glob: '.n?trc' }),
+          anthropicStreamBody('grep netrc selector credential turn finished'),
+        );
+        const netrcReqBefore = seenRequests.length;
+        const netrcTurn = await runPermissionTurn({
+          sessionId: 'pi-grep-netrc-selector',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(netrcTurn.resolverTools).toEqual(['grep']);
+        const netrcFollowUp = seenRequests.slice(netrcReqBefore).map((request) => request.body).join('\n');
+        expect(netrcFollowUp).not.toContain('NETRC_SECRET=must-not-leak');
+        expect(netrcFollowUp).toContain('User denied this tool call via Cindy.');
+
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'SSH_CONFIG_SECRET', path: '.', glob: '.s?h/config' }),
+          anthropicStreamBody('grep ssh directory selector credential turn finished'),
+        );
+        const sshReqBefore = seenRequests.length;
+        const sshTurn = await runPermissionTurn({
+          sessionId: 'pi-grep-ssh-directory-selector',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(sshTurn.resolverTools).toEqual(['grep']);
+        const sshFollowUp = seenRequests.slice(sshReqBefore).map((request) => request.body).join('\n');
+        expect(sshFollowUp).not.toContain('SSH_CONFIG_SECRET=must-not-leak');
+        expect(sshFollowUp).toContain('User denied this tool call via Cindy.');
+
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'CONFIG_SECRET', path: '.', glob: '.config/g?-*/**' }),
+          anthropicStreamBody('grep config directory selector credential turn finished'),
+        );
+        const configReqBefore = seenRequests.length;
+        const configTurn = await runPermissionTurn({
+          sessionId: 'pi-grep-config-directory-selector',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(configTurn.resolverTools).toEqual(['grep']);
+        const configFollowUp = seenRequests.slice(configReqBefore).map((request) => request.body).join('\n');
+        expect(configFollowUp).not.toContain('CONFIG_SECRET=must-not-leak');
+        expect(configFollowUp).toContain('User denied this tool call via Cindy.');
+
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'KEY_SECRET', path: 'src', glob: '?.key' }),
+          anthropicStreamBody('grep key selector credential turn finished'),
+        );
+        const keyReqBefore = seenRequests.length;
+        const keyTurn = await runPermissionTurn({
+          sessionId: 'pi-grep-key-selector-full-access',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'deny',
+        });
+        expect(keyTurn.resolverTools).toEqual([]);
+        const keyFollowUp = seenRequests.slice(keyReqBefore).map((request) => request.body).join('\n');
+        expect(keyFollowUp).not.toContain('KEY_SECRET=must-not-leak');
+        expect(keyFollowUp).toContain('Cindy blocks reading credential or key paths');
+
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'SAFE_SELECTOR', path: 'src', glob: 'source.ts' }),
+          anthropicStreamBody('grep ordinary selector turn finished'),
         );
         const safeReqBefore = seenRequests.length;
         const safeTurn = await runPermissionTurn({
-          sessionId: 'pi-grep-negative-dotenv-selector',
+          sessionId: 'pi-grep-ordinary-selector',
           workingDir,
           permissionMode: 'auto',
           resolverBehavior: 'deny',

@@ -57,11 +57,13 @@ function loadReviewSearchHelpers(
   const helperEnd = source.indexOf("// ── MCP streamable-HTTP");
   const findStart = source.indexOf("function rgGlob(");
   const findEnd = source.indexOf("export default async function cindyBridge");
+  const selectorGlobs = /^const CREDENTIAL_SELECTOR_GLOBS = .*;$/m.exec(source)?.[0];
   if (
     helperStart < 0 ||
     helperEnd <= helperStart ||
     findStart < 0 ||
-    findEnd <= findStart
+    findEnd <= findStart ||
+    !selectorGlobs
   ) {
     throw new Error(
       "Review search helpers were not found in the generated bridge",
@@ -71,6 +73,7 @@ function loadReviewSearchHelpers(
     "const CREDENTIAL_PATH_PATTERNS: RegExp[] = [/(?:^|[\\\\/])\\.env(?:\\.[^\\\\/]+)?$/i, /\\.pem$/i];",
     "const REVIEW_CREDENTIAL_PATH_PATTERNS: RegExp[] = [/(?:^|[\\\\/])node_modules(?:[\\\\/]|$)/i];",
     "const REVIEW_CREDENTIAL_GLOB_PATTERNS: string[] = [];",
+    selectorGlobs,
     "function touchesCredentialPath(input: unknown): boolean {",
     "  if (typeof input === 'string') return CREDENTIAL_PATH_PATTERNS.some((re) => re.test(input));",
     "  if (Array.isArray(input)) return input.some(touchesCredentialPath);",
@@ -145,6 +148,23 @@ describe('cindy-bridge extension source', () => {
       touchesCredential: false,
     });
     expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.env*' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.n?trc' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: 'src/.n?trc' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '*.p?m' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.config/g?/**' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '?.key' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.env.?' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.ssh-*/**' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', globs: ['*.key', '!secret.key'] }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '**/.cargo/credentia?s.bak' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '**/.m2/settings.xml.bak' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.s?h' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: 'id_rsa.*' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.s?h/config' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.config/g?/hosts.yml' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.a?s/credentials' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: '.config/g?-*/**' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: '.', glob: 'nested/.config/g?-*/**' }).touchesCredential).toBe(true);
     expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.e[n-o]v' }).touchesCredential).toBe(true);
     expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[.-0]env*' }).touchesCredential).toBe(true);
     expect(evidence('find', { pattern: '.e{n,foo}v', path: 'src' }).touchesCredential).toBe(true);
@@ -152,10 +172,19 @@ describe('cindy-bridge extension source', () => {
     expect(evidence('find', { pattern: '@(safe|.env)', path: 'src' }).touchesCredential).toBe(true);
     expect(evidence('find', { pattern: '.e{o,p}v', path: 'src' }).touchesCredential).toBe(false);
     expect(evidence('find', { pattern: '.e[o-p]v', path: 'src' }).touchesCredential).toBe(false);
-    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.environment*' }).touchesCredential).toBe(false);
-    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '!.env*' }).touchesCredential).toBe(false);
-    expect(evidence('grep', { pattern: 'KEY', path: 'src', globs: ['*', '!.env*'] }).touchesCredential).toBe(false);
-    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[!.]*.ts' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.environment*' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '!.env*' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', globs: ['*', '!.env*'] }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', globs: ['source.ts', '!.env*'] }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[!.]*.ts' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '*.ts' }).touchesCredential).toBe(true);
+    expect(evidence('find', { pattern: '*.ts', path: 'src' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.n?tes' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[!.]*.png' }).touchesCredential).toBe(true);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '?.txt' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.envrc?' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.netrcfoo' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.sshhelper' }).touchesCredential).toBe(false);
     expect(evidence('find', { pattern: '.env', path: 'src' }).touchesCredential).toBe(true);
     expect(evidence('read', { path: '.env.local', offset: 1 }).touchesCredential).toBe(true);
     expect(evidence('ls', { path: 'src/.environment' }).touchesCredential).toBe(false);

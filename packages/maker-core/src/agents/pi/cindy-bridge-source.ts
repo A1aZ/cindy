@@ -26,11 +26,26 @@
 import {
   REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
+  SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
 } from "../shared/sensitive-credential-paths.js";
 import { shellInputRedirectionParserSource } from "../shared/shell-input-redirections.js";
 
 const SHELL_INPUT_REDIRECTION_PARSER_SOURCE = shellInputRedirectionParserSource();
+const CREDENTIAL_WORD_BOUNDARY = '\u0001';
+const SENSITIVE_CREDENTIAL_SELECTOR_GLOBS = [...new Set(
+  SENSITIVE_CREDENTIAL_GLOB_PATTERNS.flatMap((pattern) => {
+    const variants = [pattern];
+    const directory = pattern.endsWith('/**') ? pattern.slice(0, -3) : undefined;
+    if (directory) {
+      variants.push(directory, directory + CREDENTIAL_WORD_BOUNDARY + '**');
+    } else if (pattern !== '**/.env' && pattern !== '**/.env.*' && !pattern.endsWith('*')) {
+      variants.push(pattern + CREDENTIAL_WORD_BOUNDARY + '**');
+    }
+    return variants.flatMap((variant) =>
+      variant.startsWith('**/') ? [variant, variant.slice(3)] : [variant]);
+  }),
+)];
 
 export const CINDY_BRIDGE_EXTENSION_FILENAME = "cindy-bridge.ts";
 
@@ -115,6 +130,7 @@ const CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(SENSITIVE_CREDENTIAL_PATH_PATT
 const REVIEW_CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS)}
   .map(({ source, flags }) => new RegExp(source, flags));
 const REVIEW_CREDENTIAL_GLOB_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS)};
+const CREDENTIAL_SELECTOR_GLOBS = ${JSON.stringify(SENSITIVE_CREDENTIAL_SELECTOR_GLOBS)};
 
 ${SHELL_INPUT_REDIRECTION_PARSER_SOURCE}
 
@@ -664,7 +680,6 @@ function collectReviewFileSelectors(toolName: string, input: unknown): string[] 
 }
 
 function readonlySelectorClassCandidates(value: string): string[] | null {
-  if (value === '!.' || value === '^.') return ['x'];
   if (value.startsWith('!') || value.startsWith('^') || value.includes('[:')) return null;
   const chars: string[] = [];
   for (let index = 0; index < value.length; index += 1) {
@@ -708,27 +723,129 @@ function expandReadonlySelector(selector: string): string[] | null {
   return expanded;
 }
 
-function readonlySelectorTouchesCredential(selector: string): boolean {
-  if (selector.trimStart().startsWith('!')) return false;
+type SelectorGlobToken =
+  | { kind: 'literal'; value: string }
+  | { kind: 'one' | 'star' | 'globstar' | 'nonword' };
+
+type SelectorGlobLabel =
+  | { kind: 'literal'; value: string }
+  | { kind: 'non-slash' | 'non-word' | 'any' };
+
+function selectorGlobTokens(pattern: string): SelectorGlobToken[] | null {
+  if (/[\[\]{}()|+@]/.test(pattern)) return null;
+  const normalized = pattern.replace(/\\/g, '/').toLowerCase();
+  const tokens: SelectorGlobToken[] = [];
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (char === '\u0001') {
+      tokens.push({ kind: 'nonword' });
+      continue;
+    }
+    if (char === '?') {
+      tokens.push({ kind: 'one' });
+      continue;
+    }
+    if (char === '*') {
+      let end = index + 1;
+      while (normalized[end] === '*') end += 1;
+      tokens.push({ kind: end - index >= 2 ? 'globstar' : 'star' });
+      index = end - 1;
+      continue;
+    }
+    tokens.push({ kind: 'literal', value: char });
+  }
+  return tokens;
+}
+
+function selectorGlobTransition(
+  tokens: readonly SelectorGlobToken[],
+  index: number,
+): { next: number; label: SelectorGlobLabel } | null {
+  const token = tokens[index];
+  if (!token) return null;
+  if (token.kind === 'literal') return { next: index + 1, label: token };
+  if (token.kind === 'one') return { next: index + 1, label: { kind: 'non-slash' } };
+  if (token.kind === 'nonword') return { next: index + 1, label: { kind: 'non-word' } };
+  if (token.kind === 'star') return { next: index, label: { kind: 'non-slash' } };
+  return { next: index, label: { kind: 'any' } };
+}
+
+function selectorGlobLabelsOverlap(left: SelectorGlobLabel, right: SelectorGlobLabel): boolean {
+  if (left.kind === 'any' || right.kind === 'any') return true;
+  if (left.kind === 'literal' && right.kind === 'literal') return left.value === right.value;
+  if (left.kind === 'literal') {
+    if (right.kind === 'non-word') return !/[a-z0-9_]/i.test(left.value);
+    return left.value !== '/';
+  }
+  if (right.kind === 'literal') {
+    if (left.kind === 'non-word') return !/[a-z0-9_]/i.test(right.value);
+    return right.value !== '/';
+  }
+  return true;
+}
+
+function selectorGlobsIntersect(leftPattern: string, rightPattern: string): boolean | null {
+  const left = selectorGlobTokens(leftPattern);
+  const right = selectorGlobTokens(rightPattern);
+  if (!left || !right) return null;
+  const pending: Array<[number, number]> = [[0, 0]];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const [leftIndex, rightIndex] = pending.pop()!;
+    const key = leftIndex + ':' + rightIndex;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (leftIndex === left.length && rightIndex === right.length) return true;
+
+    const leftToken = left[leftIndex];
+    const rightToken = right[rightIndex];
+    if (leftToken?.kind === 'star' || leftToken?.kind === 'globstar') {
+      pending.push([leftIndex + 1, rightIndex]);
+    }
+    if (rightToken?.kind === 'star' || rightToken?.kind === 'globstar') {
+      pending.push([leftIndex, rightIndex + 1]);
+    }
+
+    const leftTransition = selectorGlobTransition(left, leftIndex);
+    const rightTransition = selectorGlobTransition(right, rightIndex);
+    if (leftTransition && rightTransition
+      && selectorGlobLabelsOverlap(leftTransition.label, rightTransition.label)) {
+      pending.push([leftTransition.next, rightTransition.next]);
+    }
+  }
+  return false;
+}
+
+function readonlySelectorCouldMatchCredential(selector: string): boolean {
   const expanded = expandReadonlySelector(selector);
   if (!expanded) return true;
-  const dotenvProbes = ['.env', '.env.local', '.env.production', '.env.secret'];
+  return expanded.some((candidate) => CREDENTIAL_SELECTOR_GLOBS.some((credentialGlob) => {
+    if (!candidate.includes('/') && credentialGlob.endsWith('/**')) return false;
+    const sensitivePattern = candidate.includes('/') ? credentialGlob : path.basename(credentialGlob);
+    return selectorGlobsIntersect(candidate, sensitivePattern) !== false;
+  }));
+}
+
+function readonlySelectorDirectlyTouchesCredential(selector: string): boolean {
+  const expanded = expandReadonlySelector(selector);
+  if (!expanded) return true;
   return expanded.some((candidate) => {
     const directCandidates = [candidate, ...candidate.split('|')];
     if (directCandidates.some((value) =>
       CREDENTIAL_PATH_PATTERNS.some((re) => re.test(value)))) return true;
-    if (directCandidates.some((value) => {
+    return directCandidates.some((value) => {
       const literalized = value.replace(/[*?()!+@]/g, '');
       return literalized !== value
         && CREDENTIAL_PATH_PATTERNS.some((re) => re.test(literalized));
-    })) return true;
-    try {
-      const basename = candidate.replace(/\\/g, '/').split('/').pop() ?? '';
-      return dotenvProbes.some((probe) => path.matchesGlob(probe, basename));
-    } catch {
-      return true;
-    }
+    });
   });
+}
+
+function readonlySelectorsTouchCredential(selectors: readonly string[]): boolean {
+  if (selectors.length === 0) return false;
+  const positive = selectors.filter((selector) => !selector.trimStart().startsWith('!'));
+  if (positive.length === 0) return true;
+  return positive.some(readonlySelectorCouldMatchCredential);
 }
 
 function collectReadonlyCredentialEvidence(
@@ -739,10 +856,12 @@ function collectReadonlyCredentialEvidence(
   const selectors = collectReviewFileSelectors(toolName, input);
   if (!pathFields || !selectors) return { paths: [], touchesCredential: true };
   const paths = pathFields.map((field) => field.candidate);
+  const selectorTouchesCredential = toolName === 'grep'
+    ? readonlySelectorsTouchCredential(selectors)
+    : selectors.some(readonlySelectorDirectlyTouchesCredential);
   return {
     paths,
-    touchesCredential: touchesCredentialPath(paths)
-      || selectors.some(readonlySelectorTouchesCredential),
+    touchesCredential: touchesCredentialPath(paths) || selectorTouchesCredential,
   };
 }
 

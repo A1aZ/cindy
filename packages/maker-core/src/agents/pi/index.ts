@@ -2779,6 +2779,9 @@ export class PiAgent extends BaseAgent {
               PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
           });
           if (!resp.success) {
+            if (resp.command !== command.type) {
+              throw new Error('pi prompt rejection response missing matching command');
+            }
             throw new TurnDispatchRejectedError(
               `pi prompt rejected before acceptance: ${resp.error ?? 'unknown'}`,
             );

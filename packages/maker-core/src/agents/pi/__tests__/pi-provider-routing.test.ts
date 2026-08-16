@@ -12,7 +12,12 @@ const captured = vi.hoisted(() => ({
     refreshTimeoutOnEvent?: (event: { type: string }) => boolean;
   } | undefined>,
   closes: 0,
-  requestHandler: undefined as undefined | ((command: Record<string, unknown>) => Promise<{ success: boolean; data?: unknown; error?: string }>),
+  requestHandler: undefined as undefined | ((command: Record<string, unknown>) => Promise<{
+    success: boolean;
+    command?: unknown;
+    data?: unknown;
+    error?: string;
+  }>),
 }));
 
 vi.mock('../transport.js', () => ({
@@ -1558,7 +1563,13 @@ describe('Pi provider-aware model routing', () => {
       if (command.type === 'get_state') {
         return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
       }
-      if (command.type === 'prompt') return { success: false, error: 'prompt rejected before acceptance' };
+      if (command.type === 'prompt') {
+        return {
+          command: 'prompt',
+          success: false,
+          error: 'prompt rejected before acceptance',
+        };
+      }
       return { success: true, data: {} };
     };
     const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
@@ -1573,6 +1584,48 @@ describe('Pi provider-aware model routing', () => {
       code: 'TURN_DISPATCH_REJECTED',
       message: 'pi prompt rejected before acceptance: prompt rejected before acceptance',
     });
+    await handle.close();
+  });
+
+  it.each([
+    ['missing command', { success: false, error: 'prompt rejected before acceptance' }],
+    [
+      'non-string command',
+      { command: { type: 'prompt' }, success: false, error: 'prompt rejected before acceptance' },
+    ],
+    [
+      'mismatched command',
+      { command: 'steer', success: false, error: 'prompt rejected before acceptance' },
+    ],
+  ])('treats a rejected prompt response with %s as an unconfirmed dispatch', async (
+    label,
+    rejectionResponse,
+  ) => {
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return {
+          success: true,
+          data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } },
+        };
+      }
+      if (command.type === 'prompt') return rejectionResponse;
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: `prompt-rejection-${label.replaceAll(' ', '-')}`,
+      workingDir: cwd,
+      model: 'local-model',
+    });
+
+    await expect(handle.send({ type: 'user', content: 'continue the goal' })).rejects.toMatchObject({
+      name: 'TurnDispatchUnconfirmedError',
+      code: 'TURN_DISPATCH_UNCONFIRMED',
+      cause: expect.objectContaining({
+        message: 'pi prompt rejection response missing matching command',
+      }),
+    });
+    expect(captured.requests.filter((request) => request.type === 'prompt')).toHaveLength(1);
     await handle.close();
   });
 

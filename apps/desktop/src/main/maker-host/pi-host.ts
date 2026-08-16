@@ -424,6 +424,7 @@ export function buildPiSubscriptionNativeProviders(
   const providers: PiNativeProviderSpec[] = [];
   const env: Record<string, string> = {
     [PI_OPENAI_PROXY_KEY_ENV]: piOpenaiProxyPlaceholderJwt(),
+    [PI_XAI_PROXY_API_KEY_ENV]: PI_PROVIDER_AUTH_PLACEHOLDER_KEY,
   };
   const add = (
     sourceProviderId: 'anthropic' | 'openai' | 'xai',
@@ -435,6 +436,26 @@ export function buildPiSubscriptionNativeProviders(
     const source = catalog.providers.find((provider) => provider.id === sourceProviderId);
     const models = source?.models.pi ?? [];
     if (models.length === 0) return;
+    const modelIdAliases = Object.fromEntries(
+      models.flatMap((model) => {
+        const wireId =
+          stripPrefix && model.id.startsWith(stripPrefix)
+            ? model.id.slice(stripPrefix.length)
+            : model.id;
+        const namespaced = sourceProviderId === 'xai' && !model.id.startsWith('xai/')
+          ? `xai/${wireId}`
+          : undefined;
+        // alias 必须落到 spec.models[].id,不能落到 wireId。否则 ChatGPT 的
+        // chatgpt/gpt-* 会被收成 gpt-*,和 namespaced candidate.id 对不上。
+        return [
+          [model.id, model.id],
+          ...(wireId !== model.id ? [[wireId, model.id] as const] : []),
+          ...(namespaced && namespaced !== model.id
+            ? [[namespaced, model.id] as const]
+            : []),
+        ];
+      }),
+    );
     providers.push({
       id: piProviderId,
       sourceProviderId,
@@ -442,6 +463,8 @@ export function buildPiSubscriptionNativeProviders(
       baseUrl,
       inheritModels: true,
       ...(sourceProviderId === 'openai' ? { apiKeyEnvVar: PI_OPENAI_PROXY_KEY_ENV } : {}),
+      ...(sourceProviderId === 'xai' ? { apiKeyEnvVar: PI_XAI_PROXY_API_KEY_ENV } : {}),
+      modelIdAliases,
       headers: piSubscriptionHeaders(sourceProviderId),
       models: models.map((model) => {
         const wireId =
@@ -453,7 +476,8 @@ export function buildPiSubscriptionNativeProviders(
         // A missing/empty/partial PI probe is not evidence that the daily
         // catalog annotation is wrong. Keep annotated rows in the overlay so
         // inheritModels cannot filter out a confirmed addition or correction.
-        const isAnnotatedAddition = !!model.piApi && !bundledModel;
+        const isXaiCatalogAddition = sourceProviderId === 'xai' && !bundledModel;
+        const isAnnotatedAddition = (!!model.piApi && !bundledModel) || isXaiCatalogAddition;
         const isProtocolCorrection =
           sourceProviderId !== 'openai' &&
           !!model.piApi &&
@@ -467,14 +491,16 @@ export function buildPiSubscriptionNativeProviders(
           // portable piApi marks a daily catalog addition here. Existing models
           // stay untouched so their full bundled compat/pricing metadata survives;
           // only IDs proven absent from this exact PI binary are added.
-          ...(sourceProviderId === 'openai' && isAnnotatedAddition
+          ...((sourceProviderId === 'openai' && isAnnotatedAddition) || isXaiCatalogAddition
             ? { catalogAddition: true }
             : {}),
-          ...(sourceProviderId !== 'openai' &&
-          model.piApi &&
-          (isAnnotatedAddition || isProtocolCorrection)
-            ? { api: model.piApi }
-            : {}),
+          ...(isXaiCatalogAddition
+            ? { api: model.piApi ?? 'openai-responses' }
+            : sourceProviderId !== 'openai' &&
+                model.piApi &&
+                (isAnnotatedAddition || isProtocolCorrection)
+              ? { api: model.piApi }
+              : {}),
           name: preserved?.name ?? model.name,
           contextWindow: preserved?.contextWindow ?? model.contextWindow,
           ...(preserved?.maxTokens
@@ -1207,6 +1233,9 @@ export async function resolvePiNativeProviders(ctx: {
   // Remote PI cannot use the local native overlay. Preserve upstream's exact
   // SuperGrok provenance/forwarding path there; locally the version-matched PI
   // native provider above remains the protocol authority.
+  // inheritModels xai 现在带占位 apiKey,Pi getAvailable() 才能看见 grok-4.6。
+  // 不要再塞一份 overlay xai:reserved id 会被改名成 cindy-byom-xai,Messages
+  // 请求打到 PI native handler 会 404 Unsupported PI subscription endpoint。
   if (
     !subscriptions.providers.some((provider) => provider.id === 'xai') &&
     (ctx.providerId === 'xai' || hasGrokOAuthLogin())
@@ -1221,7 +1250,16 @@ export async function resolvePiNativeProviders(ctx: {
   }
   return mergePiNativeProviderResults(
     subscriptions,
-    custom,
+    {
+      providers: custom.providers,
+      env: {
+        ...custom.env,
+        // 会话启动时即使还没登录 SuperGrok,也预埋占位 env。登录后热写 models.json
+        // 才能引用 $CINDY_PI_XAI_PROXY_API_KEY,不必为注入 env 整进程重启。
+        [PI_XAI_PROXY_API_KEY_ENV]:
+          custom.env[PI_XAI_PROXY_API_KEY_ENV] ?? PI_PROVIDER_AUTH_PLACEHOLDER_KEY,
+      },
+    },
     (sourceProviderId, runtimeProviderId) => {
       log.info('resolvePiNativeProviders: namespaced custom provider runtime id', {
         sourceProviderId,

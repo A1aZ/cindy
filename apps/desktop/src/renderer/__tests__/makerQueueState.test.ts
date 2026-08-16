@@ -115,6 +115,7 @@ const state = (overrides: Partial<SessionChatState> = {}): SessionChatState => (
   lastStopWasSideTask: false,
   pendingTaskWake: 0,
   pendingTaskWakeDuringTurn: 0,
+  pendingTaskWakeStarted: false,
   turnStoppedByUser: false,
   lastAgentMeta: null,
   ...overrides,

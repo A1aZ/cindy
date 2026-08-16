@@ -849,4 +849,46 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
       makerChatStore.purgeSession(sid);
     }
   });
+
+  it('多任务并发:SDK 在 Done 之前推送中间 isRunning=false → 不重复消费桥接', async () => {
+    const sid = `multi-wake-intermediate-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // 主 turn 启动再结束,模拟主轮完成后的空窗
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false));
+      // 两个 wake 任务完成
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      applyTask(sid, { taskId: 't2', status: 'running', taskType: 'local_workflow' });
+      applyTask(sid, { taskId: 't2', status: 'completed' });
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(2);
+
+      // 第一个 wake turn 启动 → 消费 1
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(1);
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeStarted).toBe(true);
+
+      // SDK 推送中间 isRunning=false(非 Done 状态)——模拟 SDK 在 Done 前先翻 isRunning
+      makerChatStore.__applyStatusUpdateForTest(sid, {
+        sessionId: sid,
+        status: 'Generating...',
+        tokenUsage: 0,
+        costUsd: 0,
+        contextTokens: 0,
+        contextWindow: 0,
+        isRunning: false,
+      });
+
+      // 第一个 wake turn 的 Done 到达(修复前:此时 pendingTaskWake 会从 1 变 0)
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(1);
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeStarted).toBe(false);
+
+      // 第二个 wake turn 启动 → 消费最后 1
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(0);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
 });

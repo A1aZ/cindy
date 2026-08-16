@@ -2575,6 +2575,18 @@ export interface SessionChatState {
    */
   pendingTaskWakeDuringTurn: number;
   /**
+   * 唤醒桥接的「isTurnStart 已消费」标记:记录当前 wake turn 是否已通过 isTurnStart
+   * 消费了一个桥接计数。当 SDK 在 Done 之前推送中间 isRunning=false 时，
+   * Done 分支会因 !agentStatus.isRunning 为 true 而误判为 wake turn 失败，
+   * 重复消费下一个任务的桥接计数。本标记阻断此路径:
+   * - isTurnStart 且 pendingTaskWake > 0 → 置 true（已消费）
+   * - isTurnComplete → 置 false（清理）
+   * - Done 分支消费桥接前检查本标记:若为 true 则跳过（本轮已消费过）
+   *
+   * 仅运行时使用，不持久化。
+   */
+  pendingTaskWakeStarted: boolean;
+  /**
    * 用户主动 Stop 标记:会话级(非组件级),确保同一 session 在多窗口打开时
    * 任一窗口的 Stop 都能阻止其他窗口触发预测等后续行为。
    * 置位:stopSession(用户主动 Stop 时)。
@@ -2629,6 +2641,7 @@ export type SessionChatLightState = Pick<
   | 'planModeEnabled'
   | 'agentSwitchIntent'
   | 'pendingTaskWake'
+  | 'pendingTaskWakeStarted'
   | 'turnStoppedByUser'
 >;
 
@@ -2697,6 +2710,7 @@ function createInitialState(): SessionChatState {
     lastStopWasSideTask: false,
     pendingTaskWake: 0,
     pendingTaskWakeDuringTurn: 0,
+    pendingTaskWakeStarted: false,
     turnStoppedByUser: false,
     lastAgentMeta: null,
   };
@@ -2767,6 +2781,7 @@ export const EMPTY_SESSION_STATE: SessionChatState = Object.freeze({
   lastStopWasSideTask: false,
   pendingTaskWake: 0,
   pendingTaskWakeDuringTurn: 0,
+  pendingTaskWakeStarted: false,
   turnStoppedByUser: false,
   lastAgentMeta: null,
 }) as SessionChatState;
@@ -5769,6 +5784,7 @@ function forceFinalizeOnSessionClosed(state: SessionChatState): SessionChatState
     taskUpdates: stoppedTasks,
     pendingTaskWake: 0,
     pendingTaskWakeDuringTurn: 0,
+    pendingTaskWakeStarted: false,
     turnStoppedByUser: false,
     agentStatus: {
       ...finalized.agentStatus,
@@ -5863,8 +5879,10 @@ function handleStatusUpdate(
     // (pendingTaskWakeDuringTurn),不清除:桥接必须跨过主 turn 自己的 Done 继续
     // 存活,直到 wake turn 启动或失败。仅靠 agentStatus.isRunning 判断会把「主轮
     // Done 前 SDK 先推了 isRunning=false 的中间 status」误判成 wake 失败。
+    // pendingTaskWakeStarted:isTurnStart 已消费桥接时置 true,防止 Done 分支
+    // 因 SDK 中间 isRunning=false 而重复消费下一个任务的桥接计数。
     pendingTaskWake: isTurnStart ? Math.max(0, state.pendingTaskWake - 1) :
-      (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0) ? Math.max(0, state.pendingTaskWake - 1) :
+      (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0 && !state.pendingTaskWakeStarted) ? Math.max(0, state.pendingTaskWake - 1) :
       state.pendingTaskWake,
     // 跨主 turn 标记:主 turn 自己的 Done 越过(标记仍为 true 时到达的首个 Done)后,
     // 标记使命已尽、立即退休。否则 wake turn 失败(从未 isRunning:true、无 isTurnStart)
@@ -5874,6 +5892,12 @@ function handleStatusUpdate(
     pendingTaskWakeDuringTurn: isTurnStart ? 0 :
       (isTurnComplete && state.pendingTaskWakeDuringTurn > 0) ? 0 :
       state.pendingTaskWakeDuringTurn,
+    // isTurnStart 已消费标记:isTurnStart 且 pendingTaskWake > 0 时置 true(本轮
+    // 桥接已消费),isTurnComplete 时复位。防止 SDK 中间推送 isRunning=false 后,
+    // Done 分支再消费下一个任务的桥接(多任务并发场景)。
+    pendingTaskWakeStarted: isTurnStart && state.pendingTaskWake > 0 ? true :
+      isTurnComplete ? false :
+      state.pendingTaskWakeStarted,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {
       status: update.status,
@@ -9853,6 +9877,7 @@ function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean 
       taskUpdates: new Map(),
       pendingTaskWake: 0,
       pendingTaskWakeDuringTurn: 0,
+      pendingTaskWakeStarted: false,
       turnStoppedByUser: false,
       historyLoaded: false,
       hasMoreMessages: false,
@@ -12481,6 +12506,7 @@ function stopSession(
       taskUpdates: stopRunningAgentTasks(s.taskUpdates, 'wake'),
       pendingTaskWake: 0,
       pendingTaskWakeDuringTurn: 0,
+      pendingTaskWakeStarted: false,
       turnStoppedByUser: true,
       agentStatus: {
         status: 'Idle',
@@ -12887,6 +12913,7 @@ async function clearSessionAfterGuardImpl(sessionId: string, clearedAt: string):
       taskUpdates: new Map(),
       pendingTaskWake: 0,
       pendingTaskWakeDuringTurn: 0,
+      pendingTaskWakeStarted: false,
       turnStoppedByUser: false,
       streamingClientId: null,
       streamingText: '',

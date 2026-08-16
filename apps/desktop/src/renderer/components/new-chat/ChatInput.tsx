@@ -1228,9 +1228,10 @@ export function ChatInput({
           role: m.role,
           content: m.content,
         }));
-        // 捕获请求时刻的 sessionId 与 turnGen 快照,落地前校验是否仍匹配。
+        // 捕获请求时刻的 sessionId、turnGen 与 workingDir 快照,落地前校验是否仍匹配。
         const requestSessionId = sessionId;
         const requestTurnGen = turnGenRef.current;
+        const requestWorkingDir = workingDir;
         // 去重:同一 session 同一 turnGen 同时只有一次预测调用,避免重复 provider 调用与费用。
         // 当旧 turn 预测仍在途时新 turn 触发预测,新 turnGen 不同 → 替换旧条目,允许新预测通过。
         const existingTurnGen = _predictingSessions.get(requestSessionId);
@@ -1259,7 +1260,8 @@ export function ChatInput({
               composerFullyEmptyRef.current() &&
               !showStopButtonRef.current &&
               prevSessionIdRef.current === requestSessionId &&
-              turnGenRef.current === requestTurnGen
+              turnGenRef.current === requestTurnGen &&
+              workingDirRef.current === requestWorkingDir
             ) {
               showRecommendationRef.current = true;
               setRecommendedPrompt(result.prompt);
@@ -1463,6 +1465,13 @@ export function ChatInput({
   const internalMentionDragActiveRef = useRef(false);
   const [workingDir, setWorkingDir] = useState<string | null>(initialWorkingDir ?? null);
   const [internalFolderOpen, setInternalFolderOpen] = useState(false);
+
+  // 工作目录变化 → 作废在途推荐并清除已显示推荐,避免旧目录上下文诱导错误操作。
+  useEffect(() => {
+    turnGenRef.current += 1;
+    showRecommendationRef.current = false;
+    setRecommendedPrompt(null);
+  }, [workingDir]);
 
   // Ref bridge for Tiptap handlePaste(粘贴管线):editorProps 闭包只建一次,
   // 读不到最新 state / props / t——粘贴时的 workdir(路径识别范围)、会话来源

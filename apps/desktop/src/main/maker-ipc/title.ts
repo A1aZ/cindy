@@ -478,14 +478,20 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。仅按 sessionId 去重:当已有同 session
-      // 的预测在途时拒绝所有新请求,不按 turnGen 比较替换。turnGen 是各窗口独立维护的
-      // 局部计数器,不存在跨窗口全局序:高 turnGen 请求替换 Map 条目后会留下旧请求仍在
-      // 途但失去去重保护,导致同一轮并行产生两次付费调用;后到请求先结束时还会删除条目,
-      // 使仍在途的旧请求完全失去去重保护。
+      // 等多窗口场景下重复触发付费 provider 调用。同 turnGen 的请求是真重复,拒绝;
+      // 不同 turnGen 说明新轮已开始,旧轮结果终将被 renderer 的 turnGen 校验丢弃,
+      // 替换旧条目放行新请求,避免旧轮吞掉新轮预测导致当前轮永久没有推荐词。
       const existingTurnGen = _predictingPromptSessions.get(sessionId);
       if (existingTurnGen != null) {
-        return { prompt: null };
+        if (existingTurnGen === turnGen) {
+          return { prompt: null };
+        }
+        // 旧轮预测仍在途但新轮已开始,旧结果注定被 renderer 丢弃,放行新请求。
+        log.debug('predict-prompt replacing stale in-flight prediction', {
+          sessionId,
+          oldTurnGen: existingTurnGen,
+          newTurnGen: turnGen,
+        });
       }
       _predictingPromptSessions.set(sessionId, turnGen);
       try {

@@ -374,7 +374,7 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果' });
   });
 
-  it('同一 session 新 turnGen 的请求被拒绝（当已有在途请求时，避免重复付费）', async () => {
+  it('同一 session 新 turnGen 的请求替换旧请求（旧轮结果终将被 renderer turnGen 校验丢弃）', async () => {
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
@@ -384,21 +384,25 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     const first = invokePredict(VALID_REQUEST);
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 同一 session 发起 turnGen=1 的新预测，应被拒绝（已有在途请求）
+    // 同一 session 发起 turnGen=1 的新预测，应替换旧条目并允许通过。
+    // 旧请求结果终将被 renderer 端 turnGen 校验丢弃，不再阻塞新轮。
+    let resolveSecond!: (value: string) => void;
+    h.predict.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveSecond = resolve; }),
+    );
     const second = invokePredict({
       ...VALID_REQUEST,
       turnGen: 1,
     });
-    await expect(second).resolves.toEqual({ prompt: null });
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(2));
 
-    // 旧预测完成，去重条目应被清除
+    // 旧预测完成，去重条目已被新请求替换
     resolveFirst('旧轮预测');
     await expect(first).resolves.toEqual({ prompt: '旧轮预测' });
 
-    // 旧预测完成后，新请求可以通过
-    h.predict.mockImplementationOnce(async () => '新预测');
-    const third = invokePredict({ ...VALID_REQUEST, turnGen: 2 });
-    await expect(third).resolves.toEqual({ prompt: '新预测' });
+    // 新预测完成
+    resolveSecond('新轮预测');
+    await expect(second).resolves.toEqual({ prompt: '新轮预测' });
   });
 
   it('不同 session 可以并发预测', async () => {
@@ -420,7 +424,7 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     await expect(first).resolves.toEqual({ prompt: '预测结果A' });
   });
 
-  it('同一 session 更低 turnGen 的请求被拒绝（跨窗口旧窗口场景）', async () => {
+  it('同一 session 更低 turnGen 的请求也允许通过（renderer 端 turnGen 校验兜底）', async () => {
     let resolveFirst!: (value: string) => void;
     h.predict.mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
@@ -430,12 +434,21 @@ describe('maker:predict-prompt — 多窗口去重', () => {
     const first = invokePredict({ ...VALID_REQUEST, turnGen: 5 });
     await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(1));
 
-    // 窗口 B 发起 turnGen=3 的预测（因挂载/会话切换历史不同，turnGen 更低），应被拒绝
+    // 窗口 B 发起 turnGen=3 的预测（因挂载/会话切换历史不同，turnGen 更低）。
+    // 不同 turnGen 允许通过，入口不比对大小；renderer 端 turnGen 校验兜底。
+    let resolveSecond!: (value: string) => void;
+    h.predict.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveSecond = resolve; }),
+    );
     const second = invokePredict({ ...VALID_REQUEST, turnGen: 3 });
-    await expect(second).resolves.toEqual({ prompt: null });
+    await vi.waitFor(() => expect(h.predict).toHaveBeenCalledTimes(2));
 
     // 窗口 A 的预测完成
-    resolveFirst('预测结果');
-    await expect(first).resolves.toEqual({ prompt: '预测结果' });
+    resolveFirst('预测结果A');
+    await expect(first).resolves.toEqual({ prompt: '预测结果A' });
+
+    // 窗口 B 的预测完成
+    resolveSecond('预测结果B');
+    await expect(second).resolves.toEqual({ prompt: '预测结果B' });
   });
 });

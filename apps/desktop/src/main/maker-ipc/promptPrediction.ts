@@ -54,9 +54,17 @@ function buildConversationContext(
   const lines: string[] = [];
   for (const m of recent) {
     const maxChars = m.role === 'user' ? PREDICTION_USER_MSG_MAX : PREDICTION_ASSISTANT_MSG_MAX;
-    const text = m.content.replace(/\s+/g, ' ').trim().slice(0, maxChars);
-    if (!text) continue;
-    lines.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${text}`);
+    const text = m.content.replace(/\s+/g, ' ').trim();
+    // 保留首尾:Assistant 长回复的结尾通常包含总结/待确认问题/下一步建议,
+    // 仅保留开头会丢失关键上下文。
+    const truncated =
+      text.length <= maxChars
+        ? text
+        : m.role === 'assistant'
+          ? text.slice(0, Math.floor(maxChars * 0.4)) + ' … ' + text.slice(-Math.floor(maxChars * 0.6))
+          : text.slice(0, maxChars);
+    if (!truncated) continue;
+    lines.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${truncated}`);
   }
   // 超长时从最旧侧裁剪，保留最新对话（刚完成的回复与结尾指令不丢失）。
   const context = lines.join('\n');
@@ -80,6 +88,7 @@ function buildPredictionPrompt(
 ): { system: string; user: string } {
   const languageHints: Record<string, string> = {
     'zh-CN': "Match the user's language. The user types in Simplified Chinese.",
+    'zh-TW': "Match the user's language. The user types in Traditional Chinese.",
     en: "Match the user's language. The user types in English.",
     ja: "Match the user's language. The user types in Japanese.",
     ko: "Match the user's language. The user types in Korean.",

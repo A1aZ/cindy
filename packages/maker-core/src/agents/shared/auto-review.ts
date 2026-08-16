@@ -5033,6 +5033,7 @@ function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
     if (!/^-[^-]/.test(token)) continue;
     for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
       const option = token.charAt(optionIndex);
+      if (option === '.') { hidden = true; continue; }
       if (option === 'u') { unrestricted += 1; if (unrestricted >= 2) hidden = true; continue; }
       const kind = readerShortOptionKind('rg', option);
       if (!kind) continue;
@@ -5101,6 +5102,12 @@ function isGitRevisionDotenvOperand(value: string): boolean {
     && isDotenvCredentialPath(value.slice(revisionPathSeparator + 1));
 }
 
+function isGitExcludePathspec(value: string): boolean {
+  const longPathspec = /^:\(([^)]*)\)(.*)$/.exec(value);
+  if (longPathspec) return /(?:^|,)(?:exclude|!)(?:,|$)/.test(longPathspec[1]);
+  return value.startsWith(':!') || value.startsWith(':^');
+}
+
 function gitArgumentsReadDotenv(args: readonly string[]): boolean {
   let pathspecOnly = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -5113,6 +5120,7 @@ function gitArgumentsReadDotenv(args: readonly string[]): boolean {
       index += 1;
       continue;
     }
+    if (isGitExcludePathspec(token)) continue;
     if (shellOperandCouldMatchDotenv(token, isGitDotenvOperand)) return true;
     if (!pathspecOnly && isGitRevisionDotenvOperand(token)) return true;
   }
@@ -5141,31 +5149,81 @@ function gitGrepHasExplicitPathspec(args: readonly string[]): boolean {
 }
 
 function gitGrepListsOnly(args: readonly string[]): boolean {
-  for (const token of args) {
+  for (let tokenIndex = 0; tokenIndex < args.length; tokenIndex += 1) {
+    const token = args[tokenIndex];
     if (token === '--') break;
-    if (token === '--files-with-matches' || token === '--files-without-match' || token === '--name-only') return true;
+    if (token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const kind = resolveReaderLongOption('grep', name);
+      if (kind === 'data' || kind === 'data-file') {
+        if (equalsIndex < 0) tokenIndex += 1;
+        continue;
+      }
+      if (token === '--files-with-matches' || token === '--files-without-match' || token === '--name-only') return true;
+      continue;
+    }
     if (!/^-[^-]/.test(token)) continue;
-    for (let index = 1; index < token.length; index += 1) {
-      const option = token.charAt(index);
-      if (option === 'e' || option === 'f') break;
+    for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+      const option = token.charAt(optionIndex);
+      if (option === 'e' || option === 'f') {
+        if (optionIndex === token.length - 1) tokenIndex += 1;
+        break;
+      }
       if (option === 'l' || option === 'L') return true;
     }
   }
   return false;
 }
 
+function parseGitPathspec(value: string): { exclude: boolean; pattern: string } {
+  const longPathspec = /^:\(([^)]*)\)(.*)$/.exec(value);
+  if (longPathspec) {
+    const magic = new Set(longPathspec[1].split(','));
+    return { exclude: magic.has('exclude') || magic.has('!'), pattern: longPathspec[2] };
+  }
+  if (value.startsWith(':!') || value.startsWith(':^')) {
+    return { exclude: true, pattern: value.slice(2) };
+  }
+  if (value.startsWith(':/')) return { exclude: false, pattern: value.slice(2) };
+  return { exclude: false, pattern: value };
+}
+
+function gitDiffPathspecIsSafeFile(value: string): boolean {
+  const { exclude, pattern } = parseGitPathspec(value);
+  if (exclude) return true;
+  const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (SAFE_DEVICE_PATH.test(normalized) || /^NUL$/i.test(normalized)) return true;
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.endsWith('/')) return false;
+  if (/[*?\[\]{]/.test(normalized)) return false;
+  const basename = normalized.split('/').pop() ?? '';
+  return basename.includes('.');
+}
+
+function gitDiffPathspecsCouldReadDotenv(pathspecs: readonly string[]): boolean {
+  const positive = pathspecs.filter((value) => !parseGitPathspec(value).exclude);
+  return positive.length === 0 || positive.some((value) => !gitDiffPathspecIsSafeFile(value));
+}
+
 function gitContentReadWithoutPath(sub: string, args: readonly string[]): boolean {
   if (sub === 'grep') return !gitGrepListsOnly(args) && !gitGrepHasExplicitPathspec(args);
   if (sub !== 'diff') return false;
-  const separator = args.indexOf('--');
-  if (separator >= 0 && separator < args.length - 1) return false;
-  if (args.includes('--no-index') && args.filter((arg) => !arg.startsWith('-')).length >= 2) return false;
   const metadataOnly = args.some((arg) => [
     '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--summary', '--check', '--raw',
   ].includes(arg));
   const patchRequested = args.some((arg) =>
     /^(?:-p|--patch|-u|-U\d*|--unified(?:=.*)?|-W|--function-context|--word-diff(?:=.*)?|--word-diff-regex(?:=.*)?|--color-words(?:=.*)?|--patch-with-stat|--patch-with-raw|--binary|--inter-hunk-context(?:=.*)?)$/.test(arg));
-  return !metadataOnly || patchRequested;
+  if (metadataOnly && !patchRequested) return false;
+
+  const separator = args.indexOf('--');
+  if (separator >= 0 && separator < args.length - 1) {
+    return gitDiffPathspecsCouldReadDotenv(args.slice(separator + 1));
+  }
+  if (args.includes('--no-index')) {
+    const operands = args.filter((arg) => !arg.startsWith('-'));
+    if (operands.length >= 2) return operands.some((operand) => !gitDiffPathspecIsSafeFile(operand));
+  }
+  return true;
 }
 
 function shellCommandReadsDotenv(

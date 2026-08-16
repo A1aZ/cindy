@@ -2354,7 +2354,10 @@ export class DeviceLinkClient {
     return true;
   }
 
-  /** @returns 实际写进 ws 的**帧**数(一条逻辑消息可能分多帧);抛错时为已写出的帧数。 */
+  /**
+   * 实际写进 ws 的**帧**数(一条逻辑消息可能分多帧)。
+   * 一分片都没写出才抛;中途竞态只返回已上网的帧数,让恢复预算能结算部分突发。
+   */
   private sendReliableFrames(peer: PeerTransportState, pending: PendingReliableMessage): number {
     const frames = encodeReliableFrames(
       pending.envelope,
@@ -2370,6 +2373,12 @@ export class DeviceLinkClient {
         pending.sent = true;
         sent += 1;
       }
+    } catch (err) {
+      if (sent === 0) throw err;
+      this.log.debug(
+        `reliable transport send interrupted after ${sent} frame(s) for seq=${pending.seq}`,
+        err,
+      );
     } finally {
       if (sent > 0) {
         pending.sent = true;

@@ -4843,6 +4843,68 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     h.client.stop();
   }, 10_000);
 
+  it('恢复期内部分写出的分片也计入探测预算', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 3,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'warmup', { ok: true, result: 0 });
+    const ws = h.current();
+    const warmup = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!;
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId: warmup.meta.streamId, ackSeq: warmup.meta.seq },
+      },
+    });
+    await tick();
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'link-close',
+      src: 'dev-b',
+      payload: { reason: 'transport-timeout' },
+    });
+    await tick();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    const before = framesSent(ws);
+    const origSend = ws.send.bind(ws);
+    let reliableFrames = 0;
+    ws.send = (data: string) => {
+      const env = JSON.parse(data) as Envelope;
+      if (env.kind === 'invoke-result' && parseTransportPayload(env.payload)) {
+        reliableFrames += 1;
+        if (reliableFrames >= 2) throw new Error('socket raced');
+      }
+      origSend(data);
+    };
+    const chunky = 'x'.repeat(2 * 128 * 1024 + 1_000);
+    h.client.sendInvokeResult('dev-b', 'partial', { ok: true, result: chunky });
+    expect(framesSent(ws)).toBe(before + 1);
+
+    ws.send = origSend;
+    for (let i = 0; i < 5; i += 1) {
+      h.client.sendInvokeResult('dev-b', `after-${i}`, { ok: true, result: i });
+    }
+    expect(framesSent(ws)).toBe(before + 3);
+
+    h.client.stop();
+  }, 10_000);
+
   it('恢复探测未 ACK 时定时器仍重发已发出的探针,不放行新帧', async () => {
     await withFakeTimers(async (h, advance) => {
       for (let i = 0; i < 7; i += 1) {

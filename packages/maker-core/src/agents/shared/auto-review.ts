@@ -5176,6 +5176,53 @@ function gitBlameContentsReadDotenv(args: readonly string[]): boolean {
   return false;
 }
 
+/**
+ * `-L` uses `<range>:<file>`: regex ranges may contain colons inside `/.../`, while
+ * function ranges begin with `:` and use the next unescaped colon as the separator.
+ */
+function gitLineRangeFile(value: string): string | null {
+  let escaped = false;
+  if (value.startsWith(':')) {
+    for (let index = 1; index < value.length; index += 1) {
+      const char = value.charAt(index);
+      if (escaped) { escaped = false; continue; }
+      if (char === '\\') { escaped = true; continue; }
+      if (char === ':') return value.slice(index + 1);
+    }
+    return null;
+  }
+
+  let inRegex = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value.charAt(index);
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '/') { inRegex = !inRegex; continue; }
+    if (char === ':' && !inRegex) return value.slice(index + 1);
+  }
+  return null;
+}
+
+function gitLineRangeReadsDotenv(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') break;
+    let value: string | undefined;
+    if (token === '-L') {
+      value = args[index + 1];
+      index += 1;
+    } else if (token.startsWith('-L')) {
+      value = token.slice(2);
+    } else {
+      continue;
+    }
+    if (!value) return true;
+    const file = gitLineRangeFile(value);
+    if (file === null || shellOperandCouldMatchDotenv(file, isGitDotenvOperand)) return true;
+  }
+  return false;
+}
+
 function gitArgumentsReadDotenv(args: readonly string[]): boolean {
   let pathspecOnly = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -5347,6 +5394,8 @@ function shellCommandReadsDotenv(
         if (gitGrepExpandsSearchScope(invocation.args)) return true;
         if (readerArgumentsReadDotenv('grep', invocation.args, isGitDotenvOperand)) return true;
       } else if ((invocation.sub === 'blame' && gitBlameContentsReadDotenv(invocation.args))
+        || ((invocation.sub === 'log' || invocation.sub === 'whatchanged' || invocation.sub === 'show')
+          && gitLineRangeReadsDotenv(invocation.args))
         || gitArgumentsReadDotenv(invocation.args)) {
         return true;
       }

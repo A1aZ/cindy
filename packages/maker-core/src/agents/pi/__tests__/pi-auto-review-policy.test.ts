@@ -46,6 +46,9 @@ describe('classifyPiToolForAutoReview', () => {
   it('routes bash through the shell classifier', () => {
     expect(verdict('bash', { command: 'ls -la' })).toBe('auto-approve');
     expect(verdict('bash', { command: 'git status' })).toBe('auto-approve');
+    expect(verdict('bash', { command: 'git log -L1,1:.env' })).toBe('prompt-each-time');
+    expect(verdict('bash', { command: 'git log -L 1,1:.env.local' })).toBe('prompt-each-time');
+    expect(verdict('bash', { command: 'git log -L1,1:README.md' })).toBe('auto-approve');
     expect(verdict('bash', { command: 'sudo whoami' })).toBe('prompt-each-time');
     // Destructive but replaceable actions are gray: the current-model reviewer
     // should block or ask with the actual user intent instead of always interrupting.

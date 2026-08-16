@@ -195,6 +195,10 @@ function bashInputReadEvidence(input: unknown): BashInputReadEvidence {
   const targets = parsed.targets.flatMap((target, index) => {
     const cwdEvidence = bashWorkingDirectoryCandidates(parsed.targetPrefixes[index] ?? '');
     unresolved ||= cwdEvidence.unresolved;
+    // POSIX allows a literal backslash in a filename, while the embedded runtime's
+    // tool-call and execution stages have not normalized that shell input consistently.
+    // Preserve the target and require consent unless canonical evidence settles it.
+    unresolved ||= path.sep === '/' && target.includes('\\');
     return cwdEvidence.paths.flatMap((cwd) => {
       const expanded = bashExpandedPathCandidates(target, cwd, parsed.targetMayExpand[index] === true);
       unresolved ||= expanded.unresolved;

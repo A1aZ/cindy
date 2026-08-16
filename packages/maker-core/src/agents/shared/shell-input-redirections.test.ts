@@ -11,6 +11,7 @@ describe('parseShellInputRedirections', () => {
     ['cat<.e\\nv', '.env', 'cat'],
     ["cat <'$TARGET'", '$TARGET', 'cat'],
     ['cat <*.txt', '*.txt', 'cat'],
+    ['cat <"innocent\\q"', 'innocent\\q', 'cat'],
   ])('extracts the static input target from %s', (command, target, stripped) => {
     const parsed = parseShellInputRedirections(command);
     expect(parsed.command.trim()).toBe(stripped);

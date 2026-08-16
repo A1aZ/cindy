@@ -2110,29 +2110,43 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-dotenv-'));
       try {
         const secretPath = path.join(workingDir, 'secrets', '.env');
+        const ordinaryPath = path.join(workingDir, 'ordinary.txt');
         const subDir = path.join(workingDir, 'sub');
-        const linkPath = path.join(subDir, 'link');
+        const postCdLink = path.join(subDir, 'link');
+        const escapedLinkName = 'innocent\\q';
+        const cdRedirectLinkName = 'cd-innocent';
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(subDir);
         writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
-        symlinkSync('../secrets/.env', linkPath);
+        writeFileSync(ordinaryPath, 'ordinary-content');
+        symlinkSync('../secrets/.env', postCdLink);
+        symlinkSync(secretPath, path.join(workingDir, escapedLinkName));
+        symlinkSync(secretPath, path.join(workingDir, cdRedirectLinkName));
+        symlinkSync(ordinaryPath, path.join(subDir, cdRedirectLinkName));
+        symlinkSync(ordinaryPath, path.join(subDir, 'ordinary'));
 
-        scriptedResponses.length = 0;
-        scriptedResponses.push(
-          anthropicToolUseBody('bash', { command: 'cd sub >/dev/null && cat<link' }),
-          anthropicStreamBody('bash symlink dotenv turn finished'),
-        );
-        const reqBefore = seenRequests.length;
-        const { resolverTools } = await runPermissionTurn({
-          sessionId: 'perm-auto-bash-symlink-dotenv',
-          workingDir,
-          permissionMode: 'auto',
-          resolverBehavior: 'deny',
-        });
-        expect(resolverTools).toEqual(['bash']);
-        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
-        expect(followUp.some((b) => b.includes('FAKE_REDIRECT_DOTENV_SECRET'))).toBe(false);
-        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+        for (const [sessionId, command] of [
+          ['perm-auto-bash-symlink-dotenv-post-cd', 'cd sub >/dev/null && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-backslash', `cat <"${escapedLinkName}"`],
+          ['perm-auto-bash-symlink-dotenv-cd-redirect', `cd sub <>${cdRedirectLinkName} && cat <ordinary`],
+        ] as const) {
+          scriptedResponses.length = 0;
+          scriptedResponses.push(
+            anthropicToolUseBody('bash', { command }),
+            anthropicStreamBody('bash symlink dotenv turn finished'),
+          );
+          const reqBefore = seenRequests.length;
+          const { resolverTools } = await runPermissionTurn({
+            sessionId,
+            workingDir,
+            permissionMode: 'auto',
+            resolverBehavior: 'deny',
+          });
+          const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+          expect(resolverTools, `${command}\n${followUp.join('\n')}`).toEqual(['bash']);
+          expect(followUp.some((b) => b.includes('FAKE_REDIRECT_DOTENV_SECRET')), command).toBe(false);
+          expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.')), command).toBe(true);
+        }
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;
@@ -2148,14 +2162,19 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       try {
         const targetPath = path.join(workingDir, 'ordinary-target.txt');
         const subDir = path.join(workingDir, 'sub');
+        const redirectLinkName = 'ordinary-redirect-link';
         const linkPath = path.join(subDir, 'link');
         mkdirSync(subDir);
         writeFileSync(targetPath, 'ordinary-bash-symlink-content');
+        symlinkSync(targetPath, path.join(workingDir, redirectLinkName));
+        symlinkSync('../ordinary-target.txt', path.join(subDir, redirectLinkName));
         symlinkSync('../ordinary-target.txt', linkPath);
 
         scriptedResponses.length = 0;
         scriptedResponses.push(
-          anthropicToolUseBody('bash', { command: 'cd sub >/dev/null && cat<link' }),
+          anthropicToolUseBody('bash', {
+            command: `cd sub <${redirectLinkName} && cat<link`,
+          }),
           anthropicStreamBody('bash ordinary symlink turn finished'),
         );
         const reqBefore = seenRequests.length;
@@ -2168,6 +2187,26 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(resolverTools).toEqual([]);
         const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
         expect(followUp.some((b) => b.includes('ordinary-bash-symlink-content'))).toBe(true);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', {
+            command: `cd sub <>${redirectLinkName} && cat<link`,
+          }),
+          anthropicStreamBody('bash ordinary read-write symlink turn finished'),
+        );
+        const readWriteReqBefore = seenRequests.length;
+        const readWriteTurn = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-symlink-plain-read-write',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'allow',
+        });
+        expect(readWriteTurn.resolverTools).toEqual(['bash']);
+        const readWriteFollowUp = seenRequests.slice(readWriteReqBefore).map((r) => r.body);
+        expect(readWriteFollowUp.some((b) => b.includes('ordinary-bash-symlink-content'))).toBe(true);
+        expect(readWriteFollowUp.some((b) => b.includes('Cindy blocks reading credential or key paths')))
+          .toBe(false);
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;

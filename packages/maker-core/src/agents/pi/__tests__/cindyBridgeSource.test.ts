@@ -249,6 +249,7 @@ describe('cindy-bridge extension source', () => {
         const ordinaryPath = path.join(tempRoot, 'ordinary.txt');
         const secretLink = path.join(tempRoot, 'innocent.txt');
         const ordinaryLink = path.join(tempRoot, 'ordinary-link.txt');
+        const escapedSecretLink = path.join(tempRoot, 'innocent\\q');
         const nestedDir = path.join(tempRoot, 'nested');
         const dashDir = path.join(tempRoot, '-credential-dir');
         const nestedSecretLink = path.join(nestedDir, 'nested-innocent.txt');
@@ -257,6 +258,11 @@ describe('cindy-bridge extension source', () => {
         const scopedLinkName = 'scoped-innocent.txt';
         const rootScopedSecretLink = path.join(tempRoot, scopedLinkName);
         const nestedScopedOrdinaryLink = path.join(nestedDir, scopedLinkName);
+        const cdRedirectName = 'cd-innocent';
+        const rootCdRedirectSecretLink = path.join(tempRoot, cdRedirectName);
+        const nestedCdRedirectOrdinaryLink = path.join(nestedDir, cdRedirectName);
+        const nestedOrdinaryReadName = 'ordinary-after-cd.txt';
+        const nestedOrdinaryReadLink = path.join(nestedDir, nestedOrdinaryReadName);
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
@@ -267,7 +273,11 @@ describe('cindy-bridge extension source', () => {
         symlinkSync(secretPath, dashSecretLink);
         symlinkSync(secretPath, lateSecretLink);
         symlinkSync(secretPath, rootScopedSecretLink);
+        symlinkSync(secretPath, escapedSecretLink);
+        symlinkSync(secretPath, rootCdRedirectSecretLink);
         symlinkSync(ordinaryPath, nestedScopedOrdinaryLink);
+        symlinkSync(ordinaryPath, nestedCdRedirectOrdinaryLink);
+        symlinkSync(ordinaryPath, nestedOrdinaryReadLink);
         symlinkSync(ordinaryPath, ordinaryLink);
 
         expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
@@ -287,6 +297,30 @@ describe('cindy-bridge extension source', () => {
         )).toEqual([realpathSync(secretPath)]);
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: ordinaryCommand }),
+        )).toEqual([]);
+        const escapedBackslashCommand = 'cat <"innocent\\\\q"';
+        expect(context.bashInputReadEvidence?.({ command: escapedBackslashCommand })).toEqual({
+          targets: [escapedSecretLink],
+          unresolved: true,
+        });
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({ command: escapedBackslashCommand }),
+        )).toEqual([realpathSync(secretPath)]);
+        for (const cdRedirectOperator of ['<>', '<']) {
+          const command = `cd ${nestedDir} ${cdRedirectOperator}${cdRedirectName} && cat <${nestedOrdinaryReadName}`;
+          const evidence = context.bashInputReadEvidence?.({ command });
+          expect(evidence?.unresolved, command).toBe(false);
+          expect(evidence?.targets, command).toEqual([
+            rootCdRedirectSecretLink,
+            nestedOrdinaryReadLink,
+          ]);
+          expect(context.collectResolvedCredentialPaths?.(evidence?.targets), command)
+            .toEqual([realpathSync(secretPath)]);
+        }
+        expect(context.collectResolvedCredentialPaths?.(
+          context.bashInputReadTargets?.({
+            command: `cd ${nestedDir} <ordinary-link.txt && cat <${nestedOrdinaryReadName}`,
+          }),
         )).toEqual([]);
         const readWriteSecretCommand = `cat 3<>${secretLink}`;
         expect(context.parseShellInputRedirections?.(readWriteSecretCommand)).toEqual({

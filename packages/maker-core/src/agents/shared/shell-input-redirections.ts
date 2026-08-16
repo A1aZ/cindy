@@ -24,7 +24,14 @@ export function readShellRedirectionTarget(
         continue;
       }
       if (char === '\\' && quote === '"' && cursor + 1 < command.length) {
-        if (command[cursor + 1] !== '\n') target += command[cursor + 1];
+        const escaped = command[cursor + 1];
+        if (escaped !== '\n') {
+          if (escaped === '$' || escaped.charCodeAt(0) === 96 || escaped === '"' || escaped === '\\') {
+            target += escaped;
+          } else {
+            target += '\\' + escaped;
+          }
+        }
         cursor += 2;
         continue;
       }

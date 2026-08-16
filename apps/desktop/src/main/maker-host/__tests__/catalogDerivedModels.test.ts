@@ -66,7 +66,6 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
     expect(pi.find((m) => m.id === 'grok-4.3')?.efforts).toEqual([]);
     expect(pi.find((m) => m.id === 'grok-4.5')?.efforts).toEqual(['minimal', 'low', 'medium', 'high']);
     expect(pi.find((m) => m.id === 'grok-4.6')?.efforts).toEqual([
-      'minimal',
       'low',
       'medium',
       'high',

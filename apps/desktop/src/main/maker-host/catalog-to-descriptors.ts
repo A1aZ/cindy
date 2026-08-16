@@ -39,6 +39,10 @@ interface DescriptorProjectionOptions {
   preserveExplicitPiEfforts?: boolean;
 }
 
+function isOfficialGrok46Id(modelId: string): boolean {
+  return modelId === 'grok-4.6' || modelId.endsWith('/grok-4.6');
+}
+
 interface SeenModelProjection {
   index: number;
   includesUserProvider: boolean;
@@ -146,7 +150,7 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
       const userProvider = provider.source === 'user';
       if (!isModelSelectableForNewRoute(m, { userProvider })) continue;
       const descriptor = toDescriptor(m, agent, {
-        preserveExplicitPiEfforts: userProvider,
+        preserveExplicitPiEfforts: userProvider || (provider.id === 'xai' && isOfficialGrok46Id(m.id)),
       });
       const previous = seen.get(m.id);
       if (previous) {
@@ -190,7 +194,8 @@ export function resolvePiRuntimeModelDescriptor(
     const model = (provider.models.pi ?? []).find((candidate) => candidate.id === modelId);
     if (model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' })) {
       return toDescriptor(model, 'pi', {
-        preserveExplicitPiEfforts: provider.source === 'user',
+        preserveExplicitPiEfforts:
+          provider.source === 'user' || (provider.id === 'xai' && isOfficialGrok46Id(model.id)),
       });
     }
   }

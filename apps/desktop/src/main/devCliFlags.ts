@@ -243,15 +243,15 @@ export function resolveSingleInstanceLockUserDataDir(input: {
  * 不接受任何 dev-only passive 语义。调用方会把这个纯判定同步成内部 env，供延后加载
  * 的 localDb 模块在首次打开用户数据库时执行硬闸。
  *
- * 判定看解析后的 profileKind，不看 isolated 旗标：旗标说 isolated、目录却是正式版时
- * 仍按 production-shared 处理（启动器应先拒绝这种组合）。
+ * 判定看解析后的真实 profile：正式目录与非隔离 custom 覆写（两进程共一个裸
+ * XDT_USER_DATA_DIR）都受保护；只有真正的 isolated-sandbox 自己迁、自己删。
  */
 export function shouldEnforcePassiveMigrationCompatibility(input: {
   isPackaged: boolean;
   schedulerPassive: boolean;
   profileKind: DevProfileKind;
 }): boolean {
-  return !input.isPackaged && input.schedulerPassive && input.profileKind === 'production-shared';
+  return !input.isPackaged && input.schedulerPassive && input.profileKind !== 'isolated-sandbox';
 }
 
 export function resolveOfficialUserDataDirs(defaultUserDataDir: string): string[] {

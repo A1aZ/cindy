@@ -187,6 +187,21 @@ test("isolated restart target pointing at the other region's official profile is
 	assert.equal(isOfficialProductionUserDataDir(globalFromCn), true);
 });
 
+test("env-only XDT_ISOLATED=1 derives the default sandbox, not the official profile", () => {
+	const target = resolveRestartTargetUserDataDir({
+		isolatedEnv: "1",
+		selectedRegion: "cn",
+	});
+	assert.equal(target, defaultIsolatedUserDataDir("", "cn"));
+	assert.equal(isOfficialProductionUserDataDir(target), false);
+	const named = resolveRestartTargetUserDataDir({
+		isolatedEnv: "1",
+		isolatedName: "review",
+		selectedRegion: "global",
+	});
+	assert.equal(named, defaultIsolatedUserDataDir("review", "global"));
+});
+
 test("isolated official-profile refuse happens before mkdir in the restart main flow", () => {
 	const source = fs.readFileSync(new URL("../restart-desktop-remote.mjs", import.meta.url), "utf8");
 	const refuseIdx = source.indexOf("isOfficialProductionUserDataDir(targetUserDataDir)");

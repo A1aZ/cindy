@@ -467,11 +467,17 @@ export function isOfficialProductionUserDataDir(dir) {
 export function resolveRestartTargetUserDataDir({
   envUserDataDir,
   isolatedArg,
+  isolatedEnv,
+  isolatedName,
   selectedRegion,
 }) {
+  const isolationName = isolatedArg
+    ? parseIsolationName(isolatedArg)
+    : (typeof isolatedName === 'string' ? isolatedName.trim() : '');
+  const isolated = Boolean(isolatedArg) || isolatedEnv === '1';
   return envUserDataDir
-    || (isolatedArg
-      ? defaultIsolatedUserDataDir(parseIsolationName(isolatedArg), selectedRegion)
+    || (isolated
+      ? defaultIsolatedUserDataDir(isolationName, selectedRegion)
       : productionUserDataDir(selectedRegion));
 }
 
@@ -914,6 +920,8 @@ async function main() {
   const targetUserDataDir = resolveRestartTargetUserDataDir({
     envUserDataDir: process.env.XDT_USER_DATA_DIR,
     isolatedArg,
+    isolatedEnv: process.env.XDT_ISOLATED,
+    isolatedName: process.env.XDT_ISOLATED_NAME,
     selectedRegion,
   });
   if (
@@ -925,9 +933,15 @@ async function main() {
         'Omit XDT_USER_DATA_DIR, or point it at a sandbox directory.',
     );
   }
-  if (startupConfig && isolatedArg && process.env.XDT_USER_DATA_DIR) {
+  if (startupConfig && hasIsolationIntent(argv, process.env)) {
+    if (!process.env.XDT_USER_DATA_DIR) {
+      process.env.XDT_USER_DATA_DIR = targetUserDataDir;
+      process.env.XDT_USER_DATA_DIR_EPOCH = '1';
+    }
     fs.mkdirSync(process.env.XDT_USER_DATA_DIR, { recursive: true });
-    const isolationName = parseIsolationName(isolatedArg);
+    const isolationName = isolatedArg
+      ? parseIsolationName(isolatedArg)
+      : (process.env.XDT_ISOLATED_NAME || '');
     console.log(`==> Isolated dev user data${isolationName ? ` (sandbox "${isolationName}")` : ''}: ${process.env.XDT_USER_DATA_DIR}`);
   }
   if (!preserveRunning) {

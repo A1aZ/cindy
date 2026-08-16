@@ -508,7 +508,7 @@ describe('resolveDevProfileKind / isIsolatedIdentityOnProductionProfile', () => 
 });
 
 describe('shouldEnforcePassiveMigrationCompatibility', () => {
-  it('只对共享正式 profile 的 passive dev 启用，沙箱 / custom / packaged 不启用', () => {
+  it('对正式 profile 与非隔离 custom 的 passive 启用，沙箱 / packaged 不启用', () => {
     expect(
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: false,
@@ -520,14 +520,14 @@ describe('shouldEnforcePassiveMigrationCompatibility', () => {
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: false,
         schedulerPassive: true,
-        profileKind: 'isolated-sandbox',
+        profileKind: 'custom',
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldEnforcePassiveMigrationCompatibility({
         isPackaged: false,
         schedulerPassive: true,
-        profileKind: 'custom',
+        profileKind: 'isolated-sandbox',
       }),
     ).toBe(false);
     expect(

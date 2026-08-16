@@ -58,6 +58,11 @@ describe('passive shared-userData instance auth isolation', () => {
     );
     const preserveIdx = authSource.indexOf('preservePersistedRefreshToken: true', runtimeIdx);
     expect(preserveIdx).toBeGreaterThan(runtimeIdx);
+    expect(authSource).toContain('let foreignDeviceLocalSignOut = false');
+    expect(authSource).toContain("foreignDeviceLocalSignOut = true");
+    expect(authSource).toContain(
+      "if (foreignDeviceLocalSignOut) {",
+    );
   });
 
   it('clearAuth:passive 共享实例不删磁盘 refresh token', () => {

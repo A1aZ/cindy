@@ -2263,7 +2263,8 @@ export function ChatInput({
           !event.repeat &&
           !event.isComposing &&
           showRecommendationRef.current &&
-          recommendedPromptRef.current
+          recommendedPromptRef.current &&
+          !voiceInputBusyRef.current
         ) {
           if (composerFullyEmptyRef.current()) {
             event.preventDefault();

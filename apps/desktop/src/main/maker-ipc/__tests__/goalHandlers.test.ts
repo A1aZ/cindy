@@ -99,7 +99,7 @@ describe('goal update IPC errors', () => {
       code: 'INTERNAL',
       message: expect.stringContaining('failed to read goal status'),
     });
-    expect(mocks.resumeOnOpen).toHaveBeenCalledWith('s1');
+    expect(mocks.resumeOnOpen).toHaveBeenCalledWith('s1', { waitForDispatch: false });
   });
 
   it('returns the post-recovery blocked state instead of a stale active snapshot', async () => {
@@ -117,7 +117,7 @@ describe('goal update IPC errors', () => {
     const result = await handlerFor(MAKER_INVOKE.GOAL_GET_STATUS)({}, 's1');
 
     expect(result).toEqual(blocked);
-    expect(mocks.resumeOnOpen).toHaveBeenCalledWith('s1');
+    expect(mocks.resumeOnOpen).toHaveBeenCalledWith('s1', { waitForDispatch: false });
     expect(mocks.getStatus).toHaveBeenCalledTimes(2);
   });
 
@@ -133,6 +133,47 @@ describe('goal update IPC errors', () => {
       code: 'PRECONDITION_FAILED',
       message: expect.stringContaining('unable to restore the agent session'),
     });
+    expect(mocks.getStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns active status without waiting for detached prompt acceptance', async () => {
+    const active = { sessionId: 's1', status: 'active' };
+    const neverAccepted = new Promise<void>(() => {});
+    mocks.getStatus
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce(active);
+    mocks.resumeOnOpen.mockImplementationOnce(
+      async (_sessionId: string, opts?: { waitForDispatch?: boolean }) => {
+        if (opts?.waitForDispatch !== false) await neverAccepted;
+      },
+    );
+
+    const result = await handlerFor(MAKER_INVOKE.GOAL_GET_STATUS)({}, 's1');
+
+    expect(result).toEqual(active);
+    expect(mocks.resumeOnOpen).toHaveBeenCalledWith('s1', { waitForDispatch: false });
+    expect(mocks.getStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps an internal dormant recovery read failure to sanitized INTERNAL', async () => {
+    mocks.getStatus.mockResolvedValueOnce({ sessionId: 's1', status: 'active' });
+    mocks.resumeOnOpen.mockRejectedValueOnce(
+      new Error('sqlite path /private/user-data/goal.db failed'),
+    );
+
+    const result = handlerFor(MAKER_INVOKE.GOAL_GET_STATUS)({}, 's1');
+
+    let error: unknown;
+    try {
+      await result;
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'INTERNAL',
+      message: expect.stringContaining('failed to restore goal status'),
+    });
+    expect((error as Error).message).not.toContain('/private/user-data');
     expect(mocks.getStatus).toHaveBeenCalledTimes(1);
   });
 

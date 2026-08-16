@@ -126,13 +126,22 @@ export function registerGoalHandlers(): void {
     if (!controller) throwIpcError('INTERNAL', 'goal controller not started');
     let status = await readGoalStatusForIpc(controller, id);
     // Dormant recovery may synchronously converge an apparently active Goal to
-    // blocked. Wait and re-read so this invoke response cannot overwrite the
-    // newer status push with its stale pre-recovery active snapshot.
+    // blocked. Wait for storage/session recovery and re-read so this invoke
+    // response cannot overwrite the newer status push with a stale active
+    // snapshot. Actual turn dispatch stays detached: PI prompt acceptance may
+    // legitimately wait through long compaction and must not hold a read query.
     if (status?.status === 'active') {
       try {
-        await controller.resumeOnOpen(id);
+        await controller.resumeOnOpen(id, { waitForDispatch: false });
       } catch (error) {
-        throwGoalControllerIpcError(error);
+        if (
+          error instanceof GoalControllerInputError ||
+          error instanceof GoalSessionRestoreError ||
+          error instanceof GoalUpdateSupersededError
+        ) {
+          throwGoalControllerIpcError(error);
+        }
+        throwIpcError('INTERNAL', 'failed to restore goal status');
       }
       status = await readGoalStatusForIpc(controller, id);
     }

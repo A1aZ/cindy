@@ -1342,7 +1342,10 @@ export class GoalController {
    * 活化失败则转 blocked 并给出可见原因，不能继续显示成正在推进。
    * 这样重开会话能让 active 目标自己跑下去,而不是卡死等用户重发 /goal。
    */
-  async resumeOnOpen(sessionId: string): Promise<void> {
+  async resumeOnOpen(
+    sessionId: string,
+    opts?: { waitForDispatch?: boolean },
+  ): Promise<void> {
     const pendingFailure = this.unpersistedDispatchFailures.get(sessionId);
     if (pendingFailure) {
       const persisted = await this.blockDispatchFailure(
@@ -1425,7 +1428,19 @@ export class GoalController {
     if (this.turns.get(sessionId) !== lifecycleBoundary) return;
     this.emit(state);
     if (!this.isBusy(sessionId)) {
-      await this.fireTurn(sessionId, { throwOnUnpersistedRestoreFailure: true });
+      const dispatch = this.fireTurn(sessionId, {
+        throwOnUnpersistedRestoreFailure: true,
+      });
+      if (opts?.waitForDispatch === false) {
+        void dispatch.catch((error) => {
+          this.deps.logger.warn('[goal] detached resume-on-open fire failed', {
+            sessionId,
+            error: String(error),
+          });
+        });
+      } else {
+        await dispatch;
+      }
     }
   }
 
@@ -2179,7 +2194,23 @@ export class GoalController {
     const isCurrentLifecycle = (): boolean =>
       this.turns.get(sessionId) === lifecycleBoundary &&
       lifecycleBoundary.generation === lifecycleGeneration;
-    const state = await this.deps.storage.get(sessionId);
+    let state: GoalState | null;
+    try {
+      state = await this.deps.storage.get(sessionId);
+    } catch (error) {
+      this.deps.logger.warn('[goal] fireTurn preflight state read failed', {
+        sessionId,
+        error: String(error),
+      });
+      const persisted = await this.blockDispatchFailure(
+        sessionId,
+        lifecycleBoundary,
+        'turn dispatch failed: unable to read Goal state',
+        isCurrentLifecycle,
+      );
+      if (!persisted && opts?.throwOnUnpersistedRestoreFailure) throw error;
+      return;
+    }
     // owner 身份拒绝 Stop / Resume 换代，generation 拒绝另一轮正常推进后的旧 fire；
     // 两者都不能只信上面读到的 active 存档快照。
     if (

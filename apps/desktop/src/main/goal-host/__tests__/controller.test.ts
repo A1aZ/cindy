@@ -2849,6 +2849,96 @@ describe('GoalController', () => {
     expect(h.session.sends.length).toBe(sends);
   });
 
+  it('resumeOnOpen can return after recovery while prompt acceptance remains pending', async () => {
+    let markDispatchStarted!: () => void;
+    let releaseDispatch!: (result: SessionSendResult) => void;
+    const dispatchStarted = new Promise<void>((resolve) => {
+      markDispatchStarted = resolve;
+    });
+    const pendingDispatch = new Promise<SessionSendResult>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const local = makeController();
+    vi.spyOn(local.session, 'send').mockImplementation(async (
+      message: Parameters<FakeSession['send']>[0],
+      opts: Parameters<FakeSession['send']>[1],
+    ): Promise<SessionSendResult> => {
+      const content = typeof message === 'string' ? message : message.content;
+      local.session.sends.push({ content, originKind: opts?.origin?.kind });
+      opts?.onDispatching?.();
+      markDispatchStarted();
+      return pendingDispatch;
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'keep going' }));
+
+    await expect(
+      local.controller.resumeOnOpen('s1', { waitForDispatch: false }),
+    ).resolves.toBeUndefined();
+    await dispatchStarted;
+
+    expect(local.session.sends).toHaveLength(1);
+    expect(await local.storage.get('s1')).toMatchObject({ status: 'active' });
+
+    releaseDispatch({ accepted: true });
+    await Promise.resolve();
+  });
+
+  it('converges a detached resume-on-open dispatch failure to blocked', async () => {
+    let markDispatchStarted!: () => void;
+    let releaseDispatch!: () => void;
+    const dispatchStarted = new Promise<void>((resolve) => {
+      markDispatchStarted = resolve;
+    });
+    const dispatchGate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const local = makeController();
+    vi.spyOn(local.session, 'send').mockImplementation(async (
+      message: Parameters<FakeSession['send']>[0],
+      opts: Parameters<FakeSession['send']>[1],
+    ): Promise<SessionSendResult> => {
+      const content = typeof message === 'string' ? message : message.content;
+      local.session.sends.push({ content, originKind: opts?.origin?.kind });
+      opts?.onDispatching?.();
+      markDispatchStarted();
+      await dispatchGate;
+      throw new Error('provider unavailable');
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'recover safely' }));
+
+    await local.controller.resumeOnOpen('s1', { waitForDispatch: false });
+    await dispatchStarted;
+    expect(await local.storage.get('s1')).toMatchObject({ status: 'active' });
+
+    releaseDispatch();
+    await vi.waitFor(async () => {
+      expect(await local.storage.get('s1')).toMatchObject({
+        status: 'blocked',
+        lastReason: expect.stringContaining('provider unavailable'),
+      });
+    });
+    expect(local.session.sends).toHaveLength(1);
+  });
+
+  it('converges a detached resume-on-open preflight read failure to blocked', async () => {
+    const local = makeController();
+    const active = seededGoal({ status: 'active', objective: 'recover safely' });
+    await local.storage.set(active);
+    vi.spyOn(local.storage, 'get')
+      .mockResolvedValueOnce(active)
+      .mockRejectedValueOnce(new Error('goal state read unavailable'));
+
+    await local.controller.resumeOnOpen('s1', { waitForDispatch: false });
+
+    await vi.waitFor(async () => {
+      expect(await local.storage.get('s1')).toMatchObject({
+        status: 'blocked',
+        lastReason: expect.stringContaining('unable to read Goal state'),
+      });
+    });
+    expect(local.session.sends).toHaveLength(0);
+  });
+
   it('resumeOnOpen activates a dormant active goal (attach + fire) when the conversation is opened', async () => {
     // 模拟重启后 dormant:有 active 目标行,但没挂 listener、没 fire。
     await h.storage.set(seededGoal({ status: 'active', objective: 'keep going', turnsUsed: 0 }));

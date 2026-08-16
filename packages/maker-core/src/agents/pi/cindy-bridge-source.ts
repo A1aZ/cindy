@@ -332,6 +332,13 @@ function collectResolvedCredentialPaths(input: unknown, depth = 0): string[] {
   return [];
 }
 
+function resolvedCredentialEvidenceForHost(
+  paths: readonly string[],
+  credentialRead: boolean,
+): string[] | null {
+  return credentialRead && paths.length === 0 ? null : [...paths];
+}
+
 // 从 bash 子进程读取任意进程的初始环境(/proc/<pid|self>/environ)是绕过密钥剥离的旁路:
 // spawn 边界虽从子进程 env 删了 Cindy 私密变量,但父 pi 进程仍持有它们,同 UID 下
 // cat /proc/PPID/environ 可直接取回代理 token / 网关 key / BYOM key(codex 报)。
@@ -702,6 +709,7 @@ function expandReadonlySelector(selector: string): string[] | null {
 }
 
 function readonlySelectorTouchesCredential(selector: string): boolean {
+  if (selector.trimStart().startsWith('!')) return false;
   const expanded = expandReadonlySelector(selector);
   if (!expanded) return true;
   const dotenvProbes = ['.env', '.env.local', '.env.production', '.env.secret'];
@@ -1452,6 +1460,10 @@ export default async function cindyBridge(pi: any) {
     const credentialRead = readonlyCredentialEvidence?.touchesCredential === true
       || (event.toolName === 'bash' && (bashReadEvidence.unresolved || touchesCredentialPath(bashReadTargets)))
       || resolvedCredentialReadPaths.length > 0;
+    const credentialEvidenceForHost = resolvedCredentialEvidenceForHost(
+      resolvedCredentialReadPaths,
+      credentialRead,
+    );
     if (credentialRead && permission.mode === 'bypassPermissions') {
       return { block: true, reason: 'Cindy blocks reading credential or key paths, even with Full access.' };
     }
@@ -1464,7 +1476,7 @@ export default async function cindyBridge(pi: any) {
         JSON.stringify({
           toolName: event.toolName,
           input: event.input ?? {},
-          resolvedCredentialPaths: resolvedCredentialReadPaths,
+          resolvedCredentialPaths: credentialEvidenceForHost,
         }),
       );
     } catch {

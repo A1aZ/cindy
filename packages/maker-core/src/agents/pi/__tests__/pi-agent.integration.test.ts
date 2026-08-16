@@ -1623,6 +1623,54 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'auto mode escalates selector-only dotenv grep evidence',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-grep-dotenv-selector-'));
+      mkdirSync(path.join(workingDir, 'src'));
+      writeFileSync(path.join(workingDir, 'src', '.env.local'), 'SELECTOR_SECRET=must-not-leak\n');
+      writeFileSync(path.join(workingDir, 'src', 'source.ts'), 'SAFE_SELECTOR=visible\n');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'SELECTOR_SECRET', path: 'src', glob: '.env*' }),
+          anthropicStreamBody('grep selector credential turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'pi-grep-dotenv-selector',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual(['grep']);
+        const followUp = seenRequests.slice(reqBefore).map((request) => request.body).join('\n');
+        expect(followUp).not.toContain('SELECTOR_SECRET=must-not-leak');
+        expect(followUp).toContain('User denied this tool call via Cindy.');
+
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'SAFE_SELECTOR', path: 'src', glob: '!.env*' }),
+          anthropicStreamBody('grep negative selector turn finished'),
+        );
+        const safeReqBefore = seenRequests.length;
+        const safeTurn = await runPermissionTurn({
+          sessionId: 'pi-grep-negative-dotenv-selector',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(safeTurn.resolverTools).toEqual([]);
+        const safeFollowUp = seenRequests.slice(safeReqBefore).map((request) => request.body).join('\n');
+        expect(safeFollowUp).toContain('source.ts:1: SAFE_SELECTOR=visible');
+        expect(safeFollowUp).not.toContain('SELECTOR_SECRET=must-not-leak');
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
     'Review directory grep returns safe matches without credential-file contents',
     { timeout: 60_000 },
     async () => {

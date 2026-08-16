@@ -153,6 +153,8 @@ describe('cindy-bridge extension source', () => {
     expect(evidence('find', { pattern: '.e{o,p}v', path: 'src' }).touchesCredential).toBe(false);
     expect(evidence('find', { pattern: '.e[o-p]v', path: 'src' }).touchesCredential).toBe(false);
     expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '.environment*' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '!.env*' }).touchesCredential).toBe(false);
+    expect(evidence('grep', { pattern: 'KEY', path: 'src', globs: ['*', '!.env*'] }).touchesCredential).toBe(false);
     expect(evidence('grep', { pattern: 'KEY', path: 'src', glob: '[!.]*.ts' }).touchesCredential).toBe(false);
     expect(evidence('find', { pattern: '.env', path: 'src' }).touchesCredential).toBe(true);
     expect(evidence('read', { path: '.env.local', offset: 1 }).touchesCredential).toBe(true);
@@ -175,6 +177,7 @@ describe('cindy-bridge extension source', () => {
         '(globalThis as any).bashInputReadTargets = bashInputReadTargets;',
         '(globalThis as any).bashInputReadEvidence = bashInputReadEvidence;',
         '(globalThis as any).parseShellInputRedirections = parseShellInputRedirections;',
+        '(globalThis as any).resolvedCredentialEvidenceForHost = resolvedCredentialEvidenceForHost;',
       ].join('\n');
       const compiled = ts.transpileModule(executableSource, {
         compilerOptions: {
@@ -199,6 +202,10 @@ describe('cindy-bridge extension source', () => {
           targetMayExpand: boolean[];
           hasUnresolvedTarget: boolean;
         };
+        resolvedCredentialEvidenceForHost?: (
+          paths: readonly string[],
+          credentialRead: boolean,
+        ) => string[] | null;
       } = {
         globSync,
         realpathSync,
@@ -238,6 +245,9 @@ describe('cindy-bridge extension source', () => {
           realpathSync(secretPath),
         ]);
         expect(context.collectResolvedCredentialPaths?.({ path: ordinaryLink })).toEqual([]);
+        expect(context.resolvedCredentialEvidenceForHost?.([], true)).toBeNull();
+        expect(context.resolvedCredentialEvidenceForHost?.([], false)).toEqual([]);
+        expect(context.resolvedCredentialEvidenceForHost?.([secretPath], true)).toEqual([secretPath]);
 
         const secretCommand = `cat<${secretLink}`;
         const ordinaryCommand = `cat<${ordinaryLink}`;
@@ -338,7 +348,7 @@ describe('cindy-bridge extension source', () => {
         });
         expect(source).toContain("event.toolName === 'bash'\n      ? bashInputReadEvidence(event.input)");
         expect(source).toContain('bashReadEvidence.unresolved || touchesCredentialPath(bashReadTargets)');
-        expect(source).toContain('resolvedCredentialPaths: resolvedCredentialReadPaths');
+        expect(source).toContain('resolvedCredentialPaths: credentialEvidenceForHost');
       } finally {
         rmSync(tempRoot, { recursive: true, force: true });
       }

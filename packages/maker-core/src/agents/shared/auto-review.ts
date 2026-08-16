@@ -168,7 +168,7 @@ const DOTENV_FILE_READER_BINS: ReadonlySet<string> = new Set([
   'cat', 'head', 'tail', 'wc', 'stat', 'file', 'realpath', 'readlink',
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'tree', 'du',
   'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'column', 'nl', 'tac',
-  'jq', 'yq', 'base64', 'md5', 'md5sum', 'sha256sum', 'cksum', 'sed',
+  'jq', 'yq', 'base64', 'md5', 'md5sum', 'sha256sum', 'cksum', 'sed', 'date',
 ]);
 
 
@@ -4733,10 +4733,10 @@ export function commandExecutableNames(command: string): string[] {
 }
 
 const FIRST_DATA_ARGUMENT_BINS: ReadonlySet<string> = new Set([
-  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq',
+  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq', 'date',
 ]);
 
-type ReaderOptionKind = 'data' | 'data-file' | 'selector' | 'filter' | 'aux-file';
+type ReaderOptionKind = 'data' | 'data-file' | 'selector' | 'filter' | 'aux-file' | 'aux-file-list';
 type ReaderLongOption = { name: string; kind: ReaderOptionKind };
 
 const GREP_LONG_OPTIONS: readonly ReaderLongOption[] = [
@@ -4767,6 +4767,29 @@ const DIFF_LONG_OPTIONS: readonly ReaderLongOption[] = [
 ];
 const FILE_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--files-from', kind: 'data-file' },
+  { name: '--magic-file', kind: 'aux-file-list' },
+];
+const FILES0_FROM_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--files0-from', kind: 'data-file' },
+];
+const DU_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  ...FILES0_FROM_LONG_OPTIONS,
+  { name: '--exclude', kind: 'filter' },
+  { name: '--exclude-from', kind: 'aux-file' },
+];
+const SORT_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  ...FILES0_FROM_LONG_OPTIONS,
+  { name: '--random-source', kind: 'aux-file' },
+];
+const DATE_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--file', kind: 'data-file' },
+  { name: '--reference', kind: 'aux-file' },
+];
+const AG_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--path-to-ignore', kind: 'aux-file' },
+];
+const TREE_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--infofile', kind: 'aux-file' },
 ];
 
 function readerLongOptions(bin: string): readonly ReaderLongOption[] {
@@ -4776,6 +4799,12 @@ function readerLongOptions(bin: string): readonly ReaderLongOption[] {
   if (bin === 'jq' || bin === 'yq') return JQ_LONG_OPTIONS;
   if (bin === 'diff') return DIFF_LONG_OPTIONS;
   if (bin === 'file') return FILE_LONG_OPTIONS;
+  if (bin === 'wc') return FILES0_FROM_LONG_OPTIONS;
+  if (bin === 'du') return DU_LONG_OPTIONS;
+  if (bin === 'sort') return SORT_LONG_OPTIONS;
+  if (bin === 'date') return DATE_LONG_OPTIONS;
+  if (bin === 'ag') return AG_LONG_OPTIONS;
+  if (bin === 'tree') return TREE_LONG_OPTIONS;
   return [];
 }
 
@@ -4791,7 +4820,11 @@ function resolveReaderLongOption(bin: string, name: string): ReaderOptionKind | 
   return kinds.size === 1 ? candidates[0]?.kind ?? null : null;
 }
 
-function readerShortOptionKind(bin: string, option: string): ReaderOptionKind | null {
+function readerShortOptionKind(
+  bin: string,
+  option: string,
+  platform: NodeJS.Platform = process.platform,
+): ReaderOptionKind | null {
   if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep' || bin === 'sed') {
     if (option === 'e') return 'data';
     if (option === 'f') return 'data-file';
@@ -4804,6 +4837,12 @@ function readerShortOptionKind(bin: string, option: string): ReaderOptionKind | 
   if ((bin === 'jq' || bin === 'yq') && option === 'f') return 'data-file';
   if (bin === 'ag' && option === 'G') return 'selector';
   if (bin === 'file' && option === 'f') return 'data-file';
+  if (bin === 'file' && (option === 'm' || option === 'M')) return 'aux-file-list';
+  if (bin === 'file' && (option === 'e' || option === 'F' || option === 'P')) return 'data';
+  if (bin === 'date' && option === 'f') return platform === 'darwin' ? 'data' : 'data-file';
+  if (bin === 'date' && option === 'r') return platform === 'darwin' ? 'data' : 'aux-file';
+  if (bin === 'date' && (option === 'd' || option === 'I' || option === 's'
+      || option === 'v' || option === 'z')) return 'data';
   return null;
 }
 
@@ -4891,10 +4930,22 @@ function shellOperandCouldMatchDotenv(
   });
 }
 
+function readerOptionValueIsSensitive(
+  kind: ReaderOptionKind,
+  value: string | undefined,
+  isSensitiveOperand: (value: string) => boolean,
+): boolean {
+  if (kind === 'selector') return selectorCouldMatchDotenv(value ?? '');
+  if (!value || (kind !== 'data-file' && kind !== 'aux-file' && kind !== 'aux-file-list')) return false;
+  const operands = kind === 'aux-file-list' ? value.split(/[:;]/) : [value];
+  return operands.some((operand) => shellOperandCouldMatchDotenv(operand, isSensitiveOperand));
+}
+
 function readerArgumentsReadDotenv(
   bin: string,
   args: readonly string[],
   isSensitiveOperand: (value: string) => boolean = isDotenvCredentialPath,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   let dataArgumentProvided = !FIRST_DATA_ARGUMENT_BINS.has(bin);
   let optionsEnded = false;
@@ -4913,10 +4964,7 @@ function readerArgumentsReadDotenv(
       if (kind) {
         const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
         const value = attached ?? args[index + 1];
-        const isSensitive = kind === 'selector'
-          ? selectorCouldMatchDotenv(value ?? '')
-          : (kind === 'data-file' || kind === 'aux-file')
-            && Boolean(value && shellOperandCouldMatchDotenv(value, isSensitiveOperand));
+        const isSensitive = readerOptionValueIsSensitive(kind, value, isSensitiveOperand);
         if (kind !== 'data' && isSensitive) return true;
         if (attached === undefined) index += 1;
         if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
@@ -4927,14 +4975,11 @@ function readerArgumentsReadDotenv(
     if (!optionsEnded && /^-[^-]/.test(token)) {
       let handled = false;
       for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
-        const kind = readerShortOptionKind(bin, token.charAt(optionIndex));
+        const kind = readerShortOptionKind(bin, token.charAt(optionIndex), platform);
         if (!kind) continue;
         const attached = token.slice(optionIndex + 1) || undefined;
         const value = attached ?? args[index + 1];
-        const isSensitive = kind === 'selector'
-          ? selectorCouldMatchDotenv(value ?? '')
-          : (kind === 'data-file' || kind === 'aux-file')
-            && Boolean(value && shellOperandCouldMatchDotenv(value, isSensitiveOperand));
+        const isSensitive = readerOptionValueIsSensitive(kind, value, isSensitiveOperand);
         if (kind !== 'data' && isSensitive) return true;
         if (attached === undefined) index += 1;
         if (kind === 'data' || kind === 'data-file') dataArgumentProvided = true;
@@ -5312,7 +5357,7 @@ function shellCommandReadsDotenv(
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
     if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;
-    if (readerArgumentsReadDotenv(bin, args)) return true;
+    if (readerArgumentsReadDotenv(bin, args, isDotenvCredentialPath, opts.platform ?? process.platform)) return true;
   }
   return false;
 }

@@ -426,6 +426,32 @@ describe('对抗语料 — dotenv 凭证路径', () => {
       'file --files-from=.env',
       'file --files-from .env.local',
       'file --files-f=.env.production',
+      'file --magic-file=.env',
+      'file --magic-file=README.md:.env',
+      'file --magic-f .env.local',
+      'file -mREADME.md:.env.production',
+      'file -M .env.test',
+      'date --file=.env',
+      'date --fi .env.local',
+      'date --reference=.env',
+      'date --ref .env.local',
+      'ag --path-to-ignore=.env needle .',
+      'ag --path-to-i .env.local needle .',
+      'tree --infofile=.env',
+      'tree --infof .env.local',
+      'wc --files0-from=.env',
+      'wc --files0-from .env.local',
+      'wc --files0-f=.env.production',
+      'sort --files0-from=.env',
+      'sort --files0-from .env.local',
+      'sort --files0-f=.env.production',
+      'sort --random-source=.env',
+      'sort --random-sou .env.local',
+      'du --files0-from=.env',
+      'du --files0-from .env.local',
+      'du --files0-f=.env.production',
+      'du --exclude-from=.env',
+      'du --exclude-f .env.local',
       'diff --from-file .env.local /dev/null',
       'diff --from-f=.env.production /dev/null',
       'diff --to-file=.env.test /dev/null',
@@ -581,6 +607,19 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     expect(classifyShellCommand(command, roots, opts)).toBe('prompt');
   });
 
+  it('date 短选项按平台区分 GNU 文件值与 macOS 数据值', () => {
+    expect(classifyShellCommand('date -f .env 0', roots, { ...opts, platform: 'linux' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('date -r.env', roots, { ...opts, platform: 'linux' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('date -f .env 0', roots, { ...opts, platform: 'darwin' }))
+      .toBe('auto-approve');
+    expect(classifyShellCommand('date -r .env', roots, { ...opts, platform: 'darwin' }))
+      .toBe('auto-approve');
+    expect(classifyShellCommand('date -d.env', roots, { ...opts, platform: 'linux' }))
+      .toBe('auto-approve');
+  });
+
   it('brace expansion 在全局候选预算内惰性遍历，超限时 fail-closed', () => {
     const explosiveOperand = Array.from(
       { length: 8 },
@@ -626,6 +665,34 @@ describe('对抗语料 — dotenv 凭证路径', () => {
     ['file --files-from=README.md', 'auto-approve'],
     ['file --files-from README.md', 'auto-approve'],
     ['file --files-f=README.md', 'auto-approve'],
+    ['file --magic-file=README.md', 'auto-approve'],
+    ['file --magic-file=README.md:OTHER', 'auto-approve'],
+    ['file --magic-f README.md', 'auto-approve'],
+    ['file -mREADME.md:OTHER', 'auto-approve'],
+    ['file -M README.md', 'auto-approve'],
+    ['file -Fm.env README.md', 'auto-approve'],
+    ['file -F.env README.md', 'auto-approve'],
+    ['file -Pname=.env README.md', 'auto-approve'],
+    ['file -em.env README.md', 'auto-approve'],
+    ['date --file=README.md', 'auto-approve'],
+    ['date --fi README.md', 'auto-approve'],
+    ['date --reference=README.md', 'auto-approve'],
+    ['date --ref README.md', 'auto-approve'],
+    ['date .env', 'auto-approve'],
+    ['ag --path-to-ignore=README.md needle .', 'auto-approve'],
+    ['ag --path-to-i README.md needle .', 'auto-approve'],
+    ['tree --infofile=README.md', 'auto-approve'],
+    ['tree --infof README.md', 'auto-approve'],
+    ['wc --files0-from=README.md', 'auto-approve'],
+    ['wc --files0-from README.md', 'auto-approve'],
+    ['wc --files0-f=README.md', 'auto-approve'],
+    ['sort --files0-from=README.md', 'auto-approve'],
+    ['sort --files0-from README.md', 'auto-approve'],
+    ['sort --random-source=README.md', 'auto-approve'],
+    ['du --files0-from=README.md', 'auto-approve'],
+    ['du --files0-from README.md', 'auto-approve'],
+    ['du --exclude-from=README.md', 'auto-approve'],
+    ['du --exclude=.env src', 'auto-approve'],
     ['column data.csv', 'auto-approve'],
     ['grep --regexp=. data.json', 'auto-approve'],
     ['grep -e.env data.json', 'auto-approve'],

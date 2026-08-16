@@ -41,6 +41,12 @@ import {
 } from './types';
 
 const DEFAULT_DEBOUNCE_MS = 150;
+const DISPATCH_REJECTION_BASE_DELAY_MS = 500;
+const DISPATCH_REJECTION_MAX_DELAY_MS = 4_000;
+const DISPATCH_REJECTION_MAX_ATTEMPTS = 4;
+const DISPATCH_REJECTION_MAX_WINDOW_MS = 15_000;
+const DISPATCH_REJECTION_BLOCK_REASON =
+  'turn dispatch failed: provider repeatedly rejected attempts before accepting work';
 
 export class GoalControllerInputError extends Error {
   readonly code = 'INVALID_PARAMS';
@@ -389,6 +395,14 @@ export class GoalController {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   /** goal controller 自己发起且尚未收到终止事件的 turn。用于编辑时区分 goal turn / user turn。 */
   private readonly goalTurnsInFlight = new Set<string>();
+  /**
+   * Provider 明确拒绝(确认未接受)的连续重排窗口。只记内存：成功接受或任一显式
+   * lifecycle 操作都会清零；未知投递从不进入这里，而是直接走 fence / blocked。
+   */
+  private readonly dispatchRejectionRetries = new Map<
+    string,
+    { attempts: number; firstRejectedAt: number; retryNotBefore: number }
+  >();
   /** (Option B)已经用 AskUserQuestion 答案改写、或正在提交改写的会话。token 让失败调用
    *  只能释放自己的 claim，不能误删新目标 / 后续调用的闸门。setGoal 与 clearGoal 时重置。 */
   private readonly clarificationApplied = new Map<string, object>();
@@ -445,6 +459,34 @@ export class GoalController {
     if (!objective) throw new GoalControllerInputError('objective must not be empty');
     this.cancelDeferredManualResume(sessionId);
     let entryBoundary = this.turns.get(sessionId);
+    let rejectionTakeover:
+      | {
+          retry: { attempts: number; firstRejectedAt: number; retryNotBefore: number };
+          previousBoundary: TurnAccumulator;
+          hadGoalTurn: boolean;
+          hadFiring: boolean;
+        }
+      | undefined;
+    const rejectionRetry = this.dispatchRejectionRetries.get(sessionId);
+    if (rejectionRetry && entryBoundary) {
+      // A replacement `/goal` must synchronously fence the old objective before
+      // storage or hydration can yield. Keep a cancelled owner on failure so a
+      // stale backoff timer cannot dispatch the old objective invisibly.
+      rejectionTakeover = {
+        retry: { ...rejectionRetry },
+        previousBoundary: entryBoundary,
+        hadGoalTurn: this.goalTurnsInFlight.has(sessionId),
+        hadFiring: this.firing.has(sessionId),
+      };
+      const previousBoundary = entryBoundary;
+      this.stopSession(sessionId);
+      entryBoundary = freshTurn(
+        true,
+        previousBoundary.pendingPersistence,
+        previousBoundary.pendingCompletion,
+      );
+      this.turns.set(sessionId, entryBoundary);
+    }
     // 连续过载计数是 per-goal 状态：换目标(含替换既有目标的编辑路径)必须清零，
     // 否则上一个目标撞过载上限变 blocked 后，新目标会继承耗尽的计数，第一次容量
     // 错误就直接 blocked、拿不到自己的重试预算。
@@ -463,7 +505,22 @@ export class GoalController {
       if (this.turns.get(sessionId) !== takeoverBoundary) return null;
       entryBoundary = takeoverBoundary;
     }
-    const existing = await this.deps.storage.get(sessionId);
+    let existing: GoalState | null;
+    try {
+      existing = await this.deps.storage.get(sessionId);
+    } catch (error) {
+      if (
+        rejectionTakeover &&
+        this.turns.get(sessionId) === entryBoundary
+      ) {
+        this.turns.set(sessionId, rejectionTakeover.previousBoundary);
+        this.dispatchRejectionRetries.set(sessionId, rejectionTakeover.retry);
+        if (rejectionTakeover.hadGoalTurn) this.goalTurnsInFlight.add(sessionId);
+        this.attachListener(sessionId);
+        if (!rejectionTakeover.hadFiring) this.scheduleContinuation(sessionId);
+      }
+      throw error;
+    }
     if (this.turns.get(sessionId) !== entryBoundary) return null;
     const ts = this.now();
 
@@ -501,9 +558,13 @@ export class GoalController {
         );
         throw new GoalSessionRestoreError();
       }
-      const sessionWasBusy = this.isBusy(sessionId);
+      const sessionWasBusy =
+        rejectionTakeover?.hadGoalTurn === true || this.isBusy(sessionId);
       if (sessionWasBusy) {
-        if (!this.goalTurnsInFlight.has(sessionId)) {
+        if (
+          rejectionTakeover?.hadGoalTurn !== true &&
+          !this.goalTurnsInFlight.has(sessionId)
+        ) {
           throw new GoalControllerInputError('current conversation is still running; edit the goal after it becomes idle');
         }
         // 先 stopSession(detach listener + 清 goalTurnsInFlight/turn),再 abort:否则 abort 触发的
@@ -518,6 +579,7 @@ export class GoalController {
         previousBoundary?.pendingCompletion ?? null,
       );
       this.turns.set(sessionId, editBoundary);
+      let editObjectivePersisted = false;
       try {
         if (sessionWasBusy) {
           await session.abort();
@@ -538,6 +600,7 @@ export class GoalController {
           }),
           async (persisted) => {
             if (!persisted) return;
+            editObjectivePersisted = true;
             // 新目标已经提交后才重置澄清闸门；被 Stop 取消或写入失败的 setGoal
             // 不能重新开放旧目标的澄清改写。
             this.clarificationApplied.delete(sessionId);
@@ -560,7 +623,20 @@ export class GoalController {
         }
         return (await this.deps.storage.get(sessionId)) ?? updated;
       } catch (error) {
-        if (this.turns.get(sessionId) === editBoundary) this.turns.delete(sessionId);
+        if (this.turns.get(sessionId) === editBoundary) {
+          if (rejectionTakeover) {
+            // Keep the persisted active Goal live after either half of the edit
+            // fails. Before objective commit, resume the old rejection budget;
+            // after commit, retry only the new objective with a fresh budget.
+            if (!editObjectivePersisted) {
+              this.dispatchRejectionRetries.set(sessionId, rejectionTakeover.retry);
+            }
+            this.attachListener(sessionId);
+            this.scheduleContinuation(sessionId);
+          } else {
+            this.turns.delete(sessionId);
+          }
+        }
         throw error;
       }
     }
@@ -635,6 +711,25 @@ export class GoalController {
     const ownsOperationBoundary = existingBoundary === undefined;
     if (ownsOperationBoundary) this.turns.set(sessionId, operationBoundary);
     let entryGeneration = operationBoundary.generation;
+    let objectiveChanged = false;
+    let objectivePersisted = false;
+    let rejectionRetryRescheduled = false;
+    let frozenRejectionRetry:
+      | { attempts: number; firstRejectedAt: number; retryNotBefore: number }
+      | undefined;
+    const rescheduleRejectedDispatchForObjective = (status: GoalStatus): boolean => {
+      if (
+        rejectionRetryRescheduled ||
+        !objectiveChanged ||
+        status !== 'active' ||
+        (!frozenRejectionRetry && !this.dispatchRejectionRetries.delete(sessionId))
+      ) {
+        return false;
+      }
+      rejectionRetryRescheduled = true;
+      this.scheduleContinuation(sessionId);
+      return true;
+    };
     const entryChanged = (): boolean => {
       const current = this.turns.get(sessionId);
       return current !== operationBoundary || current.generation !== entryGeneration;
@@ -686,6 +781,7 @@ export class GoalController {
         }
         return limited;
       }
+      rescheduleRejectedDispatchForObjective(current.status);
       this.emit(current);
       return current;
     };
@@ -697,13 +793,40 @@ export class GoalController {
       const state = await this.deps.storage.get(sessionId);
       if (entryChanged()) return reconcileLifecycleChange();
       if (!state) return null;
-      const objectiveChanged =
+      objectiveChanged =
         normalized.objective != null && normalized.objective !== state.objective;
+      if (objectiveChanged && state.status === 'active') {
+        const rejectionRetry = this.dispatchRejectionRetries.get(sessionId);
+        if (rejectionRetry && this.firing.has(sessionId)) {
+          // The old retry already entered Session.send. Its acceptance is not yet
+          // known, so committing a replacement objective and scheduling another
+          // send could duplicate side effects. Leave both lifecycle and storage
+          // untouched; the caller can retry after this dispatch settles.
+          throw new GoalControllerInputError(
+            'current goal dispatch is still being accepted; retry the update after it settles',
+          );
+        }
+        if (rejectionRetry) {
+          // Freeze the old objective synchronously before persistence can yield.
+          // Bump generation so a timer callback already waiting on storage cannot
+          // cross the dispatch boundary with the stale objective.
+          frozenRejectionRetry = { ...rejectionRetry };
+          this.dispatchRejectionRetries.delete(sessionId);
+          const timer = this.timers.get(sessionId);
+          if (timer) {
+            clearTimeout(timer);
+            this.timers.delete(sessionId);
+          }
+          operationBoundary.generation += 1;
+          entryGeneration = operationBoundary.generation;
+        }
+      }
       const ts = this.now();
       const preview = { ...state, ...normalized };
       const shouldLimit = state.status === 'active' && exceedsGoalBudget(preview);
       const persistObjectiveMarker = async (changed: GoalState | null): Promise<void> => {
         if (!objectiveChanged || !changed) return;
+        objectivePersisted = true;
         await this.deps.persistUserMessage?.(sessionId, changed.objective, {
           goalObjective: { updated: true },
         });
@@ -751,6 +874,7 @@ export class GoalController {
         if (entryChanged()) return reconcileLifecycleChange();
       }
       if (!changed) return null;
+      rescheduleRejectedDispatchForObjective(changed.status);
       if (shouldLimit) {
         if (this.turns.get(sessionId) !== limitBoundary) return reconcileLifecycleChange();
         this.stopSession(sessionId);
@@ -794,11 +918,28 @@ export class GoalController {
         return reconcileLifecycleChange();
       }
       this.emit(next);
-      if (next.status === 'active' && state.status === 'budgetLimited' && !this.isBusy(sessionId)) {
+      if (
+        next.status === 'active' &&
+        state.status === 'budgetLimited' &&
+        !this.isBusy(sessionId)
+      ) {
         this.scheduleContinuation(sessionId);
       }
       return next;
     } finally {
+      if (
+        frozenRejectionRetry &&
+        !rejectionRetryRescheduled &&
+        this.turns.get(sessionId) === operationBoundary
+      ) {
+        // Storage failure keeps the old objective authoritative, so restore its
+        // retry budget. Once the objective row committed (even if its marker
+        // failed), continue only with a fresh budget for the new objective.
+        if (!objectivePersisted) {
+          this.dispatchRejectionRetries.set(sessionId, frozenRejectionRetry);
+        }
+        this.scheduleContinuation(sessionId);
+      }
       if (ownsOperationBoundary && this.turns.get(sessionId) === operationBoundary) {
         this.turns.delete(sessionId);
       }
@@ -1049,7 +1190,10 @@ export class GoalController {
     // 的目标一恢复就立刻又撞上限)。
     // **自动续跑(opts.auto)绝不清零**:到点自动续跑正是过载循环的一环,在这里清
     // 等于让计数永远回到 0,止损闸门形同不存在。
-    if (!opts?.auto) this.consecutiveOverloadTurns.delete(sessionId);
+    if (!opts?.auto) {
+      this.consecutiveOverloadTurns.delete(sessionId);
+      this.dispatchRejectionRetries.delete(sessionId);
+    }
     const budgetAlreadyExhausted = exceedsGoalBudget(state);
     if (!budgetAlreadyExhausted) {
       let ensured: SessionLike | undefined;
@@ -1355,6 +1499,7 @@ export class GoalController {
     this.unpersistedDispatchFailures.clear();
     this.turns.clear();
     this.consecutiveOverloadTurns.clear();
+    this.dispatchRejectionRetries.clear();
   }
 
   // ── 内部 ───────────────────────────────────────────────────────────────────
@@ -1379,6 +1524,7 @@ export class GoalController {
     }
     this.firing.delete(sessionId);
     this.goalTurnsInFlight.delete(sessionId);
+    this.dispatchRejectionRetries.delete(sessionId);
     this.unpersistedDispatchFailures.delete(sessionId);
     this.turns.delete(sessionId);
   }
@@ -1822,6 +1968,10 @@ export class GoalController {
   private scheduleContinuation(sessionId: string): void {
     const existing = this.timers.get(sessionId);
     if (existing) clearTimeout(existing);
+    const rejectionRetry = this.dispatchRejectionRetries.get(sessionId);
+    const delayMs = rejectionRetry
+      ? Math.max(this.debounceMs, rejectionRetry.retryNotBefore - this.now())
+      : this.debounceMs;
     const timer = setTimeout(() => {
       this.timers.delete(sessionId);
       void this.fireTurn(sessionId).catch((error) => {
@@ -1830,7 +1980,7 @@ export class GoalController {
           error: String(error),
         });
       });
-    }, this.debounceMs);
+    }, delayMs);
     // Node 环境;不 block 进程退出。
     (timer as { unref?: () => void }).unref?.();
     this.timers.set(sessionId, timer);
@@ -2054,6 +2204,24 @@ export class GoalController {
       if (limited) this.emit(limited);
       return;
     }
+    const rejectionRetry = this.dispatchRejectionRetries.get(sessionId);
+    if (
+      rejectionRetry &&
+      Math.max(0, this.now() - rejectionRetry.firstRejectedAt) >=
+        DISPATCH_REJECTION_MAX_WINDOW_MS
+    ) {
+      this.deps.logger.warn('[goal] provider rejection retry window expired', {
+        sessionId,
+        attempts: rejectionRetry.attempts,
+      });
+      await this.blockDispatchFailure(
+        sessionId,
+        lifecycleBoundary,
+        DISPATCH_REJECTION_BLOCK_REASON,
+        isCurrentLifecycle,
+      );
+      return;
+    }
     if (this.firing.has(sessionId)) return;
     // 首轮 vs 续轮由 state 派生(turnsUsed===0 = 首轮尚未真正跑完),不再由调用方指定。
     // 关键:首轮被 busy 跳过 / 被暂停后再发时,只要首轮还没跑过就仍按 first 发,否则首轮
@@ -2167,6 +2335,55 @@ export class GoalController {
         }
         if (!isCurrentDispatch()) return;
         this.goalTurnsInFlight.delete(sessionId);
+
+        if (result.reason === 'provider-rejected-before-dispatch') {
+          const rejectedAt = this.now();
+          const previousRetry = this.dispatchRejectionRetries.get(sessionId);
+          const firstRejectedAt = previousRetry?.firstRejectedAt ?? rejectedAt;
+          const attempts = (previousRetry?.attempts ?? 0) + 1;
+          const elapsedMs = Math.max(0, rejectedAt - firstRejectedAt);
+
+          if (
+            attempts >= DISPATCH_REJECTION_MAX_ATTEMPTS ||
+            elapsedMs >= DISPATCH_REJECTION_MAX_WINDOW_MS
+          ) {
+            this.deps.logger.warn('[goal] provider rejection retry limit reached', {
+              sessionId,
+              kind,
+              attempts,
+              elapsedMs,
+            });
+            await this.blockDispatchFailure(
+              sessionId,
+              dispatchBoundary,
+              DISPATCH_REJECTION_BLOCK_REASON,
+              isCurrentDispatch,
+            );
+            return;
+          }
+
+          const remainingWindowMs = DISPATCH_REJECTION_MAX_WINDOW_MS - elapsedMs;
+          const retryDelayMs = Math.min(
+            DISPATCH_REJECTION_BASE_DELAY_MS * (2 ** (attempts - 1)),
+            DISPATCH_REJECTION_MAX_DELAY_MS,
+            remainingWindowMs,
+          );
+          const retryNotBefore = rejectedAt + retryDelayMs;
+          this.dispatchRejectionRetries.set(sessionId, {
+            attempts,
+            firstRejectedAt,
+            retryNotBefore,
+          });
+          this.deps.logger.warn('[goal] provider rejected dispatch; retrying with backoff', {
+            sessionId,
+            kind,
+            attempts,
+            retryDelayMs,
+          });
+          this.scheduleContinuation(sessionId);
+          return;
+        }
+
         this.deps.logger.warn('[goal] send not accepted', { sessionId, kind, reason: result.reason });
         this.scheduleContinuation(sessionId);
       } else {
@@ -2174,6 +2391,8 @@ export class GoalController {
           baselineStarted = false;
           return;
         }
+        // Provider acceptance ends any prior confirmed-rejection retry window.
+        this.dispatchRejectionRetries.delete(sessionId);
         // onDispatching 是归属登记的唯一边界。不能在 await send 后再次 add：极快的
         // turn 可能已经发出终态并同步释放归属，重新登记会把后续用户 turn 误认成 Goal。
         baselineStarted = false;

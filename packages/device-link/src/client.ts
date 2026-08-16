@@ -2284,11 +2284,12 @@ export class DeviceLinkClient {
       peer.pending.size < MAX_TRANSPORT_PENDING_MESSAGES
       && peer.pendingBytes + reservedBytes <= MAX_TRANSPORT_PENDING_BYTES
     );
-    // link 已 ready 时,native send buffer 满就在**任何驱逐/腾位之前**拒绝:
-    // 该帧本轮注定入不了队,先驱逐再拒绝会在连续调用下逐步清空本可重试的
-    // 镜像历史,却一帧未纳(review P1)。link 未恢复时不检——帧只进有界
-    // pending 等重放,不触碰 socket。
-    if (peer.linkReady) {
+    // socket 容量预检只服务「本轮会写出」的帧。恢复期被 hold 的消息只进
+    // pending,不碰共享 ws;其它 peer 占满 send buffer 不得让它 BACKPRESSURE。
+    // 真会发送时仍在驱逐/腾位之前预检(旧 P1:先驱逐再拒会清空镜像历史)。
+    const additionalFrames = Math.max(1, frames.length);
+    const willSendNow = peer.linkReady && !this.shouldHoldRecoverySend(peer, additionalFrames);
+    if (willSendNow) {
       this.assertWebSocketCapacity(this.measureReliableFrames(frames));
     }
     if (!hasPendingCapacity()) {
@@ -2334,7 +2335,7 @@ export class DeviceLinkClient {
     peer.pending.set(seq, pending);
     peer.pendingBytes += reservedBytes;
     peer.nextSeq = seq + 1;
-    if (peer.linkReady && !this.shouldHoldRecoverySend(peer, this.estimateReliableFrameCount(pending))) {
+    if (willSendNow) {
       try {
         const sentFrames = this.sendReliableFrames(peer, pending);
         this.noteRecoveryFrames(peer, sentFrames);

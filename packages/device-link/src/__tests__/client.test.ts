@@ -4843,6 +4843,60 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     h.client.stop();
   }, 10_000);
 
+  it('恢复期 hold 时不因共享 ws 缓冲满而 BACKPRESSURE', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    h.client.sendInvokeResult('dev-b', 'warmup', { ok: true, result: 0 });
+    const ws = h.current();
+    const warmup = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!;
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId: warmup.meta.streamId, ackSeq: warmup.meta.seq },
+      },
+    });
+    await tick();
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'link-close',
+      src: 'dev-b',
+      payload: { reason: 'transport-timeout' },
+    });
+    await tick();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    ws.bufferedAmount = MAX_TRANSPORT_WEBSOCKET_BUFFERED_BYTES;
+    expect(() => h.client.sendInvokeResult('dev-b', 'probe', { ok: true, result: 0 })).toThrow(
+      expect.objectContaining({ code: 'BACKPRESSURE' }),
+    );
+
+    ws.bufferedAmount = 0;
+    h.client.sendInvokeResult('dev-b', 'probe-0', { ok: true, result: 0 });
+    h.client.sendInvokeResult('dev-b', 'probe-1', { ok: true, result: 1 });
+    const before = framesSent(ws);
+    ws.bufferedAmount = MAX_TRANSPORT_WEBSOCKET_BUFFERED_BYTES;
+    expect(() => h.client.sendInvokeResult('dev-b', 'held', { ok: true, result: 2 })).not.toThrow();
+    expect(framesSent(ws)).toBe(before);
+
+    h.client.stop();
+  }, 10_000);
+
   it('恢复期内部分写出的分片也计入探测预算', async () => {
     const h = makeHarness({
       timing: {

@@ -477,6 +477,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       id: 'grok-4.6',
       wireId: 'grok-4.6',
       catalogAddition: true,
+      cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
     });
     expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.api).toBeUndefined();
     expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();

@@ -512,7 +512,11 @@ export function buildPiSubscriptionNativeProviders(
                   ),
                 }
               : {}),
-          ...(preserved?.cost ? { cost: { ...preserved.cost } } : {}),
+          ...(preserved?.cost
+            ? { cost: { ...preserved.cost } }
+            : model.cost
+              ? { cost: { ...model.cost } }
+              : {}),
           ...(preserved?.headers ? { headers: { ...preserved.headers } } : {}),
           ...(preserved?.compat ? { compat: structuredClone(preserved.compat) } : {}),
         };

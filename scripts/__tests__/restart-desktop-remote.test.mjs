@@ -16,6 +16,7 @@ import {
 	isRepositoryDesktopDevProcess,
 	officialProductionUserDataDirs,
 	resolveRestartTargetUserDataDir,
+	sanitizeIsolationName,
 	formatDesktopStartupFailure,
 	inspectSharedUserDataRegion,
 	partitionDesktopDevProcesses,
@@ -200,6 +201,18 @@ test("env-only XDT_ISOLATED=1 derives the default sandbox, not the official prof
 		selectedRegion: "global",
 	});
 	assert.equal(named, defaultIsolatedUserDataDir("review", "global"));
+});
+
+test("invalid env isolation name falls back to the default sandbox", () => {
+	assert.equal(sanitizeIsolationName("../Cindy"), "");
+	assert.equal(sanitizeIsolationName("我的沙箱"), "");
+	const target = resolveRestartTargetUserDataDir({
+		isolatedEnv: "1",
+		isolatedName: "../Cindy",
+		selectedRegion: "cn",
+	});
+	assert.equal(target, defaultIsolatedUserDataDir("", "cn"));
+	assert.equal(isOfficialProductionUserDataDir(target), false);
 });
 
 test("isolated official-profile refuse happens before mkdir in the restart main flow", () => {

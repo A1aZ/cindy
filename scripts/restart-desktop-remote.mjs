@@ -459,9 +459,28 @@ export function officialProductionUserDataDirs() {
   return DESKTOP_DEV_REGIONS.map((region) => productionUserDataDir(region));
 }
 
-export function isOfficialProductionUserDataDir(dir) {
+/** 与 devCliFlags ISOLATION_NAME_RE 一致：非法名字回落默认沙箱，不把路径段写进目录。 */
+export const ISOLATION_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+export function sanitizeIsolationName(raw) {
+  const name = typeof raw === 'string' ? raw.trim() : '';
+  return ISOLATION_NAME_RE.test(name) ? name : '';
+}
+
+export function canonicalizeUserDataDir(dir) {
   const resolved = path.resolve(dir);
-  return officialProductionUserDataDirs().some((official) => path.resolve(official) === resolved);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+export function isOfficialProductionUserDataDir(dir) {
+  const resolved = canonicalizeUserDataDir(dir);
+  return officialProductionUserDataDirs().some(
+    (official) => canonicalizeUserDataDir(official) === resolved,
+  );
 }
 
 export function resolveRestartTargetUserDataDir({
@@ -471,9 +490,9 @@ export function resolveRestartTargetUserDataDir({
   isolatedName,
   selectedRegion,
 }) {
-  const isolationName = isolatedArg
-    ? parseIsolationName(isolatedArg)
-    : (typeof isolatedName === 'string' ? isolatedName.trim() : '');
+  const isolationName = sanitizeIsolationName(
+    isolatedArg ? parseIsolationName(isolatedArg) : isolatedName,
+  );
   const isolated = Boolean(isolatedArg) || isolatedEnv === '1';
   return envUserDataDir
     || (isolated

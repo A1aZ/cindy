@@ -245,15 +245,18 @@ export async function runRefreshWithTransientRetry<T>(
   for (const delayMs of retryDelaysMs) {
     if (result.ok) break;
     const definitive = isDefinitiveRefreshFailure(result);
+    const foreignDevice = isForeignDeviceRefreshFailure(result);
     const skipRateLimited = result.status === 429 && rateLimitDelayMs <= 0;
     opts?.onFailure?.({
       attempt: attempts,
       status: result.status,
       code: (result.data as RefreshErrorBody | null)?.error?.code,
       definitive,
-      willRetry: !definitive && !skipRateLimited,
+      willRetry: !definitive && !foreignDevice && !skipRateLimited,
     });
-    if (definitive) return { result, attempts };
+    // DEVICE_MISMATCH 不得当瞬时失败重试：会拖 1/2 秒，且后续 429/断网会把
+    // 终态盖成 transient-failure，冷启动就立不上 foreign-device 墓碑。
+    if (definitive || foreignDevice) return { result, attempts };
     if (skipRateLimited) return { result, attempts };
     const effectiveDelay = result.status === 429 ? rateLimitDelayMs : delayMs;
     await sleep(effectiveDelay);

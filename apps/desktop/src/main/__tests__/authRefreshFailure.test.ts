@@ -406,6 +406,11 @@ describe('runRefreshWithTransientRetry', () => {
     status: 401,
     data: { error: { code: 'INVALID_REFRESH_TOKEN' } },
   };
+  const deviceMismatch: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 401,
+    data: { error: { code: 'DEVICE_MISMATCH' } },
+  };
   /** 立即 resolve 的注入 sleep,记录每次退避时长。 */
   const makeSleep = () => {
     const calls: number[] = [];
@@ -456,6 +461,29 @@ describe('runRefreshWithTransientRetry', () => {
         status: 401,
         code: 'INVALID_REFRESH_TOKEN',
         definitive: true,
+        willRetry: false,
+      },
+    ]);
+  });
+
+  it('DEVICE_MISMATCH 立即返回,不按瞬时失败重试', async () => {
+    const doRefresh = vi.fn().mockResolvedValue(deviceMismatch);
+    const { calls, sleep } = makeSleep();
+    const failures: RefreshFailureInfo[] = [];
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      onFailure: (info) => failures.push(info),
+    });
+    expect(result).toBe(deviceMismatch);
+    expect(attempts).toBe(1);
+    expect(doRefresh).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+    expect(failures).toEqual([
+      {
+        attempt: 1,
+        status: 401,
+        code: 'DEVICE_MISMATCH',
+        definitive: false,
         willRetry: false,
       },
     ]);

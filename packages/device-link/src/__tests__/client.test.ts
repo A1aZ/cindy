@@ -4247,6 +4247,7 @@ describe('DeviceLinkClient relay 拥塞断连(close 1013)', () => {
         reconnectBaseMs: 1,
         reconnectMaxMs: 5,
         reconnectStableResetMs: 20,
+        congestionStableResetMs: 80,
         congestionBackoffBaseMs: 2,
         congestionBackoffMaxMs: 8,
         pingIntervalMs: 60_000,
@@ -4268,8 +4269,12 @@ describe('DeviceLinkClient relay 拥塞断连(close 1013)', () => {
     expect(h.client.getStatus()).toBe('online');
     expect(internals.congestionCloseStreak).toBe(1);
 
-    // 稳定在线满 reconnectStableResetMs 后清零
-    await tick(100);
+    // 普通稳定窗过了,拥塞连击仍在:现场 1013 间隔远大于 10s
+    await tick(40);
+    expect(internals.congestionCloseStreak).toBe(1);
+
+    // 稳定在线满 congestionStableResetMs 后才清零
+    await tick(80);
     expect(internals.congestionCloseStreak).toBe(0);
 
     // 普通断线(1006)不计入拥塞连击
@@ -4652,11 +4657,11 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     });
   }, 10_000);
 
-  it('link 重建后的 replay 不受预算限制:可达性刚被对端 link-accept 证明过', async () => {
+  it('同连接代重复 link-open 不再全量 replay', async () => {
     const h = makeHarness({
       timing: {
         pingIntervalMs: 60_000,
-        transportRetryIntervalMs: 60_000, // 定时器不参与,只看 replay 那一趟
+        transportRetryIntervalMs: 60_000,
         transportRetryPassBudget: 2,
         transportMaxRetryAttempts: 50,
       },
@@ -4672,10 +4677,57 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     const ws = h.current();
     expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
 
-    // 对端重新 link-open → 本端 link-accept → replay:一趟把 7 条全部重放
     await establishInboundReliableLink(h, 'remote-stream-2');
     await tick();
-    expect(retriedSeqs(sendsBySeq(ws)).length).toBe(7);
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
+
+    h.client.stop();
+  }, 10_000);
+
+  it('真正恢复时 replay 受探测预算约束,ACK 后再继续 drain', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    for (let i = 0; i < 7; i += 1) {
+      h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+    }
+    const ws = h.current();
+    const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
+    expect(seqs).toHaveLength(7);
+
+    const internals = h.client as unknown as {
+      peerTransport: Map<string, { linkReady: boolean }>;
+    };
+    internals.peerTransport.get('dev-b')!.linkReady = false;
+
+    await establishInboundReliableLink(h, 'remote-stream-2');
+    await tick();
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual(seqs.slice(0, 2));
+
+    const streamId = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!.meta.streamId;
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId, ackSeq: seqs[1] },
+      },
+    });
+    await tick();
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual([...seqs.slice(0, 2), ...seqs.slice(2, 4)]);
 
     h.client.stop();
   }, 10_000);

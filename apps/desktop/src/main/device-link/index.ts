@@ -390,6 +390,8 @@ let appliedKeepAwake: boolean | null = null;
 /** 退出路径的持有权 DELETE 完成信号:sync 阶段发起,async 阶段 disposer await(见 onQuit 注释) */
 let pendingQuitOwnershipRelease: Promise<void> | null = null;
 const openLinkInFlight = new Map<string, Promise<LinkAcceptPayload>>();
+/** 对端已对本机撤权：自动 recover/probe 不得再 openLink；用户显式重试可清掉。 */
+const revokedByRemote = new Set<string>();
 const presenceAvailableByDevice = new Map<string, boolean>();
 /**
  * 「目标设备无响应」熔断(弱网 / 对端卡死时收敛请求风暴,见 responsivenessTracker)。
@@ -615,6 +617,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       client?.getStatus() === 'online' &&
       arbiter?.isOwner() === true &&
       presenceAvailableByDevice.get(deviceId) === true &&
+      !revokedByRemote.has(deviceId) &&
       !readDeviceLinkSettings().disabledControlDeviceIds.includes(deviceId),
     // observed:false 且是唯一豁免熔断快速拒绝的建链入口:recoverLink 是探测
     // 周期的延伸(业务/探测超时已由 tracker 记账,不重复观测),且 open 期间
@@ -802,6 +805,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       if (reason === 'revoked') {
         // 撤权后在途请求会陆续超时——那不是「设备无响应」,是访问被收回。清熔断并
         // 作废在途结果(翻代),避免 unresponsive 状态与撤权状态并存(对齐 mobile 语义)。
+        revokedByRemote.add(env.src);
         responsivenessTracker?.clearDevice(env.src);
         broadcast(DEVICE_LINK_PUSH.ACCESS_REVOKED, { deviceId: env.src });
       }
@@ -1118,6 +1122,7 @@ function teardownActiveLink(): void {
   for (const timer of subscriptionReplayRetryTimers.values()) clearTimeout(timer);
   subscriptionReplayRetryTimers.clear();
   presenceAvailableByDevice.clear();
+  revokedByRemote.clear();
   // 词典同步驱动是进程级的,**不随单次链路起停**:多实例仲裁的 demote → acquire
   // 只会 client.start(),不会重跑 initDeviceLinkService,在这里 stop 掉它会让词典
   // 同步在降级过一次之后永久失效。清空 presence 就够了 —— 没有对端就不会发送,
@@ -1554,11 +1559,15 @@ const openLinkCloseEpochs = new Map<string, number>();
  */
 export async function openRemoteLink(
   deviceId: string,
-  opts?: { observed?: boolean },
+  opts?: { observed?: boolean; allowRevokedRetry?: boolean },
 ): Promise<LinkAcceptPayload> {
   assertNotStandby();
   assertRemoteControlTargetEnabled(deviceId);
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
+  if (opts?.allowRevokedRetry) revokedByRemote.delete(deviceId);
+  else if (revokedByRemote.has(deviceId)) {
+    throw new DeviceLinkError('ACCESS_REVOKED', 'access revoked by target device');
+  }
   const existing = openLinkInFlight.get(deviceId);
   if (existing) return existing;
 

@@ -478,12 +478,13 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。与 renderer 侧 _predictingSessions 同模式:
-      // 新 turn 的更高 turnGen 会替换旧条目,允许新轮预测通过。
-      // 使用 <= 比较而非 ===:两个窗口的 ChatInput 因各自的挂载/会话切换/turn 历史
-      // 持有不同的 turnGen 时,低 turnGen 的旧请求被拒绝,高 turnGen 的新请求替换旧条目。
+      // 等多窗口场景下重复触发付费 provider 调用。仅按 sessionId 去重:当已有同 session
+      // 的预测在途时拒绝所有新请求,不按 turnGen 比较替换。turnGen 是各窗口独立维护的
+      // 局部计数器,不存在跨窗口全局序:高 turnGen 请求替换 Map 条目后会留下旧请求仍在
+      // 途但失去去重保护,导致同一轮并行产生两次付费调用;后到请求先结束时还会删除条目,
+      // 使仍在途的旧请求完全失去去重保护。
       const existingTurnGen = _predictingPromptSessions.get(sessionId);
-      if (existingTurnGen != null && turnGen <= existingTurnGen) {
+      if (existingTurnGen != null) {
         return { prompt: null };
       }
       _predictingPromptSessions.set(sessionId, turnGen);
@@ -547,8 +548,8 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           }),
         };
       } finally {
-        // 仅在 Map 条目仍为请求时刻的 turnGen 时才删除,防止旧轮预测结束时
-        // 清除新轮预测的去重保护(与 renderer 侧 _predictingSessions 同模式)。
+        // 同 session 的预测在上一笔在途时会被拒绝,正常情况下条目始终为请求时刻的
+        // turnGen。此处保留相等性校验作为防御性编程。
         if (_predictingPromptSessions.get(sessionId) === turnGen) {
           _predictingPromptSessions.delete(sessionId);
         }

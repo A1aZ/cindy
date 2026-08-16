@@ -670,7 +670,7 @@ export function CreateWorkerPopover({
             <Tip
               text={t('orca.createWorker.roleHint')}
               side="top"
-              contentClassName="whitespace-nowrap"
+              contentClassName="max-w-[280px] whitespace-normal break-words text-left"
             >
               <button
                 type="button"

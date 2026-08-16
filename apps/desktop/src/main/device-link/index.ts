@@ -1564,14 +1564,13 @@ const openLinkCloseEpochs = new Map<string, number>();
  */
 export async function openRemoteLink(
   deviceId: string,
-  opts?: { observed?: boolean; allowRevokedRetry?: boolean },
+  opts?: { observed?: boolean },
 ): Promise<LinkAcceptPayload> {
   assertNotStandby();
   assertRemoteControlTargetEnabled(deviceId);
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
   // 自动 recover/probe 由 recoverLink + isProbeEligible 挡。presence / subscribe
-  // 必须能在对端重新授权后走这里接回；成功建链再清终态。
-  if (opts?.allowRevokedRetry) revokedByRemote.delete(deviceId);
+  // 可以在对端重新授权后走这里接回；终态只在成功建链后清除,失败重试不得提前解闩。
   const existing = openLinkInFlight.get(deviceId);
   if (existing) return existing;
 

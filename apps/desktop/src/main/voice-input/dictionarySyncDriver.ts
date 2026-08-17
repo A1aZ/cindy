@@ -200,16 +200,21 @@ export function readDictionaryProjectionForMobile(): {
   entries: Array<{ text: string; frequency: number; aliases: Array<{ text: string; count: number }> }>;
   stateVector?: Record<string, string>;
 } {
-  if (!isSyncEnabled()) return { entries: [] };
+  // 版本向量对合并单调(逐节点取 max),所以「逐节点 ≥」等价于「已经见过对方的
+  // 全部事件」—— 这才是手机可以拿一份替代另一份的条件,而不是谁的时间戳大。
+  // 同步关闭时仍带上当前向量:空表是清缓存指令,但必须证明自己不比手机已有的
+  // 快照更旧,否则晚到的空投影会把更新的词表抹掉。
+  const vector = buildStateVersionVector(voiceDictionarySyncStore.getState());
+  const stateVector = Object.keys(vector).length > 0 ? vector : undefined;
+  if (!isSyncEnabled()) {
+    return stateVector ? { entries: [], stateVector } : { entries: [] };
+  }
   const entries = voiceDictionarySyncStore.materialize().entries.map((entry) => ({
     text: entry.text,
     frequency: entry.frequency,
     aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
   }));
-  // 版本向量对合并单调(逐节点取 max),所以「逐节点 ≥」等价于「已经见过对方的
-  // 全部事件」—— 这才是手机可以拿一份替代另一份的条件,而不是谁的时间戳大。
-  const vector = buildStateVersionVector(voiceDictionarySyncStore.getState());
-  return Object.keys(vector).length > 0 ? { entries, stateVector: vector } : { entries };
+  return stateVector ? { entries, stateVector } : { entries };
 }
 
 function broadcastMobileSnapshots(reason: string): void {
@@ -242,6 +247,7 @@ function sendMobileSnapshotTo(
 function buildMobileSnapshot(): MobileVoiceDictionarySnapshotResult | null {
   const payload: MobileVoiceDictionarySnapshotResult = {
     ok: true,
+    emittedAt: Date.now(),
     ...readDictionaryProjectionForMobile(),
   };
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');

@@ -69,6 +69,8 @@ type CachedDictionary = {
   fetchedAt: number;
   /** 被控端上报的版本向量;老版本不带,此时只能退回按 fetchedAt 比较。 */
   stateVector?: Record<string, string>;
+  /** 桌面生成投影的时间;有则优先于 fetchedAt 判断同一 host 的先后。 */
+  emittedAt?: number;
 };
 
 const memoryCache = new Map<string, CachedDictionary>();
@@ -109,12 +111,14 @@ export function readCachedMobileVoiceDictionarySnapshot(hostDeviceId: string): {
   entries: MobileVoiceCredentialSyncDictionaryEntry[];
   fetchedAt: number;
   stateVector?: Record<string, string>;
+  emittedAt?: number;
 } {
   const cached = memoryCache.get(normalizeHostDeviceId(hostDeviceId));
   return {
     entries: cached?.entries ?? [],
     fetchedAt: cached?.fetchedAt ?? 0,
     stateVector: cached?.stateVector,
+    emittedAt: cached?.emittedAt,
   };
 }
 
@@ -145,6 +149,7 @@ export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promis
       entries: normalizeEntries(parsed?.entries),
       fetchedAt: typeof parsed?.fetchedAt === 'number' ? parsed.fetchedAt : 0,
       stateVector: normalizeStateVector(parsed?.stateVector),
+      emittedAt: normalizeEmittedAt(parsed?.emittedAt),
     };
     // 开麦路径会并发跑 hydrate 与 refresh。磁盘读晚于网络响应返回时,不能用旧
     // 快照盖掉刚拉到的新数据 —— 只在内存仍为空、或盘上确实更新时才写。
@@ -228,6 +233,7 @@ async function storeSnapshot(
     entries: normalizeEntries(result.entries),
     fetchedAt: Date.now(),
     stateVector: normalizeStateVector(result.stateVector),
+    emittedAt: normalizeEmittedAt(result.emittedAt),
   };
   const current = memoryCache.get(host);
   if (current && !shouldAcceptIncomingSnapshot(current, next)) return;
@@ -266,8 +272,10 @@ function shouldAcceptIncomingSnapshot(
   current: CachedDictionary,
   next: CachedDictionary,
 ): boolean {
-  // 同步关闭的空投影没有版本向量,但是明确的清缓存指令。
-  if (next.entries.length === 0 && next.stateVector === undefined) return true;
+  // 同一 host 只接受更新鲜的快照。新鲜度唯一判据是版本向量包含关系,
+  // 并列或都没有向量时才比到达时间。同步关闭的空投影必须自带当时的
+  // stateVector,才能清掉同一代缓存;无向量的空表不能覆盖已证明自己
+  // 更新的快照。
   return isFresherMobileVoiceDictionarySnapshot(next, current);
 }
 
@@ -389,6 +397,10 @@ function normalizeEntries(raw: unknown): MobileVoiceCredentialSyncDictionaryEntr
 
 function readPositiveInt(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
+}
+
+function normalizeEmittedAt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
 /**

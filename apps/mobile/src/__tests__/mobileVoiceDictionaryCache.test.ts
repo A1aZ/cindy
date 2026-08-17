@@ -414,15 +414,47 @@ describe('版本向量的入站校验', () => {
     expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
   });
 
-  it('无版本向量的空投影可以清空已有缓存', async () => {
+  it('后到的无向量空投影不能清掉已有的更新快照', async () => {
     await applyMobileVoiceDictionarySnapshot(HOST, {
       ok: true,
-      entries: [{ text: '旧词' }],
+      entries: [{ text: '新词' }],
       stateVector: { 'node-a': STAMP_A },
     });
     await applyMobileVoiceDictionarySnapshot(HOST, {
       ok: true,
       entries: [],
+    });
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
+  });
+
+  it('带同一代版本向量且更晚发出的空投影可以清空缓存', async () => {
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '旧词' }],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 1_000,
+    });
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 2_000,
+    });
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+  });
+
+  it('更早发出的词表不能盖掉已清空的同一代投影', async () => {
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 2_000,
+    });
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '旧词' }],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 1_000,
     });
     expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
   });

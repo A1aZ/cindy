@@ -122,8 +122,7 @@ export default function SettingsScreen() {
   const { locale, setLocale } = useLocale();
   const windowDimensions = useWindowDimensions();
   const safeAreaInsets = useSafeAreaInsets();
-  const deviceLink = useDeviceLink();
-  const { lastPresenceSnapshot, status } = deviceLink;
+  const { lastPresenceSnapshot, status, invoke } = useDeviceLink();
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [accountDeletionAvailable, setAccountDeletionAvailable] =
@@ -723,7 +722,7 @@ export default function SettingsScreen() {
     void Promise.all(
       online.map((host) => refreshMobileVoiceDictionary(
         host.deviceId,
-        () => deviceLink.invoke<MobileVoiceDictionarySnapshotResult>(
+        () => invoke<MobileVoiceDictionarySnapshotResult>(
           host.deviceId,
           DEVICE_LINK_VOICE_DICTIONARY_GET_CHANNEL,
           [],
@@ -735,7 +734,7 @@ export default function SettingsScreen() {
       // 缓存写在模块里,组件靠这个计数触发重渲染。
       setDictionaryRevision((value) => value + 1);
     });
-  }, [desktopDevices, deviceLink]);
+  }, [desktopDevices, invoke]);
 
   // 页面打开后再由 effect 读取缓存和刷新。设备清单本身是异步 REST 请求，不能只
   // 捕获点击瞬间的 desktopDevices=[]，否则清单稍后到达时历史缓存永远不会 hydrate。

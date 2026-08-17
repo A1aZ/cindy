@@ -164,18 +164,22 @@ describe('出站', () => {
 
   it('手机上线时主动推只读快照,不依赖远程控制开关', () => {
     handleMobilePeerOnline('phone-1');
-    expect(sendMobileSnapshot).toHaveBeenCalledWith('phone-1', {
+    expect(sendMobileSnapshot).toHaveBeenCalledWith('phone-1', expect.objectContaining({
       ok: true,
       entries: [
         { text: 'Cindy', frequency: 2, aliases: [{ text: 'sindy', count: 1 }] },
       ],
-    });
+    }));
+    expect(sendMobileSnapshot.mock.calls[0][1].emittedAt).toEqual(expect.any(Number));
   });
 
   it('同步关闭时仍推空投影给手机,让旧缓存及时清空', () => {
     syncEnabled.value = false;
     handleMobilePeerOnline('phone-1');
-    expect(sendMobileSnapshot).toHaveBeenCalledWith('phone-1', { ok: true, entries: [] });
+    expect(sendMobileSnapshot).toHaveBeenCalledWith(
+      'phone-1',
+      expect.objectContaining({ ok: true, entries: [] }),
+    );
   });
 
   it('立即广播会同时刷新所有在线手机', () => {
@@ -292,7 +296,7 @@ describe('手机只读投影', () => {
     expect(projection.entries).toEqual([
       { text: 'Cindy', frequency: 2, aliases: [{ text: 'sindy', count: 1 }] },
     ]);
-    // 除了词条和版本向量,不该漏出节点 id、化身、墓碑等同步内部结构。
+    // 除了词条、发出时间和版本向量,不该漏出节点 id、化身、墓碑等同步内部结构。
     expect(Object.keys(projection).sort()).toEqual(['entries']);
   });
 
@@ -311,5 +315,17 @@ describe('手机只读投影', () => {
     // 向量对合并单调:后一份必须包含前一份,否则手机会一直停在旧快照上。
     expect(versionVectorDominates(after, before!)).toBe(true);
     expect(versionVectorDominates(before!, after)).toBe(false);
+  });
+
+  it('同步关闭的空投影仍带上当前版本向量,避免晚到的空表清掉更新快照', () => {
+    const first = addManualEntry(createEmptySyncState(), createHlcClock('node-a', 1_000), {
+      text: 'Cindy',
+      nowMs: 1_000,
+    });
+    stateOverride.value = first.state;
+    syncEnabled.value = false;
+    const projection = readDictionaryProjectionForMobile();
+    expect(projection.entries).toEqual([]);
+    expect(projection.stateVector && Object.keys(projection.stateVector)).toEqual(['node-a']);
   });
 });

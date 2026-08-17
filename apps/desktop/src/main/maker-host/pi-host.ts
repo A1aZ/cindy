@@ -96,8 +96,16 @@ export interface PiBundledModelInfo {
 }
 
 export type PiBundledModelCatalog = ReadonlyMap<string, ReadonlyMap<string, PiBundledModelInfo>>;
+export type PiListedModelIds = ReadonlyMap<string, ReadonlySet<string>>;
 
 const piBundledModelsByBinary = new Map<string, Promise<PiBundledModelCatalog | null>>();
+const listedIdsByCatalog = new WeakMap<PiBundledModelCatalog, PiListedModelIds>();
+
+export function listedPiModelIds(
+  catalog: PiBundledModelCatalog | undefined,
+): PiListedModelIds | undefined {
+  return catalog ? listedIdsByCatalog.get(catalog) : undefined;
+}
 const PI_NATIVE_APIS = new Set<PiNativeApi>([
   'anthropic-messages',
   'openai-responses',
@@ -391,7 +399,9 @@ export async function readPiBundledModels(
         initialProvider,
         initialModel,
       );
-      return catalog.size > 0 ? catalog : null;
+      if (catalog.size === 0) return null;
+      listedIdsByCatalog.set(catalog, listed);
+      return catalog;
     } catch (err) {
       log.warn(
         'readPiBundledModels: PI catalog probe failed; using daily PI annotations without bundled baseline',
@@ -443,6 +453,7 @@ export function buildPiSubscriptionNativeProviders(
   catalog: Catalog,
   endpoint: string,
   bundledModelsByProvider?: PiBundledModelCatalog,
+  listedModelIdsByProvider?: PiListedModelIds,
 ): PiNativeProvidersResult {
   const providers: PiNativeProviderSpec[] = [];
   const env: Record<string, string> = {
@@ -495,14 +506,17 @@ export function buildPiSubscriptionNativeProviders(
             ? { catalogAddition: true }
             : {}),
           // SuperGrok 没有官方列模型通道，Cindy 目录是成员唯一来源。
-          // PI 二进制常常跟不上新 Grok id（grok-4.6）：inheritModels
-          // 会把没有 piApi 的行从 models.json 滤掉，spawn 靠 custom
-          // model id 能跑，set_model 却 fail-closed。只有探针成功且
-          // 这份结果里真有 xAI 行，才能把缺 id 当成有效证明；总表
-          // 非空但 xAI 被畸形数据整表跳过时，仍走 annotated-only。
-          ...(sourceProviderId === 'xai' && bundledModels != null && !bundledModel
-            ? { catalogAddition: true }
-            : {}),
+          // 缺席证明必须来自未过滤的 --list-models id：解析后的
+          // bundled 表会丢掉未知 api 的行，不能把「解析失败」当成
+          // 「二进制没有这个模型」。
+          ...(() => {
+            if (sourceProviderId !== 'xai') return {};
+            const listedIds =
+              listedModelIdsByProvider?.get(piProviderId) ??
+              listedPiModelIds(bundledModelsByProvider)?.get(piProviderId);
+            if (!listedIds || listedIds.has(wireId)) return {};
+            return { catalogAddition: true };
+          })(),
           ...(sourceProviderId !== 'openai' &&
           model.piApi &&
           (isAnnotatedAddition || isProtocolCorrection)

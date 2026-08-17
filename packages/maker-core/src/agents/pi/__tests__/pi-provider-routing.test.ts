@@ -689,6 +689,45 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('rejects a same-route gateway heartbeat when the live session wire protocol is stale', async () => {
+    let gatewayApi: 'anthropic-messages' | 'openai-responses' = 'anthropic-messages';
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'test', authSource: 'oauth' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({}),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [{
+          id: 'shared-model',
+          displayName: 'Shared',
+          contextWindow: 128_000,
+          efforts: [],
+          defaultEffort: null,
+        }],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => gatewayApi,
+    });
+    const handle = await agent.startSession({
+      sessionId: 'gateway-same-route-stale',
+      workingDir: cwd,
+      model: 'shared-model',
+      providerId: 'xd',
+    });
+    gatewayApi = 'openai-responses';
+    captured.requests.length = 0;
+    await expect(handle.setModel!('shared-model', { providerId: 'xd' })).rejects.toThrow(
+      /restart the Pi session to change provider wire protocol/,
+    );
+    expect(captured.requests.filter((request) => request.type === 'set_model')).toEqual([]);
+    await handle.close();
+  });
+
   it('applies each native provider alias during provider-less compatibility routing', async () => {
     const provider = (id: string, aliases?: Record<string, string>) => ({
       id,

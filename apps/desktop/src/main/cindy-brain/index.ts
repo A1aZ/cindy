@@ -79,6 +79,7 @@ import { withGhostInstallLock } from './ghostInstallLock.js';
 import {
   GhostPackagePermissionReviewRequiredError,
   marketPackageNeedsHostReview,
+  marketPackageOauthIdentityChanged,
 } from './packagePermissionReview.js';
 import {
   clearBuiltinTombstone,
@@ -4553,9 +4554,14 @@ async function installOrUpdateMarketGhostPackageLocked(
             inspected.canonicalManifest,
           )
         : null;
+      const builtinOauthClientChanged = marketPackageOauthIdentityChanged(
+        expected.reviewedManifest,
+        baselineManifest,
+        inspected.canonicalManifest,
+      );
       const needsReview = marketPackageNeedsHostReview({
         mode: expected.permissionPolicy.mode,
-        builtinOauthClientChanged: permissionDiff?.builtinOauthClientChanged === true,
+        builtinOauthClientChanged,
         addedCount: permissionDiff === null ? null : permissionDiff.added.length,
         unreviewedCount: unreviewed.length,
         extrasVersusReviewedCount:
@@ -4580,7 +4586,7 @@ async function installOrUpdateMarketGhostPackageLocked(
           ghostId: expected.ghostId,
           mode: expected.permissionPolicy.mode,
           keys: reviewKeys,
-          builtinOauthClientChanged: permissionDiff?.builtinOauthClientChanged === true,
+          builtinOauthClientChanged,
         });
         throw new GhostPackagePermissionReviewRequiredError(review);
       }

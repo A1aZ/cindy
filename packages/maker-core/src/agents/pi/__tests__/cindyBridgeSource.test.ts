@@ -272,6 +272,8 @@ describe('cindy-bridge extension source', () => {
         const cwdSwitchName = 'cwd-switch-link';
         const rootCwdSwitchOrdinaryLink = path.join(tempRoot, cwdSwitchName);
         const nestedCwdSwitchSecretLink = path.join(nestedDir, cwdSwitchName);
+        const stackOtherDir = path.join(tempRoot, 'stack-other');
+        const stackOtherOrdinaryLink = path.join(stackOtherDir, cwdSwitchName);
         const ordinaryGlobDir = path.join(tempRoot, 'ordinary-glob');
         const ordinaryGlobPath = path.join(ordinaryGlobDir, 'ordinary.txt');
         const dotglobDir = path.join(tempRoot, 'dotglob-only');
@@ -283,6 +285,7 @@ describe('cindy-bridge extension source', () => {
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
         mkdirSync(cdPathSubDir, { recursive: true });
+        mkdirSync(stackOtherDir);
         mkdirSync(ordinaryGlobDir);
         mkdirSync(dotglobDir);
         mkdirSync(largeGlobDir);
@@ -317,6 +320,7 @@ describe('cindy-bridge extension source', () => {
         symlinkSync(secretPath, cdPathSecretLink);
         symlinkSync(ordinaryPath, rootCwdSwitchOrdinaryLink);
         symlinkSync(secretPath, nestedCwdSwitchSecretLink);
+        symlinkSync(ordinaryPath, stackOtherOrdinaryLink);
         symlinkSync(ordinaryPath, ordinaryLink);
 
         expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
@@ -520,6 +524,23 @@ describe('cindy-bridge extension source', () => {
           command: `X=\`printf cd\` printf ok; cat <${cwdSwitchName}`,
         })).toEqual({
           targets: [rootCwdSwitchOrdinaryLink],
+          unresolved: false,
+        });
+        for (const rotation of ['+1', '-1']) {
+          const command = `pushd ${nestedDir} >/dev/null; pushd ${stackOtherDir} >/dev/null; pushd ${rotation} >/dev/null; cat <${cwdSwitchName}`;
+          const evidence = context.bashInputReadEvidence?.({ command });
+          expect(evidence?.unresolved, command).toBe(true);
+          expect(evidence?.targets, command).toContain(stackOtherOrdinaryLink);
+          expect(evidence?.targets.every((target) => [
+            rootCwdSwitchOrdinaryLink,
+            nestedCwdSwitchSecretLink,
+            stackOtherOrdinaryLink,
+          ].includes(target)), command).toBe(true);
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: `pushd -n ${nestedDir} >/dev/null && cat <ordinary-link.txt`,
+        })).toEqual({
+          targets: [ordinaryLink],
           unresolved: false,
         });
         expect(context.bashInputReadEvidence?.({

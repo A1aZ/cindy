@@ -4736,7 +4736,17 @@ const FIRST_DATA_ARGUMENT_BINS: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'jq', 'yq', 'date',
 ]);
 
-type ReaderOptionKind = 'data' | 'data-file' | 'selector' | 'filter' | 'aux-file' | 'aux-file-list';
+type ReaderOptionKind =
+  | 'data'
+  | 'data-file'
+  | 'selector'
+  | 'filter'
+  | 'aux-file'
+  | 'aux-file-list'
+  | 'type-definition'
+  | 'type-include'
+  | 'type-exclude'
+  | 'type-clear';
 type ReaderLongOption = { name: string; kind: ReaderOptionKind };
 
 const GREP_LONG_OPTIONS: readonly ReaderLongOption[] = [
@@ -4753,6 +4763,10 @@ const RG_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--glob', kind: 'selector' },
   { name: '--iglob', kind: 'selector' },
   { name: '--ignore-file', kind: 'aux-file' },
+  { name: '--type-add', kind: 'type-definition' },
+  { name: '--type', kind: 'type-include' },
+  { name: '--type-not', kind: 'type-exclude' },
+  { name: '--type-clear', kind: 'type-clear' },
 ];
 const SED_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--expression', kind: 'data' },
@@ -4833,6 +4847,8 @@ function readerShortOptionKind(
     if (option === 'e') return 'data';
     if (option === 'f') return 'data-file';
     if (option === 'g') return 'selector';
+    if (option === 't') return 'type-include';
+    if (option === 'T') return 'type-exclude';
   }
   if ((bin === 'jq' || bin === 'yq') && option === 'f') return 'data-file';
   if (bin === 'ag' && option === 'G') return 'selector';
@@ -5060,10 +5076,79 @@ function grepRecursesIntoPotentialDotenv(bin: string, args: readonly string[]): 
   return recursive && (includes.length === 0 || includes.some(selectorCouldMatchDotenv));
 }
 
+type RgTypeDefinition = { globs: string[]; includes: string[] };
+
+type ParsedRgTypeSpec = {
+  name: string;
+  glob?: string;
+  includes?: string[];
+};
+
+function parseRgTypeSpec(value: string): ParsedRgTypeSpec | null {
+  const separator = value.indexOf(':');
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const name = value.slice(0, separator);
+  if (!/^[\p{L}\p{N}]+$/u.test(name)) return null;
+  const definition = value.slice(separator + 1);
+  if (!definition.startsWith('include:')) return { name, glob: definition };
+  const includes = definition.slice('include:'.length).split(',');
+  return includes.length > 0 && includes.every((included) => /^[\p{L}\p{N}]+$/u.test(included))
+    ? { name, includes }
+    : null;
+}
+
+function rgCustomTypeCouldMatchDotenv(
+  name: string,
+  definitions: ReadonlyMap<string, RgTypeDefinition>,
+  visiting = new Set<string>(),
+): boolean {
+  if (visiting.has(name)) return true;
+  const definition = definitions.get(name);
+  if (!definition) return true;
+  if (definition.globs.some(selectorCouldMatchDotenv)) return true;
+  const nextVisiting = new Set(visiting).add(name);
+  return definition.includes.some((included) =>
+    rgCustomTypeCouldMatchDotenv(included, definitions, nextVisiting));
+}
+
 function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
   let hidden = false;
   let unrestricted = 0;
+  let typeParsingUnresolved = false;
   const globs: string[] = [];
+  const definitions = new Map<string, RgTypeDefinition>();
+  const includedTypes = new Set<string>();
+  const excludedTypes = new Set<string>();
+  const applyTypeOption = (kind: ReaderOptionKind, value: string | undefined): void => {
+    if (!value) {
+      typeParsingUnresolved = true;
+      return;
+    }
+    if (kind === 'type-include') {
+      includedTypes.add(value);
+      return;
+    }
+    if (kind === 'type-exclude') {
+      excludedTypes.add(value);
+      return;
+    }
+    if (kind === 'type-clear') {
+      if (!/^[\p{L}\p{N}]+$/u.test(value)) typeParsingUnresolved = true;
+      else definitions.set(value, { globs: [], includes: [] });
+      return;
+    }
+    if (kind !== 'type-definition') return;
+    const parsed = parseRgTypeSpec(value);
+    if (!parsed) {
+      typeParsingUnresolved = true;
+      return;
+    }
+    const definition = definitions.get(parsed.name) ?? { globs: [], includes: [] };
+    if (parsed.glob !== undefined) definition.globs.push(parsed.glob);
+    if (parsed.includes !== undefined) definition.includes.push(...parsed.includes);
+    definitions.set(parsed.name, definition);
+  };
+
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
     if (token === '--') break;
@@ -5078,6 +5163,7 @@ function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
       const value = attached ?? args[index + 1];
       if (attached === undefined) index += 1;
       if (kind === 'selector' && value) globs.push(value);
+      applyTypeOption(kind, value);
       continue;
     }
     if (!/^-[^-]/.test(token)) continue;
@@ -5091,9 +5177,18 @@ function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
       const value = attached ?? args[index + 1];
       if (attached === undefined) index += 1;
       if (kind === 'selector' && value) globs.push(value);
+      applyTypeOption(kind, value);
       break;
     }
   }
+
+  if (typeParsingUnresolved) return true;
+  const selectedCustomTypes = includedTypes.has('all')
+    ? [...definitions.keys()]
+    : [...includedTypes].filter((name) => definitions.has(name));
+  if (!excludedTypes.has('all') && selectedCustomTypes.some((name) =>
+    !excludedTypes.has(name) && rgCustomTypeCouldMatchDotenv(name, definitions))) return true;
+
   const positive = globs.filter((glob) => !glob.startsWith('!'));
   const positiveCouldMatchDotenv = positive.some(selectorCouldMatchDotenv);
   const excludesDotenv = !positiveCouldMatchDotenv

@@ -2112,21 +2112,25 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         const secretPath = path.join(workingDir, 'secrets', '.env');
         const ordinaryPath = path.join(workingDir, 'ordinary.txt');
         const subDir = path.join(workingDir, 'sub');
+        const stackOtherDir = path.join(workingDir, 'stack-other');
         const postCdLink = path.join(subDir, 'link');
         const escapedLinkName = 'innocent\\q';
         const cdRedirectLinkName = 'cd-innocent';
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(subDir);
+        mkdirSync(stackOtherDir);
         writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
         writeFileSync(ordinaryPath, 'ordinary-content');
         symlinkSync('../secrets/.env', postCdLink);
         symlinkSync(ordinaryPath, path.join(workingDir, 'link'));
+        symlinkSync(ordinaryPath, path.join(stackOtherDir, 'link'));
         symlinkSync(secretPath, path.join(workingDir, escapedLinkName));
         symlinkSync(secretPath, path.join(workingDir, cdRedirectLinkName));
         symlinkSync(ordinaryPath, path.join(subDir, cdRedirectLinkName));
         symlinkSync(ordinaryPath, path.join(subDir, 'ordinary'));
 
         for (const [sessionId, command] of [
+          ['perm-auto-bash-symlink-dotenv-pushd-rotation', 'pushd sub >/dev/null; pushd ../stack-other >/dev/null; pushd +1 >/dev/null; cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-cd', 'X=1 cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-leading-redirect', 'X=1 2>/dev/null builtin cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-leading-assignment-wrapper', '2>/dev/null X=1 command -- cd sub && cat<link'],

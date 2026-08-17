@@ -464,6 +464,7 @@ type BashLeadingRedirection = { end: number; unresolved: boolean };
 type BashAssignmentPrefix = { end: number; name: string; unresolved: boolean };
 type BashDirectoryChangeHead = {
   cursor: number;
+  command: 'cd' | 'pushd' | null;
   hadRedirection: boolean;
   unresolved: boolean;
 };
@@ -593,7 +594,7 @@ function bashDirectoryChangeHead(
   let word = readShellRedirectionTarget(command, cursor);
   if (!word.target || word.unresolved) {
     if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
-      return { cursor, hadRedirection, unresolved: true };
+      return { cursor, command: null, hadRedirection, unresolved: true };
     }
     return null;
   }
@@ -613,17 +614,17 @@ function bashDirectoryChangeHead(
       cursor = bashInlinePaddingEnd(command, word.end);
     }
     if (!word.target || word.unresolved) return unresolved
-      ? { cursor, hadRedirection, unresolved: true }
+      ? { cursor, command: null, hadRedirection, unresolved: true }
       : null;
   }
 
   if ((word.target !== 'cd' && word.target !== 'pushd') || word.unresolved) {
     if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
-      return { cursor, hadRedirection, unresolved: true };
+      return { cursor, command: null, hadRedirection, unresolved: true };
     }
     return null;
   }
-  return { cursor: word.end, hadRedirection, unresolved };
+  return { cursor: word.end, command: word.target, hadRedirection, unresolved };
 }
 
 function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBudget): BashPathCandidates {
@@ -648,6 +649,7 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     if (!bashSubshellScopeRemainsOpen(codeMask, cursor, changeDepth)) continue;
     let parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
     let optionsEnded = false;
+    let suppressDirectoryChange = false;
     while (true) {
       cursor = bashInlinePaddingEnd(command, cursor);
       const redirection = bashLeadingRedirectionAt(command, cursor);
@@ -658,10 +660,18 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
         parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
         continue;
       }
-      if (parsed.target !== '--' && !/^-[LPen]+$/.test(parsed.target)) break;
+      const knownOption = head.command === 'pushd'
+        ? parsed.target === '-n'
+        : parsed.target !== '--' && /^-[LPe]+$/.test(parsed.target);
+      if (parsed.target !== '--' && !knownOption) break;
       if (parsed.target === '--') optionsEnded = true;
+      if (head.command === 'pushd' && parsed.target === '-n') suppressDirectoryChange = true;
       cursor = parsed.end;
       parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
+    }
+    if (head.command === 'pushd' && !optionsEnded && /^[+-]\d+$/.test(parsed.target)) {
+      unresolved = true;
+      continue;
     }
     if (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-'))) {
       unresolved = true;
@@ -674,6 +684,7 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     }
     const operator = operatorEvidence.operator;
     if (!operator || operator === '|' || operator === '&') continue;
+    if (suppressDirectoryChange) continue;
     if (bashInheritedDirectoryChangeIsUncertain(parsed.target)) {
       unresolved = true;
       continue;

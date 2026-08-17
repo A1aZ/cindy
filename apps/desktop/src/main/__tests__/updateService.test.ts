@@ -1000,6 +1000,47 @@ describe('startup update relaunch safety', () => {
     }
   });
 
+  it('does not let a failed settings write overwrite a committed observed channel', async () => {
+    const service = await bootWithStagedPatch({ enabled: false });
+    let releaseFirstWrite: (() => void) | undefined;
+    let rejectSecondWrite: ((error: Error) => void) | undefined;
+    let writeCalls = 0;
+    writeEnableBeta.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve, reject) => {
+          writeCalls += 1;
+          if (writeCalls === 1) {
+            releaseFirstWrite = () => resolve(undefined);
+            return;
+          }
+          rejectSecondWrite = reject;
+        }),
+    );
+    try {
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      const firstWrite = setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      const secondWrite = setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      await vi.waitFor(() => {
+        expect(releaseFirstWrite).toBeTypeOf('function');
+        expect(rejectSecondWrite).toBeTypeOf('function');
+      });
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      releaseFirstWrite?.();
+      await firstWrite;
+      rejectSecondWrite?.(new Error('lock timeout'));
+      await expect(secondWrite).rejects.toThrow();
+      await expect(service.checkForUpdate()).resolves.toBe('ready');
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
   it('releases a pending hold when the org-default write throws', async () => {
     const service = await bootWithStagedPatch({ enabled: true });
     let releaseProbe: ((busy: boolean) => void) | undefined;

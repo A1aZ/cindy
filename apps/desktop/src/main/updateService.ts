@@ -646,9 +646,17 @@ function invalidateInFlightChannelDownloads(): void {
   clearCachedManifest();
 }
 
+function readObservedEnableBetaFromDisk(): boolean {
+  return readUpdateChannelSettings().enableBeta;
+}
+
+function restoreObservedEnableBetaFromDisk(): void {
+  observedEnableBeta = readObservedEnableBetaFromDisk();
+}
+
 function syncObservedUpdateChannel(): boolean {
   if (pendingChannelChangeHolds > 0) return false;
-  const enableBeta = readUpdateChannelSettings().enableBeta;
+  const enableBeta = readObservedEnableBetaFromDisk();
   if (enableBeta === observedEnableBeta) return false;
   observedEnableBeta = enableBeta;
   invalidateInFlightChannelDownloads();
@@ -1520,13 +1528,15 @@ export function initUpdateService(): void {
       await writeEnableBeta(next);
     } catch (err) {
       if (wasBeta !== next) {
-        observedEnableBeta = wasBeta;
+        // 另一笔并发写入可能已经落盘成功,不能用本次开始时的 wasBeta 盖回去。
+        restoreObservedEnableBetaFromDisk();
         releasePendingChannelChangeHold();
       }
       log.error('writeEnableBeta failed:', err);
       throwIpcError('INTERNAL', 'failed to write update channel settings');
     }
     if (wasBeta !== next) {
+      observedEnableBeta = next;
       commitPendingChannelChange();
       clearStagedPatch();
     }
@@ -1544,13 +1554,14 @@ export function initUpdateService(): void {
       await resetUpdateChannelSettings();
     } catch (err) {
       if (wasBeta) {
-        observedEnableBeta = wasBeta;
+        restoreObservedEnableBetaFromDisk();
         releasePendingChannelChangeHold();
       }
       log.error('resetUpdateChannelSettings failed:', err);
       throwIpcError('INTERNAL', 'failed to reset update channel settings');
     }
     if (wasBeta) {
+      observedEnableBeta = false;
       commitPendingChannelChange();
       clearStagedPatch();
     }
@@ -1760,11 +1771,13 @@ export async function enableUncustomizedBetaChannel(
       return wrote;
     }
     if (!wasBeta) {
+      restoreObservedEnableBetaFromDisk();
       releasePendingChannelChangeHold();
     }
     return wrote;
   } catch (err) {
     if (!wasBeta) {
+      restoreObservedEnableBetaFromDisk();
       releasePendingChannelChangeHold();
     }
     throw err;

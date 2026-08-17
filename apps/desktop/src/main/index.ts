@@ -94,6 +94,7 @@ const devFlags = resolveDevCliFlags({
   isPackaged: app.isPackaged,
   envUserDataDir: process.env.XDT_USER_DATA_DIR,
   defaultUserDataDir: app.getPath('userData'),
+  appDataDir: app.getPath('appData'),
   envIsolated: process.env.XDT_ISOLATED,
   envIsolationName: process.env.XDT_ISOLATED_NAME,
   envUserDataDirEpoch: process.env.XDT_USER_DATA_DIR_EPOCH,

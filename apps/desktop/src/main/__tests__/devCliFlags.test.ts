@@ -34,6 +34,7 @@ const base = {
   isPackaged: false,
   envUserDataDir: undefined as string | undefined,
   defaultUserDataDir: '/AppData/Cindy',
+  appDataDir: '/AppData',
   envIsolated: undefined as string | undefined,
   envIsolationName: undefined as string | undefined,
   envUserDataDirEpoch: undefined as string | undefined,
@@ -67,6 +68,21 @@ describe('resolveDevCliFlags', () => {
     expect(flags.isolatedOnProductionProfile).toBe(false);
     expect(flags.userDataDirOverride).toBeNull();
   });
+
+  it('原生 --user-data-dir 自定义默认 + XDT_USER_DATA_DIR 指向正式目录,仍判正式 profile',
+    () => {
+      const flags = resolveDevCliFlags({
+        ...base,
+        defaultUserDataDir: '/tmp/custom-profile',
+        appDataDir: '/AppData',
+        argv: [...base.argv, '--isolated'],
+        envUserDataDir: '/AppData/Cindy',
+      });
+      expect(flags.profileKind).toBe('production-shared');
+      expect(flags.isolatedOnProductionProfile).toBe(true);
+      expect(flags.needsIsolatedDeviceId).toBe(true);
+    },
+  );
 
   it('--passive 只开被动,不动 userData / 设备标识', () => {
     const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--passive'] });

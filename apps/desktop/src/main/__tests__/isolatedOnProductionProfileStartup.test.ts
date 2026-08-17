@@ -20,6 +20,7 @@ describe('isolated-on-production-profile startup refuse', () => {
     expect(refuseIdx).toBeGreaterThan(-1);
     expect(setPathIdx).toBeGreaterThan(refuseIdx);
     expect(deviceIdx).toBeGreaterThan(refuseIdx);
+    expect(indexSource).toContain("appDataDir: app.getPath('appData')");
     expect(indexSource).toContain("isolated: devFlags.profileKind === 'isolated-sandbox'");
     expect(indexSource).toContain('isolationIntent: devFlags.isolated');
     expect(indexSource).toContain('profileKind: devFlags.profileKind');

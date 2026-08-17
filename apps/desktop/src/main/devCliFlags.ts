@@ -132,6 +132,12 @@ export interface DevCliFlagsInput {
   /** app.getPath('userData') 的默认值;隔离模式在其后缀 '-dev2[-<名字>]' 生成沙箱目录。 */
   defaultUserDataDir: string;
   /**
+   * Electron app.getPath('appData')。正式 profile 只从这里派生 Cindy /
+   * CindyGlobal / CindyDev，不得用当前 userData 覆写的父目录猜。
+   * 缺省回落到 dirname(defaultUserDataDir)，仅给旧测试。
+   */
+  appDataDir?: string;
+  /**
    * XDT_ISOLATED 环境变量:严格 '1' = 隔离开关开,其它任何值(含 '0'/'false'/名字)
    * 一律视为关。名字**不**挤在这个变量里——否则名叫 "1" 的沙箱会和开关标记值撞车
    * (数据目录是命名的、deviceId 却派生成默认的,把互踢问题带回来,codex review P2)。
@@ -254,12 +260,11 @@ export function shouldEnforcePassiveMigrationCompatibility(input: {
   return !input.isPackaged && input.schedulerPassive && input.profileKind !== 'isolated-sandbox';
 }
 
-export function resolveOfficialUserDataDirs(defaultUserDataDir: string): string[] {
-  const parent = dirname(defaultUserDataDir);
-  // 只认已知正式目录名。不能把运行时 defaultUserDataDir 无条件算进去：
-  // 原生 `--user-data-dir=/tmp/custom` 会让 app.getPath('userData') 变成自定义
-  // 目录，再把它标成 production-shared 会误拦 pending migration。
-  return OFFICIAL_USER_DATA_DIR_NAMES.map((name) => join(parent, name));
+export function resolveOfficialUserDataDirs(appDataDir: string): string[] {
+  // 正式集合永远从 appData 派生。不能用当前 userData 覆写的父目录猜：
+  // `--user-data-dir=/tmp/custom` + `XDT_USER_DATA_DIR=$HOME/.../Cindy` 时，
+  // 用 /tmp 当父目录会把真正的 Cindy 目录判成 custom。
+  return OFFICIAL_USER_DATA_DIR_NAMES.map((name) => join(appDataDir, name));
 }
 
 function isOfficialUserDataDir(
@@ -271,32 +276,46 @@ function isOfficialUserDataDir(
   return officialDirs.some((official) => canonicalize(official) === target);
 }
 
+function officialDirsFromInput(input: {
+  officialUserDataDirs?: readonly string[];
+  appDataDir?: string;
+  productionUserDataDir?: string;
+  effectiveUserDataDir?: string;
+}): readonly string[] {
+  if (input.officialUserDataDirs) return input.officialUserDataDirs;
+  const appDataDir =
+    input.appDataDir ??
+    dirname(input.productionUserDataDir ?? input.effectiveUserDataDir ?? '');
+  return resolveOfficialUserDataDirs(appDataDir);
+}
+
 export function isIsolatedIdentityOnProductionProfile(input: {
   isolated: boolean;
   effectiveUserDataDir: string;
   productionUserDataDir?: string;
+  appDataDir?: string;
   officialUserDataDirs?: readonly string[];
   canonicalizePath?: (value: string) => string;
 }): boolean {
   if (!input.isolated) return false;
   const canonicalize = input.canonicalizePath ?? defaultCanonicalizePath;
-  const officialDirs =
-    input.officialUserDataDirs ??
-    resolveOfficialUserDataDirs(input.productionUserDataDir ?? input.effectiveUserDataDir);
-  return isOfficialUserDataDir(input.effectiveUserDataDir, officialDirs, canonicalize);
+  return isOfficialUserDataDir(
+    input.effectiveUserDataDir,
+    officialDirsFromInput(input),
+    canonicalize,
+  );
 }
 
 export function resolveDevProfileKind(input: {
   isolatedDirIsEpochDerived: boolean;
   effectiveUserDataDir: string;
   productionUserDataDir?: string;
+  appDataDir?: string;
   officialUserDataDirs?: readonly string[];
   canonicalizePath?: (value: string) => string;
 }): DevProfileKind {
   const canonicalize = input.canonicalizePath ?? defaultCanonicalizePath;
-  const officialDirs =
-    input.officialUserDataDirs ??
-    resolveOfficialUserDataDirs(input.productionUserDataDir ?? input.effectiveUserDataDir);
+  const officialDirs = officialDirsFromInput(input);
   if (isOfficialUserDataDir(input.effectiveUserDataDir, officialDirs, canonicalize)) {
     return 'production-shared';
   }
@@ -379,7 +398,9 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
     userDataDirOverride !== null &&
     canonicalize(userDataDirOverride) === canonicalize(epochDerivedDir);
   const effectiveUserDataDir = userDataDirOverride ?? input.defaultUserDataDir;
-  const officialUserDataDirs = resolveOfficialUserDataDirs(input.defaultUserDataDir);
+  const officialUserDataDirs = resolveOfficialUserDataDirs(
+    input.appDataDir ?? dirname(input.defaultUserDataDir),
+  );
   const isolatedOnProductionProfile = isIsolatedIdentityOnProductionProfile({
     isolated,
     effectiveUserDataDir,

@@ -498,6 +498,38 @@ describe('cindy-bridge extension source', () => {
           expect(context.collectResolvedCredentialPaths?.(evidence?.targets), command)
             .toEqual([realpathSync(secretPath)]);
         }
+        for (const command of [
+          `source change-dir.sh; cat <${cwdSwitchName}`,
+          `. ./change-dir.sh && cat <${cwdSwitchName}`,
+          `builtin source change-dir.sh; cat <${cwdSwitchName}`,
+          `builtin -- . ./change-dir.sh; cat <${cwdSwitchName}`,
+          `command eval 'cd nested'; cat <${cwdSwitchName}`,
+          `X=1 2>/dev/null source change-dir.sh; cat <${cwdSwitchName}`,
+          `false || source change-dir.sh; cat <${cwdSwitchName}`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
+            targets: [rootCwdSwitchOrdinaryLink],
+            unresolved: true,
+          });
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: 'source change-dir.sh <ordinary-link.txt',
+        })).toEqual({ targets: [ordinaryLink], unresolved: false });
+        expect(context.bashInputReadEvidence?.({
+          command: '(source change-dir.sh); cat <ordinary-link.txt',
+        })).toEqual({ targets: [ordinaryLink], unresolved: false });
+        expect(context.bashInputReadEvidence?.({
+          command: 'bash change-dir.sh; cat <ordinary-link.txt',
+        })).toEqual({ targets: [ordinaryLink], unresolved: false });
+        expect(context.bashInputReadEvidence?.({
+          command: `(source change-dir.sh; cat <${cwdSwitchName})`,
+        })).toEqual({ targets: [rootCwdSwitchOrdinaryLink], unresolved: true });
+        expect(context.bashInputReadEvidence?.({ command: 'source change-dir.sh' }))
+          .toEqual({ targets: [], unresolved: false });
+        expect(context.bashInputReadEvidence?.({
+          command: `printf '%s' 'source change-dir.sh'; cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: false });
+
         expect(context.bashInputReadEvidence?.({
           command: `CDPATH=${cdPathRoot} cd sub && cat <${cwdSwitchName}`,
         })).toEqual({

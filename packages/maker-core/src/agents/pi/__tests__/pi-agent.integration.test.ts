@@ -2121,6 +2121,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         mkdirSync(stackOtherDir);
         writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
         writeFileSync(ordinaryPath, 'ordinary-content');
+        writeFileSync(path.join(workingDir, 'change-dir.sh'), 'cd sub\n');
         symlinkSync('../secrets/.env', postCdLink);
         symlinkSync(ordinaryPath, path.join(workingDir, 'link'));
         symlinkSync(ordinaryPath, path.join(stackOtherDir, 'link'));
@@ -2134,6 +2135,10 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           ['perm-auto-bash-symlink-dotenv-popd', 'pushd sub; pushd ../stack-other; popd; cat<link'],
           ['perm-auto-bash-symlink-dotenv-popd-index', 'pushd sub && pushd ../stack-other && popd +0 && cat<link'],
           ['perm-auto-bash-symlink-dotenv-builtin-terminator', 'builtin -- cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-source', 'source change-dir.sh; cat<link'],
+          ['perm-auto-bash-symlink-dotenv-dot-source', '. ./change-dir.sh && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-builtin-source', 'builtin source change-dir.sh; cat<link'],
+          ['perm-auto-bash-symlink-dotenv-eval-source', "eval 'source change-dir.sh'; cat<link"],
           ['perm-auto-bash-symlink-dotenv-dynamic-cd', 'D=cd; $D sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-interpolated-cd', 'UNSET=; c${UNSET}d sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-interpolated-builtin', 'UNSET=; bu${UNSET}iltin -- cd sub && cat<link'],
@@ -2171,6 +2176,8 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         for (const [sessionId, command] of [
           ['perm-full-access-bash-popd-plain', 'pushd sub && popd && cat<link'],
           ['perm-full-access-bash-builtin-terminator-plain', 'builtin -- cd sub && cat<ordinary'],
+          ['perm-full-access-bash-subshell-source-plain', '(source change-dir.sh); cat<link'],
+          ['perm-full-access-bash-external-source-plain', 'bash change-dir.sh; cat<link'],
           ['perm-full-access-bash-popd-index-plain', 'pushd sub && pushd ../stack-other && popd +1 && cat<link'],
           ['perm-full-access-bash-pushd-zero-plain', 'pushd +0 && cat<link'],
           ['perm-full-access-bash-popd-no-cd-plain', 'pushd sub && pushd ../stack-other && popd -n +1 && cat<link'],

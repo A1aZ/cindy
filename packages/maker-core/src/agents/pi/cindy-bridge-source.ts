@@ -466,12 +466,17 @@ function bashInheritedDirectoryChangeIsUncertain(
 
 type BashLeadingRedirection = { end: number; unresolved: boolean };
 type BashAssignmentPrefix = { end: number; name: string; unresolved: boolean };
+type BashDirectoryChangeCommand = 'cd' | 'pushd' | 'popd' | 'opaque';
 type BashDirectoryChangeHead = {
   cursor: number;
-  command: 'cd' | 'pushd' | 'popd' | null;
+  command: BashDirectoryChangeCommand | null;
   hadRedirection: boolean;
   unresolved: boolean;
 };
+
+const BASH_OPAQUE_CURRENT_SHELL_EVALUATORS: ReadonlySet<string> = new Set([
+  'source', '.', 'eval',
+]);
 
 function bashInlinePaddingEnd(command: string, start: number): number {
   let cursor = start;
@@ -523,12 +528,16 @@ function bashAssignmentCanChangeDirectory(name: string): boolean {
   return name === 'CDPATH' || name === 'HOME' || name === 'OLDPWD' || name === 'PWD';
 }
 
-function bashUnescapedBacktickAt(command: string, index: number): boolean {
+function bashCharacterIsEscapedAt(command: string, index: number): boolean {
   let backslashes = 0;
   for (let cursor = index - 1; cursor >= 0 && command[cursor] === '\\'; cursor -= 1) {
     backslashes += 1;
   }
-  return backslashes % 2 === 0;
+  return backslashes % 2 === 1;
+}
+
+function bashUnescapedBacktickAt(command: string, index: number): boolean {
+  return !bashCharacterIsEscapedAt(command, index);
 }
 
 function bashUnresolvedHeadHasDirectoryChange(codeMask: string, start: number): boolean {
@@ -630,6 +639,9 @@ function bashDirectoryChangeHead(
     }
   }
 
+  if (BASH_OPAQUE_CURRENT_SHELL_EVALUATORS.has(word.target) && !word.unresolved) {
+    return { cursor: word.end, command: 'opaque', hadRedirection, unresolved };
+  }
   if ((word.target !== 'cd' && word.target !== 'pushd' && word.target !== 'popd') || word.unresolved) {
     if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
       return { cursor, command: null, hadRedirection, unresolved: true };
@@ -661,6 +673,43 @@ function bashPopdIndex(operand: string, stackLength: number): number | null {
   return match[1] === '+' ? offset : stackLength - 1 - offset;
 }
 
+function bashOpaqueEvaluatorCompletesBeforeRead(
+  command: string,
+  codeMask: string,
+  start: number,
+  initialDepth: number,
+): boolean {
+  let depth = initialDepth;
+  let inBacktick = false;
+  for (let index = start; index < codeMask.length; index += 1) {
+    const char = codeMask.charAt(index);
+    if (char.charCodeAt(0) === 96 && bashUnescapedBacktickAt(codeMask, index)) {
+      inBacktick = !inBacktick;
+      continue;
+    }
+    if (inBacktick) continue;
+    if (char === '#' && (index === 0 || /[\s;&|()]/.test(codeMask.charAt(index - 1)))) {
+      const newline = codeMask.indexOf('\n', index + 1);
+      if (newline < 0) return false;
+      index = newline - 1;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth -= 1;
+      if (depth < initialDepth) return false;
+      continue;
+    }
+    if (depth !== initialDepth || !/[;&|\n]/.test(char)) continue;
+    if (char === '\n' && bashCharacterIsEscapedAt(command, index)) continue;
+    return true;
+  }
+  return false;
+}
+
 function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBudget): BashPathCandidates {
   let states: BashDirectoryState[] = [{ cwd: process.cwd(), stack: [process.cwd()] }];
   let unresolved = false;
@@ -670,6 +719,15 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     const matchIndex = match.index ?? 0;
     const head = bashDirectoryChangeHead(command, codeMask, matchIndex + match[0].length);
     if (!head) continue;
+    const changeDepth = bashSubshellDepthAt(codeMask, head.cursor);
+    if (!bashSubshellScopeRemainsOpen(codeMask, head.cursor, changeDepth)) continue;
+    if (head.command === 'opaque') {
+      if (head.unresolved
+        || bashOpaqueEvaluatorCompletesBeforeRead(command, codeMask, head.cursor, changeDepth)) {
+        unresolved = true;
+      }
+      continue;
+    }
     if (head.unresolved || !head.command) {
       unresolved = true;
       continue;
@@ -677,8 +735,6 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     let cursor = head.cursor;
     const precededByOrOperator = matchIndex > 0
       && codeMask[matchIndex] === '|' && codeMask[matchIndex - 1] === '|';
-    const changeDepth = bashSubshellDepthAt(codeMask, cursor);
-    if (!bashSubshellScopeRemainsOpen(codeMask, cursor, changeDepth)) continue;
     let parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
     let optionsEnded = false;
     let suppressDirectoryChange = false;

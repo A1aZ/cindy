@@ -734,6 +734,49 @@ describe('startup update relaunch safety', () => {
       service.stopUpdateService();
     }
   });
+
+  it('does not restore a superseded patch after a channel change', async () => {
+    const { DownloadError } = await import('../downloader/index');
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    let failDownload: ((error: Error) => void) | undefined;
+    download.mockImplementation(() => new Promise((_, reject) => {
+      failDownload = reject;
+    }));
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      service.setUpdateAutoRelaunchBusyProbe(() => true);
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      fetchManifest.mockResolvedValue(updateManifest('0.0.66'));
+      const checkPromise = service.checkForUpdate();
+      await vi.waitFor(() => {
+        expect(failDownload).toBeTypeOf('function');
+      });
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('superseding');
+      });
+      failDownload?.(new DownloadError('NETWORK', 'boom'));
+      await expect(checkPromise).resolves.toBe('idle');
+      expect(service.getUpdateStatus()).toBe('idle');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
 });
 
 describe('splash 启动下载 0% 显式广播', () => {

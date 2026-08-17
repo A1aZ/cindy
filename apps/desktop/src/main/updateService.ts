@@ -668,20 +668,21 @@ function flushDeferredStagedPatchClear(): void {
   if (!deferredStagedPatch) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
   const stale = deferredStagedPatch;
+  if (currentStatus === 'downloading' || currentStatus === 'superseding') {
+    // 新渠道下载还在飞:不要再推进代际,也不要删同路径 dest。
+    // 标记先留着——下载失败若把旧补丁快照写回来,后续还能再清。
+    if (readyChannelEpoch === stale.epoch) {
+      readyVersion = undefined;
+      readyFilePath = undefined;
+      readyChannelEpoch = undefined;
+    }
+    return;
+  }
   deferredStagedPatch = undefined;
   if (isCurrentPatchNewerThanDeferred(stale)) {
     log.info('keeping newer staged patch after deferred channel-change clear');
     if (stale.path && stale.path !== readyFilePath) {
       try { fs.unlinkSync(stale.path); } catch { /* ignore */ }
-    }
-    return;
-  }
-  if (currentStatus === 'downloading' || currentStatus === 'superseding') {
-    // 新渠道下载还在飞:不要再推进代际,也不要删同路径 dest。
-    if (readyChannelEpoch === stale.epoch) {
-      readyVersion = undefined;
-      readyFilePath = undefined;
-      readyChannelEpoch = undefined;
     }
     return;
   }
@@ -1077,9 +1078,20 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
     // readyFilePath 全都没动过,直接重新广播 ready 让 banner 按钮从 loading 恢复成可点。
     // 下一次 30min 轮询会再次尝试 b。
     if (wasReady) {
-      // 下载期间用户切渠道:旧 patch 已被 clearStagedPatch 清掉,不能恢复。
-      if (channelEpochAtStart !== updateChannelEpoch) {
+      // 下载期间用户切渠道:旧 patch 已被作废,不能从局部快照恢复。
+      // 代际在下载开始前就可能已经推进过,所以还要看旧补丁自己的代际。
+      const staleChannelPatch =
+        channelEpochAtStart !== updateChannelEpoch ||
+        (previousReadyChannelEpoch != null && previousReadyChannelEpoch !== updateChannelEpoch);
+      if (staleChannelPatch) {
         log.info('update channel changed during superseding download — not restoring stale patch');
+        if (previousReadyFilePath) {
+          try { fs.unlinkSync(previousReadyFilePath); } catch { /* ignore */ }
+        }
+        readyVersion = undefined;
+        readyFilePath = undefined;
+        readyChannelEpoch = undefined;
+        removePatchInfo();
         setStatus('idle');
         return 'idle';
       }

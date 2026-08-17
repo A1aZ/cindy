@@ -439,7 +439,7 @@ describe('remoteSessionStore', () => {
 
   it('does not let a draft sentinel snapshot replace an optimistic first-message title', () => {
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [
-      session('s1', { title: '帮我排查登录失败' }),
+      session('s1', { title: '帮我排查登录失败', pendingLocalCreation: true }),
     ]);
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [
       session('s1', { title: 'New Maker' }),
@@ -453,6 +453,14 @@ describe('remoteSessionStore', () => {
       session('s1', { title: '登录失败排查' }),
     ]);
     expect(remoteSessionStore.getSessions()[0]?.title).toBe('登录失败排查');
+  });
+
+  it('lets an authoritative New Maker rename through after optimistic creation settles', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [
+      session('s1', { title: '帮我排查登录失败' }),
+    ]);
+    remoteSessionStore.applySessionPatch('dev-1', 's1', { title: 'New Maker' });
+    expect(remoteSessionStore.getSessions()[0]?.title).toBe('New Maker');
   });
 
   it('dedupes an unchanged message push by id or client id', () => {

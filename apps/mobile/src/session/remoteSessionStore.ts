@@ -614,10 +614,11 @@ function preserveSessionRuntimeFields(fresh: RemoteSession, local: RemoteSession
   ) {
     next = { ...next, agentSwitchIntent: local.agentSwitchIntent };
   }
-  // 新建乐观行已经用用户原文当标题;被控端 create 先落哨兵,全量对账 /
-  // getSession 回流不能把第一帧打回「未命名任务」。权威智能标题一到就让位。
+  // 只在乐观新建尚未结束时挡住哨兵回流。管线结束后用户完全可以把标题改成
+  // 字面量 New Maker,那是权威写入,不能再被旧原文盖回去。
   if (
-    isDefaultDraftSessionTitle(fresh.title)
+    local.pendingLocalCreation === true
+    && isDefaultDraftSessionTitle(fresh.title)
     && local.title
     && local.title !== DEFAULT_DRAFT_SESSION_TITLE
     && local.title !== 'New remote session'

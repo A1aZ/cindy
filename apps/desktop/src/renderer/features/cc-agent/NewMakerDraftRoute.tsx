@@ -3836,6 +3836,8 @@ export function NewMakerDraftRoute() {
         throw new Error(t('goal.newGoalDialog.busy'));
       }
       markSendInFlight(true);
+      let goalSessionId: string | null = null;
+      let optimisticGoalTitle: string | null = null;
       try {
         const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
         const selectedWorktree = { ...wtRef.current };
@@ -4210,8 +4212,8 @@ export function NewMakerDraftRoute() {
           && selectedWorktree.enabled
           && selectedWorktree.confirmedIneligible !== true,
         );
-        const goalSessionId = makeDraftSessionId();
-        const optimisticGoalTitle = normalizeAutoTitle(objective);
+        goalSessionId = makeDraftSessionId();
+        optimisticGoalTitle = normalizeAutoTitle(objective);
         if (optimisticGoalTitle) emitAutoTitlePreview(goalSessionId, optimisticGoalTitle);
         let goalWorkingDir = selectedWorkingDir;
         let goalWorktreeName = '';
@@ -4341,6 +4343,9 @@ export function NewMakerDraftRoute() {
           state: orcaWorkersRevealState ? { orcaWorkersReveal: orcaWorkersRevealState } : undefined,
         });
       } catch (error) {
+        // 预览在 createSession 之前登记。worktree 建议名 / 建树 / 回滚失败都走这里,
+        // 不撤回会让空会话或未建成的 goalSessionId 一直顶着目标原文。
+        if (goalSessionId && optimisticGoalTitle) emitAutoTitlePreviewCleared(goalSessionId);
         if (isLocalGoalWorktreeCleanupPendingError(error)) {
           log.error('[draft goal] incomplete local worktree session cleanup failed', {
             setupError: error.setupError,

@@ -85,6 +85,12 @@ describe('desktop 会话标题投影出口', () => {
     expect(draftRoute).toContain(
       'if (optimisticGoalTitle) emitAutoTitlePreviewCleared(goalSessionId);',
     );
+    const goalCatch = draftRoute.indexOf('} catch (error) {\n        // 预览在 createSession 之前登记。');
+    expect(goalCatch).toBeGreaterThan(-1);
+    expect(draftRoute.indexOf(
+      'if (goalSessionId && optimisticGoalTitle) emitAutoTitlePreviewCleared(goalSessionId);',
+      goalCatch,
+    )).toBeGreaterThan(goalCatch);
     // 预览必须在本机发送路径的 createSession 之前登记,否则 sessions:created
     // 刷新会先画出「未命名任务」。文件前段还有 SSH / 远程建会话,不能拿第一处 create。
     const previewBeforeCreate = draftRoute.indexOf('emitAutoTitlePreview(sessionId, optimisticTitle)');

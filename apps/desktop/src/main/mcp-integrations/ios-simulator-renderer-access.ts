@@ -359,29 +359,40 @@ export class IOSSimulatorRendererAccessRegistry {
     return true;
   }
 
-  deactivateForSessionChange(
+  syncForSessionChange(
     preferredTarget: IOSSimulatorRendererWebContents,
     sessionId: string | null,
   ): number {
     const normalizedSessionId = sessionId?.trim() || null;
-    const targets =
-      this.resolveTargets(preferredTarget)?.targets ??
-      new Map([[preferredTarget.id, preferredTarget]]);
-    let deactivated = 0;
+    const resolved = this.resolveTargets(preferredTarget);
+    const targets = resolved?.targets ?? new Map([[preferredTarget.id, preferredTarget]]);
+    let changed = 0;
     for (const target of targets.values()) {
       const pending = this.pendingAccess.get(target.id);
       if (pending && (!normalizedSessionId || pending.sessionId !== normalizedSessionId)) {
         this.bumpTargetEpoch(target.id);
       }
       const current = this.activeGrants.get(target.id);
-      if (!current || current.target !== target || current.sessionId === normalizedSessionId) {
-        continue;
-      }
+      const retained = resolved && normalizedSessionId
+        ? this.viewerGrants.get(target.id)?.get(normalizedSessionId)
+        : undefined;
+      const next =
+        retained?.target === target && !retained.target.isDestroyed() ? retained : undefined;
+      if (current?.target !== target && !next) continue;
+      if (current === next) continue;
+
+      // The route report may select only a Viewer grant that the Host already
+      // minted for this exact WebContents. It never creates or transfers a
+      // Viewer authorization from renderer-supplied session data.
       this.bumpTargetEpoch(target.id);
-      this.activeGrants.delete(target.id);
-      deactivated += 1;
+      if (next) {
+        this.activeGrants.set(target.id, next);
+      } else if (current?.target === target) {
+        this.activeGrants.delete(target.id);
+      }
+      changed += 1;
     }
-    return deactivated;
+    return changed;
   }
 
   revokeSession(sessionId: string): void {
@@ -714,11 +725,11 @@ export function inheritIOSSimulatorRendererSessionAccess(
   return rendererAccessRegistry.inheritAccess(sourceTarget, target);
 }
 
-export function deactivateIOSSimulatorRendererAccessForSessionChange(
+export function syncIOSSimulatorRendererAccessForSessionChange(
   target: IOSSimulatorRendererWebContents,
   sessionId: string | null,
 ): number {
-  return rendererAccessRegistry.deactivateForSessionChange(target, sessionId);
+  return rendererAccessRegistry.syncForSessionChange(target, sessionId);
 }
 
 export function revokeIOSSimulatorRendererSession(sessionId: string): void {

@@ -240,7 +240,7 @@ import {
   focusIOSSimulatorRendererSession,
   getIOSSimulatorRendererSessionAccess,
   requestIOSSimulatorRendererSessionAccess,
-  deactivateIOSSimulatorRendererAccessForSessionChange,
+  syncIOSSimulatorRendererAccessForSessionChange,
 } from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { getIOSSimulatorPluginStatus } from '../mcp-integrations/ios-simulator.js';
 import type { GhostTrustRegistry } from './ghostSignature.js';
@@ -2323,13 +2323,13 @@ const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
 
 function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | null): void {
-  // Renderer route reports are not an authority to grant Simulator access. They
-  // may only clear a stale active mutation grant when this window family moves
-  // elsewhere. Retained Viewer access follows the existing session-scoped
-  // sidebar bucket and is never promoted by a renderer-reported route.
+  // Renderer route reports are not an authority to mint Simulator Viewer
+  // access. They may only select an exact Viewer grant that the Host already
+  // retained for this session-scoped sidebar bucket, or clear a stale active
+  // mutation grant when the window family moves elsewhere.
   const previous = ghostSessionFocusByWebContents.get(sender.id);
   if (previous !== sessionId) {
-    deactivateIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
+    syncIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
     ghostSessionFocusByWebContents.set(sender.id, sessionId);
     if (!ghostSessionFocusTrackedWebContents.has(sender.id)) {
       ghostSessionFocusTrackedWebContents.add(sender.id);

@@ -86,7 +86,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.accessSnapshot(main.target)).toBeNull();
   });
 
-  it('retains authorized Viewer sessions while selecting one active mutation grant', () => {
+  it('retains authorized Viewer sessions and restores the active grant on session return', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(21);
     registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
@@ -98,12 +98,12 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(main.target, 'session-b')).toBe(true);
     expect(registry.accessSnapshot(main.target)).toEqual({ sessionId: 'session-b', generation: 2 });
 
-    expect(registry.deactivateForSessionChange(main.target, 'session-a')).toBe(1);
-    expect(registry.accessSnapshot(main.target)).toBeNull();
+    expect(registry.syncForSessionChange(main.target, 'session-a')).toBe(1);
     expect(registry.hasAccess(main.target, 'session-a')).toBe(true);
-
-    expect(registry.grantAndFocus('session-a')).toBe(true);
-    expect(registry.accessSnapshot(main.target)).toEqual({ sessionId: 'session-a', generation: 3 });
+    expect(registry.accessSnapshot(main.target)).toEqual({
+      sessionId: 'session-a',
+      generation: 1,
+    });
   });
 
   it('restores the previous active session when a new focus command cannot be delivered', () => {
@@ -119,6 +119,20 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(main.target, 'session-a')).toBe(true);
     expect(registry.hasAccess(main.target, 'session-b')).toBe(false);
     expect(registry.accessSnapshot(main.target)?.sessionId).toBe('session-a');
+  });
+
+  it('does not restore a retained grant when the Host resolver is unavailable', () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(221);
+    registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
+    expect(registry.grantAndFocus('session-a')).toBe(true);
+    expect(registry.grantAndFocus('session-b')).toBe(true);
+
+    registry.configureResolver(null);
+
+    expect(registry.syncForSessionChange(main.target, 'session-a')).toBe(1);
+    expect(registry.hasAccess(main.target, 'session-a')).toBe(true);
+    expect(registry.accessSnapshot(main.target)).toBeNull();
   });
 
   it('keeps the existing same-session grant when a repeated focus command cannot be delivered', () => {
@@ -458,7 +472,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     );
 
     const pending = registry.requestAgentControlElevation('session-a', 'instance-a', main.target);
-    expect(registry.deactivateForSessionChange(main.target, 'session-b')).toBe(1);
+    expect(registry.syncForSessionChange(main.target, 'session-b')).toBe(1);
     deferred.resolve?.(true);
 
     await expect(pending).resolves.toBeNull();
@@ -503,7 +517,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     );
 
     const pending = registry.requestAccess('session-a', sidebar.target);
-    expect(registry.deactivateForSessionChange(main.target, 'session-b')).toBe(0);
+    expect(registry.syncForSessionChange(main.target, 'session-b')).toBe(0);
     deferred.resolve?.(true);
 
     await expect(pending).resolves.toBe(false);
@@ -511,7 +525,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(false);
   });
 
-  it('switches an inherited family away without revoking retained Viewer access', () => {
+  it('restores an inherited family when returning to a retained Viewer session', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(101);
     const sidebar = fakeWebContents(102);
@@ -524,20 +538,22 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     registry.grantAndFocus('session-a');
     revoked.mockClear();
 
-    expect(registry.deactivateForSessionChange(main.target, 'session-b')).toBe(2);
+    expect(registry.syncForSessionChange(main.target, 'session-b')).toBe(2);
     expect(registry.hasAccess(main.target, 'session-a')).toBe(true);
     expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(true);
     expect(registry.accessSnapshot(main.target)).toBeNull();
     expect(registry.accessSnapshot(sidebar.target)).toBeNull();
     expect(revoked).not.toHaveBeenCalled();
 
-    expect(registry.deactivateForSessionChange(sidebar.target, 'session-a')).toBe(0);
-    expect(registry.accessSnapshot(main.target)).toBeNull();
-    expect(registry.accessSnapshot(sidebar.target)).toBeNull();
-
-    expect(registry.grantAndFocus('session-a')).toBe(true);
-    expect(registry.accessSnapshot(main.target)?.sessionId).toBe('session-a');
-    expect(registry.accessSnapshot(sidebar.target)?.sessionId).toBe('session-a');
+    expect(registry.syncForSessionChange(sidebar.target, 'session-a')).toBe(2);
+    expect(registry.accessSnapshot(main.target)).toEqual({
+      sessionId: 'session-a',
+      generation: 1,
+    });
+    expect(registry.accessSnapshot(sidebar.target)).toEqual({
+      sessionId: 'session-a',
+      generation: 1,
+    });
   });
 
   it('revokes only the removed session while keeping other Viewer grants usable', () => {

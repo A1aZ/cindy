@@ -1574,6 +1574,7 @@
         "enableModel": "啟用此模型",
         "capabilityGroupHint": "不會出現在對話模型選擇中，僅供影像生成等功能使用",
         "accessWriteFailed": "停用設定未能儲存，請重試",
+        "visibilityWriteFailed": "模型顯示設定未能儲存，請重試；如果仍然失敗，請重新啟動 Cindy。",
         "disabledGroup": "已停用",
         "enableAllModels": "全部啟用",
         "priceOverride": {

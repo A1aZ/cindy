@@ -268,6 +268,76 @@ describe('claimLegacyOwnerNamespace', () => {
     expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(true);
   });
 
+  it('prunes a schema-v1 record after proving that its PID was reused', async () => {
+    const root = await tempRoot();
+    const startedAtMs = 1_000_000;
+    const recordPath = path.join(root, '.dev-instances', '4242.json');
+    await writeDevInstanceRecord(root, 4242, root, {
+      instanceId: 'stale-instance',
+      startedAtMs,
+    });
+
+    await __testing.warmStaleProcessProvenance(
+      root,
+      realFsDeps(root, {
+        isPidAlive: (pid) => pid === 4242,
+        readProcessIdentity: () => ({
+          startedAtMs: startedAtMs + 120_000,
+          command: 'C:\\Windows\\System32\\OpenConsole.exe --server',
+        }),
+      }),
+    );
+
+    await expect(fs.access(recordPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(true);
+  });
+
+  it('keeps a replacement record that changes during stale-PID cleanup', async () => {
+    const root = await tempRoot();
+    const startedAtMs = 1_000_000;
+    const recordPath = path.join(root, '.dev-instances', '4242.json');
+    await writeDevInstanceRecord(root, 4242, root, {
+      instanceId: 'stale-instance',
+      startedAtMs,
+    });
+    const originalRaw = await fs.readFile(recordPath, 'utf-8');
+    const replacementRaw = JSON.stringify({
+      schemaVersion: 1,
+      instanceId: 'replacement-instance',
+      pid: 4242,
+      userDataDir: root,
+      startedAtMs: startedAtMs + 1,
+    });
+    let recordReads = 0;
+
+    await __testing.warmStaleProcessProvenance(
+      root,
+      realFsDeps(
+        root,
+        {
+          isPidAlive: (pid) => pid === 4242,
+          readProcessIdentity: () => ({
+            startedAtMs: startedAtMs + 120_000,
+            command: 'C:\\Windows\\System32\\OpenConsole.exe --server',
+          }),
+        },
+        {
+          readFile: async (file: string) => {
+            if (file !== recordPath) return fs.readFile(file, 'utf-8');
+            recordReads += 1;
+            if (recordReads === 1) return originalRaw;
+            await fs.writeFile(recordPath, replacementRaw, 'utf-8');
+            return replacementRaw;
+          },
+        },
+      ),
+    );
+
+    expect(recordReads).toBeGreaterThanOrEqual(2);
+    await expect(fs.access(recordPath)).resolves.toBeUndefined();
+    expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(false);
+  });
+
   it('keeps local startup fail-closed when provenance warmup cannot read identity', async () => {
     const root = await tempRoot();
     await writeDevInstanceRecord(root, 4242, root, { startedAtMs: 1_000_000 });
@@ -3195,7 +3265,7 @@ async function writeDevInstanceRecord(
   root: string,
   pid: number,
   userDataDir: string = root,
-  options: { startedAtMs?: number; rootDir?: string } = {},
+  options: { startedAtMs?: number; rootDir?: string; instanceId?: string } = {},
 ): Promise<void> {
   const registryDir = path.join(root, '.dev-instances');
   await fs.mkdir(registryDir, { recursive: true });

@@ -35,6 +35,7 @@ class MemLocalStorage {
 
 let memStorage: MemLocalStorage;
 const syncModelVisibility = vi.fn(async () => undefined);
+const logToMain = vi.fn();
 let ownerClaim: {
   dataOwnerId: string | null;
   ownerGeneration: number;
@@ -62,10 +63,12 @@ function setOwnerClaim(
 beforeEach(() => {
   memStorage = new MemLocalStorage();
   syncModelVisibility.mockClear();
+  logToMain.mockClear();
   setOwnerClaim('owner-a', 1);
   vi.stubGlobal('window', {
     localStorage: memStorage,
     electronAPI: {
+      logToMain,
       maker: {
         syncModelVisibility,
         claimLegacyModelVisibilityOwner: () => ownerClaim,
@@ -151,8 +154,8 @@ describe('modelVisibilityPrefs store', () => {
 
   it('同值写入短路:不抛,值保持', async () => {
     const { isModelEnabled, setModelVisibility } = await loadModuleForOwner();
-    setModelVisibility('codex', 'openai', 'gpt-5.4', false);
-    expect(() => setModelVisibility('codex', 'openai', 'gpt-5.4', false)).not.toThrow();
+    expect(setModelVisibility('codex', 'openai', 'gpt-5.4', false)).toBe(true);
+    expect(setModelVisibility('codex', 'openai', 'gpt-5.4', false)).toBe(true);
     expect(isModelEnabled('codex', 'openai', { id: 'gpt-5.4' })).toBe(false);
   });
 
@@ -222,10 +225,33 @@ describe('modelVisibilityPrefs store', () => {
     setOwnerClaim('owner-a', 1, false, false);
     const module = await loadModuleForOwner();
 
-    module.setModelVisibility('codex', 'openai', 'gpt-5.5', false);
+    expect(module.setModelVisibility('codex', 'openai', 'gpt-5.5', false)).toBe(false);
 
     expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1.owner.owner-a')).toBeNull();
     expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.5' })).toBe(true);
+    expect(logToMain).toHaveBeenCalledWith(
+      'warn',
+      'ModelVisibilityPrefs',
+      expect.stringContaining('owner-write-not-ready'),
+    );
+  });
+
+  it('owner-scoped 存储失败时返回失败并保持旧状态', async () => {
+    const module = await loadModuleForOwner();
+    const mirrorCallsBeforeFailure = syncModelVisibility.mock.calls.length;
+    const setItem = vi.spyOn(memStorage, 'setItem').mockImplementation(() => {
+      throw new Error('injected storage failure');
+    });
+
+    expect(module.setModelVisibility('codex', 'openai', 'gpt-5.5', false)).toBe(false);
+    expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.5' })).toBe(true);
+    expect(syncModelVisibility).toHaveBeenCalledTimes(mirrorCallsBeforeFailure);
+    expect(logToMain).toHaveBeenCalledWith(
+      'warn',
+      'ModelVisibilityPrefs',
+      expect.stringContaining('storage-write-failed'),
+    );
+    setItem.mockRestore();
   });
 
   it('已有 owner-scoped override 优先，迁移不会覆盖', async () => {

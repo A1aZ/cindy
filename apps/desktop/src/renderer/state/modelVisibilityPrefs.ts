@@ -34,6 +34,9 @@ import { useSyncExternalStore } from 'react';
 import { isModelVisible } from '@cindy/model-providers';
 
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('ModelVisibilityPrefs');
 
 const LEGACY_STORAGE_KEY = 'xdt:modelVisibilityPrefs:v1';
 const STORAGE_KEY_PREFIX = `${LEGACY_STORAGE_KEY}.owner`;
@@ -198,19 +201,43 @@ function mirrorToMain(map: VisibilityMap): void {
 let version = 0;
 const listeners = new Set<() => void>();
 
-function persist(map: VisibilityMap): void {
+interface VisibilityWriteContext {
+  operation: 'single' | 'bulk';
+  agent: AgentKind;
+  providerId: string;
+  enabled: boolean;
+  modelId?: string;
+  modelCount?: number;
+}
+
+function persist(map: VisibilityMap, context: VisibilityWriteContext): boolean {
+  if (typeof window === 'undefined' || !activeOwnerId) {
+    log.warn('model visibility write rejected', {
+      reason: 'owner-unavailable',
+      ...context,
+      ownerGeneration: activeOwnerGeneration,
+      mode: activeOwnerMode,
+    });
+    return false;
+  }
+  try {
+    window.localStorage.setItem(ownerStorageKey(activeOwnerId), JSON.stringify(map));
+  } catch (error) {
+    log.warn('model visibility write failed', {
+      reason: 'storage-write-failed',
+      ...context,
+      ownerGeneration: activeOwnerGeneration,
+      mode: activeOwnerMode,
+    }, error);
+    return false;
+  }
+  // 先确认落盘成功，再更新受控开关状态，避免界面显示成功但重启后设置丢失。
   cache = map;
   version += 1;
-  if (typeof window !== 'undefined' && activeOwnerId) {
-    try {
-      window.localStorage.setItem(ownerStorageKey(activeOwnerId), JSON.stringify(map));
-    } catch {
-      // localStorage 满 / 私密窗口禁写 —— 忽略,不影响内存缓存。
-    }
-  }
   // 每次开关变更后把最新快照重推 main,保持 IM /model 与应用内可见性一致。
   mirrorToMain(map);
   for (const l of listeners) l();
+  return true;
 }
 
 function subscribe(cb: () => void): () => void {
@@ -270,12 +297,32 @@ export function setModelVisibility(
   providerId: string,
   modelId: string,
   enabled: boolean,
-): void {
-  if (!providerId || !modelId || !ensureActiveOwnerReadyForWrites()) return;
+): boolean {
+  const context: VisibilityWriteContext = {
+    operation: 'single',
+    agent,
+    providerId,
+    modelId,
+    enabled,
+  };
+  if (!providerId || !modelId) {
+    log.warn('model visibility write rejected', { reason: 'invalid-target', ...context });
+    return false;
+  }
+  if (!ensureActiveOwnerReadyForWrites()) {
+    log.warn('model visibility write rejected', {
+      reason: 'owner-write-not-ready',
+      ...context,
+      ownerGeneration: activeOwnerGeneration,
+      mode: activeOwnerMode,
+      migrationPending: activeOwnerMigrationPending,
+    });
+    return false;
+  }
   const map = load();
   const k = keyOf(agent, providerId, modelId);
-  if (map[k] === enabled) return;
-  persist({ ...map, [k]: enabled });
+  if (map[k] === enabled) return true;
+  return persist({ ...map, [k]: enabled }, context);
 }
 
 /**
@@ -288,8 +335,29 @@ export function setManyVisibility(
   providerId: string,
   modelIds: readonly string[],
   enabled: boolean,
-): void {
-  if (!providerId || modelIds.length === 0 || !ensureActiveOwnerReadyForWrites()) return;
+): boolean {
+  const context: VisibilityWriteContext = {
+    operation: 'bulk',
+    agent,
+    providerId,
+    modelCount: modelIds.length,
+    enabled,
+  };
+  if (!providerId) {
+    log.warn('model visibility write rejected', { reason: 'invalid-target', ...context });
+    return false;
+  }
+  if (modelIds.length === 0) return true;
+  if (!ensureActiveOwnerReadyForWrites()) {
+    log.warn('model visibility write rejected', {
+      reason: 'owner-write-not-ready',
+      ...context,
+      ownerGeneration: activeOwnerGeneration,
+      mode: activeOwnerMode,
+      migrationPending: activeOwnerMigrationPending,
+    });
+    return false;
+  }
   const map = load();
   let changed = false;
   const next = { ...map };
@@ -300,7 +368,7 @@ export function setManyVisibility(
       changed = true;
     }
   }
-  if (changed) persist(next);
+  return changed ? persist(next, context) : true;
 }
 
 /**

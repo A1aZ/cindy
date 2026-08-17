@@ -472,18 +472,23 @@ export function UnifiedModelList({
   const refreshLabel = refreshing
     ? t('settings.providers.models.refreshingAria')
     : (refreshIdleLabel ?? t('settings.providers.models.refreshAria'));
+  const showVisibilityWriteFailure = useCallback(() => {
+    toast.error(t('settings.providers.models.visibilityWriteFailed'));
+  }, [t]);
 
   /** 单开关(显示轴):一次写该行全部可用 agent(分歧行拨动即归一)。写入用各 agent 的
    *  **真实模型 id**(桥接投影行两端 id 不同:chatgpt/gpt-5.5 vs gpt-5.5),不能用规范化后的 row.id。 */
   const toggleRow = useCallback(
     (row: UnionModelRow) => {
       const next = !rowAnyEnabled(provider.id, row);
+      let failed = false;
       for (const a of row.avail) {
         const m = row.byAgent[a];
-        if (m) setModelVisibility(a, provider.id, m.id, next);
+        if (m && setModelVisibility(a, provider.id, m.id, next) === false) failed = true;
       }
+      if (failed) showVisibilityWriteFailure();
     },
-    [provider.id],
+    [provider.id, showVisibilityWriteFailure],
   );
 
   /** 全部显示 / 隐藏:逐 agent 批量写(单 agent 一次落盘)。只作用于**对话模型的显示轴**
@@ -492,6 +497,7 @@ export function UnifiedModelList({
    *  行 key):刚停用、快照未回来的行同样不写(PR #744 review)。 */
   const handleBulk = useCallback(() => {
     const next = !allOn;
+    let failed = false;
     for (const agent of provider.agents) {
       const ids = (provider.models[agent] ?? [])
         .filter(
@@ -501,9 +507,10 @@ export function UnifiedModelList({
               true,
         )
         .map((m) => m.id);
-      setManyVisibility(agent, provider.id, ids, next);
+      if (setManyVisibility(agent, provider.id, ids, next) === false) failed = true;
     }
-  }, [allOn, provider, pendingDisabled]);
+    if (failed) showVisibilityWriteFailure();
+  }, [allOn, provider, pendingDisabled, showVisibilityWriteFailure]);
 
   /** 行级「⋯」菜单(hover 显现;菜单打开期间保持可见):停用动作的唯一入口。 */
   const rowMenu = (row: UnionModelRow) => (
@@ -795,7 +802,11 @@ export function UnifiedModelList({
                                   {m ? (
                                     <Switch
                                       checked={isModelEnabled(a, provider.id, m)}
-                                      onCheckedChange={(v) => setModelVisibility(a, provider.id, m.id, v)}
+                                      onCheckedChange={(v) => {
+                                        if (setModelVisibility(a, provider.id, m.id, v) === false) {
+                                          showVisibilityWriteFailure();
+                                        }
+                                      }}
                                       aria-label={`${rep.name} · ${AGENT_LABEL[a]}`}
                                     />
                                   ) : (

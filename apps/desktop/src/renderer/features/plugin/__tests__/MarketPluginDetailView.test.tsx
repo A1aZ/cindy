@@ -93,4 +93,23 @@ describe('MarketPluginDetailView', () => {
     renderDetail({ description: null });
     expect(screen.getByText('google-calendar')).toBeTruthy();
   });
+
+  it('replaces the install action with a spinner while busy', () => {
+    render(
+      <MarketPluginDetailView
+        detail={detail}
+        busy
+        onBack={vi.fn()}
+        onInstall={vi.fn()}
+        onIconLoadError={vi.fn()}
+      />,
+    );
+
+    const action = screen.getByRole('button', {
+      name: /settings\.ghosts\.market\.install/,
+    });
+    expect(action.getAttribute('aria-busy')).toBe('true');
+    expect(action.querySelector('.animate-spin')).toBeTruthy();
+    expect(action.textContent).toBe('');
+  });
 });

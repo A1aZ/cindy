@@ -1857,6 +1857,7 @@ export class PluginMarketService {
           ? {
               permissionPolicy: options.permissionPolicy,
               ...(permissionBaselineManifest ? { permissionBaselineManifest } : {}),
+              ...(options.reviewedManifest ? { reviewedManifest: options.reviewedManifest } : {}),
             }
           : {}),
         ...(options.approvedPackageSha256 !== undefined

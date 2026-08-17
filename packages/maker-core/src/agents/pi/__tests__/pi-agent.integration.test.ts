@@ -2177,6 +2177,78 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'redirect globs fail closed on inherited Bash options while ordinary globs stay fast',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-glob-options-'));
+      const previousBashOptions = process.env.BASHOPTS;
+      try {
+        writeFileSync(path.join(workingDir, '.env'), 'FAKE_DOTGLOB_SECRET=must-not-leak');
+        writeFileSync(path.join(workingDir, 'ordinary.txt'), 'ordinary-glob-content');
+        process.env.BASHOPTS = 'dotglob';
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'cat <*' }),
+          anthropicStreamBody('bash dotglob turn finished'),
+        );
+        const autoReqBefore = seenRequests.length;
+        const autoTurn = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-dotglob',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(autoTurn.resolverTools).toEqual(['bash']);
+        const autoFollowUp = seenRequests.slice(autoReqBefore).map((request) => request.body);
+        expect(autoFollowUp.some((body) => body.includes('FAKE_DOTGLOB_SECRET'))).toBe(false);
+        expect(autoFollowUp.some((body) => body.includes('User denied this tool call via Cindy.'))).toBe(true);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'cat <*' }),
+          anthropicStreamBody('bash Full Access dotglob turn finished'),
+        );
+        const fullAccessReqBefore = seenRequests.length;
+        const fullAccessTurn = await runPermissionTurn({
+          sessionId: 'perm-full-access-bash-dotglob',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(fullAccessTurn.resolverTools).toEqual([]);
+        const fullAccessFollowUp = seenRequests.slice(fullAccessReqBefore).map((request) => request.body);
+        expect(fullAccessFollowUp.some((body) => body.includes('FAKE_DOTGLOB_SECRET'))).toBe(false);
+        expect(fullAccessFollowUp.some((body) => body.includes('Cindy blocks reading credential or key paths')))
+          .toBe(true);
+
+        delete process.env.BASHOPTS;
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'cat <ordinary*' }),
+          anthropicStreamBody('bash ordinary glob turn finished'),
+        );
+        const ordinaryReqBefore = seenRequests.length;
+        const ordinaryTurn = await runPermissionTurn({
+          sessionId: 'perm-auto-bash-ordinary-glob',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(ordinaryTurn.resolverTools).toEqual([]);
+        const ordinaryFollowUp = seenRequests.slice(ordinaryReqBefore).map((request) => request.body);
+        expect(ordinaryFollowUp.some((body) => body.includes('ordinary-glob-content'))).toBe(true);
+        expect(ordinaryFollowUp.some((body) => body.includes('FAKE_DOTGLOB_SECRET'))).toBe(false);
+      } finally {
+        if (previousBashOptions === undefined) delete process.env.BASHOPTS;
+        else process.env.BASHOPTS = previousBashOptions;
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
   it.skipIf(process.platform === 'win32' || !canSymlink)(
     'auto mode fail closes inherited CDPATH while explicit relative cd keeps ordinary reads fast',
     { timeout: 60_000 },

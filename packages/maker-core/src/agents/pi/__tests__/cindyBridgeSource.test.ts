@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdtempSync,
   mkdirSync,
+  opendirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -217,6 +218,7 @@ describe('cindy-bridge extension source', () => {
       const tempRoot = mkdtempSync(path.join(tmpdir(), 'cindy-pi-credential-link-'));
       const context: {
         globSync: typeof globSync;
+        opendirSync: typeof opendirSync;
         realpathSync: typeof realpathSync;
         statSync: typeof statSync;
         path: typeof path;
@@ -237,6 +239,7 @@ describe('cindy-bridge extension source', () => {
         ) => string[] | null;
       } = {
         globSync,
+        opendirSync,
         realpathSync,
         statSync,
         path,
@@ -269,12 +272,38 @@ describe('cindy-bridge extension source', () => {
         const cwdSwitchName = 'cwd-switch-link';
         const rootCwdSwitchOrdinaryLink = path.join(tempRoot, cwdSwitchName);
         const nestedCwdSwitchSecretLink = path.join(nestedDir, cwdSwitchName);
+        const ordinaryGlobDir = path.join(tempRoot, 'ordinary-glob');
+        const ordinaryGlobPath = path.join(ordinaryGlobDir, 'ordinary.txt');
+        const dotglobDir = path.join(tempRoot, 'dotglob-only');
+        const dotglobSecretPath = path.join(dotglobDir, '.env');
+        const largeGlobDir = path.join(tempRoot, 'large-glob');
+        const workGlobDir = path.join(tempRoot, 'work-glob');
+        const deepGlobDir = path.join(tempRoot, 'deep-glob');
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
         mkdirSync(cdPathSubDir, { recursive: true });
+        mkdirSync(ordinaryGlobDir);
+        mkdirSync(dotglobDir);
+        mkdirSync(largeGlobDir);
+        mkdirSync(workGlobDir);
+        mkdirSync(deepGlobDir);
         writeFileSync(secretPath, 'FAKE PRIVATE KEY');
         writeFileSync(ordinaryPath, 'ordinary');
+        writeFileSync(ordinaryGlobPath, 'ordinary glob content');
+        writeFileSync(dotglobSecretPath, 'DOTGLOB_SECRET=must-not-leak');
+        for (let index = 0; index <= 1_024; index += 1) {
+          writeFileSync(path.join(largeGlobDir, `match-${index}.txt`), 'ordinary');
+        }
+        for (let index = 0; index < 4_096; index += 1) {
+          writeFileSync(path.join(workGlobDir, `nonmatch-${index}.txt`), 'ordinary');
+        }
+        let deepCursor = deepGlobDir;
+        for (let depth = 0; depth <= 64; depth += 1) {
+          deepCursor = path.join(deepCursor, `level-${depth}`);
+          mkdirSync(deepCursor);
+        }
+        writeFileSync(path.join(deepCursor, 'ordinary.txt'), 'ordinary');
         symlinkSync(secretPath, secretLink);
         symlinkSync(secretPath, nestedSecretLink);
         symlinkSync(secretPath, dashSecretLink);
@@ -351,6 +380,26 @@ describe('cindy-bridge extension source', () => {
             context.bashInputReadTargets?.({ command: expandedCommand }),
           ), expandedCommand).toEqual([realpathSync(secretPath)]);
         }
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${ordinaryGlobDir} && cat <*.txt`,
+        })).toEqual({ targets: [ordinaryGlobPath], unresolved: false });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${largeGlobDir} && cat <*.txt`,
+        })).toEqual({ targets: [], unresolved: true });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${workGlobDir} && cat <*.json`,
+        })).toEqual({ targets: [], unresolved: true });
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${deepGlobDir} && cat <**/*`,
+        })).toEqual({ targets: [], unresolved: true });
+        context.process.env.BASHOPTS = 'checkwinsize:dotglob';
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${dotglobDir} && cat <*>`,
+        })).toEqual({ targets: [], unresolved: true });
+        delete context.process.env.BASHOPTS;
+        expect(context.bashInputReadEvidence?.({
+          command: `cd ${ordinaryGlobDir} && cat <*.txt`,
+        })).toEqual({ targets: [ordinaryGlobPath], unresolved: false });
         expect(context.collectResolvedCredentialPaths?.(
           context.bashInputReadTargets?.({ command: "cat <>'innocent.*'" }),
         )).toEqual([]);

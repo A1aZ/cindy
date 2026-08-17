@@ -171,6 +171,10 @@ let autoRelaunchDecisionDepth = 0;
  * readyFilePath,只比路径会把刚下好的新渠道补丁清掉。
  */
 let deferredStagedPatch: { path?: string; epoch?: number } | undefined;
+/** 并发渠道写入各自持有一次 hold。失败只能放自己那次,不能清掉别人的保护。 */
+let pendingChannelChangeHolds = 0;
+/** 已经落盘成功的渠道切换。后续失败写入不能把这笔作废请求清掉。 */
+let committedChannelChangeInvalidation = false;
 let lastAutoRelaunchBlockReason: AutoRelaunchBlockReason | null = null;
 let lastBusyAtMs: number | null = null;
 let lastResumeAtMs: number | null = null;
@@ -364,7 +368,7 @@ async function requestAutoRelaunch(
 
     if (syncObservedUpdateChannel()) {
       log.info('auto relaunch aborted — shared update channel changed');
-      rememberDeferredStagedPatch();
+      markCommittedChannelChangeInvalidation();
       return { accepted: false, blockReason: 'not-ready' };
     }
 
@@ -657,9 +661,35 @@ function rememberDeferredStagedPatch(): void {
   };
 }
 
+function markCommittedChannelChangeInvalidation(): void {
+  committedChannelChangeInvalidation = true;
+  rememberDeferredStagedPatch();
+}
+
+function clearChannelChangeInvalidation(): void {
+  pendingChannelChangeHolds = 0;
+  committedChannelChangeInvalidation = false;
+  deferredStagedPatch = undefined;
+}
+
 /** 先拦住 apply,不删 zip / patch-info。写入没成功时还能继续用这份补丁。 */
 function holdStagedPatchForPendingChannelChange(): void {
+  pendingChannelChangeHolds += 1;
   rememberDeferredStagedPatch();
+}
+
+/** 只放掉本次未提交的 hold。已落盘的渠道切换仍要拦住旧补丁。 */
+function releasePendingChannelChangeHold(): void {
+  pendingChannelChangeHolds = Math.max(0, pendingChannelChangeHolds - 1);
+  if (pendingChannelChangeHolds === 0 && !committedChannelChangeInvalidation) {
+    deferredStagedPatch = undefined;
+  }
+}
+
+/** 本次写入已经改到盘上。后续失败的并发写入不能再放开 apply。 */
+function commitPendingChannelChange(): void {
+  pendingChannelChangeHolds = Math.max(0, pendingChannelChangeHolds - 1);
+  markCommittedChannelChangeInvalidation();
 }
 
 function isCurrentPatchNewerThanDeferred(
@@ -702,7 +732,7 @@ function flushDeferredStagedPatchClear(): void {
     }
     return;
   }
-  deferredStagedPatch = undefined;
+  clearChannelChangeInvalidation();
   if (isCurrentPatchNewerThanDeferred(stale)) {
     log.info('keeping newer staged patch after deferred channel-change clear');
     if (stale.path && stale.path !== readyFilePath) {
@@ -719,7 +749,7 @@ function flushDeferredStagedPatchClear(): void {
  */
 function discardUnappliedStagedPatchForChannelRelaunch(): void {
   if (isUpdateApplyCommitted()) return;
-  deferredStagedPatch = undefined;
+  clearChannelChangeInvalidation();
   discardStagedPatchFiles();
 }
 
@@ -1475,12 +1505,13 @@ export function initUpdateService(): void {
     } catch (err) {
       if (wasBeta !== next) {
         observedEnableBeta = wasBeta;
-        deferredStagedPatch = undefined;
+        releasePendingChannelChangeHold();
       }
       log.error('writeEnableBeta failed:', err);
       throwIpcError('INTERNAL', 'failed to write update channel settings');
     }
     if (wasBeta !== next) {
+      commitPendingChannelChange();
       clearStagedPatch();
     }
     return channelSettingsWire();
@@ -1498,12 +1529,13 @@ export function initUpdateService(): void {
     } catch (err) {
       if (wasBeta) {
         observedEnableBeta = wasBeta;
-        deferredStagedPatch = undefined;
+        releasePendingChannelChangeHold();
       }
       log.error('resetUpdateChannelSettings failed:', err);
       throwIpcError('INTERNAL', 'failed to reset update channel settings');
     }
     if (wasBeta) {
+      commitPendingChannelChange();
       clearStagedPatch();
     }
     return channelSettingsWire();
@@ -1706,17 +1738,18 @@ export async function enableUncustomizedBetaChannel(
     const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
     if (wrote && !wasBeta) {
       observedEnableBeta = true;
+      commitPendingChannelChange();
       clearStagedPatch();
       broadcastChannelSettings();
       return wrote;
     }
     if (!wasBeta) {
-      deferredStagedPatch = undefined;
+      releasePendingChannelChangeHold();
     }
     return wrote;
   } catch (err) {
     if (!wasBeta) {
-      deferredStagedPatch = undefined;
+      releasePendingChannelChangeHold();
     }
     throw err;
   }

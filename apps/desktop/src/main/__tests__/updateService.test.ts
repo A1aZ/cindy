@@ -857,6 +857,60 @@ describe('startup update relaunch safety', () => {
     }
   });
 
+  it('keeps a settings-page hold when a concurrent org-default write throws', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    let releaseWrite: (() => void) | undefined;
+    writeEnableBeta.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseWrite = () => resolve(undefined);
+        }),
+    );
+    tryEnableUncustomizedBetaAtomic.mockRejectedValue(new Error('lock timeout'));
+    try {
+      await probeStarted;
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      const writePromise = setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      await vi.waitFor(() => {
+        expect(releaseWrite).toBeTypeOf('function');
+      });
+      await expect(service.enableUncustomizedBetaChannel()).rejects.toThrow('lock timeout');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      releaseProbe?.(false);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('ready');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      logInfo.mockClear();
+      ipcListeners.get('update-relaunch')?.({}, 'dark');
+      expect(logInfo.mock.calls.map((call) => String(call[0]))).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('executeRelaunch() aborted'),
+        ]),
+      );
+      expect(service.getUpdateStatus()).toBe('ready');
+      releaseWrite?.();
+      await writePromise;
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('idle');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
   it('releases a pending hold when the org-default write throws', async () => {
     const service = await bootWithStagedPatch({ enabled: true });
     let releaseProbe: ((busy: boolean) => void) | undefined;

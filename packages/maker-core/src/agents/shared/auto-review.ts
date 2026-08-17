@@ -4808,6 +4808,9 @@ const DATE_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--reference', kind: 'aux-file' },
 ];
 const AG_LONG_OPTIONS: readonly ReaderLongOption[] = [
+  { name: '--file-search-regex', kind: 'selector' },
+  { name: '--ignore', kind: 'filter' },
+  { name: '--ignore-dir', kind: 'filter' },
   { name: '--path-to-ignore', kind: 'aux-file' },
 ];
 const TREE_LONG_OPTIONS: readonly ReaderLongOption[] = [
@@ -5311,6 +5314,88 @@ function rgCustomTypeCouldMatchCredential(
     rgCustomTypeCouldMatchCredential(included, definitions, nextVisiting));
 }
 
+type AgScopeOptionKind =
+  | 'hidden'
+  | 'recursive'
+  | 'non-recursive'
+  | 'value'
+  | 'optional-value'
+  | 'filename-only'
+  | 'flag';
+
+const AG_SCOPE_LONG_OPTIONS: ReadonlyArray<{ name: string; kind: AgScopeOptionKind }> = [
+  { name: '--ackmate-dir-filter', kind: 'value' },
+  { name: '--after', kind: 'optional-value' },
+  { name: '--before', kind: 'optional-value' },
+  { name: '--color-line-number', kind: 'value' },
+  { name: '--color-match', kind: 'value' },
+  { name: '--color-path', kind: 'value' },
+  { name: '--context', kind: 'optional-value' },
+  { name: '--depth', kind: 'value' },
+  { name: '--filename-pattern', kind: 'filename-only' },
+  { name: '--file-search-regex', kind: 'value' },
+  { name: '--heading', kind: 'flag' },
+  { name: '--help', kind: 'flag' },
+  { name: '--hidden', kind: 'hidden' },
+  { name: '--ignore', kind: 'value' },
+  { name: '--ignore-case', kind: 'flag' },
+  { name: '--ignore-dir', kind: 'value' },
+  { name: '--max-count', kind: 'value' },
+  { name: '--no-recurse', kind: 'non-recursive' },
+  { name: '--norecurse', kind: 'non-recursive' },
+  { name: '--pager', kind: 'value' },
+  { name: '--path-to-ignore', kind: 'value' },
+  { name: '--recurse', kind: 'recursive' },
+  { name: '--unrestricted', kind: 'hidden' },
+  { name: '--width', kind: 'value' },
+  { name: '--workers', kind: 'value' },
+];
+const AG_VALUE_SHORT_OPTIONS: ReadonlySet<string> = new Set(['A', 'B', 'C', 'G', 'm', 'p', 'W']);
+
+function agSearchesPotentialCredential(args: readonly string[]): boolean {
+  let hidden = false;
+  let recursive = true;
+  let filenameOnly = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') break;
+
+    if (token.startsWith('--')) {
+      const equalsIndex = token.indexOf('=');
+      const name = equalsIndex >= 0 ? token.slice(0, equalsIndex) : token;
+      const exact = AG_SCOPE_LONG_OPTIONS.find((option) => option.name === name);
+      const matches = exact
+        ? [exact]
+        : AG_SCOPE_LONG_OPTIONS.filter((option) => option.name.startsWith(name));
+      const option = matches.length === 1 ? matches[0] : null;
+      if (!option) continue;
+      if (option.kind === 'hidden') hidden = true;
+      if (option.kind === 'recursive') recursive = true;
+      if (option.kind === 'non-recursive') recursive = false;
+      if (option.kind === 'filename-only') filenameOnly = true;
+      if ((option.kind === 'value' || option.kind === 'filename-only') && equalsIndex < 0) index += 1;
+      continue;
+    }
+
+    if (!/^-[^-]/.test(token)) continue;
+    for (let optionIndex = 1; optionIndex < token.length; optionIndex += 1) {
+      const option = token.charAt(optionIndex);
+      if (option === 'u') hidden = true;
+      if (option === 'n') recursive = false;
+      if (option === 'r' || option === 'R') recursive = true;
+      if (option === 'g') filenameOnly = true;
+      if (option !== 'g' && !AG_VALUE_SHORT_OPTIONS.has(option)) continue;
+      if (optionIndex === token.length - 1) index += 1;
+      break;
+    }
+  }
+
+  // Explicit ignore patterns only subtract candidates and cannot prove that the
+  // complete credential language is excluded. Unrestricted mode ignores them.
+  return hidden && recursive && !filenameOnly;
+}
+
 function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
   let hidden = false;
   let unrestricted = 0;
@@ -5729,6 +5814,7 @@ function shellCommandReadsDotenv(
     if (readsCredentialInput) return true;
     const args = tokens.slice(1);
     if (grepRecursesIntoPotentialDotenv(bin, args)) return true;
+    if (bin === 'ag' && agSearchesPotentialCredential(args)) return true;
     if (bin === 'rg' && rgSearchesPotentialDotenv(args)) return true;
     if (readerArgumentsReadDotenv(bin, args, isDotenvCredentialPath, opts.platform ?? process.platform)) return true;
   }

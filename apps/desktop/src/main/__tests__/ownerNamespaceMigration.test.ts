@@ -268,7 +268,7 @@ describe('claimLegacyOwnerNamespace', () => {
     expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(true);
   });
 
-  it('prunes a schema-v1 record after proving that its PID was reused', async () => {
+  it('does not delete a registry record after proving that its PID was reused', async () => {
     const root = await tempRoot();
     const startedAtMs = 1_000_000;
     const recordPath = path.join(root, '.dev-instances', '4242.json');
@@ -288,54 +288,8 @@ describe('claimLegacyOwnerNamespace', () => {
       }),
     );
 
-    await expect(fs.access(recordPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(true);
-  });
-
-  it('keeps a replacement record that changes during stale-PID cleanup', async () => {
-    const root = await tempRoot();
-    const startedAtMs = 1_000_000;
-    const recordPath = path.join(root, '.dev-instances', '4242.json');
-    await writeDevInstanceRecord(root, 4242, root, {
-      instanceId: 'stale-instance',
-      startedAtMs,
-    });
-    const originalRaw = await fs.readFile(recordPath, 'utf-8');
-    const replacementRaw = JSON.stringify({
-      schemaVersion: 1,
-      instanceId: 'replacement-instance',
-      pid: 4242,
-      userDataDir: root,
-      startedAtMs: startedAtMs + 1,
-    });
-    let recordReads = 0;
-
-    await __testing.warmStaleProcessProvenance(
-      root,
-      realFsDeps(
-        root,
-        {
-          isPidAlive: (pid) => pid === 4242,
-          readProcessIdentity: () => ({
-            startedAtMs: startedAtMs + 120_000,
-            command: 'C:\\Windows\\System32\\OpenConsole.exe --server',
-          }),
-        },
-        {
-          readFile: async (file: string) => {
-            if (file !== recordPath) return fs.readFile(file, 'utf-8');
-            recordReads += 1;
-            if (recordReads === 1) return originalRaw;
-            await fs.writeFile(recordPath, replacementRaw, 'utf-8');
-            return replacementRaw;
-          },
-        },
-      ),
-    );
-
-    expect(recordReads).toBeGreaterThanOrEqual(2);
     await expect(fs.access(recordPath)).resolves.toBeUndefined();
-    expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(false);
   });
 
   it('keeps local startup fail-closed when provenance warmup cannot read identity', async () => {
@@ -3171,7 +3125,11 @@ describe('hasExclusiveSharedLegacyUserDataAccess', () => {
   it('reuses async stale-pid proof in sync guards and invalidates it when the record changes', async () => {
     const root = await tempRoot();
     const startedAtMs = 1_000_000;
-    await writeDevInstanceRecord(root, 4242, root, { startedAtMs });
+    const recordPath = path.join(root, '.dev-instances', '4242.json');
+    await writeDevInstanceRecord(root, 4242, root, {
+      instanceId: 'stale-instance',
+      startedAtMs,
+    });
 
     await claimLegacyOwnerNamespace(
       { mode: 'cloud', dataOwnerId: 'cloud-a', user: { id: 'cloud-a' } },
@@ -3186,10 +3144,20 @@ describe('hasExclusiveSharedLegacyUserDataAccess', () => {
 
     expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(true);
 
-    await writeDevInstanceRecord(root, 4242, root, {
+    const replacementRaw = JSON.stringify({
+      schemaVersion: 1,
+      instanceId: 'replacement-instance',
+      pid: 4242,
+      userDataDir: root,
+      passive: false,
       startedAtMs: startedAtMs + 1,
     });
+    const replacementPath = `${recordPath}.replacement`;
+    await fs.writeFile(replacementPath, replacementRaw, 'utf-8');
+    await fs.rename(replacementPath, recordPath);
+
     expect(hasExclusiveSharedLegacyUserDataAccess(root, (pid) => pid === 4242)).toBe(false);
+    await expect(fs.readFile(recordPath, 'utf-8')).resolves.toBe(replacementRaw);
   });
 });
 

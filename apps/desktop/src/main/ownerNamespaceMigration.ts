@@ -106,8 +106,6 @@ interface MigrationDeps {
 }
 
 interface RegisteredInstanceRecord {
-  schemaVersion?: number;
-  instanceId?: string;
   pid?: number;
   userDataDir?: string;
   startedAtMs?: number;
@@ -554,42 +552,6 @@ function recordedPidMayStillBeLive(
   }
   if (identity.startedAtMs <= recordedAtMs + PID_REUSE_TOLERANCE_MS) return true;
   return looksLikeCindyRuntime(identity.command, rootDir);
-}
-
-type StaleRegistrySettlement = 'pruned' | 'gone' | 'changed' | 'retained';
-
-/** Delete only the exact schema-v1 `<pid>.json` payload that the OS identity scan proved stale. */
-async function settleStaleRegistryRecord(
-  deps: MigrationDeps,
-  registryDir: string,
-  candidate: {
-    raw: string;
-    fileName: string;
-    schemaVersion: number | undefined;
-    instanceId: string | undefined;
-    pid: number;
-  },
-): Promise<StaleRegistrySettlement> {
-  if (
-    candidate.schemaVersion !== 1
-    || typeof candidate.instanceId !== 'string'
-    || candidate.instanceId.length === 0
-    || candidate.fileName !== `${candidate.pid}.json`
-  ) {
-    return 'retained';
-  }
-  const filePath = path.join(registryDir, candidate.fileName);
-  try {
-    if (await deps.readFile(filePath) !== candidate.raw) return 'changed';
-  } catch (error) {
-    return isMissing(error) ? 'gone' : 'changed';
-  }
-  try {
-    await deps.unlink(filePath);
-    return 'pruned';
-  } catch (error) {
-    return isMissing(error) ? 'gone' : 'retained';
-  }
 }
 
 /**
@@ -2493,8 +2455,6 @@ async function findConcurrentLiveInstancePids(
   const candidates: Array<{
     raw: string;
     fileName: string;
-    schemaVersion: number | undefined;
-    instanceId: string | undefined;
     pid: number;
     recordedAtMs: number | undefined;
     rootDir: string | undefined;
@@ -2529,8 +2489,6 @@ async function findConcurrentLiveInstancePids(
     candidates.push({
       raw,
       fileName: name,
-      schemaVersion: record.schemaVersion,
-      instanceId: record.instanceId,
       pid,
       recordedAtMs: record.startedAtMs,
       rootDir: record.rootDir,
@@ -2548,23 +2506,10 @@ async function findConcurrentLiveInstancePids(
     if (recordedPidMayStillBeLive(candidate.recordedAtMs, candidate.rootDir, identity)) {
       pids.push(candidate.pid);
     } else {
-      const settlement = await settleStaleRegistryRecord(deps, registryDir, candidate);
-      if (settlement === 'changed') {
-        // The identity belongs to the old payload; a replacement remains unproven in this pass.
-        pids.push(candidate.pid);
-        continue;
-      }
-      if (settlement === 'retained') {
-        rememberStaleProcessProof(
-          processProofKey(userDataDir, 'registry', `${candidate.fileName}\u0000${candidate.raw}`),
-        );
-      }
-      log.info(
-        settlement === 'pruned'
-          ? 'pruned stale instance registry record after PID reuse'
-          : 'ignoring stale instance registry record after PID reuse',
-        { pid: candidate.pid },
+      rememberStaleProcessProof(
+        processProofKey(userDataDir, 'registry', `${candidate.fileName}\u0000${candidate.raw}`),
       );
+      log.info('ignoring stale instance registry record after PID reuse', { pid: candidate.pid });
     }
   }
 

@@ -46,7 +46,7 @@ import {
 } from '@/components/new-chat/sourceSwitch';
 import {
   isModelEnabled,
-  setManyVisibility,
+  setModelVisibilities,
   setModelVisibility,
   useModelVisibilityVersion,
 } from '@/state/modelVisibilityPrefs';
@@ -481,35 +481,36 @@ export function UnifiedModelList({
   const toggleRow = useCallback(
     (row: UnionModelRow) => {
       const next = !rowAnyEnabled(provider.id, row);
-      let failed = false;
-      for (const a of row.avail) {
-        const m = row.byAgent[a];
-        if (m && setModelVisibility(a, provider.id, m.id, next) === false) failed = true;
+      const targets = row.avail.flatMap((agent) => {
+        const model = row.byAgent[agent];
+        return model ? [{ agent, modelId: model.id }] : [];
+      });
+      if (setModelVisibilities(provider.id, targets, next) === false) {
+        showVisibilityWriteFailure();
       }
-      if (failed) showVisibilityWriteFailure();
     },
     [provider.id, showVisibilityWriteFailure],
   );
 
-  /** 全部显示 / 隐藏:逐 agent 批量写(单 agent 一次落盘)。只作用于**对话模型的显示轴**
+  /** 全部显示 / 隐藏:跨 agent 一次落盘。只作用于**对话模型的显示轴**
    *  —— 能力模型没有显示轴,停用行没有可显示态,都不写(写了 = 无效 override 污染存储,
    *  且历史上会把图像模型漏进选择器)。停用判定含乐观覆盖(pendingDisabled,按规范化
    *  行 key):刚停用、快照未回来的行同样不写(PR #744 review)。 */
   const handleBulk = useCallback(() => {
     const next = !allOn;
-    let failed = false;
-    for (const agent of provider.agents) {
-      const ids = (provider.models[agent] ?? [])
+    const targets = provider.agents.flatMap((agent) =>
+      (provider.models[agent] ?? [])
         .filter(
           (m) =>
             isAgentSelectableModel(m, { userProvider: provider.source === 'user' }) &&
             (pendingDisabled[canonicalModelKey(provider, agent, m.id)] ?? m.disabled === true) !==
               true,
         )
-        .map((m) => m.id);
-      if (setManyVisibility(agent, provider.id, ids, next) === false) failed = true;
+        .map((model) => ({ agent, modelId: model.id })),
+    );
+    if (setModelVisibilities(provider.id, targets, next) === false) {
+      showVisibilityWriteFailure();
     }
-    if (failed) showVisibilityWriteFailure();
   }, [allOn, provider, pendingDisabled, showVisibilityWriteFailure]);
 
   /** 行级「⋯」菜单(hover 显现;菜单打开期间保持可见):停用动作的唯一入口。 */

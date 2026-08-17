@@ -20,7 +20,7 @@
  *   - 「全部开启 / 全部关闭」是显式批量动作 → 为当前 agent 该来源的每个模型写显式 override。
  *
  * 谁读谁写:
- *   - 写:ProvidersSection 的模型开关 / 批量按钮(setModelVisibility / setManyVisibility)。
+ *   - 写:ProvidersSection 的模型开关 / 批量按钮(setModelVisibility / setModelVisibilities)。
  *   - 读:ModelSelector 的右栏过滤(isModelEnabled);ProvidersSection 的计数与开关态。
  *
  * 持久化频率低(仅用户点开关触发),同步写 localStorage,不做 batch / debounce —— 与
@@ -112,7 +112,11 @@ function migrateLegacyVisibility(ownerId: string, ownerGeneration: number): Migr
     // Main 用模型可见性专属 marker 把旧 key 原子归属给升级时的当前稳定 local/cloud owner；
     // canInitialize 还保证此刻没有另一个共享 userData 的旧进程在并发改写迁移输入。
     const claim = window.electronAPI?.maker?.claimLegacyModelVisibilityOwner?.();
-    if (claim?.dataOwnerId !== ownerId || claim.ownerGeneration !== ownerGeneration) {
+    if (
+      claim?.dataOwnerId !== ownerId
+      || claim.ownerGeneration !== ownerGeneration
+      || claim.canWriteOwnerScoped !== true
+    ) {
       return BLOCKED_MIGRATION;
     }
     if (claim.claimedByOtherOwner === true) {
@@ -123,7 +127,12 @@ function migrateLegacyVisibility(ownerId: string, ownerGeneration: number): Migr
         migrationPending: false,
       };
     }
-    if (claim.claimed !== true) return BLOCKED_MIGRATION;
+    if (claim.claimed !== true) {
+      // A missing/blocked legacy marker only defers importing the pre-account snapshot. The
+      // stable current owner can still write its isolated key; a later import merges scoped
+      // values last, so these new settings win without mutating the legacy input.
+      return { readyForWrites: true, migrationPending: true };
+    }
     if (claim.canInitialize !== true) {
       // 归属已经明确时，新设置可以安全写进 owner namespace；只把旧全局快照的导入推迟到独占时。
       return { readyForWrites: true, migrationPending: true };
@@ -203,7 +212,8 @@ const listeners = new Set<() => void>();
 
 interface VisibilityWriteContext {
   operation: 'single' | 'bulk';
-  agent: AgentKind;
+  agent?: AgentKind;
+  agentCount?: number;
   providerId: string;
   enabled: boolean;
   modelId?: string;
@@ -291,6 +301,40 @@ export function isModelEnabled(
   return isModelVisible(load()[keyOf(agent, providerId, model.id)], model.defaultEnabled);
 }
 
+function setVisibilityTargets(
+  providerId: string,
+  targets: readonly { agent: AgentKind; modelId: string }[],
+  enabled: boolean,
+  context: VisibilityWriteContext,
+): boolean {
+  if (!providerId || targets.some(({ modelId }) => !modelId)) {
+    log.warn('model visibility write rejected', { reason: 'invalid-target', ...context });
+    return false;
+  }
+  if (targets.length === 0) return true;
+  if (!ensureActiveOwnerReadyForWrites()) {
+    log.warn('model visibility write rejected', {
+      reason: 'owner-write-not-ready',
+      ...context,
+      ownerGeneration: activeOwnerGeneration,
+      mode: activeOwnerMode,
+      migrationPending: activeOwnerMigrationPending,
+    });
+    return false;
+  }
+  const map = load();
+  let changed = false;
+  const next = { ...map };
+  for (const { agent, modelId } of targets) {
+    const k = keyOf(agent, providerId, modelId);
+    if (next[k] !== enabled) {
+      next[k] = enabled;
+      changed = true;
+    }
+  }
+  return changed ? persist(next, context) : true;
+}
+
 /** 写单个 (agent, 来源, 模型) 的可见性 override。同值短路,避免无意义落盘 / 通知。 */
 export function setModelVisibility(
   agent: AgentKind,
@@ -305,24 +349,7 @@ export function setModelVisibility(
     modelId,
     enabled,
   };
-  if (!providerId || !modelId) {
-    log.warn('model visibility write rejected', { reason: 'invalid-target', ...context });
-    return false;
-  }
-  if (!ensureActiveOwnerReadyForWrites()) {
-    log.warn('model visibility write rejected', {
-      reason: 'owner-write-not-ready',
-      ...context,
-      ownerGeneration: activeOwnerGeneration,
-      mode: activeOwnerMode,
-      migrationPending: activeOwnerMigrationPending,
-    });
-    return false;
-  }
-  const map = load();
-  const k = keyOf(agent, providerId, modelId);
-  if (map[k] === enabled) return true;
-  return persist({ ...map, [k]: enabled }, context);
+  return setVisibilityTargets(providerId, [{ agent, modelId }], enabled, context);
 }
 
 /**
@@ -343,32 +370,30 @@ export function setManyVisibility(
     modelCount: modelIds.length,
     enabled,
   };
-  if (!providerId) {
-    log.warn('model visibility write rejected', { reason: 'invalid-target', ...context });
-    return false;
-  }
-  if (modelIds.length === 0) return true;
-  if (!ensureActiveOwnerReadyForWrites()) {
-    log.warn('model visibility write rejected', {
-      reason: 'owner-write-not-ready',
-      ...context,
-      ownerGeneration: activeOwnerGeneration,
-      mode: activeOwnerMode,
-      migrationPending: activeOwnerMigrationPending,
-    });
-    return false;
-  }
-  const map = load();
-  let changed = false;
-  const next = { ...map };
-  for (const id of modelIds) {
-    const k = keyOf(agent, providerId, id);
-    if (next[k] !== enabled) {
-      next[k] = enabled;
-      changed = true;
-    }
-  }
-  return changed ? persist(next, context) : true;
+  return setVisibilityTargets(
+    providerId,
+    modelIds.map((modelId) => ({ agent, modelId })),
+    enabled,
+    context,
+  );
+}
+
+/**
+ * 跨 agent 原子写一组模型可见性。统一列表的一次用户操作必须只落盘一次，避免前一
+ * agent 成功、后一 agent 失败后界面进入部分提交状态，导致重试方向反转。
+ */
+export function setModelVisibilities(
+  providerId: string,
+  targets: readonly { agent: AgentKind; modelId: string }[],
+  enabled: boolean,
+): boolean {
+  return setVisibilityTargets(providerId, targets, enabled, {
+    operation: 'bulk',
+    providerId,
+    agentCount: new Set(targets.map(({ agent }) => agent)).size,
+    modelCount: targets.length,
+    enabled,
+  });
 }
 
 /**

@@ -182,6 +182,33 @@ describe('GhostPluginCard', () => {
     expect(onManage).not.toHaveBeenCalled();
   });
 
+  it.each(['Enter', ' '] as const)(
+    'opens plugin details when the card itself is activated with %s',
+    (key) => {
+      const onPrimary = vi.fn();
+      const onManage = vi.fn();
+      render(<GhostPluginCard item={commandPlugin} onPrimary={onPrimary} onManage={onManage} />);
+
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Filo Google' }), { key });
+      expect(onManage).toHaveBeenCalledTimes(1);
+      expect(onPrimary).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['Enter', ' '] as const)(
+    'does not treat a nested pill %s as a card activation',
+    (key) => {
+      const onPrimary = vi.fn();
+      const onManage = vi.fn();
+      render(<GhostPluginCard item={commandPlugin} onPrimary={onPrimary} onManage={onManage} />);
+
+      fireEvent.keyDown(screen.getByRole('button', { name: 'settings.ghosts.page.chatAria' }), {
+        key,
+      });
+      expect(onManage).not.toHaveBeenCalled();
+    },
+  );
+
   it('labels the primary button 使用 for a tab-panel plugin', () => {
     const onPrimary = vi.fn();
     const onManage = vi.fn();

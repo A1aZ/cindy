@@ -123,6 +123,17 @@ vi.mock('../cindy-brain/index', () => ({
   getGhostNodeRuntimeBroker: () => ({ destroyAll: vi.fn() }),
 }));
 
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: () => ({
+      unref: vi.fn(),
+      on: vi.fn(),
+    }),
+  };
+});
+
 vi.mock('../security/trustedAppRenderer', () => ({
   assertTrustedAppRendererEvent: vi.fn(),
 }));

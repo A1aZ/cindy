@@ -70,10 +70,13 @@ describe('GhostPanelRestoreEntry', () => {
     expect(screen.queryByTestId('ghost-panel-restore-entry')).toBeNull();
 
     act(() => setGhostPanelRestoreMode('sidebar'));
-    expect(screen.getByTestId('ghost-panel-restore-entry')).toBeTruthy();
+    const trigger = screen.getByTestId('ghost-panel-restore-entry');
+    expect(screen.getByTestId('ghost-panel-restore-label').textContent).toBe('a 面板');
+    expect(trigger.getAttribute('title')).toBe('a 面板');
+    expect(trigger.getAttribute('aria-label')).toContain('ghostPanelRestore.single');
 
     act(() => {
-      fireEvent.click(screen.getByTestId('ghost-panel-restore-entry'));
+      fireEvent.click(trigger);
     });
     expect(getGhostPanelBubbleState().a?.minimized).not.toBe(true);
     expect(screen.queryByTestId('ghost-panel-restore-entry')).toBeNull();

@@ -48,11 +48,9 @@ export function GhostPanelRestoreEntry({
   if (mode !== 'sidebar' || minimized.length === 0) return null;
 
   const single = minimized.length === 1 ? minimized[0] : null;
-  const label = single
-    ? t('ghostPanelRestore.single', { name: panelName(single) })
-    : t('ghostPanelRestore.multiple');
+  const label = single ? panelName(single) : t('ghostPanelRestore.multiple');
   const ariaLabel = single
-    ? label
+    ? t('ghostPanelRestore.single', { name: label })
     : t('ghostPanelRestore.multipleAria', { count: minimized.length });
   const content = (
     <>

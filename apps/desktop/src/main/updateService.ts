@@ -99,6 +99,12 @@ interface PatchInfo {
    * fails (deterministic — retry won't help) or when the threshold is hit.
    */
   applyAttempts?: number;
+  /**
+   * 下载这份补丁时的有效渠道。共库另一实例在本进程停机期间切过渠道后,
+   * 冷启动读盘对账会丢掉这份旧包,避免 manifest 失败时把旧渠道 zip 当匹配补丁装上。
+   * 旧 patch-info 没有这个字段,保持原行为。
+   */
+  enableBeta?: boolean;
 }
 
 /**
@@ -573,6 +579,19 @@ function checkExistingPatch(): { action: 'relaunch' | 'check' | 'none'; version?
     return { action: 'check' };
   }
 
+  const currentEnableBeta = readUpdateChannelSettings().enableBeta;
+  if (typeof patchInfo.enableBeta === 'boolean' && patchInfo.enableBeta !== currentEnableBeta) {
+    log.info(
+      'discarding staged patch v%s from another update channel (patch=%s current=%s)',
+      patchInfo.version,
+      patchInfo.enableBeta ? 'beta' : 'release',
+      currentEnableBeta ? 'beta' : 'release',
+    );
+    try { fs.unlinkSync(patchFilePath); } catch { /* ignore */ }
+    removePatchInfo();
+    return { action: 'check' };
+  }
+
   const currentVersion = app.getVersion();
   if (patchInfo.version === currentVersion) {
     // Patch matches current version → already applied; clean up and re-check.
@@ -871,6 +890,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
   // 快照发起时的渠道代际;下载期间若用户 opt-out(clearStagedPatch 递增),
   // 成功/失败写回前都据此作废本次产物。
   const channelEpochAtStart = updateChannelEpoch;
+  const channelEnableBetaAtStart = observedEnableBeta;
 
   if (isVersionlessAppVersion(app.getVersion())) {
     log.info('Versionless build (placeholder %s) — in-app update disabled', app.getVersion());
@@ -1055,6 +1075,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       fileName,
       sha256: asset.sha256.toLowerCase(),
       requireRelogin,
+      enableBeta: channelEnableBetaAtStart,
     });
     // release-relogin-on-update: drop the marker the moment we've committed a
     // good patch on disk. Doing it here (rather than inside the platform
@@ -1681,17 +1702,24 @@ export async function enableUncustomizedBetaChannel(
   if (!wasBeta) {
     holdStagedPatchForPendingChannelChange();
   }
-  const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
-  if (wrote && !wasBeta) {
-    observedEnableBeta = true;
-    clearStagedPatch();
-    broadcastChannelSettings();
+  try {
+    const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
+    if (wrote && !wasBeta) {
+      observedEnableBeta = true;
+      clearStagedPatch();
+      broadcastChannelSettings();
+      return wrote;
+    }
+    if (!wasBeta) {
+      deferredStagedPatch = undefined;
+    }
     return wrote;
+  } catch (err) {
+    if (!wasBeta) {
+      deferredStagedPatch = undefined;
+    }
+    throw err;
   }
-  if (!wasBeta) {
-    deferredStagedPatch = undefined;
-  }
-  return wrote;
 }
 
 export function stopUpdateService(): void {

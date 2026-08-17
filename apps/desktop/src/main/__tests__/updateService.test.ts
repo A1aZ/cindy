@@ -856,6 +856,69 @@ describe('startup update relaunch safety', () => {
       service.stopUpdateService();
     }
   });
+
+  it('releases a pending hold when the org-default write throws', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    tryEnableUncustomizedBetaAtomic.mockRejectedValue(new Error('lock timeout'));
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).rejects.toThrow('lock timeout');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('ready');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('does not apply a leftover patch after an offline channel change', async () => {
+    const updatesDir = path.join(TEST_USER_DATA, 'updates');
+    fs.mkdirSync(updatesDir, { recursive: true });
+    fs.writeFileSync(path.join(updatesDir, 'xdt-maker-0.0.65.zip'), 'update');
+    fs.writeFileSync(
+      path.join(updatesDir, 'patch-info.json'),
+      JSON.stringify({
+        version: '0.0.65',
+        fileName: 'xdt-maker-0.0.65.zip',
+        sha256: 'abc',
+        enableBeta: false,
+      }),
+    );
+    readUpdateChannelSettings.mockReturnValue({
+      enableBeta: true,
+      orgDefaultEnableBeta: true,
+    });
+    fetchManifest.mockResolvedValue(null);
+    const service = await freshUpdateService('darwin');
+    service.initUpdateService();
+    try {
+      const handler = ipcHandlers.get('update-check-startup');
+      expect(handler).toBeTypeOf('function');
+      await expect(handler?.()).resolves.toMatchObject({
+        hasUpdate: false,
+        action: 'none',
+        error: 'manifest_failed',
+      });
+      expect(service.getUpdateStatus()).toBe('idle');
+      expect(fs.existsSync(path.join(updatesDir, 'patch-info.json'))).toBe(false);
+      expect(fs.existsSync(path.join(updatesDir, 'xdt-maker-0.0.65.zip'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
 });
 
 describe('splash 启动下载 0% 显式广播', () => {

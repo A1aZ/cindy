@@ -396,8 +396,14 @@ function pollError(value: unknown, path: string): string | null {
   if (error) return error;
   error = headersError(value.headers, `${path}.headers`);
   if (error) return error;
-  if (
-    value.method === 'POST' &&
+  if (value.method === 'GET') {
+    if (!(value.path as string).includes('{taskId}')) {
+      return `${path} GET polling path must include {taskId}`;
+    }
+    if (value.bodyTaskIdPath !== undefined) {
+      return `${path}.bodyTaskIdPath is only valid for POST polling`;
+    }
+  } else if (
     value.bodyTaskIdPath === undefined &&
     !(value.path as string).includes('{taskId}')
   ) {

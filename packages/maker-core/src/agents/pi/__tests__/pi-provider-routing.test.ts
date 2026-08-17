@@ -1386,7 +1386,11 @@ describe('Pi provider-aware model routing', () => {
     );
     const imageMessage = {
       type: 'user' as const,
-      content: [{ type: 'image' as const, path: imagePath }],
+      content: [{
+        type: 'image' as const,
+        path: imagePath,
+        managedUrl: 'xdt-image://pi-managed/screenshot.png',
+      }],
     };
     const mixedMessage = {
       type: 'user' as const,
@@ -1435,6 +1439,20 @@ describe('Pi provider-aware model routing', () => {
     await handle.send(imageMessage);
     expect(captured.requests).toContainEqual(expect.objectContaining({
       type: 'prompt',
+      message: expect.stringContaining(JSON.stringify({
+        image: 1,
+        uri: 'xdt-image://pi-managed/screenshot.png',
+      })),
+      images: [expect.objectContaining({ type: 'image', mimeType: 'image/png' })],
+    }));
+    captured.requests.length = 0;
+    await handle.steer!(imageMessage);
+    expect(captured.requests).toContainEqual(expect.objectContaining({
+      type: 'steer',
+      message: expect.stringContaining(JSON.stringify({
+        image: 1,
+        uri: 'xdt-image://pi-managed/screenshot.png',
+      })),
       images: [expect.objectContaining({ type: 'image', mimeType: 'image/png' })],
     }));
 

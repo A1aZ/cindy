@@ -301,9 +301,9 @@ function registerGhostProtocol(partition: string, ghost: InstalledGhost): void {
           },
         });
       }
-      // /media-models?type=image|video:插件自己的设置页 / 面板读取可配置模型及
-      // Gateway modalities。Host 不解释具体业务动作；端点仍不发起生成，也不返回
-      // 凭证、endpoint 或 Guide。
+      // /media-models?type=image|video:插件自己的设置页 / 面板读取当前客户端可执行
+      // 模型及 Gateway modalities。兼容判定由 Host provider 完成；端点仍不发起生成，
+      // 也不返回凭证、endpoint、Guide 或内部判定细节。
       if (url.pathname === '/media-models') {
         if (request.method !== 'GET') return new Response(null, { status: 405 });
         const keys = [...url.searchParams.keys()];

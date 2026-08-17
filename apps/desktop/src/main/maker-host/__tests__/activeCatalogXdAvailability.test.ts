@@ -15,6 +15,7 @@ import { BUNDLED_CATALOG, type CatalogModel } from '@cindy/model-providers';
 
 import {
   getActiveCatalog,
+  getXdGatewayModels,
   resolveXdPiGatewayWireProtocol,
   setActiveCatalog,
   setAnthropicDiscoveredModels,
@@ -38,9 +39,6 @@ describe('XD 网关权威模型清单重建', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     expect(xdModels('claude-code')).toEqual([]);
     expect(xdModels('codex')).toEqual([]);
-    const xd = getActiveCatalog().providers.find((provider) => provider.id === 'xd');
-    expect(xd?.imageModels).toEqual([]);
-    expect(xd?.videoModels).toEqual([]);
   });
 
   it('显式空列表保持 XD 模型不可用', () => {
@@ -50,12 +48,17 @@ describe('XD 网关权威模型清单重建', () => {
     expect(xdModels('codex')).toEqual([]);
   });
 
-  it('远端 Catalog 不能覆盖 XD Provider 壳或注入 XD 模型', () => {
+  it('current Catalog controls the XD media shell while /models controls chat membership', () => {
     const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as typeof BUNDLED_CATALOG;
     const catalogXd = catalog.providers.find((provider) => provider.id === 'xd');
-    const builtinXd = BUNDLED_CATALOG.providers.find((provider) => provider.id === 'xd');
-    if (!catalogXd || !builtinXd) throw new Error('missing XD provider fixture');
+    if (!catalogXd) throw new Error('missing XD provider fixture');
     catalogXd.name = 'Catalog-supplied XD';
+    catalogXd.imageModels = [];
+    delete catalogXd.imageDefaults;
+    catalogXd.embeddingModels = [];
+    delete catalogXd.embeddingDefaults;
+    catalogXd.videoModels = [{ id: 'seedance-fast', name: 'Seedance Fast' }];
+    catalogXd.videoDefaults = { standard: 'seedance-fast' };
     catalogXd.models['claude-code'] = [
       {
         id: 'catalog-only-model',
@@ -69,7 +72,10 @@ describe('XD 网关权威模型清单重建', () => {
     setActiveCatalog(catalog);
 
     const activeXd = getActiveCatalog().providers.find((provider) => provider.id === 'xd');
-    expect(activeXd?.name).toBe(builtinXd.name);
+    expect(activeXd?.name).toBe('Catalog-supplied XD');
+    expect(activeXd?.imageModels).toEqual([]);
+    expect(activeXd?.embeddingModels).toEqual([]);
+    expect(activeXd?.videoModels).toEqual([{ id: 'seedance-fast', name: 'Seedance Fast' }]);
     expect(xdModels('claude-code')).toEqual([]);
   });
 
@@ -187,7 +193,7 @@ describe('XD 网关权威模型清单重建', () => {
     expect(xdModels('codex').map((model) => model.id)).toEqual(['codex-native-only']);
   });
 
-  it('媒体 mode 条目不进入聊天目录，并重建设置页专属媒体清单', () => {
+  it('媒体 mode 条目不进入聊天目录，并保留在原始 Gateway 快照', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     setXdGatewayModels([
       {
@@ -209,11 +215,11 @@ describe('XD 网关权威模型清单重建', () => {
       },
     ]);
 
-    const xd = getActiveCatalog().providers.find((provider) => provider.id === 'xd');
-    expect(xd?.imageModels).toEqual([{ id: 'image-without-guide', name: 'Image Without Guide' }]);
-    expect(xd?.videoModels).toEqual([{ id: 'video-model', name: 'Video Model' }]);
-    expect(xd?.imageDefaults).toBeUndefined();
-    expect(xd?.videoDefaults).toBeUndefined();
+    expect(getXdGatewayModels().map((model) => model.id)).toEqual([
+      'image-without-guide',
+      'video-model',
+      'chat-model',
+    ]);
     expect(xdModels('claude-code')).toEqual([]);
     expect(xdModels('codex').map((model) => model.id)).toEqual(['chat-model']);
   });

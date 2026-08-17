@@ -127,6 +127,7 @@
       "chipMetrics": "用量指示器",
       "memory": "記憶",
       "subagentModels": "Subagent",
+      "visionBridge": "視覺橋",
       "compaction": "上下文壓縮",
       "terminalShell": "預設終端 shell",
       "composer": "訊息輸入",
@@ -308,6 +309,7 @@
         "statusInstalled": "已安裝",
         "statusNotInstalled": "未安裝",
         "claudeCodeName": "Claude Code",
+        "piName": "Pi",
         "button": {
           "install": "安裝",
           "reinstall": "重新安裝",
@@ -477,7 +479,7 @@
         "reset": "恢復預設佈局",
         "resetSuccess": "已恢復預設面板佈局",
         "resetFailed": "無法恢復預設面板佈局",
-        "saved": "面板位置已儲存；可在「設定 → 外觀」中恢復預設佈局",
+        "saved": "面板位置已儲存；可在「設定 → 一般」的「外觀」區段恢復預設配置",
         "saveFailed": "無法儲存面板位置"
       }
     },
@@ -984,7 +986,7 @@
         },
         "inputMonitoring": {
           "label": "監聽權限",
-          "tooltip": "用於監聽 Fn、單獨 Command / Option / Control 以及帶 Fn 的語音輸入快捷鍵。普通組合鍵和 F1-F24 單鍵通常不需要。已授權表示當前執行中的 App 可以監聽快捷鍵；開發版可能由 Terminal 承載授權。"
+          "tooltip": "用於監聽 Fn、單獨 Command / Option / Control、帶 Fn 的快捷鍵，以及 F1-F24 單鍵按住說話的放開事件。普通組合鍵不需要。已授權表示目前執行中的 App 可以監聽快捷鍵；開發版可能由 Terminal 承載授權。"
         },
         "accessibility": {
           "label": "自動輸入",
@@ -1450,6 +1452,30 @@
           "empty": "沒有匹配的模型",
           "confirm": "填入所選模型（{{count}}）"
         },
+        "authMode": {
+          "label": "鑑權方式",
+          "apiKey": "API 金鑰",
+          "oauth": "OAuth 訂閱授權",
+          "none": "無需鑑權",
+          "noneHelp": "適用於本機或受信任的自託管 Proxy。Cindy 會移除 CLI 自帶的訂閱憑證和帳號頭，再把請求發往該端點。",
+          "oauthHelp": "適用於提供 OAuth 登入的供應商。可選擇瀏覽器回撥或裝置碼流程，儲存後從供應商列表發起授權。憑證僅加密儲存在本機。",
+          "flowLabel": "OAuth 流程",
+          "flow": {
+            "authorization-code": "瀏覽器回撥（PKCE）",
+            "device-code": "裝置碼"
+          },
+          "fields": {
+            "authorizeUrl": "授權端點 (Authorize URL)",
+            "deviceAuthorizationUrl": "裝置授權端點 (Device Authorization URL)",
+            "tokenUrl": "令牌端點 (Token URL)",
+            "clientId": "Client ID",
+            "scopes": "Scopes（空格分隔）"
+          },
+          "modelsAutoNote": "模型清單將在授權成功後自動獲取，無需手動填寫。"
+        },
+        "advanced": {
+          "label": "高階配置（模型 / 請求頭）"
+        },
         "runtimeFill": {
           "action": "填入其他 Runtime",
           "reviewTitle": "填入其他 Runtime",
@@ -1514,30 +1540,6 @@
           "modelsBusy": "請先完成正在進行的模型列表獲取或選擇，再填入其他 Runtime",
           "noCompatibleFields": "其他 Runtime 不支援目前 Runtime 中可重用的欄位",
           "filledToast": "已填入 {{targets}}；各 Runtime 仍保持獨立"
-        },
-        "authMode": {
-          "label": "鑑權方式",
-          "apiKey": "API 金鑰",
-          "oauth": "OAuth 訂閱授權",
-          "none": "無需鑑權",
-          "noneHelp": "適用於本機或受信任的自託管 Proxy。Cindy 會移除 CLI 自帶的訂閱憑證和帳號頭，再把請求發往該端點。",
-          "oauthHelp": "適用於提供 OAuth 登入的供應商。可選擇瀏覽器回撥或裝置碼流程，儲存後從供應商列表發起授權。憑證僅加密儲存在本機。",
-          "flowLabel": "OAuth 流程",
-          "flow": {
-            "authorization-code": "瀏覽器回撥（PKCE）",
-            "device-code": "裝置碼"
-          },
-          "fields": {
-            "authorizeUrl": "授權端點 (Authorize URL)",
-            "deviceAuthorizationUrl": "裝置授權端點 (Device Authorization URL)",
-            "tokenUrl": "令牌端點 (Token URL)",
-            "clientId": "Client ID",
-            "scopes": "Scopes（空格分隔）"
-          },
-          "modelsAutoNote": "模型清單將在授權成功後自動獲取，無需手動填寫。"
-        },
-        "advanced": {
-          "label": "高階配置（模型 / 請求頭）"
         }
       },
       "models": {
@@ -1755,6 +1757,21 @@
         "enabled": "LSP 已開啟，新建 Agent 會話後生效",
         "disabled": "LSP 已關閉，新建 Agent 會話後生效",
         "toggleFailed": "切換 LSP 開關失敗"
+      }
+    },
+    "betaChannel": {
+      "title": "Beta 測試管道",
+      "description": "加入 Beta 測試管道，提前接收即將發布的客戶端更新。開啟後需重新啟動客戶端生效。",
+      "toggleAria": "Beta 測試管道開關",
+      "restartTitle": "重新啟動客戶端",
+      "restartDescription": "Beta 測試管道需要重新啟動客戶端後才能生效，是否立即重新啟動？",
+      "restartNow": "立即重新啟動",
+      "restartLater": "稍後",
+      "restartBusyDescription": "目前有任務進行中，重新啟動會中斷它們。確定要立即重新啟動嗎？",
+      "unavailable": "Beta 測試管道暫不可用，無法連接到 Beta 更新伺服器。",
+      "toast": {
+        "disabled": "Beta 測試管道已關閉，重新啟動後生效",
+        "toggleFailed": "切換 Beta 測試管道失敗"
       }
     },
     "gitSafety": {
@@ -2319,7 +2336,7 @@
       "title": "Subagent",
       "description": "分別設定 Claude Code 和 Codex 執行子任務時使用的預設模型，併為 Codex Subagent 配置執行護欄。設定按入口生效，不會為每個模型單獨儲存。",
       "unspecified": "不指定（跟隨原邏輯）",
-      "hint": "可選模型取決於已連線的模型來源；留空表示使用 Agent 原本的預設設定。Claude Code 的修改從新建的 Agent 會話開始生效；Codex 的修改在空閒時立即重啟生效，有任務執行時會在本地 Codex 會話全部空閒後自動應用。",
+      "hint": "Claude Code Subagent 僅支援指定模型，推理強度沿用 Claude Code 原生邏輯。可選模型取決於已連線的模型來源；留空表示使用 Agent 原本的預設設定。Claude Code 的修改從新建的 Agent 會話開始生效；Codex 的修改在空閒時立即重啟生效，有任務執行時會在本地 Codex 會話全部空閒後自動應用。",
       "codexV2ModelHint": "Subagent 預設模型必須是 Codex 自身模型目錄內的模型，目錄外的模型（如經相容橋接入的第三方模型）會被 Codex 拒絕；Sol / Terra（Multi-Agent V2）進一步只接受 V2 目錄模型（當前為 gpt-5.6-sol 與 gpt-5.6-terra），舊版（V1）無 V2 限制。",
       "saveFailed": "儲存 Subagent 設定失敗",
       "guardrails": {
@@ -2429,6 +2446,37 @@
       "title": "小技巧",
       "description": "一些功能性開關，部分需要新建任務才會生效(具體見各 cell 說明)。"
     },
+    "visionBridge": {
+      "title": "視覺橋",
+      "description": "讓純文字模型獲得看圖能力：用獨立的多模態模型把圖片轉成文字描述後再交給純文字模型。",
+      "enableLabel": "啟用視覺橋",
+      "enableHint": "關閉時所有模型行為與之前完全一致。開啟後，下方勾選的模型會把圖片經視覺後端轉成文字描述。啟用後，傳送給這些模型的圖片以及同訊息文字提示會傳送給你選擇的視覺後端。",
+      "enableAria": "切換視覺橋",
+      "toast": {
+        "saved": "視覺橋設定已儲存",
+        "saveFailed": "儲存視覺橋設定失敗"
+      },
+      "capability": {
+        "vision": "已知支援視覺",
+        "noVision": "已知純文字",
+        "unknown": "視覺能力未知"
+      },
+      "targetModels": {
+        "label": "走視覺橋的模型",
+        "hint": "純文字模型（如 DeepSeek）預設已勾選。也可以勾選支援視覺的模型——例如故意用更便宜的描述模型來節省 token。",
+        "empty": "暫無可用的模型。",
+        "toggleAria": "切換 {{model}} 的視覺橋"
+      },
+      "backends": {
+        "label": "視覺後端模型",
+        "hint": "選擇最多兩個把圖片轉文字的多模態模型。第二個（備用）可選。",
+        "primary": "主後端",
+        "fallback": "備用",
+        "unset": "未選擇",
+        "noBackup": "無備用",
+        "hintSecondary": "優先使用主後端。主後端失敗且配置了備用時切換到備用。兩者都失敗時圖片無法辨識，會以文字提示代替並提醒你。"
+      }
+    },
     "chatEmbedding": {
       "cell": {
         "label": "啟用對話記錄語義索引",
@@ -2448,6 +2496,11 @@
         "description": "在對話正文左側顯示一列提問刻度：懸停預覽提問和回答開頭，點選跳回那一輪。僅在提問較多且視窗足夠寬時出現。"
       },
       "toggleAria": "切換提問導航條"
+    },
+    "promptRecommendation": {
+      "label": "輸入框推薦提示詞",
+      "description": "AI 回覆結束後，輸入框會顯示預測的後續提示詞，按 Tab 鍵可快速填入。",
+      "toggleAria": "切換輸入框推薦提示詞"
     },
     "collaboration": {
       "loading": "正在載入協同設定…",
@@ -3156,8 +3209,8 @@
           "codex": "Codex",
           "pi": "Pi"
         },
-        "groupCtrPermissionLabel": "群聊 /ctr 新建任務權限檔",
-        "groupCtrPermissionDescription": "群組裡 @bot 用 /ctr 新建任務時使用的權限檔，預設「自動審批」。群組上下文裡有成員可控制的內容，設成「完全存取」後將直接執行、不再逐項確認，請確認群組成員都可信。"
+        "groupPermissionLabel": "群聊新建任務權限檔",
+        "groupPermissionDescription": "群組裡新建任務時統一使用的權限檔（@bot 開話題、/new、/ctr 都算），預設「自動審批」；上面那個權限檔只管私聊。群組上下文裡有成員可控制的內容，設成「完全存取」後將直接執行、不再逐項確認，請確認群組成員都可信。變更只影響之後新建的任務，已有任務在群組裡用 /permission 單獨切換。"
       }
     },
     "shortcuts": {
@@ -3346,11 +3399,10 @@
         "update": "從市場更新",
         "updateTo": "更新到 v{{version}}",
         "installed": "已安裝",
-        "replace": "替換",
-        "replaceAria": "使用此市場版本替換 {{name}}",
-        "replaceDescription": "已安裝相同標識的插件；繼續安裝會使用此市場版本替換，並保留插件資料。",
+        "conflict": "暫不可用",
+        "conflictAria": "{{name}} 存在插件標識衝突",
+        "conflictDescription": "插件標識已被佔用，當前無法安裝",
         "unavailable": "插件市場暫時不可用；已安裝插件仍可正常管理和使用。",
-        "customSourcesUnavailable": "以下自訂市場暫時不可用：{{names}}。其他市場不受影響。",
         "authenticationRequired": "登入 Cindy 後才能檢視插件市場。",
         "notConfigured": "當前環境未配置插件市場；已安裝插件仍可正常管理和使用。",
         "upgradeNotice": {
@@ -3446,7 +3498,11 @@
             "copied": "指南已複製到剪貼簿。",
             "copyFailed": "複製失敗，請重試。"
           }
-        }
+        },
+        "customSourcesUnavailable": "以下自訂市場暫時無法存取：{{names}}，其他市場不受影響。",
+        "replace": "取代",
+        "replaceAria": "以此市場版本取代 {{name}}",
+        "replaceDescription": "已安裝相同 ID 的插件，繼續將以市場版本取代，原有資料會保留。"
       },
       "install": "安裝插件…",
       "empty": "還沒有安裝任何插件",
@@ -4812,7 +4868,10 @@
         "localOnly": "本條訊息的精確變更暫不支援遠端任務。",
         "partialNotice": "本條訊息包含無法精確追蹤的命令或工具寫入；以下僅展示已精確捕獲的部分，不能視為完整補丁。",
         "emptyTitle": "沒有已記錄的變更",
-        "emptyDesc": "這條訊息記錄的補丁中沒有可顯示的檔案變更。"
+        "emptyDesc": "這條訊息記錄的補丁中沒有可顯示的檔案變更。",
+        "crossSessionSwitchDisabled": "正在審查協作任務中的這條訊息，不能在目前任務中切換來源。",
+        "previewUnavailable": "這條訊息記錄的是歷史變更，無法可靠預覽目前磁碟中的檔案內容。",
+        "snapshotPatchUnavailable": "歷史變更快照不能產生面向目前 worktree 的 git apply 指令。"
       },
       "fileCount_one": "{{count}} 個檔案",
       "fileCount_other": "{{count}} 個檔案",
@@ -4870,6 +4929,7 @@
         "in-progress": "git 操作進行中",
         "agent-running": "Agent 正在執行",
         "disabled": "審查不可用",
+        "historical-snapshot": "歷史變更快照為唯讀",
         "remote-device": "遠端設備任務僅支援檢視",
         "remote-ssh": "SSH 工作區審查僅支援檢視"
       },
@@ -5078,7 +5138,7 @@
         },
         "no-session": {
           "title": "任務不存在",
-          "desc": "本裝置上找不到該任務記錄。"
+          "desc": "本設備上找不到當前任務記錄。"
         },
         "no-workdir": {
           "title": "沒有工作目錄",
@@ -5515,7 +5575,6 @@
     "modelSelector": {
       "budgetNeedsApiKey": "此模型需先在設定裡配置 API key 才能使用",
       "hidden": "已隱藏",
-      "modelListAria": "模型列表",
       "subscriptionDirectDisabled": {
         "chatgpt": "訂閱直連的 GPT 模型協議暫不支援 SSH 遠端會話",
         "xai": "訂閱直連的 Grok 模型協議暫不支援 SSH 遠端會話",
@@ -5596,7 +5655,8 @@
       },
       "agentSwitch": {
         "hint": "選擇切換到 {{agent}} 後使用的模型"
-      }
+      },
+      "modelListAria": "模型清單"
     },
     "permissionSelector": {
       "triggerAria": "選擇權限模式：{{label}}",
@@ -5668,12 +5728,12 @@
     },
     "worktree": {
       "detecting": "檢測環境中…",
-      "detectFailed": "環境檢測失敗，worktree 暫不可用",
       "gitMissing": "未檢測到 git，請先安裝",
       "notGitRepo": "當前目錄不是 git 倉庫",
       "alreadyInWorktree": "已在 worktree 中，禁止巢狀",
       "toggleAria": "啟用 worktree 隔離",
-      "chipTooltip": "在獨立 worktree 中開始這次對話，不影響當前分支"
+      "chipTooltip": "在獨立 worktree 中開始這次對話，不影響當前分支",
+      "detectFailed": "環境偵測失敗，暫時無法使用 Worktree"
     },
     "branchChip": {
       "label": "分支",
@@ -5903,6 +5963,7 @@
       "alwaysAllowScoped": "本任務都允許 {{scope}}",
       "alwaysAllowScopedHint": "作用於整個任務，且只限這裡列出的範圍。",
       "alwaysAllowSessionHint": "作用於整個任務，不只是這一次請求。",
+      "autoReviewUnavailable": "自動審批沒完成，請確認要不要允許這次操作。",
       "ruleSeparator": "、"
     },
     "deviceSwitcher": {
@@ -6018,7 +6079,6 @@
     "verificationFailed": "暫時無法確認 ChatGPT 登入是否已恢復，請重新檢測。"
   },
   "chat": {
-    "sessionLoading": "正在載入任務",
     "askUserQuestion": {
       "skippedAnswer": "已跳過"
     },
@@ -6083,6 +6143,11 @@
     },
     "imageMissing": {
       "title": "圖片已丟失"
+    },
+    "visionBridge": {
+      "analyzing": "正在辨識圖片中…（{{count}} 張）",
+      "fallback": "視覺橋使用了備用視覺後端（主後端不可用），圖片辨識可能受影響",
+      "unavailable": "視覺橋目前不可用，圖片無法辨識，已以文字提示代替"
     },
     "newMessageIndicator": {
       "aria": "回到底部，檢視 {{count}} 條新訊息",
@@ -6186,7 +6251,10 @@
       "networkShowRaw": "檢視原始錯誤",
       "networkHideRaw": "收起原始錯誤",
       "silentStopContinue": "繼續",
-      "silentStopContinueTitle": "繼續當前任務"
+      "silentStopContinueTitle": "繼續當前任務",
+      "piTransportClosed": "遠端 Pi 連線已中斷（SSH 通道關閉）。遠端任務仍在執行，重新連線後可以繼續。",
+      "piManagerUnavailable": "遠端 Pi 管理器未就緒，請稍後重試；若持續失敗請到「設定 → 遠端機器」重新安裝 Pi。",
+      "piBundledNodeMissing": "遠端缺少執行環境（Node.js）。請到「設定 → 遠端機器」展開該主機，先在 Claude Code 或 Codex 列點擊「安裝」（會附帶 Node.js），再建立 Pi 任務。"
     },
     "backgroundActivity": {
       "status": "後臺子任務執行中，模型用量仍在消耗…",
@@ -6532,8 +6600,8 @@
           "sourceConversationChanged": "來源任務已變更，請針對當前任務重新執行 /review。",
           "sourceFilesChanged": "來源任務的檔案已變更，請針對當前成果重新執行 /review。",
           "artifactChanged": "審查成果已變更，請針對當前成果重新執行 /review。",
-          "artifactUnavailable": "Cindy 無法安全讀取審查成果，請檢查工作區或附件後重新執行 /review。",
-          "providerFailed": "審查任務執行失敗"
+          "providerFailed": "審查任務執行失敗",
+          "artifactUnavailable": "Cindy 無法安全讀取審查成品，請檢查工作區或附件後重新執行 /review"
         }
       }
     },
@@ -6603,6 +6671,8 @@
       "automationSent": "由自動化傳送",
       "automationSentNamed": "由自動化「{{name}}」傳送",
       "automationViewTask": "檢視自動化",
+      "orcaFromLead": "來自 Lead 的訊息",
+      "orcaFromWorker": "來自 Worker 的訊息",
       "expandLongMessage": "展開全文",
       "collapseLongMessage": "收起",
       "sessionReference": {
@@ -6668,20 +6738,22 @@
       }
     },
     "upgradeBanner": {
-      "description": "遠端 {{hostId}} 的 cc-manager 有新版本可用 — 升級會中斷該機器上當前所有 Claude Code 遠端任務",
-      "upgrading": "正在升級遠端 {{hostId}} 的 cc-manager…",
+      "description": "遠端 {{hostId}} 的 {{manager}} 有新版本可用 — 升級會中斷該機器上當前所有遠端任務",
+      "upgrading": "正在升級遠端 {{hostId}} 的 {{manager}}…",
       "upgrade": "立即升級",
-      "upgradeTitle": "下載並啟動新版本 cc-manager（會中斷當前任務）",
+      "upgradeTitle": "下載並啟動新版本 {{manager}}（會中斷當前任務）",
       "dismissTitle": "暫不升級（下次啟動會再次提示）",
       "failed": "升級失敗：{{message}}",
-      "daemonNotReady": "cc-manager 升級完成，但遠端 daemon 暫未啟動 — 請手動重新傳送訊息"
+      "daemonNotReady": "{{manager}} 升級完成，但遠端 daemon 暫未啟動 — 請手動重新傳送訊息"
     },
     "remoteError": {
       "REMOTE_DAEMON_CLOSED": "遠端連線已中斷（daemon 可能正在升級或重啟）。本輪已結束 — 請重新傳送。",
       "REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED": "遠端任務無法訪問本地檔案/圖片附件。請直接貼上內容。",
       "AUTO_REVIEW_UNAVAILABLE": "自動審批暫時無法給出判斷（網路或服務波動），需要審批的操作已轉由你來確認。想少被打斷，可以把任務切到「預設權限」自行掌控。",
+      "AUTO_REVIEW_CONFIRM_UNDELIVERED": "自動審批沒完成，確認也沒有送到或沒有被點。這次拒絕不是你點的。",
       "REMOTE_COMPAT_MODE_UNSUPPORTED": "遠端 Claude Code 會話無法透過本地相容 Proxy 路由(內部錯誤，請反饋)。",
       "REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE": "Cindy AI 憑據尚未就緒(登入後由服務端自動下發)。請稍候重試；若持續出現，請到 設定 → 模型供應商 檢查 Cindy AI 連線狀態。",
+      "REMOTE_LOCAL_ONLY_PROVIDER": "此模型供應商是本機專屬服務（如 Ollama），SSH 遠端任務無法存取本機位址。請改用 Cindy AI 閘道，或選擇遠端主機可達的模型供應商。",
       "DEVICE_LINK_CONTROL_DISABLED": "已關閉對該裝置的控制，訊息未傳送。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "附件傳輸失敗，訊息未傳送。請重試。"
     },
@@ -6786,7 +6858,8 @@
     },
     "ghostPreview": {
       "opened": "打開了一個預覽頁面"
-    }
+    },
+    "sessionLoading": "載入任務中"
   },
   "ccAgent": {
     "agentStatus": {
@@ -9036,9 +9109,11 @@
       "title": "建立新 Worker",
       "submit": "建立 Worker",
       "closeAria": "關閉建立 Worker 彈窗",
-      "roleLabel": "角色",
-      "customRolePlaceholder": "+ 自定義角色（可選）",
-      "customRolePredefinedError": "自定義角色不能使用預設角色名",
+      "roleLabel": "角色名",
+      "roleHint": "只是一個名字，方便多個協作者時分辨角色，不改變能力",
+      "roleHintAria": "角色名說明",
+      "customRolePlaceholder": "+ 自定義角色名（可選）",
+      "customRolePredefinedError": "自定義角色名不能使用預設角色名",
       "agentLabel": "Agent",
       "modelLabel": "模型",
       "permissionLabel": "權限模式",
@@ -9058,6 +9133,7 @@
       "archiveWorkerAria": "歸檔 Worker {{name}}",
       "createWorker": "建立新 Worker",
       "hardLimitHint": "已達硬上限 {{count}} 個 · 歸檔現有 Worker 後可繼續建立",
+      "hardLimitSettingsHint": "已達硬上限 {{count}} 個 · 點擊前往協同設定調整",
       "softLimitHint": "已超過軟上限 {{count}} 個 · Worker 過多會增加記憶體佔用",
       "settingsCollaboration": "設定 · 協同",
       "layoutMenuLabel": "Worker 列表顯示方式",
@@ -9343,13 +9419,20 @@
         "endsAt": "套餐將於 {{date}} 結束",
         "cancelAction": "取消訂閱",
         "cancelConfirmTitle": "取消當前訂閱？",
-        "cancelConfirmDescription": "本次操作不會退款，也不會立即調整餘額。當前套餐權益可繼續使用至 {{date}}，之後不再續費。取消後無法在應用內恢復，本計費週期結束前也無法購買新套餐。",
-        "cancelConfirmDescriptionWithoutDate": "本次操作不會退款，也不會立即調整餘額。當前套餐權益可繼續使用至本計費週期結束，之後不再續費。取消後無法在應用內恢復，本計費週期結束前也無法購買新套餐。",
+        "cancelConfirmDescription": "本次操作不會退款，也不會立即調整餘額。當前套餐權益可繼續使用至 {{date}}，之後不再續費。本計費週期結束前無法購買新套餐。",
+        "cancelConfirmDescriptionWithoutDate": "本次操作不會退款，也不會立即調整餘額。當前套餐權益可繼續使用至本計費週期結束，之後不再續費。本計費週期結束前無法購買新套餐。",
         "cancelConfirmAction": "確認取消",
         "cancelSuccess": "已取消自動續費，當前套餐可使用至 {{date}}。",
         "cancelSuccessWithoutDate": "已取消自動續費，當前套餐將在本計費週期結束後到期。",
         "cancelNotSupported": "當前訂閱暫不支援取消。",
-        "cancelFailed": "取消訂閱失敗，請稍後重試。"
+        "cancelFailed": "取消訂閱失敗，請稍後重試。",
+        "resumeAction": "恢復訂閱",
+        "resumeConfirmTitle": "恢復目前訂閱？",
+        "resumeConfirmDescription": "恢復後將在續費日自動續費。",
+        "resumeConfirmAction": "恢復訂閱",
+        "resumeSuccess": "已恢復訂閱，將按原計畫自動續費。",
+        "resumeNotAvailable": "目前訂閱暫不支援恢復，請查看最新訂閱狀態後重試。",
+        "resumeFailed": "未能恢復訂閱，請稍後重試。"
       },
       "topupCard": {
         "action": "餘額充值"

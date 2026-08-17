@@ -95,7 +95,7 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       'sessionId={undefined}',
       'initialWorkingDir={effectiveWorkingDir}',
       'remoteHostId={draft.remoteHostId ?? null}',
-      'deviceLinkDeviceId={effectiveDeviceLinkDeviceId}',
+      'deviceLinkDeviceId={effectiveDeviceLinkDeviceId ?? null}',
       'modelMemoryOverride={deviceLinkDraftMemory}',
       'initialModel={draftInitialModel}',
       'initialEffort={draftInitialEffort}',
@@ -352,7 +352,7 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     expect(vendorIconSource).toContain('text-[hsl(var(--sidebar-muted))]');
 
     expect(userInfoSectionSource).toContain(
-      'border border-[var(--sidebar-user-card-border)]',
+      'rounded-full border border-[var(--sidebar-user-card-border)]',
     );
     expect(userInfoSectionSource).toContain('bg-[var(--sidebar-user-card-bg)]');
     expect(userInfoSectionSource).toContain('text-[var(--sidebar-user-card-text)]');

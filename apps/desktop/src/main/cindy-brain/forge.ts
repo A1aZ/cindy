@@ -2247,15 +2247,14 @@ const result = await (await fetch('/media-models?type=image')).json();
 // }
 \`\`\`
 
-\`type\` 只接受 \`image\` / \`video\`。Host 只按 Gateway \`mode\` 切大类，并把
-Gateway \`architecture\` 已归一化后的 \`modalities.input/output\` 原样交给插件；
-**Host 不把它翻译成出图、改图、文生视频或图生视频等插件业务动作**。这些动作怎样匹配
-输入/输出模态由插件自行决定，例如 Art 可以要求改图模型同时包含 \`text\`、\`image\`
-输入和 \`image\` 输出。\`modalities\` 缺省表示上游没有声明，插件不得按型号名或 Guide
-猜测支持度。
+\`type\` 只接受 \`image\` / \`video\`。Host 按 Gateway \`mode\` 切大类，并结合插件在
+\`cindy.image/video\` 声明的动作、Gateway \`modalities\`、Guide operation 与当前客户端
+协议支持度，只返回当前真正可执行的模型。单个模型的 Guide 缺失、损坏或版本过新只隔离
+该模型，不拖垮整个目录。
 
-Guide 是独立可选信息，不在此接口返回，也不决定模型是否出现在目录中。插件可把用户
-选择的模型 id 存进自己的 \`/kv\`，再通过工具结果或插件说明交给当前 Agent。
+响应仍只把 Gateway \`architecture\` 已归一化后的 \`modalities.input/output\` 原样交给插件，
+不下发 Guide、endpoint、凭证或 Host 内部兼容判定。插件可把用户选择的模型 id 存进自己的
+\`/kv\`，再通过工具结果或插件说明交给当前 Agent；付费请求前 Core 会再次校验。
 
 插件与 Agent 不需要新的媒体协议，继续使用现有工具调用链：
 

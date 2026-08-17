@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS `media_invocations` (
 	`guide_json` text NOT NULL,
 	`state` text NOT NULL,
 	`task_id` text,
+	`response_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL
 );

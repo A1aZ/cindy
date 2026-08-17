@@ -3,6 +3,7 @@ import {
   parsePreparedMediaInvocationGuide,
   type PreparedMediaInvocationGuide,
 } from '../../shared/mediaInvocation.js';
+import type { DbClient } from '../localDb/client/DbClient.js';
 import { getDbClient } from '../localDb/client/current.js';
 
 export type MediaInvocationState =
@@ -17,6 +18,7 @@ export interface StoredMediaInvocation {
   guide: PreparedMediaInvocationGuide;
   state: MediaInvocationState;
   taskId?: string;
+  responseJson?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -30,6 +32,7 @@ interface MediaInvocationRow {
   guideJson: string;
   state: MediaInvocationState;
   taskId: string | null;
+  responseJson: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -59,13 +62,17 @@ function fromRow(row: MediaInvocationRow): StoredMediaInvocation {
     guide: parsed.value,
     state: row.state,
     ...(row.taskId ? { taskId: row.taskId } : {}),
+    ...(row.responseJson ? { responseJson: row.responseJson } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-export async function recoverInterruptedMediaInvocations(owner: string): Promise<number> {
-  const result = await getDbClient().exec(
+export async function recoverInterruptedMediaInvocations(
+  owner: string,
+  db: DbClient = getDbClient(),
+): Promise<number> {
+  const result = await db.exec(
     `UPDATE media_invocations
        SET state = 'unknown', updated_at = ?
      WHERE owner = ? AND state = 'submitting'`,
@@ -74,12 +81,15 @@ export async function recoverInterruptedMediaInvocations(owner: string): Promise
   return Number(result.changes);
 }
 
-export async function pruneMediaInvocations(input: {
-  owner: string;
-  preparedBefore: number;
-  terminalBefore: number;
-}): Promise<void> {
-  await getDbClient().exec(
+export async function pruneMediaInvocations(
+  input: {
+    owner: string;
+    preparedBefore: number;
+    terminalBefore: number;
+  },
+  db: DbClient = getDbClient(),
+): Promise<void> {
+  await db.exec(
     `DELETE FROM media_invocations
      WHERE owner = ? AND (
        (state = 'prepared' AND created_at < ?)
@@ -89,21 +99,27 @@ export async function pruneMediaInvocations(input: {
   );
 }
 
-export async function countMediaInvocations(owner: string): Promise<number> {
-  const row = await getDbClient().queryOne<{ count: number }>(
+export async function countMediaInvocations(
+  owner: string,
+  db: DbClient = getDbClient(),
+): Promise<number> {
+  const row = await db.queryOne<{ count: number }>(
     'SELECT COUNT(*) AS count FROM media_invocations WHERE owner = ?',
     [owner],
   );
   return Number(row?.count ?? 0);
 }
 
-export async function createMediaInvocation(input: {
-  id: string;
-  owner: string;
-  guide: PreparedMediaInvocationGuide;
-  createdAt: number;
-}): Promise<void> {
-  await getDbClient().exec(
+export async function createMediaInvocation(
+  input: {
+    id: string;
+    owner: string;
+    guide: PreparedMediaInvocationGuide;
+    createdAt: number;
+  },
+  db: DbClient = getDbClient(),
+): Promise<void> {
+  await db.exec(
     `INSERT INTO media_invocations (
        id, owner, model_id, capability, guide_revision, guide_json,
        state, task_id, created_at, updated_at
@@ -124,8 +140,9 @@ export async function createMediaInvocation(input: {
 export async function getMediaInvocation(
   id: string,
   owner: string,
+  db: DbClient = getDbClient(),
 ): Promise<StoredMediaInvocation | null> {
-  const row = await getDbClient().queryOne<MediaInvocationRow>(
+  const row = await db.queryOne<MediaInvocationRow>(
     `SELECT
        id,
        owner,
@@ -135,6 +152,7 @@ export async function getMediaInvocation(
        guide_json AS guideJson,
        state,
        task_id AS taskId,
+       response_json AS responseJson,
        created_at AS createdAt,
        updated_at AS updatedAt
      FROM media_invocations
@@ -144,25 +162,37 @@ export async function getMediaInvocation(
   return row ? fromRow(row) : null;
 }
 
-export async function transitionMediaInvocation(input: {
-  id: string;
-  owner: string;
-  from: MediaInvocationState;
-  to: MediaInvocationState;
-  taskId?: string;
-}): Promise<boolean> {
-  const result = input.taskId
-    ? await getDbClient().exec(
-        `UPDATE media_invocations
+export async function transitionMediaInvocation(
+  input: {
+    id: string;
+    owner: string;
+    from: MediaInvocationState;
+    to: MediaInvocationState;
+    taskId?: string;
+    responseJson?: string;
+  },
+  db: DbClient = getDbClient(),
+): Promise<boolean> {
+  const result =
+    input.taskId !== undefined
+      ? await db.exec(
+          `UPDATE media_invocations
            SET state = ?, task_id = ?, updated_at = ?
          WHERE id = ? AND owner = ? AND state = ?`,
-        [input.to, input.taskId, Date.now(), input.id, input.owner, input.from],
-      )
-    : await getDbClient().exec(
-        `UPDATE media_invocations
+          [input.to, input.taskId, Date.now(), input.id, input.owner, input.from],
+        )
+      : input.responseJson !== undefined
+        ? await db.exec(
+            `UPDATE media_invocations
+             SET state = ?, response_json = ?, updated_at = ?
+           WHERE id = ? AND owner = ? AND state = ?`,
+            [input.to, input.responseJson, Date.now(), input.id, input.owner, input.from],
+          )
+        : await db.exec(
+            `UPDATE media_invocations
            SET state = ?, updated_at = ?
          WHERE id = ? AND owner = ? AND state = ?`,
-        [input.to, Date.now(), input.id, input.owner, input.from],
-      );
+            [input.to, Date.now(), input.id, input.owner, input.from],
+          );
   return Number(result.changes) === 1;
 }

@@ -5370,6 +5370,76 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
 }
 
 /**
+ * 校验 Host 已归一化的 GhostManifest 快照（例如批准 receipt 中的 manifest）。
+ *
+ * ghost.json 的作者格式与运行期格式只在 setup 条目上不同：作者写字符串引用或
+ * `{ kv, label }`，Host 归一化后统一保存 `{ kind, key, label? }`。这里仅把已归一化
+ * setup 还原为作者格式，再复用同一套完整清单校验；原始 ghost.json 仍必须走
+ * validateGhostManifest，因此作者直接写内部格式仍会被拒绝。
+ */
+export function validateNormalizedGhostManifest(raw: unknown): ManifestValidation {
+  // Durable Host state is written in author format so released clients can read it
+  // after a rollback. Still accept normalized snapshots produced by affected dev
+  // builds and passed between current Host code paths.
+  const authorResult = validateGhostManifest(raw);
+  if (authorResult.ok || !isPlainObject(raw) || raw.setup === undefined) return authorResult;
+  if (!isPlainObject(raw.setup) || !Array.isArray(raw.setup.requires)) {
+    return { ok: false, reason: '标准化清单 setup 必须是带 requires 数组的对象' };
+  }
+
+  const requires: Array<{ anyOf: Array<string | { kv: unknown; label: unknown }> }> = [];
+  for (const group of raw.setup.requires) {
+    if (!isPlainObject(group) || !Array.isArray(group.anyOf)) {
+      return { ok: false, reason: '标准化清单 setup.requires 每组必须是带 anyOf 数组的对象' };
+    }
+    const anyOf: Array<string | { kv: unknown; label: unknown }> = [];
+    for (const requirement of group.anyOf) {
+      if (!isPlainObject(requirement)) {
+        return { ok: false, reason: '标准化清单 setup 条目必须是 { kind, key } 对象' };
+      }
+      if (requirement.kind === 'secret' || requirement.kind === 'connection') {
+        if (typeof requirement.key !== 'string') {
+          return { ok: false, reason: '标准化清单 setup 条目的 key 必须是字符串' };
+        }
+        anyOf.push(`${requirement.kind}:${requirement.key}`);
+        continue;
+      }
+      if (requirement.kind === 'kv') {
+        anyOf.push({ kv: requirement.key, label: requirement.label });
+        continue;
+      }
+      return { ok: false, reason: '标准化清单 setup 条目的 kind 不受支持' };
+    }
+    requires.push({ anyOf });
+  }
+
+  return validateGhostManifest({ ...raw, setup: { requires } });
+}
+
+/**
+ * 把 Host 归一化清单投影回 ghost.json 作者格式，供跨版本持久化。
+ *
+ * receipt schema v2 已随 v0.1.48 发布；旧版读取时会直接调用
+ * validateGhostManifest，因此不能把内部 `{ kind, key }` setup 形态写盘。
+ */
+export function ghostManifestToAuthorFormat(manifest: GhostManifest): Record<string, unknown> {
+  if (manifest.setup === undefined) return { ...manifest };
+  return {
+    ...manifest,
+    setup: {
+      requires: manifest.setup.requires.map((group) => ({
+        anyOf: group.anyOf.map((requirement) => {
+          if (requirement.kind === 'kv') {
+            return { kv: requirement.key, label: requirement.label };
+          }
+          return `${requirement.kind}:${requirement.key}`;
+        }),
+      })),
+    },
+  };
+}
+
+/**
  * ── 管子(脑机接口)消息协议(docs/dev-rules/plugin-security-and-authoring.md)──
  *
  * 下行(主机 → 电子脑,'ghost-pipe:message' 单向推):
@@ -6049,9 +6119,9 @@ export type GhostCindyPreferenceResult =
     };
 
 /**
- * 插件配置界面使用的只读媒体模型目录。模型类型来自 Gateway mode；输入/输出能力
- * 原样使用 Model Access 已归一化的 modalities，由插件自行解释，不在 Host 内映射成
- * 出图、改图或图生视频等业务动作。Guide 是独立可选信息，不进入这份配置契约。
+ * 插件配置界面使用的只读可执行媒体模型目录。Host 根据插件声明、Gateway modalities、
+ * Guide operation 与当前客户端协议支持度过滤模型；响应只保留归一化 modalities，
+ * 不向插件暴露 Guide 或内部兼容判定。
  */
 export type GhostMediaModelsResult =
   | {

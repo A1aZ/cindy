@@ -6,8 +6,10 @@ import {
 
 export const MODEL_ACCESS_INVOCATION_GUIDE_SCHEMA_VERSION = 1 as const;
 export const MODEL_ACCESS_INVOCATION_GUIDE_PATH = '/api/model-access/invocation-guide' as const;
+export const MODEL_ACCESS_INVOCATION_GUIDES_PATH = '/api/model-access/invocation-guides' as const;
 
 export type MediaResultKind = 'image' | 'video' | 'audio';
+export type MediaRequestBodyEncoding = 'json' | 'multipart';
 
 export interface MediaResultExtractor {
   path: string[];
@@ -21,10 +23,20 @@ export interface MediaHttpRequestGuide {
   method: 'POST';
   path: string;
   headers?: Record<string, string>;
+  /** Defaults to JSON for persisted/older schemaVersion 1 Guides. */
+  bodyEncoding?: MediaRequestBodyEncoding;
   bodyModelPath: string[];
+  multipartFiles?: MediaMultipartFileGuide[];
   timeoutMs: number;
   maxRequestBytes: number;
   maxResponseBytes: number;
+}
+
+export interface MediaMultipartFileGuide {
+  bodyField: string;
+  formField: string;
+  kind: MediaResultKind;
+  maxItems: number;
 }
 
 export interface MediaSyncResponseGuide {
@@ -72,13 +84,12 @@ export interface MediaInvocationGuide {
 
 export interface ResolvedMediaInvocationGuide {
   modelId: string;
-  wireModelId: string;
   guide: MediaInvocationGuide;
 }
 
 /** Persisted snapshot after `prepare` selects one operation from the Server Guide. */
 export type PreparedMediaInvocationGuide = Omit<MediaInvocationGuide, 'operations'> &
-  Pick<ResolvedMediaInvocationGuide, 'modelId' | 'wireModelId'> &
+  Pick<ResolvedMediaInvocationGuide, 'modelId'> &
   MediaInvocationOperationGuide;
 
 type PlainObject = Record<string, unknown>;
@@ -88,6 +99,7 @@ const FORBIDDEN_HEADERS = new Set([
   'cookie',
   'host',
   'content-length',
+  'content-type',
   'proxy-authorization',
   'proxy-authenticate',
   'transfer-encoding',
@@ -103,7 +115,7 @@ const GUIDE_FIELDS = [
   'connection',
   'operations',
 ] as const;
-const RESOLVED_GUIDE_FIELDS = ['modelId', 'wireModelId', 'guide'] as const;
+const RESOLVED_GUIDE_FIELDS = ['modelId', 'guide'] as const;
 const OPERATION_FIELDS = [
   'capability',
   'request',
@@ -117,7 +129,6 @@ const PREPARED_GUIDE_FIELDS = [
   'schemaVersion',
   'guideId',
   'modelId',
-  'wireModelId',
   'revision',
   'connection',
   ...OPERATION_FIELDS,
@@ -265,6 +276,36 @@ function mediaListError(value: unknown, path: string): string | null {
   return null;
 }
 
+function multipartFilesError(value: unknown, path: string): string | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    return `${path} must be a non-empty array with at most 16 entries`;
+  }
+  const bodyFields = new Set<string>();
+  for (const [index, file] of value.entries()) {
+    const filePath = `${path}[${index}]`;
+    if (!isPlainObject(file)) return `${filePath} must be an object`;
+    let error = unknownField(file, ['bodyField', 'formField', 'kind', 'maxItems'], filePath);
+    if (error) return error;
+    if (!boundedString(file.bodyField, 128) || !/^[A-Za-z0-9_.-]+$/.test(file.bodyField)) {
+      return `${filePath}.bodyField must be a safe bounded string`;
+    }
+    if (
+      !boundedString(file.formField, 128) ||
+      !/^[A-Za-z0-9_.-]+$/.test(file.formField.replaceAll('[', '').replaceAll(']', ''))
+    ) {
+      return `${filePath}.formField must be a bounded string`;
+    }
+    if (file.kind !== 'image' && file.kind !== 'video' && file.kind !== 'audio') {
+      return `${filePath}.kind must be image, video or audio`;
+    }
+    error = positiveIntegerError(file.maxItems, `${filePath}.maxItems`, 1, 16);
+    if (error) return error;
+    if (bodyFields.has(file.bodyField)) return `${path} must not repeat bodyField`;
+    bodyFields.add(file.bodyField);
+  }
+  return null;
+}
+
 function requestError(value: unknown, path: string): string | null {
   if (!isPlainObject(value)) return `${path} must be an object`;
   let error = unknownField(
@@ -273,7 +314,9 @@ function requestError(value: unknown, path: string): string | null {
       'method',
       'path',
       'headers',
+      'bodyEncoding',
       'bodyModelPath',
+      'multipartFiles',
       'timeoutMs',
       'maxRequestBytes',
       'maxResponseBytes',
@@ -286,8 +329,24 @@ function requestError(value: unknown, path: string): string | null {
   if (error) return error;
   error = headersError(value.headers, `${path}.headers`);
   if (error) return error;
+  if (
+    value.bodyEncoding !== undefined &&
+    value.bodyEncoding !== 'json' &&
+    value.bodyEncoding !== 'multipart'
+  ) {
+    return `${path}.bodyEncoding must be json or multipart`;
+  }
   error = objectPathError(value.bodyModelPath, `${path}.bodyModelPath`);
   if (error) return error;
+  if (value.bodyEncoding === 'multipart') {
+    if ((value.bodyModelPath as string[]).length !== 1) {
+      return `${path}.bodyModelPath must be top-level for multipart requests`;
+    }
+    error = multipartFilesError(value.multipartFiles, `${path}.multipartFiles`);
+    if (error) return error;
+  } else if (value.multipartFiles !== undefined) {
+    return `${path}.multipartFiles is only valid for multipart requests`;
+  }
   for (const [field, max] of [
     ['timeoutMs', 600_000],
     ['maxRequestBytes', 268_435_456],
@@ -442,9 +501,7 @@ function resolvedBindingError(
 ): string | null {
   const error = unknownField(value, fields, path);
   if (error) return error;
-  for (const field of ['modelId', 'wireModelId'] as const) {
-    if (!boundedString(value[field], 256)) return `${path}.${field} must be a bounded string`;
-  }
+  if (!boundedString(value.modelId, 256)) return `${path}.modelId must be a bounded string`;
   return null;
 }
 

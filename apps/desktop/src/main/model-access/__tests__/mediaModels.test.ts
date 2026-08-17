@@ -5,6 +5,15 @@ const readModelDisableOverridesMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../serverApiClient.js', () => ({
   serverApiFetch: serverApiFetchMock,
+  ServerApiError: class ServerApiError extends Error {
+    constructor(
+      readonly code: string,
+      readonly statusCode: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
 }));
 vi.mock('../../clientEndpointsService.js', () => ({
   getClientEndpoint: vi.fn(() => 'https://model-access.example.com'),
@@ -13,7 +22,11 @@ vi.mock('../../maker-host/model-disable-store.js', () => ({
   readModelDisableOverrides: readModelDisableOverridesMock,
 }));
 
-import { fetchMediaInvocationGuide, listAvailableMediaModels } from '../mediaModels.js';
+import {
+  fetchMediaInvocationGuide,
+  listAvailableMediaModels,
+  MediaGuideCompatibilityError,
+} from '../mediaModels.js';
 
 const payload = {
   schemaVersion: 4 as const,
@@ -70,9 +83,15 @@ describe('listAvailableMediaModels', () => {
     ]);
   });
 
-  it('带操作筛选时仍只按 Gateway mode 过滤', async () => {
+  it('带操作筛选时按 Gateway modalities 判断模型能力', async () => {
     await expect(listAvailableMediaModels('image.generate')).resolves.toMatchObject([
       { id: 'image-without-guide', modalities: { input: ['text'], output: ['image'] } },
+      {
+        id: 'image-with-guide',
+        modalities: { input: ['text', 'image'], output: ['image'] },
+      },
+    ]);
+    await expect(listAvailableMediaModels('image.edit')).resolves.toMatchObject([
       {
         id: 'image-with-guide',
         modalities: { input: ['text', 'image'], output: ['image'] },
@@ -95,13 +114,14 @@ describe('listAvailableMediaModels', () => {
   it('拒绝旧版聊天目录，不把版本不匹配静默解释为空媒体列表', async () => {
     serverApiFetchMock.mockResolvedValueOnce({ ...payload, schemaVersion: 3 });
 
-    await expect(listAvailableMediaModels()).rejects.toThrow('媒体模型目录响应版本必须是 4');
+    await expect(listAvailableMediaModels()).rejects.toMatchObject({
+      name: 'MediaModelCatalogError',
+    });
   });
 
   it('只用 modelId 获取 Cindy Server Guide', async () => {
     serverApiFetchMock.mockResolvedValueOnce({
       modelId: 'image-with-guide',
-      wireModelId: 'wire-image-model',
       guide: {
         schemaVersion: 1,
         guideId: 'images-v1',
@@ -113,6 +133,7 @@ describe('listAvailableMediaModels', () => {
             request: {
               method: 'POST',
               path: '/images/generations',
+              bodyEncoding: 'json',
               bodyModelPath: ['model'],
               timeoutMs: 1_000,
               maxRequestBytes: 1_024,
@@ -146,5 +167,16 @@ describe('listAvailableMediaModels', () => {
       '/api/model-access/invocation-guide?modelId=image-with-guide',
       expect.any(Object),
     );
+  });
+
+  it('把更高 Guide schemaVersion 分类为客户端需要升级', async () => {
+    serverApiFetchMock.mockResolvedValueOnce({
+      modelId: 'image-with-guide',
+      guide: { schemaVersion: 2 },
+    });
+
+    await expect(fetchMediaInvocationGuide('image-with-guide')).rejects.toMatchObject({
+      code: 'CLIENT_UPGRADE_REQUIRED',
+    } satisfies Partial<MediaGuideCompatibilityError>);
   });
 });

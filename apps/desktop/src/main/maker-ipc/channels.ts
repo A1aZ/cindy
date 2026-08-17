@@ -222,9 +222,12 @@ export const MAKER_INVOKE = {
   /**
    * renderer → main 单向镜像「模型显示/隐藏」override(modelVisibilityPrefs)。
    * override 真源仍在 renderer localStorage;main 只缓存一份内存副本,供 IM `/model`
-   * 派生模型列表时复用同一套可见性过滤(两端列表口径一致)。fire-and-forget,不落盘。
+   * 派生模型列表时复用同一套可见性过滤(两端列表口径一致)。入参带 dataOwnerId +
+   * ownerGeneration，Main 拒绝账号切换期间的迟到快照。fire-and-forget,不落盘。
    */
   MODEL_VISIBILITY_SYNC: 'maker:model-visibility:sync',
+  /** Sync read: which stable local/cloud owner may import the pre-account Renderer preference key. */
+  MODEL_VISIBILITY_LEGACY_OWNER_CLAIM_SYNC: 'maker:model-visibility:legacy-owner-claim-sync',
   /**
    * 「模型 / 供应商停用」override 写入(model-disable-store,main 侧持久化真源)。
    * 入参 = { kind:'model', providerId, modelIds: string[], disabled: boolean }
@@ -257,6 +260,8 @@ export const MAKER_INVOKE = {
   AUTO_TITLE: 'maker:auto-title',
   // 重命名输入框 Magic 按钮:按会话最新对话内容重新生成标题(读 DB 素材,失败返 null)
   REGENERATE_TITLE: 'maker:regenerate-title',
+  /** 输入框推荐提示词:turn 结束后预测用户下一步输入(走 titleModel 轻量 one-shot)。 */
+  PREDICT_PROMPT: 'maker:predict-prompt',
   HELP_ASK: 'maker:help:ask',
   /**
    * Help-assistant 反馈草稿 (Phase 1):用户对某条回答不满时,点 👎 → 弹小表单 →
@@ -345,6 +350,10 @@ export const MAKER_INVOKE = {
   SUBAGENT_MODEL_SETTINGS_GET: 'maker:subagent-model-settings:get',
   SUBAGENT_MODEL_SETTINGS_SET: 'maker:subagent-model-settings:set',
   SUBAGENT_MODEL_SETTINGS_RESET: 'maker:subagent-model-settings:reset',
+  /** 视觉桥设置（两个清单：目标模型 + 视觉后端）。 */
+  VISION_BRIDGE_SETTINGS_GET: 'maker:vision-bridge-settings:get',
+  VISION_BRIDGE_SETTINGS_SET: 'maker:vision-bridge-settings:set',
+  VISION_BRIDGE_SETTINGS_RESET: 'maker:vision-bridge-settings:reset',
   SILENT_ENCRYPTED_RETRY_GET: 'maker:silent-encrypted-retry:get',
   SILENT_ENCRYPTED_RETRY_SET: 'maker:silent-encrypted-retry:set',
   SILENT_ENCRYPTED_RETRY_RESET: 'maker:silent-encrypted-retry:reset',

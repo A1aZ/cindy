@@ -225,11 +225,12 @@
   再次核对根与目标真身；保存文件必须排他创建且不跟随最终 symlink，不能让短命票据留下消费期
   TOCTOU。附件继续使用裁决前已读入的字节，不得在批准后重新跟随原始路径。
 - 媒体模型接入分成两层：插件声明并封装业务能力，Cindy Core 提供低级目录和调用能力。
-  插件设置页／panel 只能通过同源只读 `/media-models?type=image|video` 配置模型；Host 只按
-  Gateway `mode` 切图片／视频大类，并把 `architecture` 归一化后的 `modalities.input/output`
-  原样交给插件。出图、改图、文生视频、图生视频等业务动作由插件自行解释，Host 不建立
-  第二套能力映射；缺少 `modalities` 时插件不得按型号名或 Guide 猜测。响应不得包含 Guide、
-  endpoint 或凭证。新媒体生成请求只能由当前 Agent 调用永久 Core `media`
+  插件设置页／panel 只能通过同源只读 `/media-models?type=image|video` 配置模型；Host 按
+  Gateway `mode` 切图片／视频大类，并结合插件 `cindy.image/video` 声明、Gateway
+  `modalities`、Guide operation 与当前客户端协议支持度，只投影当前可执行模型。单模型
+  Guide 失败必须局部隔离，不能阻断其余模型或插件面板。响应仍只把归一化后的
+  `modalities.input/output` 原样交给插件，不得包含 Guide、endpoint、凭证或内部兼容判定；
+  付费请求前 Core 必须再次校验。新媒体生成请求只能由当前 Agent 调用永久 Core `media`
   工具发起，插件沙箱和 panel 不得直接提交、轮询或下载。存量 `cindy-request` 媒体代办仅作
   兼容，不得作为新 Guide 模型的接入路径。插件工具通过现有 `tool-result` 返回普通 JSON，
   Agent 读取后自行决定下一次 `media` 调用；Host 不识别插件专用媒体意图字段，也不自动

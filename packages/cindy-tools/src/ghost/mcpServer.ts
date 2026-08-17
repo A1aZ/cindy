@@ -94,11 +94,12 @@ const D_MEDIA = [
   "Cindy Core 的低级媒体接口，供当前 Agent 执行插件提供的上层能力；插件负责场景语义和可选 UI，Core 负责模型调用与媒体交付。",
   "常规链路是 Agent 先调用插件工具，读取插件返回的普通 JSON，再自行调用本工具；不存在 mediaIntent 等保留结果格式，Host 也不会自动把插件结果转成本工具调用。",
   "如果插件需要把最终结果同步进自己的面板，Agent 可在本工具成功后再调用插件声明的普通导入工具；这不是生成请求的必经步骤。",
-  "模型清单来自当前账号的 Model Access model group，并按 Gateway mode 识别；Guide 是可选调用说明，不决定模型是否存在。",
+  "模型存在性来自当前账号的 Model Access model group；list_models 只投影同时满足 Gateway modalities、Guide operation 与当前客户端协议支持度的可执行模型。",
   "媒体生成必须由当前 Agent 通过本工具发起；插件面板和插件沙箱代码不得直接提交生成请求。",
   "插件已返回用户配置的 model_id 时可直接用它和目标 capability 走 prepare → request；没有已配置 model_id 时，先用 list_models 查询可用媒体模型。prepare 会由 Server 根据 model_id 返回 Guide，并在 Guide 不存在或不支持该 capability 时明确报错。",
-  "异步任务的 request 返回 pending 时，再按 recommended_poll_after_ms 调 poll；同步任务会直接返回 xdt_image_urls / xdt_video_urls / xdt_audio_tracks。",
+  "异步任务的 request 返回 pending 时，再按 recommended_poll_after_ms 调 poll；同步任务会直接返回 xdt_image_urls / xdt_video_urls。",
   "模型 id、endpoint、Authorization 和 wire model 均由 Host 管理，不要写进 body，不要猜测或覆盖。",
+  "Guide 缺失、能力不匹配或当前客户端不支持协议时，结果会带稳定 errorCode、retryable、outcomeKnown 和 allowedActions；可按 allowedActions 换模型、改用其它已授权工具或仍存在的旧链路，不要把 INTERNAL 当成协议能力结论。",
   "prepare 返回的 invocation_id 是一次性付费提交令牌；request 超时或返回 SUBMISSION_OUTCOME_UNKNOWN 时不要自动重提，以免重复扣费。",
 ].join("\n");
 

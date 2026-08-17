@@ -1,13 +1,36 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+interface MockPreparedGuide extends Record<string, unknown> {
+  modelId: string;
+  capability: string;
+  revision: string;
+}
+
+interface MockTransitionInput {
+  id: string;
+  owner: string;
+  from: string;
+  to: string;
+  taskId?: string;
+  responseJson?: string;
+}
+
 const mocks = vi.hoisted(() => ({
   currentUserId: 'media-user-0',
   ownerGeneration: 1,
   models: vi.fn(),
+  executableModels: vi.fn(),
   guide: vi.fn(),
   outboundFetch: vi.fn(),
   ingestMedia: vi.fn(),
-  recover: vi.fn(async (_owner: string) => 0),
+  readBlob: vi.fn(),
+  db: {
+    owner: 'media-user-0',
+    drizzle: { owner: 'media-user-0' },
+  },
+  dbOwnerId: 'media-user-0',
+  transitionDbs: [] as unknown[],
+  recover: vi.fn<(owner: string, db: unknown) => Promise<number>>(async () => 0),
   prune: vi.fn(async () => undefined),
   rows: new Map<string, Record<string, unknown>>(),
 }));
@@ -17,6 +40,7 @@ vi.mock('../../authManager.js', () => ({
   getActiveAuthRealm: () => 'cn',
   getAuthState: () => ({
     user: mocks.currentUserId ? { id: mocks.currentUserId } : null,
+    dataOwnerId: mocks.currentUserId,
     ownerGeneration: mocks.ownerGeneration,
   }),
 }));
@@ -29,16 +53,38 @@ vi.mock('../../model-access/effectiveEndpoint.js', () => ({
 vi.mock('../../secrets/providerSecretStore.js', () => ({
   getProviderSecretStore: () => ({ get: () => 'test-api-key' }),
 }));
+vi.mock('../../localDb/client/current.js', () => ({
+  getDbClient: () => mocks.db,
+  getCurrentDbClientUserId: () => mocks.dbOwnerId,
+}));
 vi.mock('../../maker-host/outbound-fetch.js', () => ({
   outboundFetch: mocks.outboundFetch,
 }));
 vi.mock('../../model-access/mediaModels.js', () => ({
   listAvailableMediaModels: mocks.models,
+  listExecutableMediaModels: mocks.executableModels,
   fetchMediaInvocationGuide: mocks.guide,
+  MediaGuideCompatibilityError: class MediaGuideCompatibilityError extends Error {
+    constructor(
+      readonly code: string,
+      message: string,
+      readonly detail?: string,
+    ) {
+      super(message);
+    }
+  },
+  MediaModelCatalogError: class MediaModelCatalogError extends Error {
+    constructor(
+      message: string,
+      readonly detail?: string,
+    ) {
+      super(message);
+    }
+  },
 }));
 vi.mock('../ingest.js', () => ({ ingestMedia: mocks.ingestMedia }));
 vi.mock('../blobStore.js', () => ({
-  readFile: vi.fn(),
+  readFile: mocks.readBlob,
   supportedMime: (mime: string) =>
     ['image/png', 'video/mp4', 'audio/mpeg'].includes(mime),
 }));
@@ -57,7 +103,17 @@ vi.mock('../mediaInvocationStore.js', () => ({
   recoverInterruptedMediaInvocations: mocks.recover,
   pruneMediaInvocations: mocks.prune,
   countMediaInvocations: async () => mocks.rows.size,
-  createMediaInvocation: async ({ id, owner, guide, createdAt }: any) => {
+  createMediaInvocation: async ({
+    id,
+    owner,
+    guide,
+    createdAt,
+  }: {
+    id: string;
+    owner: string;
+    guide: MockPreparedGuide;
+    createdAt: number;
+  }) => {
     mocks.rows.set(id, {
       id,
       owner,
@@ -74,12 +130,17 @@ vi.mock('../mediaInvocationStore.js', () => ({
     const row = mocks.rows.get(id);
     return row?.owner === owner ? row : null;
   },
-  transitionMediaInvocation: async ({ id, owner, from, to, taskId }: any) => {
+  transitionMediaInvocation: async (
+    { id, owner, from, to, taskId, responseJson }: MockTransitionInput,
+    db: unknown,
+  ) => {
+    mocks.transitionDbs.push(db);
     const row = mocks.rows.get(id);
     if (!row || row.owner !== owner || row.state !== from) return false;
     row.state = to;
     row.updatedAt = Date.now();
     if (taskId) row.taskId = taskId;
+    if (responseJson) row.responseJson = responseJson;
     return true;
   },
 }));
@@ -100,6 +161,7 @@ function operation(response: Record<string, unknown>, path = '/images/generation
     request: {
       method: 'POST',
       path,
+      bodyEncoding: 'json',
       bodyModelPath: ['model'],
       timeoutMs: 5_000,
       maxRequestBytes: 1_048_576,
@@ -116,7 +178,6 @@ function operation(response: Record<string, unknown>, path = '/images/generation
 function resolvedGuide(op: Record<string, unknown>) {
   return {
     modelId: 'image-model',
-    wireModelId: 'wire-image-model',
     guide: {
       schemaVersion: 1,
       guideId: 'images-v1',
@@ -141,15 +202,27 @@ describe('Cindy Core media invocation state and security boundary', () => {
   beforeEach(() => {
     mocks.currentUserId = `media-user-${crypto.randomUUID()}`;
     mocks.ownerGeneration += 1;
+    mocks.dbOwnerId = mocks.currentUserId;
+    mocks.db = {
+      owner: mocks.currentUserId,
+      drizzle: { owner: mocks.currentUserId },
+    };
+    mocks.transitionDbs.length = 0;
     mocks.rows.clear();
     mocks.models.mockReset().mockResolvedValue([
       { id: 'image-model', name: 'Image Model', mode: 'image_generation' },
     ]);
+    mocks.executableModels.mockReset().mockResolvedValue({
+      models: [{ id: 'image-model', name: 'Image Model', mode: 'image_generation' }],
+      unavailable: [],
+      candidateCount: 1,
+    });
     mocks.guide.mockReset();
     mocks.outboundFetch.mockReset();
     mocks.ingestMedia.mockReset().mockResolvedValue({
       url: `cindy-media://blobs/${'a'.repeat(64)}.png`,
     });
+    mocks.readBlob.mockReset();
     mocks.recover.mockClear();
     mocks.prune.mockClear();
   });
@@ -182,7 +255,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(mocks.outboundFetch.mock.calls[0][0]).toBe(
       'https://gateway.example.com/images/generations',
     );
-    expect(JSON.parse(init.body)).toEqual({ prompt: 'cat', model: 'wire-image-model' });
+    expect(JSON.parse(init.body)).toEqual({ prompt: 'cat', model: 'image-model' });
     expect(init.headers.Authorization).toBe('Bearer test-api-key');
     await expect(
       callCindyMedia({ action: 'request', invocationId, body: { prompt: 'again' } }),
@@ -190,7 +263,198 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('模型可见但 Guide 缺少目标 operation 时只在 prepare 明确拒绝', async () => {
+  it('按 Guide 把受管图片机械组装为 multipart 文件请求', async () => {
+    const op = operation(
+      {
+        mode: 'sync',
+        media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+      },
+      '/v1/images/edits',
+    );
+    const multipartOp = {
+      ...op,
+      capability: 'image.generate',
+      request: {
+        ...op.request,
+        bodyEncoding: 'multipart',
+        multipartFiles: [
+          { bodyField: 'image', formField: 'image[]', kind: 'image', maxItems: 16 },
+        ],
+      },
+    };
+    mocks.guide.mockResolvedValue(resolvedGuide(multipartOp));
+    mocks.readBlob.mockResolvedValue({ buffer: PNG, mimeType: 'image/png' });
+    mocks.outboundFetch.mockResolvedValue(
+      new Response(JSON.stringify({ data: PNG.toString('base64') }), { status: 200 }),
+    );
+
+    await expect(
+      callCindyMedia({
+        action: 'request',
+        invocationId: await prepare(),
+        body: {
+          prompt: 'add snow',
+          image: `cindy-media://blobs/${'b'.repeat(64)}.png`,
+        },
+      }),
+    ).resolves.toMatchObject({ ok: true, status: 'complete' });
+
+    const [, init] = mocks.outboundFetch.mock.calls[0];
+    expect(init.headers).not.toHaveProperty('Content-Type');
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get('model')).toBe('image-model');
+    expect(form.get('prompt')).toBe('add snow');
+    expect(form.get('image[]')).toBeInstanceOf(Blob);
+  });
+
+  it('同步生成成功后下载暂时失败时复用已保存响应，不会再次付费 POST', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [
+            {
+              path: ['data'],
+              encoding: 'url',
+              kind: 'image',
+              allowedUrlHosts: ['cdn.example.com'],
+            },
+          ],
+        }),
+      ),
+    );
+    mocks.outboundFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: 'https://cdn.example.com/generated.png' }), {
+          status: 200,
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError('temporary network failure'))
+      .mockResolvedValueOnce(
+        new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }),
+      );
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MEDIA_DOWNLOAD_FAILED',
+      retryable: true,
+      retry_action: 'request',
+    });
+    expect(mocks.rows.get(invocationId)).toMatchObject({
+      state: 'pending',
+      responseJson: JSON.stringify({ data: 'https://cdn.example.com/generated.png' }),
+    });
+
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'ignored-on-retry' } }),
+    ).resolves.toMatchObject({ ok: true, status: 'complete' });
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(3);
+    expect(mocks.outboundFetch.mock.calls[0][0]).toBe(
+      'https://gateway.example.com/images/generations',
+    );
+    expect(mocks.outboundFetch.mock.calls[1][0]).toBe('https://cdn.example.com/generated.png');
+    expect(mocks.outboundFetch.mock.calls[2][0]).toBe('https://cdn.example.com/generated.png');
+  });
+
+  it('结果下载期间账号切换时不向新账号入库，并允许原账号恢复结果', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [
+            {
+              path: ['data'],
+              encoding: 'url',
+              kind: 'image',
+              allowedUrlHosts: ['cdn.example.com'],
+            },
+          ],
+        }),
+      ),
+    );
+    const originalUserId = mocks.currentUserId;
+    const originalDb = mocks.db;
+    mocks.outboundFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: 'https://cdn.example.com/generated.png' }), {
+          status: 200,
+        }),
+      )
+      .mockImplementationOnce(async () => {
+        mocks.currentUserId = `other-user-${crypto.randomUUID()}`;
+        mocks.ownerGeneration += 1;
+        mocks.dbOwnerId = mocks.currentUserId;
+        mocks.db = {
+          owner: mocks.currentUserId,
+          drizzle: { owner: mocks.currentUserId },
+        };
+        return new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } });
+      })
+      .mockResolvedValueOnce(
+        new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }),
+      );
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'ACCOUNT_CHANGED' });
+    expect(mocks.ingestMedia).not.toHaveBeenCalled();
+    expect(mocks.rows.get(invocationId)?.state).toBe('pending');
+
+    mocks.currentUserId = originalUserId;
+    mocks.ownerGeneration += 1;
+    mocks.dbOwnerId = originalUserId;
+    mocks.db = originalDb;
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'ignored-on-retry' } }),
+    ).resolves.toMatchObject({ ok: true, status: 'complete' });
+    expect(mocks.ingestMedia).toHaveBeenCalledTimes(1);
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(3);
+    expect(mocks.transitionDbs.every((db) => db === originalDb)).toBe(true);
+  });
+
+  it('结果入库期间账号切换时沿用原账号 DB，并在写入闸处停止', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+        }),
+      ),
+    );
+    mocks.outboundFetch.mockResolvedValue(
+      new Response(JSON.stringify({ data: PNG.toString('base64') }), { status: 200 }),
+    );
+    const originalDb = mocks.db;
+    mocks.ingestMedia.mockImplementationOnce(async (
+      params: { assertStillValid(): void },
+      db: unknown,
+    ) => {
+      expect(db).toBe(originalDb.drizzle);
+      mocks.currentUserId = `other-user-${crypto.randomUUID()}`;
+      mocks.ownerGeneration += 1;
+      mocks.dbOwnerId = mocks.currentUserId;
+      mocks.db = {
+        owner: mocks.currentUserId,
+        drizzle: { owner: mocks.currentUserId },
+      };
+      params.assertStillValid();
+      throw new Error('unreachable');
+    });
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'ACCOUNT_CHANGED' });
+    expect(mocks.rows.get(invocationId)?.state).toBe('pending');
+    expect(mocks.transitionDbs.every((db) => db === originalDb)).toBe(true);
+  });
+
+  it('Guide 缺少目标 operation 时在 prepare 返回稳定的能力不支持错误', async () => {
     mocks.guide.mockResolvedValue(
       resolvedGuide({
         ...operation({
@@ -207,7 +471,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
         modelId: 'image-model',
         capability: 'image.generate',
       }),
-    ).resolves.toMatchObject({ ok: false, errorCode: 'GUIDE_NOT_AVAILABLE' });
+    ).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_NOT_SUPPORTED' });
     expect(mocks.rows.size).toBe(0);
   });
 
@@ -246,6 +510,11 @@ describe('Cindy Core media invocation state and security boundary', () => {
     mocks.models.mockImplementationOnce(async () => {
       mocks.currentUserId = `other-user-${crypto.randomUUID()}`;
       mocks.ownerGeneration += 1;
+      mocks.dbOwnerId = mocks.currentUserId;
+      mocks.db = {
+        owner: mocks.currentUserId,
+        drizzle: { owner: mocks.currentUserId },
+      };
       return [{ id: 'image-model', name: 'Image Model', mode: 'image_generation' }];
     });
 
@@ -272,7 +541,6 @@ describe('Cindy Core media invocation state and security boundary', () => {
       guideRevision: resolved.guide.revision,
       guide: {
         modelId: resolved.modelId,
-        wireModelId: resolved.wireModelId,
         schemaVersion: resolved.guide.schemaVersion,
         guideId: resolved.guide.guideId,
         revision: resolved.guide.revision,
@@ -297,7 +565,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
     await expect(
       callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
-    expect(mocks.recover).toHaveBeenCalledWith(`cn:${mocks.currentUserId}`);
+    expect(mocks.recover).toHaveBeenCalledWith(`cn:${mocks.currentUserId}`, mocks.db);
     expect(mocks.outboundFetch).not.toHaveBeenCalled();
   });
 
@@ -546,5 +814,65 @@ describe('Cindy Core media invocation state and security boundary', () => {
       ok: false,
       errorCode: 'INVOCATION_NOT_PENDING',
     });
+  });
+
+  it('异步任务成功后的永久下载拒绝会终止 invocation', async () => {
+    const asyncOperation = {
+      ...operation(
+        {
+          mode: 'async',
+          taskIdPath: ['task_id'],
+          poll: {
+            method: 'GET',
+            path: '/video/tasks/{taskId}',
+            statusPath: ['status'],
+            successValues: ['succeeded'],
+            failureValues: ['failed'],
+            recommendedIntervalMs: 10,
+            timeoutMs: 5_000,
+            maxResponseBytes: 1_048_576,
+            media: [
+              {
+                path: ['video'],
+                encoding: 'url',
+                kind: 'video',
+                allowedUrlHosts: ['cdn.example.com'],
+              },
+            ],
+          },
+        },
+        '/video/tasks',
+      ),
+      capability: 'video.generate',
+    };
+    mocks.models.mockResolvedValue([
+      { id: 'image-model', name: 'Video Model', mode: 'video_generation' },
+    ]);
+    mocks.guide.mockResolvedValue(resolvedGuide(asyncOperation));
+    mocks.outboundFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-3' }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ status: 'succeeded', video: 'https://cdn.example.com/expired.mp4' }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 403 }));
+
+    const prepared = await callCindyMedia({
+      action: 'prepare',
+      modelId: 'image-model',
+      capability: 'video.generate',
+    });
+    const invocationId = prepared.invocation_id as string;
+    await callCindyMedia({ action: 'request', invocationId, body: { content: [] } });
+
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MEDIA_DOWNLOAD_REJECTED',
+      retryable: false,
+    });
+    expect(mocks.rows.get(invocationId)?.state).toBe('failed');
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(3);
   });
 });

@@ -20,7 +20,11 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-import { CINDY_BRIDGE_EXTENSION_SOURCE } from '../cindy-bridge-source.js';
+import {
+  CINDY_BRIDGE_EXTENSION_SOURCE,
+  CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS,
+  CINDY_PI_BASH_MAX_TIMEOUT_SECONDS,
+} from '../cindy-bridge-source.js';
 
 type ReviewSearchHelpers = {
   filterReviewGrepResult: (
@@ -105,6 +109,25 @@ function loadReviewSearchHelpers(
   return context as ReviewSearchHelpers;
 }
 
+function loadBashTimeoutHelpers(): {
+  resolveCindyBashTimeout: (params: unknown) => number;
+  applyCindyBashTimeoutParams: (params: unknown) => Record<string, unknown>;
+} {
+  const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+  const start = source.indexOf('const CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS =');
+  const end = source.indexOf('function cindyBashTimeoutDescription');
+  if (start < 0 || end <= start) {
+    throw new Error('bash timeout helpers were not found in the generated bridge');
+  }
+  const factory = new Function(
+    `${source.slice(start, end)}; return { resolveCindyBashTimeout, applyCindyBashTimeoutParams };`,
+  ) as () => {
+    resolveCindyBashTimeout: (params: unknown) => number;
+    applyCindyBashTimeoutParams: (params: unknown) => Record<string, unknown>;
+  };
+  return factory();
+}
+
 describe('cindy-bridge extension source', () => {
   it('is valid standalone TypeScript for the Pi runtime to load', () => {
     const result = ts.transpileModule(CINDY_BRIDGE_EXTENSION_SOURCE, {
@@ -151,6 +174,86 @@ describe('cindy-bridge extension source', () => {
   it('keeps generated extension source free of template literals', () => {
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).not.toContain('`');
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).not.toContain('${');
+  });
+
+  it('normalizes bash timeout at the execute boundary without a host-side timer', () => {
+    const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+    expect(source).toContain(
+      `const CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS = ${CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS};`,
+    );
+    expect(source).toContain(
+      `const CINDY_PI_BASH_MAX_TIMEOUT_SECONDS = ${CINDY_PI_BASH_MAX_TIMEOUT_SECONDS};`,
+    );
+    expect(source).toContain('const nextParams = applyCindyBashTimeoutParams(params);');
+    expect(source).toContain(
+      'return bashTool.execute(id, nextParams as any, signal, onUpdate as any);',
+    );
+    expect(source).toContain('cindyBashTimeoutDescription()');
+    const executeSlice = source.slice(
+      source.indexOf('applyCindyBashTimeoutParams(params)'),
+      source.indexOf('cindy-branch-switch'),
+    );
+    expect(executeSlice).not.toContain('AbortController');
+    expect(executeSlice).not.toContain('setTimeout');
+
+    const { resolveCindyBashTimeout, applyCindyBashTimeoutParams } = loadBashTimeoutHelpers();
+    expect(resolveCindyBashTimeout(undefined)).toBe(CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS);
+    expect(resolveCindyBashTimeout({})).toBe(CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS);
+    expect(resolveCindyBashTimeout({ timeout: 0 })).toBe(CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS);
+    expect(resolveCindyBashTimeout({ timeout: -1 })).toBe(CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS);
+    expect(resolveCindyBashTimeout({ timeout: 45 })).toBe(45);
+    expect(resolveCindyBashTimeout({ timeout: CINDY_PI_BASH_MAX_TIMEOUT_SECONDS })).toBe(
+      CINDY_PI_BASH_MAX_TIMEOUT_SECONDS,
+    );
+    expect(() => resolveCindyBashTimeout({ timeout: CINDY_PI_BASH_MAX_TIMEOUT_SECONDS + 1 })).toThrow(
+      /Invalid timeout: timeout is in seconds; maximum is 1800 seconds \(received 1801\)/,
+    );
+    expect(() => resolveCindyBashTimeout({ timeout: 180000 })).toThrow(
+      /Invalid timeout: timeout is in seconds; maximum is 1800 seconds \(received 180000\)/,
+    );
+    expect(() => resolveCindyBashTimeout({ timeout: Number.NaN })).toThrow(/Invalid timeout/);
+    expect(() => resolveCindyBashTimeout({ timeout: Number.POSITIVE_INFINITY })).toThrow(
+      /Invalid timeout/,
+    );
+    expect(applyCindyBashTimeoutParams({ command: 'ls' })).toEqual({
+      command: 'ls',
+      timeout: CINDY_PI_BASH_DEFAULT_TIMEOUT_SECONDS,
+    });
+    expect(applyCindyBashTimeoutParams({ command: 'ls', timeout: 12 })).toEqual({
+      command: 'ls',
+      timeout: 12,
+    });
+  });
+
+  it('keeps Pi vision bridge tool security invariants (registration, size, magic-byte, redirect, redaction)', () => {
+    const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+    // 工具只在已启用且可解析 primary 后端时注册（fallback-only 不注册）。
+    expect(source).toContain('piVisionCfg.enabled && piVisionCfg.primary');
+    // 图片大小上限（stat 前置 + read 后 TOCTOU 复查）与魔数校验，防止任意本地文件外传。
+    expect(source).toContain('MAX_IMAGE_BYTES');
+    expect(source).toContain('statSync(imagePath)');
+    expect(source).toContain('sniffImageMime');
+    // 请求禁止跟随重定向（凭证/图片不流向非预期端点）。
+    expect(source).toContain("redirect: 'error'");
+    // 路由指定额外头必须合并进请求（anthropic-version / x-api-key / 自定义 provider 头），
+    // 缺失会被后端拒（对齐 host 侧 vision-channel 的 headers 合并）。
+    expect(source).toContain('...spec.headers');
+    // anthropic-messages 视觉请求必须带 max_tokens（/v1/messages 强制要求，缺省会 400）。
+    expect(source).toContain('max_tokens: 1024');
+    // fallback 去重必须比较 headers——同 (url/model/auth) 但路由头不同（如不同
+    // anthropic-beta）的 fallback 是独立后端，不得误判为重复跳过（P2）。
+    expect(source).toContain('JSON.stringify(cfg.fallback.headers');
+    // 本地图片转 data URL 进请求体，路径字符串不外发。
+    expect(source).toContain('image_url:');
+    expect(source).toContain("'data:'");
+    // 错误脱敏：模型侧只看到泛化文案，不含本地路径 / key / URL。
+    expect(source).toContain("'vision: vision backend request failed'");
+    expect(source).toContain("'vision HTTP '");
+    expect(source).toContain("'vision: unable to read the image file'");
+    // host 可关联日志：fallback 行为有结构化 stderr 输出（脱敏，仅 backendRole/model）。
+    expect(source).toContain('vision bridge pi primary backend failed');
+    expect(source).toContain('vision bridge pi used fallback backend');
+    expect(source).toContain('vision bridge pi fallback backend failed');
   });
 
   it('captures known writes before execution and marks opaque tools only after a result', () => {

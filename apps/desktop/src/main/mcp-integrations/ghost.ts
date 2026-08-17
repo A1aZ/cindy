@@ -55,7 +55,6 @@ import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
 import {
   deriveGhostSessionContext,
-  type GhostToolDecl,
   type GhostSessionContextInjected,
   type GhostSetupAssessment,
   type InstalledGhost,
@@ -1170,62 +1169,6 @@ function toCindyGhostInfo(ghost: InstalledGhost): CindyGhostInfo {
   };
 }
 
-function declaredAttachmentUrls(
-  tool: GhostToolDecl,
-  args: Record<string, unknown>,
-): { ok: true; urls: string[] } | { ok: false; message: string } {
-  const urls: string[] = [];
-  for (const name of tool.attachmentArgs ?? []) {
-    const value = args[name];
-    if (value === undefined) continue;
-    const candidates = typeof value === 'string' ? [value] : value;
-    if (
-      !Array.isArray(candidates) ||
-      candidates.some((candidate) => typeof candidate !== 'string' || candidate.length === 0)
-    ) {
-      return {
-        ok: false,
-        message: `插件工具 ${JSON.stringify(tool.name)} 的媒体参数 ${JSON.stringify(name)} 必须是非空地址或地址数组`,
-      };
-    }
-    urls.push(...candidates);
-  }
-  return { ok: true, urls };
-}
-
-async function rewriteDeclaredAttachmentArgs(
-  ghostId: string,
-  tool: GhostToolDecl,
-  args: Record<string, unknown>,
-  sourceUrls: string[],
-  hashes: string[],
-): Promise<{ ok: true; args: Record<string, unknown> } | { ok: false; message: string }> {
-  const safeUrlBySource = new Map<string, string>();
-  for (let index = 0; index < sourceUrls.length; index += 1) {
-    const source = sourceUrls[index]!;
-    const hash = hashes[index];
-    if (!hash) {
-      return { ok: false, message: '媒体授权结果不完整，本次插件调用未执行' };
-    }
-    const info = await ledger.getBlobInfo(hash);
-    if (!info) {
-      return { ok: false, message: '媒体授权结果未写入总仓，本次插件调用未执行' };
-    }
-    safeUrlBySource.set(source, `cindy-ghost://${ghostId}/media/${hash}${info.ext}`);
-  }
-
-  const rewritten = { ...args };
-  for (const name of tool.attachmentArgs ?? []) {
-    const value = args[name];
-    if (typeof value === 'string') {
-      rewritten[name] = safeUrlBySource.get(value) ?? value;
-    } else if (Array.isArray(value)) {
-      rewritten[name] = value.map((source) => safeUrlBySource.get(source) ?? source);
-    }
-  }
-  return { ok: true, args: rewritten };
-}
-
 /**
  * 构造总机 deps(每次工具调用都现查,无任何缓存层)。
  *
@@ -1358,8 +1301,7 @@ export function getCindyGhostsMcpDeps(
       );
       if (!initialVisibility.ok) return initialVisibility;
       const target = initialVisibility.ghost;
-      // 媒体过户:显式 attachments 与工具声明的 attachmentArgs 汇合后，
-      // 逐张落媒体总仓 + 记可读引用
+      // 媒体过户:显式 attachments 逐张落媒体总仓 + 记可读引用
       // (人工确认 = ghost-grant；Host 工具代办 = ghost-tool-grant),指纹注入
       // args.attachments 交给意识。任何一张失败整批拒(ATTACHMENT_INVALID),
       // 不做半成品授权。全链路见 grantAttachmentUrls。
@@ -1410,10 +1352,10 @@ export function getCindyGhostsMcpDeps(
       );
       if (!refreshedVisibility.ok) return refreshedVisibility;
       const refreshed = refreshedVisibility.ghost;
-      const refreshedTool = grantOnly
-        ? undefined
-        : (refreshed.manifest.tools ?? []).find((candidate) => candidate.name === tool);
-      if (!grantOnly && !refreshedTool) {
+      if (
+        !grantOnly &&
+        !(refreshed.manifest.tools ?? []).some((candidate) => candidate.name === tool)
+      ) {
         return {
           ok: false,
           errorCode: 'TOOL_NOT_FOUND',
@@ -1517,17 +1459,7 @@ export function getCindyGhostsMcpDeps(
           },
         };
       }
-      const declaredAttachments = refreshedTool
-        ? declaredAttachmentUrls(refreshedTool, args)
-        : { ok: true as const, urls: [] };
-      if (!declaredAttachments.ok) {
-        return {
-          ok: false,
-          errorCode: 'ATTACHMENT_INVALID',
-          message: declaredAttachments.message,
-        };
-      }
-      const attachmentUrls = [...new Set([...(attachments ?? []), ...declaredAttachments.urls])];
+      const attachmentUrls = [...new Set(attachments ?? [])];
       if (attachmentUrls.length > 0) {
         const grant = await grantAttachmentUrls({
           ghostId,
@@ -1541,19 +1473,7 @@ export function getCindyGhostsMcpDeps(
         if (!grant.ok) {
           return { ok: false, errorCode: 'ATTACHMENT_INVALID', message: grant.message };
         }
-        const rewritten = refreshedTool
-          ? await rewriteDeclaredAttachmentArgs(
-              ghostId,
-              refreshedTool,
-              args,
-              attachmentUrls,
-              grant.hashes,
-            )
-          : { ok: true as const, args };
-        if (!rewritten.ok) {
-          return { ok: false, errorCode: 'ATTACHMENT_INVALID', message: rewritten.message };
-        }
-        mergedArgs = { ...rewritten.args, attachments: grant.hashes };
+        mergedArgs = { ...args, attachments: grant.hashes };
       }
       // 目录过户(xd-service 意识化二期):dir 收集文件发一次性票据,元数据
       // 注入 args.dir_deposit——意识拿到的只有票据与相对路径清单;上传时

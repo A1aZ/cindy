@@ -664,7 +664,6 @@ describe('Ghost manifest contract', () => {
             },
             required: ['input'],
           },
-          attachmentArgs: ['mediaUrl', 'references'],
         },
       ],
       cindy: { image: ['generate'], video: ['edit'] },
@@ -705,32 +704,6 @@ describe('Ghost manifest contract', () => {
       'fs',
     ]);
     expect(result.manifest).not.toHaveProperty('unknownField');
-    expect(result.manifest.tools?.[0]?.attachmentArgs).toEqual(['mediaUrl', 'references']);
-  });
-
-  it('rejects invalid attachmentArgs declarations', () => {
-    const tool = {
-      name: 'import_media',
-      description: 'Import generated media.',
-      parameters: {
-        type: 'object',
-        properties: {
-          mediaUrl: { type: 'string' },
-          count: { type: 'number' },
-        },
-      },
-    };
-    const validate = (attachmentArgs: unknown) =>
-      validateGhostManifest({
-        ...validManifest,
-        slots: ['tool'],
-        tools: [{ ...tool, attachmentArgs }],
-      });
-
-    expect(validate(['missing'])).toMatchObject({ ok: false });
-    expect(validate(['count'])).toMatchObject({ ok: false });
-    expect(validate(['mediaUrl', 'mediaUrl'])).toMatchObject({ ok: false });
-    expect(validate(['__proto__'])).toMatchObject({ ok: false });
   });
 
   it('accepts Desktop-supported badge and confirm slots while requiring a badge panel', () => {

@@ -1427,51 +1427,6 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     ).toBe(false);
   });
 
-  it('attachmentArgs 只接受已声明的 string / string[] 顶层参数', () => {
-    const tool = {
-      name: 'import_media',
-      description: '导入媒体',
-      parameters: {
-        type: 'object',
-        properties: {
-          mediaUrl: { type: 'string' },
-          references: { type: 'array', items: { type: 'string' } },
-          count: { type: 'number' },
-        },
-      },
-    };
-    const validate = (attachmentArgs: unknown) =>
-      validateGhostManifest({
-        ...goodChipManifest(),
-        slots: ['panel', 'tool'],
-        tools: [{ ...tool, attachmentArgs }],
-      });
-
-    const valid = validate(['mediaUrl', 'references']);
-    expect(valid.ok).toBe(true);
-    if (valid.ok) {
-      expect(valid.manifest.tools?.[0]?.attachmentArgs).toEqual(['mediaUrl', 'references']);
-      const previous = validateGhostManifest({
-        ...goodChipManifest(),
-        slots: ['panel', 'tool'],
-        tools: [tool],
-      });
-      expect(previous.ok).toBe(true);
-      if (previous.ok) {
-        expect(diffGhostPermissionItems(previous.manifest, valid.manifest).added).toEqual([
-          expect.objectContaining({
-            key: 'tool:import_media',
-            detail: expect.stringContaining('attachmentArgs: mediaUrl, references'),
-          }),
-        ]);
-      }
-    }
-    expect(validate(['missing']).ok).toBe(false);
-    expect(validate(['count']).ok).toBe(false);
-    expect(validate(['mediaUrl', 'mediaUrl']).ok).toBe(false);
-    expect(validate(['__proto__']).ok).toBe(false);
-  });
-
   it('@ 资源入口只可引用一个已声明工具，并按已知字段收窄', () => {
     const base = {
       ...goodChipManifest(),

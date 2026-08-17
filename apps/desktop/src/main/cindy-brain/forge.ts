@@ -2261,11 +2261,10 @@ const result = await (await fetch('/media-models?type=image')).json();
 1. Agent 用 \`ghost_call\` 调用插件的业务工具；
 2. 插件通过普通 \`tool-result\` JSON 返回业务参数、面板里保存的模型选择或其它上下文；
 3. 同一个 Agent 读取结果后，自行调用 Cindy Core \`media\` 工具；
-4. 如果插件需要最终媒体，在普通接收工具的 \`attachmentArgs\` 声明承载媒体地址的
-   顶层参数；Agent 按该参数调用时，Host 机械提取地址并复用通用 attachments 授权链，
-   再把声明参数中的原地址改写为该插件自己的 \`cindy-ghost://<id>/media/<hash>.<ext>\`
-   地址后派发，避免把本地绝对路径暴露给插件。插件自行保存业务状态与更新 UI；显式
-   \`ghost_call.attachments\` 仍保持兼容。
+4. 如果插件需要最终媒体，Agent 再调用插件的普通接收工具，并通过顶层
+   \`ghost_call.attachments\` 显式交接；Host 复用通用 attachments 授权链，把授权后的
+   指纹注入 \`args.attachments\`，避免把本地绝对路径暴露给插件。插件自行保存业务状态
+   与更新 UI。
 
 第 2 步的字段完全由插件定义，Host 不识别 \`mediaIntent\`、\`nextTool\` 等保留字段，也不
 自动把插件结果转成媒体请求。下面只是普通结果示例，字段名不是平台契约：
@@ -2292,13 +2291,12 @@ Guide 组装请求；Core 负责鉴权、Guide、安全边界、任务状态与�
 插件获取结果不需要专用回调协议：
 
 \`\`\`js
-// manifest：声明哪个顶层参数承载媒体地址
-// { name:'import_artwork', attachmentArgs:['mediaUrl'], parameters:{ ... } }
-// Agent 侧：Core media 成功后按普通工具参数交给插件
+// Agent 侧：Core media 成功后通过通用附件参数交给插件
 ghost_call({
   ghost_id: 'cindy-art',
-  tool: 'import_artwork',
-  args: { mediaUrl: resultUrl, caption: prompt }
+  tool: 'receive_media',
+  args: { caption: prompt },
+  attachments: [resultUrl]
 });
 
 // 插件侧：msg.args.attachments 是已授权指纹；插件自行写 /kv 并广播面板

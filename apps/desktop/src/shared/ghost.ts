@@ -425,12 +425,6 @@ export interface GhostToolDecl {
   description: string;
   /** JSON Schema(object)形态的参数声明;可省略(无参工具)。 */
   parameters?: Record<string, unknown>;
-  /**
-   * 参数中承载媒体地址的顶层字段名。调用工具时 Host 从这些字段提取
-   * string / string[]，复用 attachments 授权链完成过户并把指纹注入
-   * args.attachments；Agent 无需再把同一地址手工复制到 ghost_call.attachments。
-   */
-  attachmentArgs?: string[];
 }
 
 /** cindy 槽·图像类可申请的动作(主机代办菜单的"图像"类目)。 */
@@ -2047,15 +2041,12 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     });
   }
   for (const tool of manifest.tools ?? []) {
-    const attachmentDetail = tool.attachmentArgs?.length
-      ? `attachmentArgs: ${[...tool.attachmentArgs].sort().join(', ')}`
-      : null;
     items.push({
       key: `tool:${tool.name}`,
       kind: 'tool',
       labelKey: 'tool',
       labelArgs: { name: tool.name },
-      detail: attachmentDetail ? `${tool.description}\n${attachmentDetail}` : tool.description,
+      detail: tool.description,
     });
   }
   if (manifest.command) {
@@ -3478,63 +3469,12 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           return { ok: false, reason: 'tools[].parameters 必须可序列化' };
         }
       }
-      let attachmentArgs: string[] | undefined;
-      if (t.attachmentArgs !== undefined) {
-        if (
-          !Array.isArray(t.attachmentArgs) ||
-          t.attachmentArgs.length === 0 ||
-          t.attachmentArgs.length > 4
-        ) {
-          return { ok: false, reason: 'tools[].attachmentArgs 必须是 1–4 项的字段名数组' };
-        }
-        const properties =
-          isPlainObject(t.parameters) && isPlainObject(t.parameters.properties)
-            ? t.parameters.properties
-            : null;
-        const seenAttachmentArgs = new Set<string>();
-        attachmentArgs = [];
-        for (const rawName of t.attachmentArgs) {
-          if (
-            typeof rawName !== 'string' ||
-            rawName.length === 0 ||
-            rawName.length > 64 ||
-            isGhostManifestReservedRecordKey(rawName)
-          ) {
-            return {
-              ok: false,
-              reason: 'tools[].attachmentArgs 只能引用 1–64 字符的安全顶层参数名',
-            };
-          }
-          if (seenAttachmentArgs.has(rawName)) {
-            return {
-              ok: false,
-              reason: `tools[].attachmentArgs 含重复字段 ${JSON.stringify(rawName)}`,
-            };
-          }
-          const schema = properties?.[rawName];
-          const acceptsMediaRef =
-            isPlainObject(schema) &&
-            (schema.type === 'string' ||
-              (schema.type === 'array' &&
-                isPlainObject(schema.items) &&
-                schema.items.type === 'string'));
-          if (!acceptsMediaRef) {
-            return {
-              ok: false,
-              reason: `tools[].attachmentArgs 字段 ${JSON.stringify(rawName)} 必须在 parameters.properties 中声明为 string 或 string[]`,
-            };
-          }
-          seenAttachmentArgs.add(rawName);
-          attachmentArgs.push(rawName);
-        }
-      }
       tools.push({
         name: t.name,
         description: t.description,
         ...(t.parameters !== undefined
           ? { parameters: t.parameters as Record<string, unknown> }
           : {}),
-        ...(attachmentArgs !== undefined ? { attachmentArgs } : {}),
       });
     }
   }

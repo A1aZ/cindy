@@ -3166,14 +3166,18 @@ const getCatalogEmbedConfig = (): ReturnType<typeof getCatalogMediaConfig> =>
  * Art 等插件的媒体偏好只认 Gateway `/models` 快照，并叠加客户端现有停用准入。
  * 不合并 providers.json 的 OpenAI/Gemini/自定义来源；第三方媒体模型后续单独接入。
  */
-function getGatewayMediaPreferenceConfig(kind: 'image' | 'video'): CindyMediaCatalogConfig {
-  const capability = kind === 'image' ? 'image.generate' : 'video.generate';
+function getGatewayMediaPreferenceConfig(
+  capability: GhostMediaCapability,
+): CindyMediaCatalogConfig {
+  const kind = capability.startsWith('image.') ? 'image' : 'video';
+  const coreCapability: MediaCapability =
+    capability === 'video.edit' ? 'video.image_to_video' : capability;
   const models = filterEnabledGatewayMediaModels(
     getXdGatewayModels(),
-    capability,
+    coreCapability,
     readModelDisableOverrides(),
   )
-    .filter((model) => isMediaModelExecutable(model.id, capability))
+    .filter((model) => isMediaModelExecutable(model.id, coreCapability))
     .map((model) => ({
       id: model.id,
       label: model.name ?? model.id,
@@ -3296,7 +3300,7 @@ function getGhostConfiguredMediaModel(
     };
   }
 
-  const config = getGatewayMediaPreferenceConfig(type);
+  const config = getGatewayMediaPreferenceConfig(mediaCapability);
   const available = new Set(config.models.map((model) => model.id));
   const override = readGhostCindyOverrides(ghostId)[mediaCapability];
   const modelId = override && available.has(override) ? override : config.defaults?.standard;
@@ -5886,8 +5890,10 @@ export function registerGhostIpc(): void {
       : null;
     event.returnValue = {
       overrides,
-      image: byKind(getGatewayMediaPreferenceConfig('image')),
-      video: byKind(getGatewayMediaPreferenceConfig('video')),
+      image: byKind(getGatewayMediaPreferenceConfig('image.generate')),
+      imageEdit: byKind(getGatewayMediaPreferenceConfig('image.edit')),
+      video: byKind(getGatewayMediaPreferenceConfig('video.generate')),
+      videoEdit: byKind(getGatewayMediaPreferenceConfig('video.edit')),
       text: {
         options: textOptions,
         defaultModel:
@@ -5960,8 +5966,12 @@ export function registerGhostIpc(): void {
       // fail-closed 兜底,不在这层把「暂时没配 key」当成非法值。
       if (
         !isCindyOverrideModelAllowed(capability as string, model, {
-          image: getGatewayMediaPreferenceConfig('image').models,
-          video: getGatewayMediaPreferenceConfig('video').models,
+          image: getGatewayMediaPreferenceConfig(
+            capability === 'image.edit' ? 'image.edit' : 'image.generate',
+          ).models,
+          video: getGatewayMediaPreferenceConfig(
+            capability === 'video.edit' ? 'video.edit' : 'video.generate',
+          ).models,
           embed: getCatalogEmbedConfig().models,
           textPinIds: buildTextOneshotPinOptions(
             getActiveCatalog(),

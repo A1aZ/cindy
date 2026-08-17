@@ -234,11 +234,9 @@
   工具发起，插件沙箱和 panel 不得直接提交、轮询或下载。存量 `cindy-request` 媒体代办仅作
   兼容，不得作为新 Guide 模型的接入路径。插件工具通过现有 `tool-result` 返回普通 JSON，
   Agent 读取后自行决定下一次 `media` 调用；Host 不识别插件专用媒体意图字段，也不自动
-  转发。插件需要结果时，在普通接收工具上用 `attachmentArgs` 声明承载媒体地址的顶层
-  参数名；Agent 后续只需按工具参数调用，Host 从这些参数机械提取地址并复用已有的
-  `ghost_call.attachments` 通用授权链完成交接，并在派发前把声明参数中的原地址改写为该
-  插件自己的 `cindy-ghost://<id>/media/<hash>.<ext>` 地址，绝不把本地绝对路径暴露给插件。
-  显式 `ghost_call.attachments` 仍兼容并与声明参数去重；插件自行保存业务状态和更新 UI。
+  转发。插件需要结果时，Agent 调用普通接收工具，并通过顶层
+  `ghost_call.attachments` 显式交接；Host 复用已有的通用授权链，将授权后的指纹注入
+  `args.attachments`，绝不把本地绝对路径暴露给插件。插件自行保存业务状态和更新 UI。
   Host 不自动回调插件，也不得新增画廊等插件业务语义。
 - 面板供片与注入的主题 token 只用 `ghostPanelTheme.ts` 白名单内的值，不扩大暴露面。
 - `ios-simulator` 槽只允许读取 Host 当前台前任务的公开模拟器状态，并请求打开既有

@@ -173,6 +173,7 @@ describe('newSessionCreation pipeline', () => {
     const row = remoteSessionStore.getSessions().find((s) => s.id === 's1');
     expect(row?.pendingLocalCreation).toBe(true);
     expect(row?.workingDir).toBe('/repo');
+    expect(row?.title).toBe('hello world');
     const projection = remoteSessionStore.getInputProjection('s1');
     expect(projection.pendingQueue).toHaveLength(1);
     expect(projection.pendingQueue[0]?.text).toBe('hello world');

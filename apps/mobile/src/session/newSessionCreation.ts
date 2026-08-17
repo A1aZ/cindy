@@ -245,8 +245,12 @@ function attachFirstMessageSessionReferences(
 }
 
 function synthesizeSession(params: NewSessionCreationParams, draftOverride?: NewSessionDraft): RemoteSession {
+  const draft = draftOverride ?? params.draft;
   return {
-    ...sessionFromCreateResult({ sessionId: params.sessionId }, draftOverride ?? params.draft),
+    ...sessionFromCreateResult({ sessionId: params.sessionId }, {
+      ...draft,
+      attachments: params.attachments,
+    }),
     pendingLocalCreation: true,
   };
 }

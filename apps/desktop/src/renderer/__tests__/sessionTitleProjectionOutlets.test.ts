@@ -75,6 +75,12 @@ describe('desktop 会话标题投影出口', () => {
     expect(draftRoute).toContain(
       'if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);',
     );
+    // 预览必须在本机发送路径的 createSession 之前登记,否则 sessions:created
+    // 刷新会先画出「未命名任务」。文件前段还有 SSH / 远程建会话,不能拿第一处 create。
+    const previewBeforeCreate = draftRoute.indexOf('emitAutoTitlePreview(sessionId, optimisticTitle)');
+    const sendCreate = draftRoute.indexOf('const newSession = await createSession({', previewBeforeCreate);
+    expect(previewBeforeCreate).toBeGreaterThan(-1);
+    expect(sendCreate).toBeGreaterThan(previewBeforeCreate);
   });
 
   it('系统通知 / 飞书 / 手机推送的标题过投影,且语言走 ref 不被钉在首次渲染', () => {

@@ -165,6 +165,7 @@ import {
   type NewSessionDeviceOption,
   type NewSessionStoredPreferences,
 } from '@/session/newSession';
+import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import { newSessionText } from '@/session/newSessionMessages';
 import { i18n } from '@/i18n';
 import {
@@ -5047,7 +5048,17 @@ export default function NewRemoteSessionScreen() {
         if (!isCurrentOwner() || !ensureDeviceAlive()) return;
       } catch {
         if (!isCurrentOwner() || !ensureDeviceAlive()) return;
-        session = sessionFromCreateResult(result, finalDraft);
+        session = sessionFromCreateResult(result, {
+          ...finalDraft,
+          firstMessage: input.objective,
+        });
+      }
+      if (isDefaultDraftSessionTitle(session.title)) {
+        const titled = sessionFromCreateResult(result, {
+          ...finalDraft,
+          firstMessage: input.objective,
+        });
+        session = { ...session, title: titled.title };
       }
       if (!isCurrentOwner() || !ensureDeviceAlive()) return;
       remoteSessionStore.upsertDeviceSession(selectedDeviceId, selectedDeviceName, session);

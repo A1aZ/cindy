@@ -1437,8 +1437,10 @@ describe('new session model', () => {
       permissionMode: 'acceptEdits',
       fastMode: false,
       providerId: null,
+      firstMessage: '帮我排查登录失败',
     }, new Date('2026-06-16T10:00:00.000Z'))).toMatchObject({
       id: 's-new',
+      title: '帮我排查登录失败',
       workingDir: '/repo',
       workspaceKind: 'project',
       agentKind: 'cc',
@@ -1481,6 +1483,7 @@ describe('new session model', () => {
       providerId: 'deepseek',
     });
     expect(session.providerId).toBe('deepseek');
+    expect(session.title).toBe('New Maker');
     // 未绑定来源的草稿 → null(默认路由),与真实会话同形
     expect(sessionFromCreateResult({ sessionId: 's-n' }, {
       agentKind: 'claude-code',

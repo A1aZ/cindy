@@ -19,6 +19,7 @@ import {
   isProductTurnDoneEvent,
   isTurnContinuationBoundaryEvent,
 } from '@cindy/maker-shared/turn-continuation';
+import { DEFAULT_DRAFT_SESSION_TITLE, isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import { EMPTY_INPUT_PROJECTION, normalizeInputProjection } from '@/session/inputProjection';
 import { sortPendingInteractions } from '@/session/interactionModel';
 import { applySessionModelPrefPush } from '@/session/sessionModelMirror';
@@ -605,12 +606,25 @@ function stamp(session: RemoteSession, deviceId: string, deviceName: string): Re
  * 的新快照仍优先（包括 null）。
  */
 function preserveSessionRuntimeFields(fresh: RemoteSession, local: RemoteSession | undefined): RemoteSession {
+  if (!local) return fresh;
+  let next = fresh;
   if (
-    !local
-    || Object.prototype.hasOwnProperty.call(fresh, 'agentSwitchIntent')
-    || local.agentSwitchIntent === undefined
-  ) return fresh;
-  return { ...fresh, agentSwitchIntent: local.agentSwitchIntent };
+    !Object.prototype.hasOwnProperty.call(fresh, 'agentSwitchIntent')
+    && local.agentSwitchIntent !== undefined
+  ) {
+    next = { ...next, agentSwitchIntent: local.agentSwitchIntent };
+  }
+  // 新建乐观行已经用用户原文当标题;被控端 create 先落哨兵,全量对账 /
+  // getSession 回流不能把第一帧打回「未命名任务」。权威智能标题一到就让位。
+  if (
+    isDefaultDraftSessionTitle(fresh.title)
+    && local.title
+    && local.title !== DEFAULT_DRAFT_SESSION_TITLE
+    && local.title !== 'New remote session'
+  ) {
+    next = { ...next, title: local.title };
+  }
+  return next;
 }
 
 function normalizeMessages(list: readonly RemoteMessage[]): RemoteMessage[] {
@@ -1416,7 +1430,10 @@ export const remoteSessionStore = {
     } else {
       const wasPinned = shard.sessions[idx].pinnedAt != null;
       const unpinned = Object.prototype.hasOwnProperty.call(patch, 'pinnedAt') && patch.pinnedAt == null;
-      const patched = { ...shard.sessions[idx], ...patch } as RemoteSession;
+      const patched = preserveSessionRuntimeFields(
+        { ...shard.sessions[idx], ...patch } as RemoteSession,
+        shard.sessions[idx],
+      );
       if (remoteSessionEqual(shard.sessions[idx], patched)) return;
       shard.sessions = shard.sessions.map((s) => (s.id === sessionId ? patched : s));
       shouldReseedAfterPatch = wasPinned && unpinned;

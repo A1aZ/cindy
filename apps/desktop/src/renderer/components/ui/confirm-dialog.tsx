@@ -143,7 +143,9 @@ export function ConfirmDialog({
             'data-[state=open]:animate-confirm-overlay-in',
             'data-[state=closed]:animate-confirm-overlay-out',
           )}
-          style={{ WebkitAppRegion: 'no-drag', zIndex } as React.CSSProperties}
+          // 遮罩保留窗口拖动，避免无边框窗口在单屏边缘打开确认框后无法移回；
+          // 下方弹窗内容仍是 no-drag，按钮、复选框和滚动区继续正常交互。
+          style={{ WebkitAppRegion: 'drag', zIndex } as React.CSSProperties}
         />
         <AlertDialog.Content
           className={cn(

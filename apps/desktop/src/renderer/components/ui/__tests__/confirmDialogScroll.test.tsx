@@ -2,11 +2,12 @@
 /**
  * confirmDialogScroll.test.tsx — 共享 ConfirmDialog 的「长内容不溢出屏幕」契约。
  *
- * 这里锁三件事(都是授权确认框出过的真实问题):
+ * 这里锁四件事(都是授权确认框出过的真实问题):
  * 1. 弹窗自己限高(max-h-[85vh])、标题与按钮固定,长内容在内部滚动;
  * 2. 滚动主体只有一个 —— caller 不必也不该再套一层限高;
  * 3. 弹窗一出现就闪一下滚动条:thumb 默认透明,不提示就等于让用户在
- *    「还有权限没看到」的情况下点同意。
+ *    「还有权限没看到」的情况下点同意;
+ * 4. 确认框打开时,遮罩仍可拖动无边框窗口,但弹窗内容本身保持 no-drag。
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -63,6 +64,28 @@ describe('ConfirmDialog 长内容布局', () => {
     expect(screen.getByText('更新确认').className).toContain('shrink-0');
     const confirmBtn = screen.getByRole('button', { name: '更新' });
     expect((confirmBtn.parentElement as HTMLElement).className).toContain('shrink-0');
+  });
+
+  it('确认框遮罩保留窗口拖动,弹窗内容保持 no-drag', () => {
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="安装插件"
+        content={longContent}
+        confirmText="安装插件"
+      />,
+    );
+
+    const dialog = screen.getByRole('alertdialog');
+    const overlay = document.querySelector('.fixed.inset-0') as HTMLElement;
+    expect(overlay).not.toBeNull();
+    expect((overlay.style as CSSStyleDeclaration & { WebkitAppRegion: string }).WebkitAppRegion).toBe(
+      'drag',
+    );
+    expect((dialog.style as CSSStyleDeclaration & { WebkitAppRegion: string }).WebkitAppRegion).toBe(
+      'no-drag',
+    );
   });
 
   it('打开时闪一下滚动条,内容里的点击(如展开折叠区)后再闪一次', async () => {

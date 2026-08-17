@@ -80,7 +80,7 @@ function normalizeComparablePath(value) {
   return String(value ?? '').replaceAll('\\', '/').replace(/\/+$/, '');
 }
 
-export function isDedicatedMetroProcessGroup(entries, expectedWorktree = null) {
+export function isDedicatedMetroProcessGroup(entries, expectedWorktree) {
   if (!entries.length) return false;
   const normalizedRoot = expectedWorktree ? normalizeComparablePath(expectedWorktree) : null;
   const allowedCwds = normalizedRoot

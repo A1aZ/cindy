@@ -39,7 +39,7 @@ afterEach(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe('tryEnableUncustomizedBeta', () => {
+describe('tryEnableUncustomizedBetaAtomic', () => {
   it('turns beta on via org default without writing a user enableBeta override', async () => {
     const store = await loadStore();
 
@@ -47,7 +47,7 @@ describe('tryEnableUncustomizedBeta', () => {
       value: { enableBeta: false, orgDefaultEnableBeta: false },
       customizedKeys: [],
     });
-    expect(store.tryEnableUncustomizedBeta()).toBe(true);
+    expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(true);
     expect(store.readUpdateChannelSettings()).toEqual({
       enableBeta: true,
       orgDefaultEnableBeta: true,
@@ -63,7 +63,7 @@ describe('tryEnableUncustomizedBeta', () => {
 
     expect(store.readUpdateChannelSettings()).toMatchObject({ enableBeta: false });
     expect(store.isEnableBetaUserCustomized()).toBe(true);
-    expect(store.tryEnableUncustomizedBeta()).toBe(false);
+    expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(false);
     expect(store.readUpdateChannelSettings().enableBeta).toBe(false);
   });
 
@@ -72,7 +72,7 @@ describe('tryEnableUncustomizedBeta', () => {
     store.writeEnableBeta(false);
 
     expect(store.isEnableBetaUserCustomized()).toBe(true);
-    expect(store.tryEnableUncustomizedBeta()).toBe(false);
+    expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(false);
     expect(store.readUpdateChannelSettings().enableBeta).toBe(false);
   });
 
@@ -80,7 +80,7 @@ describe('tryEnableUncustomizedBeta', () => {
     const store = await loadStore();
     store.writeEnableBeta(true);
 
-    expect(store.tryEnableUncustomizedBeta()).toBe(false);
+    expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(false);
     expect(store.readUpdateChannelSettings().enableBeta).toBe(true);
     expect(store.isEnableBetaUserCustomized()).toBe(true);
   });

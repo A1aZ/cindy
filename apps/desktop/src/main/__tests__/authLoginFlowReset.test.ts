@@ -315,7 +315,7 @@ describe('auth login-flow reset', () => {
     const betaBody = source.slice(betaStart, betaEnd);
     expect(betaBody).toContain('if (isPassiveSharedUserDataInstance()) return;');
     expect(betaBody).toContain('decodeAccessTokenOrgSlug(accessToken)');
-    expect(betaBody).toContain('enableUncustomizedBetaChannel()');
+    expect(betaBody).toContain('enableUncustomizedBetaChannel');
     expect(source).not.toContain('relaunchForChannelChange');
 
     const clearIntegrationsStart = source.indexOf('async function clearPerAccountIntegrations(');

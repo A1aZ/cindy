@@ -49,7 +49,7 @@ function makeDeps(
     probeBetaManifest: overrides.probeThrows
       ? vi.fn().mockRejectedValue(new Error('offline'))
       : vi.fn().mockResolvedValue(overrides.available !== false),
-    enableBeta: vi.fn(),
+    enableBeta: vi.fn().mockResolvedValue(true),
   };
 }
 

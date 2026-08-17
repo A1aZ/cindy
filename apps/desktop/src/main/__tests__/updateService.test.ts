@@ -70,7 +70,7 @@ vi.mock('../auto-update-settings-store', () => ({
   writeAutoRelaunchOnIdle: vi.fn(),
 }));
 
-const tryEnableUncustomizedBeta = vi.fn(() => true);
+const tryEnableUncustomizedBetaAtomic = vi.fn(async () => true);
 const readUpdateChannelSettings = vi.fn(() => ({
   enableBeta: false,
   orgDefaultEnableBeta: false,
@@ -93,7 +93,7 @@ vi.mock('../updateChannelStore', () => ({
   }),
   resetUpdateChannelSettings: () => ({ enableBeta: false, orgDefaultEnableBeta: false }),
   writeEnableBeta: vi.fn(),
-  tryEnableUncustomizedBeta,
+  tryEnableUncustomizedBetaAtomic,
   isEnableBetaUserCustomized: () => false,
   isBetaChannelEnabled: () => readUpdateChannelSettings().enableBeta === true,
 }));
@@ -180,8 +180,8 @@ beforeEach(() => {
   isDev.mockReset();
   isDev.mockReturnValue(false);
   download.mockReset();
-  tryEnableUncustomizedBeta.mockReset();
-  tryEnableUncustomizedBeta.mockReturnValue(true);
+  tryEnableUncustomizedBetaAtomic.mockReset();
+  tryEnableUncustomizedBetaAtomic.mockResolvedValue(true);
   readUpdateChannelSettings.mockReset();
   readUpdateChannelSettings.mockReturnValue({
     enableBeta: false,
@@ -514,7 +514,7 @@ describe('startup update relaunch safety', () => {
     try {
       await probeStarted;
       expect(service.getUpdateStatus()).toBe('ready');
-      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
       expect(service.getUpdateStatus()).toBe('ready');
     } finally {
       releaseProbe?.(true);
@@ -536,7 +536,7 @@ describe('startup update relaunch safety', () => {
     });
     try {
       await probeStarted;
-      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
       expect(service.getUpdateStatus()).toBe('ready');
       releaseProbe?.(true);
       await vi.waitFor(() => {
@@ -561,7 +561,7 @@ describe('startup update relaunch safety', () => {
     });
     try {
       await probeStarted;
-      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
       expect(service.getUpdateStatus()).toBe('ready');
       releaseProbe?.(false);
       await vi.waitFor(() => {

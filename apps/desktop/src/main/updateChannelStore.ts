@@ -105,15 +105,26 @@ export function isEnableBetaUserCustomized(): boolean {
  * 用户手动关过(enableBeta 键存在)后必须保持关。
  * 返回是否实际把有效值从关写成开。
  */
-export function tryEnableUncustomizedBeta(): boolean {
-  const state = store.readState();
-  if (state.customizedKeys.includes('enableBeta') || state.value.enableBeta) return false;
-  store.writePatch({ orgDefaultEnableBeta: true });
-  log.info('beta update channel setting written', {
-    enableBeta: true,
-    source: 'xd-org-default',
+/**
+ * 跨进程锁内现读再决定是否打开组织默认。
+ * probe 前后另一实例可能已经写下用户关闭,不能用过期的 isCustomized 缓存覆盖。
+ */
+export async function tryEnableUncustomizedBetaAtomic(): Promise<boolean> {
+  let wrote = false;
+  await store.updateAtomic((current) => {
+    if (current.customizedKeys.includes('enableBeta') || current.value.enableBeta) {
+      return {};
+    }
+    wrote = true;
+    return { orgDefaultEnableBeta: true };
   });
-  return true;
+  if (wrote) {
+    log.info('beta update channel setting written', {
+      enableBeta: true,
+      source: 'xd-org-default',
+    });
+  }
+  return wrote;
 }
 
 export function resetUpdateChannelSettings(): UpdateChannelSettings {

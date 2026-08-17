@@ -38,7 +38,7 @@ export interface XdOrgBetaDefaultDeps {
   readCurrentAuthIdentity(): { authEpoch: number; userId: string | null };
   readChannelState(): XdOrgBetaChannelState;
   probeBetaManifest(): Promise<boolean>;
-  enableBeta(): void;
+  enableBeta(): boolean | Promise<boolean>;
 }
 
 export type XdOrgBetaDefaultOutcome =
@@ -102,6 +102,11 @@ export async function maybeEnableXdOrgBetaDefault(
     return { kind: 'skipped', reason: 'stale-auth' };
   }
 
-  deps.enableBeta();
+  const wrote = await deps.enableBeta();
+  if (!wrote) {
+    const latest = deps.readChannelState();
+    if (latest.enableBeta) return { kind: 'skipped', reason: 'already-enabled' };
+    return { kind: 'skipped', reason: 'user-customized' };
+  }
   return { kind: 'enabled' };
 }

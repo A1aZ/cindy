@@ -44,7 +44,7 @@ import {
   isEnableBetaUserCustomized,
   readUpdateChannelSettings,
   resetUpdateChannelSettings,
-  tryEnableUncustomizedBeta,
+  tryEnableUncustomizedBetaAtomic,
   writeEnableBeta,
 } from './updateChannelStore';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer';
@@ -155,8 +155,11 @@ let lastErrorCode: string | undefined;
 let autoRelaunchInProgress = false;
 /** 资格检查(含异步 busyProbe)进行中的次数。这段窗口暂缓清补丁。 */
 let autoRelaunchDecisionDepth = 0;
-/** 资格检查期间有人要求作废旧渠道补丁,检查结束后若没真正开始应用再补清。 */
-let stagedPatchClearDeferred = false;
+/**
+ * 资格检查期间要求作废的那份旧补丁路径。
+ * 只清这份文件,避免误删检查窗口里新渠道刚写下的 readyFilePath。
+ */
+let deferredStagedPatchPath: string | undefined;
 let lastAutoRelaunchBlockReason: AutoRelaunchBlockReason | null = null;
 let lastBusyAtMs: number | null = null;
 let lastResumeAtMs: number | null = null;
@@ -348,7 +351,7 @@ async function requestAutoRelaunch(
       return { accepted: false, blockReason };
     }
 
-    if (stagedPatchClearDeferred) {
+    if (deferredStagedPatchPath) {
       log.info('auto relaunch aborted — update channel changed during eligibility check');
       return { accepted: false, blockReason: 'not-ready' };
     }
@@ -609,9 +612,15 @@ function invalidateInFlightChannelDownloads(): void {
 }
 
 function flushDeferredStagedPatchClear(): void {
-  if (!stagedPatchClearDeferred) return;
+  if (!deferredStagedPatchPath) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
-  stagedPatchClearDeferred = false;
+  const stalePath = deferredStagedPatchPath;
+  deferredStagedPatchPath = undefined;
+  if (readyFilePath && readyFilePath !== stalePath) {
+    log.info('keeping newer staged patch after deferred channel-change clear');
+    try { fs.unlinkSync(stalePath); } catch { /* ignore */ }
+    return;
+  }
   clearStagedPatch();
 }
 
@@ -628,7 +637,7 @@ function clearStagedPatch(): void {
     return;
   }
   if (autoRelaunchDecisionDepth > 0) {
-    stagedPatchClearDeferred = true;
+    deferredStagedPatchPath = readyFilePath ?? deferredStagedPatchPath;
     // 立刻作废旧渠道 in-flight 下载,避免下载完成后又把旧补丁写成 ready。
     invalidateInFlightChannelDownloads();
     log.info('deferring staged patch clear until auto-relaunch eligibility settles');
@@ -1537,9 +1546,9 @@ export function initUpdateService(): void {
  * 渠道从关变开时作废已 staged 的旧渠道补丁,与设置页手动打开同一口径。
  * 不 relaunch:本次进程继续走当前通道,下次冷启动 / 用户自行重启再生效。
  */
-export function enableUncustomizedBetaChannel(): boolean {
+export async function enableUncustomizedBetaChannel(): Promise<boolean> {
   const wasBeta = readUpdateChannelSettings().enableBeta;
-  const wrote = tryEnableUncustomizedBeta();
+  const wrote = await tryEnableUncustomizedBetaAtomic();
   if (wrote && !wasBeta) {
     // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
     clearStagedPatch();

@@ -1473,9 +1473,7 @@ function scheduleXdOrgBetaDefault(input: {
         isCustomized: isEnableBetaUserCustomized(),
       }),
       probeBetaManifest,
-      enableBeta: () => {
-        enableUncustomizedBetaChannel();
-      },
+      enableBeta: () => enableUncustomizedBetaChannel(),
     },
   )
     .then((outcome) => {

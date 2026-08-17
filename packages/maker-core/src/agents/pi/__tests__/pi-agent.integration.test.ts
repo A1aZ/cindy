@@ -2120,6 +2120,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         writeFileSync(secretPath, 'FAKE_REDIRECT_DOTENV_SECRET=must-not-leak');
         writeFileSync(ordinaryPath, 'ordinary-content');
         symlinkSync('../secrets/.env', postCdLink);
+        symlinkSync(ordinaryPath, path.join(workingDir, 'link'));
         symlinkSync(secretPath, path.join(workingDir, escapedLinkName));
         symlinkSync(secretPath, path.join(workingDir, cdRedirectLinkName));
         symlinkSync(ordinaryPath, path.join(subDir, cdRedirectLinkName));
@@ -2127,6 +2128,10 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
 
         for (const [sessionId, command] of [
           ['perm-auto-bash-symlink-dotenv-post-cd', 'cd sub >/dev/null && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-leading-redirect', '2>/dev/null cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-builtin-cd', 'builtin cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-leading-builtin', '2>/dev/null builtin cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-builtin-pushd', 'builtin pushd sub >/dev/null && cat<link'],
           ['perm-auto-bash-symlink-dotenv-backslash', `cat <"${escapedLinkName}"`],
           ['perm-auto-bash-symlink-dotenv-cd-redirect', `cd sub <>${cdRedirectLinkName} && cat <ordinary`],
         ] as const) {
@@ -2147,6 +2152,24 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           expect(followUp.some((b) => b.includes('FAKE_REDIRECT_DOTENV_SECRET')), command).toBe(false);
           expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.')), command).toBe(true);
         }
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: '2>/dev/null builtin cd sub && cat<link' }),
+          anthropicStreamBody('bash Full Access prefixed cd turn finished'),
+        );
+        const fullAccessReqBefore = seenRequests.length;
+        const fullAccessTurn = await runPermissionTurn({
+          sessionId: 'perm-full-access-bash-prefixed-builtin-cd',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(fullAccessTurn.resolverTools).toEqual([]);
+        const fullAccessFollowUp = seenRequests.slice(fullAccessReqBefore).map((request) => request.body);
+        expect(fullAccessFollowUp.some((body) => body.includes('FAKE_REDIRECT_DOTENV_SECRET'))).toBe(false);
+        expect(fullAccessFollowUp.some((body) => body.includes('Cindy blocks reading credential or key paths')))
+          .toBe(true);
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;
@@ -2228,7 +2251,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it.skipIf(!canSymlink)(
-    'auto mode keeps ordinary bash input redirect symlinks on the readonly fast path',
+    'ordinary bash input redirect symlinks keep their existing permission behavior',
     { timeout: 60_000 },
     async () => {
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-symlink-plain-'));
@@ -2246,15 +2269,15 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         scriptedResponses.length = 0;
         scriptedResponses.push(
           anthropicToolUseBody('bash', {
-            command: `cd sub <${redirectLinkName} && cat<link`,
+            command: `2>/dev/null builtin cd sub <${redirectLinkName} && cat<link`,
           }),
           anthropicStreamBody('bash ordinary symlink turn finished'),
         );
         const reqBefore = seenRequests.length;
         const { resolverTools } = await runPermissionTurn({
-          sessionId: 'perm-auto-bash-symlink-plain',
+          sessionId: 'perm-full-access-bash-prefixed-symlink-plain',
           workingDir,
-          permissionMode: 'auto',
+          permissionMode: 'bypassPermissions',
           resolverBehavior: 'deny',
         });
         expect(resolverTools).toEqual([]);
@@ -2264,7 +2287,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         scriptedResponses.length = 0;
         scriptedResponses.push(
           anthropicToolUseBody('bash', {
-            command: `cd sub <>${redirectLinkName} && cat<link`,
+            command: `2>/dev/null command -- cd sub <>${redirectLinkName} && cat<link`,
           }),
           anthropicStreamBody('bash ordinary read-write symlink turn finished'),
         );

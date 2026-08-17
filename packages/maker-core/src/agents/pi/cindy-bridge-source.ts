@@ -316,26 +316,165 @@ function bashInheritedDirectoryChangeIsUncertain(target: string): boolean {
   return cdPath.split(':').some((entry) => entry.length > 0 && path.normalize(entry) !== '.');
 }
 
+type BashLeadingRedirection = { end: number; unresolved: boolean };
+type BashDirectoryChangeHead = {
+  cursor: number;
+  hadRedirection: boolean;
+  unresolved: boolean;
+};
+
+function bashInlinePaddingEnd(command: string, start: number): number {
+  let cursor = start;
+  while (cursor < command.length) {
+    while (/[ \t\r]/.test(command[cursor] ?? '')) cursor += 1;
+    if (command[cursor] !== '\\' || command[cursor + 1] !== '\n') break;
+    cursor += 2;
+  }
+  return cursor;
+}
+
+function bashLeadingRedirectionAt(command: string, start: number): BashLeadingRedirection | null {
+  let redirect = start;
+  const namedFd = /^\{[A-Za-z_][A-Za-z0-9_]*\}/.exec(command.slice(redirect));
+  if (namedFd) redirect += namedFd[0].length;
+  else while (/\d/.test(command[redirect] ?? '')) redirect += 1;
+  let operator = '';
+  if (command.startsWith('&>>', redirect)) operator = '&>>';
+  else if (command.startsWith('&>', redirect)) operator = '&>';
+  else {
+    for (const candidate of ['<<<', '<>', '<&', '>&', '>>', '>|', '<', '>']) {
+      if (command.startsWith(candidate, redirect)) {
+        operator = candidate;
+        break;
+      }
+    }
+  }
+  if (!operator) return null;
+  if (command.startsWith('<<', redirect) && !command.startsWith('<<<', redirect)) {
+    return { end: redirect + 2, unresolved: true };
+  }
+  const targetStart = bashInlinePaddingEnd(command, redirect + operator.length);
+  const target = readShellRedirectionTarget(command, targetStart);
+  return {
+    end: target.end,
+    unresolved: !target.target || target.unresolved,
+  };
+}
+
+function bashUnresolvedHeadHasDirectoryChange(codeMask: string, start: number): boolean {
+  let visible = '';
+  let depth = 0;
+  for (let index = start; index < codeMask.length; index += 1) {
+    const char = codeMask.charAt(index);
+    if (char === '(') {
+      depth += 1;
+      visible += ' ';
+      continue;
+    }
+    if (char === ')') {
+      if (depth === 0) break;
+      depth -= 1;
+      visible += ' ';
+      continue;
+    }
+    if (depth > 0) {
+      visible += /\s/.test(char) ? char : ' ';
+      continue;
+    }
+    if (/[;&|\n]/.test(char)) break;
+    visible += char;
+  }
+  return /\b(?:(?:command|builtin)\s+)*(?:cd|pushd)(?:\s|$)/.test(visible);
+}
+
+function bashDirectoryChangeHead(
+  command: string,
+  codeMask: string,
+  start: number,
+): BashDirectoryChangeHead | null {
+  let cursor = bashInlinePaddingEnd(command, start);
+  let hadRedirection = false;
+  let unresolved = false;
+  while (true) {
+    const redirection = bashLeadingRedirectionAt(command, cursor);
+    if (!redirection) break;
+    hadRedirection = true;
+    unresolved ||= redirection.unresolved;
+    cursor = bashInlinePaddingEnd(command, redirection.end);
+  }
+
+  let word = readShellRedirectionTarget(command, cursor);
+  if (!word.target || word.unresolved) {
+    if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
+      return { cursor, hadRedirection, unresolved: true };
+    }
+    return null;
+  }
+  while (word.target === 'command' || word.target === 'builtin') {
+    const wrapper = word.target;
+    cursor = bashInlinePaddingEnd(command, word.end);
+    while (true) {
+      const redirection = bashLeadingRedirectionAt(command, cursor);
+      if (redirection) {
+        hadRedirection = true;
+        unresolved ||= redirection.unresolved;
+        cursor = bashInlinePaddingEnd(command, redirection.end);
+        continue;
+      }
+      word = readShellRedirectionTarget(command, cursor);
+      if (wrapper !== 'command' || (word.target !== '--' && !/^-p+$/.test(word.target))) break;
+      cursor = bashInlinePaddingEnd(command, word.end);
+    }
+    if (!word.target || word.unresolved) return unresolved
+      ? { cursor, hadRedirection, unresolved: true }
+      : null;
+  }
+
+  if ((word.target !== 'cd' && word.target !== 'pushd') || word.unresolved) {
+    if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
+      return { cursor, hadRedirection, unresolved: true };
+    }
+    return null;
+  }
+  return { cursor: word.end, hadRedirection, unresolved };
+}
+
 function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
   let candidates = [process.cwd()];
   let unresolved = false;
   const codeMask = bashShellCodeMask(command);
-  const directoryChange = /(?:^|[;&|(){}\n])\s*(?:(?:if|then|elif|else|while|until|do)\s+)?(?:command\s+)?(?:cd|pushd)\s+/g;
-  for (const match of codeMask.matchAll(directoryChange)) {
+  const commandStart = /(?:^(?=[^;&|(){}\n])|[;&|(){}\n])\s*(?:(?:if|then|elif|else|while|until|do)\s+)?/g;
+  for (const match of codeMask.matchAll(commandStart)) {
     const matchIndex = match.index ?? 0;
-    let cursor = matchIndex + match[0].length;
+    const head = bashDirectoryChangeHead(command, codeMask, matchIndex + match[0].length);
+    if (!head) continue;
+    if (head.unresolved) {
+      unresolved = true;
+      continue;
+    }
+    let cursor = head.cursor;
+    let hadRedirection = head.hadRedirection;
     const precededByConditionalOperator = matchIndex > 0
       && ((codeMask[matchIndex] === '&' && codeMask[matchIndex - 1] === '&')
         || (codeMask[matchIndex] === '|' && codeMask[matchIndex - 1] === '|'));
     const changeDepth = bashSubshellDepthAt(codeMask, cursor);
     if (!bashSubshellScopeRemainsOpen(codeMask, cursor, changeDepth)) continue;
-    let parsed = readShellRedirectionTarget(command, cursor);
+    let parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
     let optionsEnded = false;
-    while (parsed.target === '--' || /^-[LPen]+$/.test(parsed.target)) {
+    while (true) {
+      cursor = bashInlinePaddingEnd(command, cursor);
+      const redirection = bashLeadingRedirectionAt(command, cursor);
+      if (redirection) {
+        hadRedirection = true;
+        unresolved ||= redirection.unresolved;
+        cursor = redirection.end;
+        parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
+        continue;
+      }
+      if (parsed.target !== '--' && !/^-[LPen]+$/.test(parsed.target)) break;
       if (parsed.target === '--') optionsEnded = true;
       cursor = parsed.end;
-      while (/\s/.test(command[cursor] ?? '')) cursor += 1;
-      parsed = readShellRedirectionTarget(command, cursor);
+      parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
     }
     if (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-'))) {
       unresolved = true;
@@ -369,7 +508,7 @@ function bashWorkingDirectoryCandidates(command: string): BashPathCandidates {
       codeMask.slice(operatorEvidence.end),
     );
     if (operator === '||' || branchMayHaveBeenSkipped || precededByConditionalOperator
-      || (operatorEvidence.hadRedirection && (operator === ';' || operator === '\n'))) {
+      || ((hadRedirection || operatorEvidence.hadRedirection) && (operator === ';' || operator === '\n'))) {
       candidates = [...new Set([...candidates, ...changed])];
     } else if (changed.length > 0) {
       candidates = [...new Set(changed)];

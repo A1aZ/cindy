@@ -266,6 +266,9 @@ describe('cindy-bridge extension source', () => {
         const cdPathRoot = path.join(tempRoot, 'cdpath-root');
         const cdPathSubDir = path.join(cdPathRoot, 'sub');
         const cdPathSecretLink = path.join(cdPathSubDir, 'link');
+        const cwdSwitchName = 'cwd-switch-link';
+        const rootCwdSwitchOrdinaryLink = path.join(tempRoot, cwdSwitchName);
+        const nestedCwdSwitchSecretLink = path.join(nestedDir, cwdSwitchName);
         mkdirSync(path.dirname(secretPath), { recursive: true });
         mkdirSync(nestedDir, { recursive: true });
         mkdirSync(dashDir, { recursive: true });
@@ -283,6 +286,8 @@ describe('cindy-bridge extension source', () => {
         symlinkSync(ordinaryPath, nestedCdRedirectOrdinaryLink);
         symlinkSync(ordinaryPath, nestedOrdinaryReadLink);
         symlinkSync(secretPath, cdPathSecretLink);
+        symlinkSync(ordinaryPath, rootCwdSwitchOrdinaryLink);
+        symlinkSync(secretPath, nestedCwdSwitchSecretLink);
         symlinkSync(ordinaryPath, ordinaryLink);
 
         expect(context.collectResolvedCredentialPaths?.({ path: secretLink })).toEqual([
@@ -417,6 +422,47 @@ describe('cindy-bridge extension source', () => {
             context.bashInputReadTargets?.({ command: redirectedCommand }),
           ), redirectedCommand).toEqual([realpathSync(secretPath)]);
         }
+        for (const command of [
+          `2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `builtin 2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `command -p 2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `command -- cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `builtin command cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `command builtin 2>/dev/null pushd ${nestedDir} && cat <${cwdSwitchName}`,
+          `{saved}>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `(2>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName})`,
+        ]) {
+          const evidence = context.bashInputReadEvidence?.({ command });
+          expect(evidence, command).toEqual({ targets: [nestedCwdSwitchSecretLink], unresolved: false });
+          expect(context.collectResolvedCredentialPaths?.(evidence?.targets), command)
+            .toEqual([realpathSync(secretPath)]);
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: `true && 2>/dev/null builtin pushd ${nestedDir} && cat <${cwdSwitchName}`,
+        })).toEqual({
+          targets: [rootCwdSwitchOrdinaryLink, nestedCwdSwitchSecretLink],
+          unresolved: false,
+        });
+        expect(context.bashInputReadEvidence?.({
+          command: `2>/missing builtin cd ${nestedDir}; cat <${cwdSwitchName}`,
+        })).toEqual({
+          targets: [rootCwdSwitchOrdinaryLink, nestedCwdSwitchSecretLink],
+          unresolved: false,
+        });
+        const dynamicPrefixedEvidence = context.bashInputReadEvidence?.({
+          command: `>$(printf out) builtin cd ${nestedDir} && cat <ordinary-link.txt`,
+        });
+        expect(dynamicPrefixedEvidence?.unresolved).toBe(true);
+        expect(context.collectResolvedCredentialPaths?.(dynamicPrefixedEvidence?.targets)).toEqual([]);
+        expect(context.bashInputReadEvidence?.({
+          command: '>$(printf cd) cat <ordinary-link.txt',
+        })).toEqual({ targets: [ordinaryLink], unresolved: false });
+        const ordinaryPrefixedCommand = `2>/dev/null builtin cd ${nestedDir} && cat <${nestedOrdinaryReadName}`;
+        const ordinaryPrefixedEvidence = context.bashInputReadEvidence?.({ command: ordinaryPrefixedCommand });
+        expect(ordinaryPrefixedEvidence).toEqual({ targets: [nestedOrdinaryReadLink], unresolved: false });
+        expect(context.collectResolvedCredentialPaths?.(ordinaryPrefixedEvidence?.targets)).toEqual([]);
+
         expect(context.bashInputReadEvidence?.({
           command: `cd ${nestedDir} >/dev/null && cat <${scopedLinkName}`,
         })).toEqual({ targets: [nestedScopedOrdinaryLink], unresolved: false });

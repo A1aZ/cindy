@@ -406,6 +406,7 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(source).toContain(
       'const hasPendingResetWindow = chipWindows.some((window) => window.resetPending);',
     );
+    expect(source).toContain('const xaiWeeklyStale = usesXaiQuotaForm');
   });
 
   it('does not treat missing subscription credits as exhausted usage', () => {

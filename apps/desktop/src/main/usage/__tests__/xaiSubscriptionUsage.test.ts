@@ -66,13 +66,15 @@ describe('fetchXaiSubscriptionUsageSnapshot', () => {
     expect(JSON.stringify(snapshot)).not.toContain('keep-out');
   });
 
-  it('still returns plan-only data when userinfo fails', async () => {
+  it('still returns weekly data when userinfo fails', async () => {
     const fetchFn = vi.fn(async (url: string) => {
       if (url.includes('/user?')) return jsonResponse(200, { userId: 'user-1' });
       if (url.includes('/settings')) {
         return jsonResponse(200, { subscription_tier_display: 'SuperGrok' });
       }
-      if (url.includes('format=credits')) return jsonResponse(500, {});
+      if (url.includes('format=credits')) {
+        return jsonResponse(200, { config: { creditUsagePercent: 2 } });
+      }
       if (url.includes('/userinfo')) return jsonResponse(500, {});
       return jsonResponse(404, {});
     });
@@ -82,8 +84,24 @@ describe('fetchXaiSubscriptionUsageSnapshot', () => {
     });
     expect(snapshot).toMatchObject({
       planLabel: 'SuperGrok',
+      creditUsagePercent: 2,
       accountFingerprint: null,
     });
+  });
+
+  it('does not replace cache with plan-only data when billing fails', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('/settings')) {
+        return jsonResponse(200, { subscription_tier_display: 'SuperGrok Heavy' });
+      }
+      if (url.includes('format=credits')) return jsonResponse(503, {});
+      if (url.includes('/user?') || url.includes('/userinfo')) return jsonResponse(200, {});
+      return jsonResponse(404, {});
+    });
+    await expect(fetchXaiSubscriptionUsageSnapshot({
+      accessToken: 'tok',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })).resolves.toBeNull();
   });
 
   it('keeps quota when identity endpoints fail', async () => {

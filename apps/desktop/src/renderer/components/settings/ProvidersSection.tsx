@@ -71,7 +71,10 @@ import {
 import { BILLING_CURRENCY, formatBillingAmount } from '@/features/billing/money';
 import { canAccessBillingSettings } from './billingVisibility';
 import { resolveXdAssetModuleState } from './providerAssetModule';
-import { useXaiSubscriptionUsage } from '@/hooks/useXaiSubscriptionUsage';
+import {
+  requestXaiSubscriptionRefresh,
+  useXaiSubscriptionUsage,
+} from '@/hooks/useXaiSubscriptionUsage';
 import {
   formatXaiProductLabel,
   isXaiWeeklyUsageCurrent,
@@ -798,6 +801,11 @@ function XaiAssetModule({ connected }: { connected: boolean }) {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, [connected]);
+  useEffect(() => {
+    if (!connected || !usage) return;
+    if (isXaiWeeklyUsageCurrent(usage, nowMs)) return;
+    requestXaiSubscriptionRefresh();
+  }, [connected, usage, nowMs]);
   if (!connected || !usage) return null;
   const hasWeekly = isXaiWeeklyUsageCurrent(usage, nowMs);
   if (!usage.planLabel && !hasWeekly) return null;

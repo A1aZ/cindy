@@ -172,9 +172,13 @@ export async function fetchXaiSubscriptionUsageSnapshot(opts: {
       accountFingerprint: subject ? fingerprintXaiSubject(subject) : null,
       now,
     });
+    if (!credits.ok) {
+      // billing 瞬时失败时只剩套餐名,不能当全量快照盖掉上次的周百分比/重置。
+      return null;
+    }
     if (!snapshot) {
       // 两个权威端点都成功但解析不出字段 → empty(清缓存)。任一非 ok 当瞬时失败保缓存。
-      if (settings.ok && credits.ok) {
+      if (settings.ok) {
         log.warn('xAI subscription usage response had no parsable plan or weekly window');
         return XAI_SUBSCRIPTION_USAGE_EMPTY;
       }
@@ -195,6 +199,7 @@ export async function fetchXaiSubscriptionUsageSnapshot(opts: {
   } finally {
     clearTimeout(quotaTimeout);
     clearTimeout(identityTimeout);
+    if (!quotaController.signal.aborted) quotaController.abort();
     if (!identityController.signal.aborted) identityController.abort();
   }
 }

@@ -166,8 +166,8 @@ export async function fetchXaiSubscriptionUsageSnapshot(opts: {
     const planLabel = parseXaiSettingsPlanLabel(settings.data);
     const parsedCredits = parseXaiBillingCreditsConfig(credits.data);
     const subject = subjectFromUserinfo(userinfo);
-    if (!credits.ok || !parsedCredits) {
-      // billing 非 ok,或 200 但没有周窗口字段:只剩套餐名,不能当全量快照盖掉缓存。
+    if (!settings.ok || !credits.ok || !parsedCredits) {
+      // 任一权威端点失败或 billing 没有周窗口:不完整快照不能盖掉缓存里的套餐/周用量。
       return null;
     }
     const snapshot = buildXaiSubscriptionUsageSnapshot({

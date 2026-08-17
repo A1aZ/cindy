@@ -104,6 +104,21 @@ describe('fetchXaiSubscriptionUsageSnapshot', () => {
     })).resolves.toBeNull();
   });
 
+  it('does not replace cache when settings fails but billing has weekly data', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('/settings')) return jsonResponse(503, {});
+      if (url.includes('format=credits')) {
+        return jsonResponse(200, { config: { creditUsagePercent: 2 } });
+      }
+      if (url.includes('/user?') || url.includes('/userinfo')) return jsonResponse(200, {});
+      return jsonResponse(404, {});
+    });
+    await expect(fetchXaiSubscriptionUsageSnapshot({
+      accessToken: 'tok',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })).resolves.toBeNull();
+  });
+
   it('does not replace cache with plan-only data when billing fails', async () => {
     const fetchFn = vi.fn(async (url: string) => {
       if (url.includes('/settings')) {

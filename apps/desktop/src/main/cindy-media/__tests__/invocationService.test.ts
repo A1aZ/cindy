@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   },
   dbOwnerId: 'media-user-0',
   transitionDbs: [] as unknown[],
+  failTransitionTo: null as string | null,
   recover: vi.fn<(owner: string, db: unknown) => Promise<number>>(async () => 0),
   prune: vi.fn(async () => undefined),
   rows: new Map<string, Record<string, unknown>>(),
@@ -138,6 +139,7 @@ vi.mock('../mediaInvocationStore.js', () => ({
     db: unknown,
   ) => {
     mocks.transitionDbs.push(db);
+    if (mocks.failTransitionTo === to) throw new Error(`transition to ${to} failed`);
     const row = mocks.rows.get(id);
     if (!row || row.owner !== owner || row.state !== from) return false;
     row.state = to;
@@ -211,6 +213,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
       drizzle: { owner: mocks.currentUserId },
     };
     mocks.transitionDbs.length = 0;
+    mocks.failTransitionTo = null;
     mocks.rows.clear();
     mocks.models.mockReset().mockResolvedValue([
       { id: 'image-model', name: 'Image Model', mode: 'image_generation' },
@@ -524,6 +527,58 @@ describe('Cindy Core media invocation state and security boundary', () => {
       callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
     expect(mocks.rows.get(invocationId)?.state).toBe('unknown');
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('建连失败发生在派发前时恢复 prepared，不把 invocation 卡在 submitting', async () => {
+    const resolved = resolvedGuide(
+      operation({
+        mode: 'sync',
+        media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+      }),
+    );
+    resolved.guide.connection.providerId = 'unsupported';
+    mocks.guide.mockResolvedValue(resolved);
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'CONNECTION_NOT_SUPPORTED',
+      outcomeKnown: true,
+      retryable: false,
+    });
+    expect(mocks.rows.get(invocationId)?.state).toBe('prepared');
+    expect(mocks.outboundFetch).not.toHaveBeenCalled();
+  });
+
+  it('上游成功后响应持久化抛错时保留 unknown，禁止自动重提', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+        }),
+      ),
+    );
+    mocks.outboundFetch.mockResolvedValue(
+      new Response(JSON.stringify({ data: PNG.toString('base64') }), { status: 200 }),
+    );
+    mocks.failTransitionTo = 'pending';
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SUBMISSION_OUTCOME_UNKNOWN',
+      outcomeKnown: false,
+    });
+    expect(mocks.rows.get(invocationId)?.state).toBe('unknown');
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
   });
 

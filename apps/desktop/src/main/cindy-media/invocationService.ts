@@ -977,6 +977,17 @@ async function submitInvocation(
   }
   const requestBody = await prepareRequestBody(body, invocation.guide);
   assertAuthScope(scope, invocation.owner);
+  let connection: MediaConnection;
+  try {
+    connection = resolveConnection(invocation.guide.connection.providerId);
+  } catch (error) {
+    if (error instanceof MediaInvocationError) {
+      return failure(error.code, error.message, error.code === 'CONNECTION_UNAVAILABLE', {
+        outcomeKnown: true,
+      });
+    }
+    throw error;
+  }
   const claimed = await transitionMediaInvocation(
     {
       id: invocation.id,
@@ -997,7 +1008,6 @@ async function submitInvocation(
   // claim 之后再过一次认证代次闸；通过后到 outboundFetch 发起之间没有异步让出点，
   // 因而不会拿切换后账号的 endpoint / key 提交旧账号的付费请求。
   assertAuthScope(scope, invocation.owner);
-  const connection = resolveConnection(invocation.guide.connection.providerId);
   try {
     const response = await dispatchRequest({
       connection,
@@ -1013,16 +1023,35 @@ async function submitInvocation(
     });
     if (invocation.guide.response.mode === 'sync') {
       const responseJson = JSON.stringify(response);
-      const persisted = await transitionMediaInvocation(
-        {
-          id: invocation.id,
-          owner: invocation.owner,
-          from: 'submitting',
-          to: 'pending',
-          responseJson,
-        },
-        db,
-      );
+      let persisted = false;
+      try {
+        persisted = await transitionMediaInvocation(
+          {
+            id: invocation.id,
+            owner: invocation.owner,
+            from: 'submitting',
+            to: 'pending',
+            responseJson,
+          },
+          db,
+        );
+      } catch (error) {
+        log.warn('persist sync media response failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await transitionMediaInvocation(
+          {
+            id: invocation.id,
+            owner: invocation.owner,
+            from: 'submitting',
+            to: 'unknown',
+          },
+          db,
+        ).catch(() => false);
+        return submissionOutcomeUnknown(
+          '上游结果已生成，但本地未能保存结果；不要自动重提',
+        );
+      }
       if (!persisted) {
         return submissionOutcomeUnknown(
           '上游结果已生成，但本地未能保存结果；不要自动重提',
@@ -1053,16 +1082,35 @@ async function submitInvocation(
         '上游响应没有任务 id，无法确认任务状态；不要自动重提',
       );
     }
-    const persisted = await transitionMediaInvocation(
-      {
-        id: invocation.id,
-        owner: invocation.owner,
-        from: 'submitting',
-        to: 'pending',
-        taskId,
-      },
-      db,
-    );
+    let persisted = false;
+    try {
+      persisted = await transitionMediaInvocation(
+        {
+          id: invocation.id,
+          owner: invocation.owner,
+          from: 'submitting',
+          to: 'pending',
+          taskId,
+        },
+        db,
+      );
+    } catch (error) {
+      log.warn('persist async media task id failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await transitionMediaInvocation(
+        {
+          id: invocation.id,
+          owner: invocation.owner,
+          from: 'submitting',
+          to: 'unknown',
+        },
+        db,
+      ).catch(() => false);
+      return submissionOutcomeUnknown(
+        '上游任务已创建，但本地未能保存任务 id；不要自动重提',
+      );
+    }
     if (!persisted) {
       return submissionOutcomeUnknown(
         '上游任务已创建，但本地未能保存任务 id；不要自动重提',

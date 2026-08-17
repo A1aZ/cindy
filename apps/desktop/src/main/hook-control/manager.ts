@@ -103,6 +103,7 @@ import {
 import { parseTelegramConnectUrl } from './telegramDeepLink.js';
 import { parseXConnectUrl, xProfileUrlOrNull } from './xDeepLink.js';
 import type { HookTransport, HookTransportOpts, HookTransportStatus } from './transport.js';
+import { recordSlackSleepPresenceProbeEvent } from '../sleepPresenceProbe.js';
 
 /** dispatcher / bindings 的 connectionId 基础键；运行时追加账号与 provider。 */
 export const SLACK_HOOK_CONNECTION_ID = 'slack';
@@ -2688,6 +2689,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         }
         notifyStatus(toView());
       },
+      probe: recordSlackSleepPresenceProbeEvent,
       log,
     });
     transport = created;

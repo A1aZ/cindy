@@ -29,6 +29,7 @@ import {
 } from '@cindy/slack-hook-protocol';
 
 import { createOutboundHttpAgent } from '../maker-host/outbound-fetch.js';
+import type { SlackTransportProbeEvent } from '../sleepPresenceProbe.js';
 
 /** transport 对外状态(manager 映射为 HookConnectionStatus)。 */
 export type HookTransportStatus = 'connecting' | 'connected' | 'standby' | 'error' | 'stopped';
@@ -58,6 +59,8 @@ export interface HookTransportOpts {
   timing?: { backoffBaseMs?: number; backoffMaxMs?: number; standbyRetryMs?: number };
   /** 测试注入退避抖动的随机源（返回 [0,1)）；生产缺省 Math.random。 */
   random?: () => number;
+  /** Slack 专用只读诊断旁路；其它 provider 不注入。 */
+  probe?: (event: SlackTransportProbeEvent) => void;
   log: { info(msg: string): void; warn(msg: string): void; debug?(msg: string): void };
 }
 
@@ -132,6 +135,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
   let lastFrameAt = 0;
   let lastError: string | null = null;
   let unexpectedHttpStatus: number | null = null;
+  let handshakeComplete = false;
   /**
    * 建连世代。connect() 每次调用递增,建连路径上的每个 await 之后都要比对 —— 取 token
    * 与解析出站代理各是一次异步往返,期间 401 重连 / 退避重试 / dispose 都可能再触发一次
@@ -144,6 +148,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
     // standby 的低频探测在内部仍会经历 connecting/error，但产品状态应持续
     // 表达“另一实例持有”，直到探测真正收到 welcome 或 transport 被重建。
     if (standby && status !== 'connected' && status !== 'stopped') return;
+    opts.probe?.({ event: 'status', status, handshakeComplete });
     onStatus(status, lastError);
   }
 
@@ -165,6 +170,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
     const delay =
       delayOverrideMs ?? computeBackoffDelayMs(attempt, backoffBaseMs, backoffMaxMs, random);
     attempt += 1;
+    opts.probe?.({ event: 'schedule-reconnect', reconnectDelayMs: delay, handshakeComplete });
     retryTimer = setTimeout(() => {
       retryTimer = null;
       connect();
@@ -189,6 +195,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
       // 看门狗先于 ping: 长时间静默直接判死, terminate 触发 close -> 重连
       if (Date.now() - lastFrameAt > IDLE_TIMEOUT_MS) {
         log.warn('idle timeout, terminating connection');
+        opts.probe?.({ event: 'idle-timeout', handshakeComplete });
         ws.terminate();
         return;
       }
@@ -200,6 +207,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
     if (stopped) return;
     const epoch = ++connectEpoch;
     unexpectedHttpStatus = null;
+    handshakeComplete = false;
     setStatus('connecting');
     void getAuthToken()
       .catch(() => null)
@@ -301,7 +309,9 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
         attempt = 0;
         authRefreshAttempted = false;
         lastError = null;
+        handshakeComplete = true;
         log.info(`handshake complete with ${msg.payload.serverName}`);
+        opts.probe?.({ event: 'handshake-complete', handshakeComplete: true });
         // 能力宣告先于 connected: 上层在状态回调里可能立刻发帧, 特性集必须已就位
         opts.onWelcome?.(msg.payload);
         setStatus('connected');
@@ -326,11 +336,15 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
       ws = null;
       if (stopped) return;
 
+      opts.probe?.({ event: 'ws-closed', closeCode: code, handshakeComplete });
+      handshakeComplete = false;
+
       const reasonText = reason.toString('utf-8');
       if (code === DUPLICATE_DEVICE_CLOSE_CODE && reasonText === DUPLICATE_DEVICE_CLOSE_REASON) {
         standby = true;
         lastError = null;
         log.info(`duplicate device connection rejected; entering standby, retrying in ${standbyRetryMs}ms`);
+        opts.probe?.({ event: 'status', status: 'standby', handshakeComplete });
         onStatus('standby', null);
         scheduleRetry(standbyRetryMs);
         return;
@@ -353,6 +367,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
     send,
     dispose() {
       stopped = true;
+      handshakeComplete = false;
       clearTimers();
       try {
         ws?.terminate();
@@ -360,6 +375,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
         /* already closed */
       }
       ws = null;
+      opts.probe?.({ event: 'status', status: 'stopped', handshakeComplete });
       onStatus('stopped', null);
     },
   };

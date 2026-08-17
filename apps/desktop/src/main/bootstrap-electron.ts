@@ -14,6 +14,7 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
   Tray,
   type WebContents,
 } from 'electron';
@@ -44,6 +45,7 @@ import {
 } from './turn-change-set/store.js';
 
 const PROCESS_STARTED_AT_MS = Date.now();
+let sleepPresenceProbe: SleepPresenceProbeHandle | null = null;
 // Official Linux binaries total hundreds of MB. Keep one shared deadline for
 // both downloads, but allow normal consumer connections to finish while the
 // splash displays real byte progress.
@@ -338,6 +340,12 @@ import {
   installPowerEventDiagnostics,
   installWindowResponsivenessDiagnostics,
 } from './powerWakeDiagnostics';
+import {
+  installSleepPresenceProbe,
+  slackTransportProbeSource,
+  shouldEnableSleepPresenceProbe,
+  type SleepPresenceProbeHandle,
+} from './sleepPresenceProbe';
 import {
   broadcastVoiceInputPowerState,
   installVoiceInputPowerRelease,
@@ -6676,6 +6684,16 @@ app.on('ready', async () => {
     return;
   }
 
+  sleepPresenceProbe?.dispose();
+  sleepPresenceProbe = installSleepPresenceProbe({
+    enabled: shouldEnableSleepPresenceProbe(),
+    electronVersion: process.versions.electron ?? 'unknown',
+    platform: process.platform,
+    powerMonitor,
+    workspaceNotifications: systemPreferences,
+    slackTransportEvents: slackTransportProbeSource,
+  });
+
   // WebAuthn 是 app/session 级能力：在任何 RSB guest 或 popup WebContents 创建
   // 之前装账户选择回调；正式签名的 macOS 包同时启用 Touch ID 平台认证器。
   configureRsbBrowserWebAuthn();
@@ -7377,6 +7395,7 @@ onQuit('remote-ssh-pool', () => disposeRemoteSshPool(), 'post-async');
 onQuit('ios-simulator-exit-abort', abortIOSSimulatorOperationsForExit, 'sync');
 // Hook 连接: 停掉全部 WS transport(含重连 timer), 防句柄阻塞退出。
 onQuit('hook-control', () => disposeHookControl(), 'sync');
+onQuit('sleep-presence-probe', () => sleepPresenceProbe?.dispose(), 'sync');
 // session-git-pr-context: 取消 .git HEAD 的 parcel watcher 订阅, 防原生句柄阻塞退出。
 onQuit('git-context', () => disposeGitContext(), 'async');
 onQuit('db-client', () => lifecycleDbClientManager.dispose('quit'), 'async');

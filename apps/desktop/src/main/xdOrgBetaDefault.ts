@@ -24,6 +24,7 @@ export interface XdOrgBetaUser {
 
 export interface XdOrgBetaChannelState {
   enableBeta: boolean;
+  /** 用户是否显式拨过开关。组织默认写入不算。 */
   isCustomized: boolean;
 }
 

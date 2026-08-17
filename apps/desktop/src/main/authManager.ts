@@ -43,7 +43,7 @@ import {
 } from '@cindy/auth-client';
 import { readReloginFlag, clearReloginFlag, enableUncustomizedBetaChannel } from './updateService';
 import { probeBetaManifest } from './manifestService';
-import { readUpdateChannelSettingsState } from './updateChannelStore';
+import { isEnableBetaUserCustomized, readUpdateChannelSettings } from './updateChannelStore';
 import * as canaryFlagStore from './canaryFlagStore';
 import { decodeAccessTokenOrgSlug } from './authTokenClaims';
 import { getProviderSecretStore } from './secrets/providerSecretStore.js';
@@ -1468,13 +1468,10 @@ function scheduleXdOrgBetaDefault(input: {
         authEpoch: authStateEpoch,
         userId: currentUser?.id ?? null,
       }),
-      readChannelState: () => {
-        const state = readUpdateChannelSettingsState();
-        return {
-          enableBeta: state.value.enableBeta,
-          isCustomized: state.isCustomized,
-        };
-      },
+      readChannelState: () => ({
+        enableBeta: readUpdateChannelSettings().enableBeta,
+        isCustomized: isEnableBetaUserCustomized(),
+      }),
       probeBetaManifest,
       enableBeta: () => {
         enableUncustomizedBetaChannel();

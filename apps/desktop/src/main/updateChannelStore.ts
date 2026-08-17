@@ -10,10 +10,11 @@
  *     所以这里用 createOverrideSettingsFile(与 auto-update-settings 同一套
  *     override 语义:默认值 + 用户 override、恢复默认只删 override),而不是仿
  *     canaryFlagStore 的裸 JSON。
- *   - xd 组织登录后可由 authManager 在「尚未自定义」时补一次默认打开;用户
- *     手动关过(isCustomized)后重启 / 重登都不再打开。
+ *   - xd 组织登录后可由 authManager 在「用户没拨过开关」时补一次默认打开;
+ *     用户手动关过(enableBeta override 存在)后重启 / 重登都不再打开。
  *
- * 落盘:userData/update-channel-settings.json,字段 { enableBeta: boolean }。
+ * 落盘:userData/update-channel-settings.json。用户拨动写 enableBeta;
+ * 组织默认写 orgDefaultEnableBeta,两者分开。
  * 默认关闭。manifestService.fetchManifest() 用 resolveUpdateChannel 把本开关与
  * canaryFlagStore.read() 收敛成最终发布通道(优先级 canary > beta > release)。
  */
@@ -31,10 +32,16 @@ const log = desktopMakerLogger.child('update-channel-settings');
 
 export interface UpdateChannelSettings {
   enableBeta: boolean;
+  /**
+   * xd 组织默认打开留下的标记,不是用户拨动。
+   * 有效值:用户写过 enableBeta 用用户值,否则看这个标记。
+   */
+  orgDefaultEnableBeta: boolean;
 }
 
 const DEFAULTS: UpdateChannelSettings = {
   enableBeta: false,
+  orgDefaultEnableBeta: false,
 };
 
 function settingsFilePath(): string {
@@ -45,8 +52,21 @@ function normalize(raw: unknown): UpdateChannelSettings {
   if (!raw || typeof raw !== 'object') return { ...DEFAULTS };
   const r = raw as Record<string, unknown>;
   return {
-    enableBeta:
-      typeof r.enableBeta === 'boolean' ? r.enableBeta : DEFAULTS.enableBeta,
+    // 这里只还原落盘字段。override store 读盘时会把 defaults 和 overrides 先
+    // 合并再交给 normalize,enableBeta:false 分不清是默认还是用户关过,有效值
+    // 在 resolveEffectiveSettings 里按 customizedKeys 算。
+    enableBeta: typeof r.enableBeta === 'boolean' ? r.enableBeta : DEFAULTS.enableBeta,
+    orgDefaultEnableBeta: r.orgDefaultEnableBeta === true,
+  };
+}
+
+function resolveEffectiveSettings(
+  state: OverrideSettingsState<UpdateChannelSettings>,
+): UpdateChannelSettings {
+  const userCustomized = state.customizedKeys.includes('enableBeta');
+  return {
+    enableBeta: userCustomized ? state.value.enableBeta : state.value.orgDefaultEnableBeta,
+    orgDefaultEnableBeta: state.value.orgDefaultEnableBeta,
   };
 }
 
@@ -59,7 +79,7 @@ const store = createOverrideSettingsFile<UpdateChannelSettings>({
 });
 
 export function readUpdateChannelSettings(): UpdateChannelSettings {
-  return store.read();
+  return resolveEffectiveSettings(store.readState());
 }
 
 export function readUpdateChannelSettingsState(): OverrideSettingsState<UpdateChannelSettings> {
@@ -68,22 +88,31 @@ export function readUpdateChannelSettingsState(): OverrideSettingsState<UpdateCh
 
 export function writeEnableBeta(enableBeta: boolean): void {
   // 关 beta 的值等于系统默认 false。若不 preserveDefaults,override 会被删掉,
-  // isCustomized 变回 false,xd 组织下次登录又会把开关默认打开,盖掉用户的
-  // 手动关闭。设置页每次拨动都算显式自定义。
+  // 用户键消失后会被当成未自定义,xd 组织下次登录又会默认打开。
+  // 设置页每次拨动都写 enableBeta,与组织默认标记分开。
   store.writePatch({ enableBeta }, { preserveDefaults: true });
   log.info('beta update channel setting written', { enableBeta });
 }
 
+/** 用户是否显式拨过 beta 开关。组织默认写入不算。 */
+export function isEnableBetaUserCustomized(): boolean {
+  return store.readState().customizedKeys.includes('enableBeta');
+}
+
 /**
- * 仅在用户从没改过这个开关时打开 beta。
- * 给 xd 组织默认打开用:用户手动关过(isCustomized)后必须保持关。
- * 返回是否实际写入了 true。
+ * 仅在用户从没拨过这个开关时打开 beta。
+ * 写入 orgDefaultEnableBeta,不写 enableBeta,避免把组织默认伪装成用户 override。
+ * 用户手动关过(enableBeta 键存在)后必须保持关。
+ * 返回是否实际把有效值从关写成开。
  */
 export function tryEnableUncustomizedBeta(): boolean {
   const state = store.readState();
-  if (state.value.enableBeta || state.isCustomized) return false;
-  store.writePatch({ enableBeta: true });
-  log.info('beta update channel setting written', { enableBeta: true, source: 'xd-org-default' });
+  if (state.customizedKeys.includes('enableBeta') || state.value.enableBeta) return false;
+  store.writePatch({ orgDefaultEnableBeta: true });
+  log.info('beta update channel setting written', {
+    enableBeta: true,
+    source: 'xd-org-default',
+  });
   return true;
 }
 

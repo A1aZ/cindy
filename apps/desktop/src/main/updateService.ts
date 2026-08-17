@@ -41,8 +41,8 @@ import {
   writeAutoRelaunchOnIdle,
 } from './auto-update-settings-store';
 import {
+  isEnableBetaUserCustomized,
   readUpdateChannelSettings,
-  readUpdateChannelSettingsState,
   resetUpdateChannelSettings,
   tryEnableUncustomizedBeta,
   writeEnableBeta,
@@ -559,12 +559,21 @@ function removePatchInfo(): void {
   try { fs.unlinkSync(path.join(getUpdatesDir(), PATCH_INFO_FILE)); } catch { /* ignore */ }
 }
 
+function isUpdateApplyInFlight(): boolean {
+  return isRelaunching || autoRelaunchInProgress;
+}
+
 /**
  * 清掉已 staged 的补丁(ready 态):删 zip + patch-info.json,状态回 idle。
- * 只在「用户关掉 beta 开关」时调用——opt-out 后不能仍让 staged 的 beta patch
- * 在下一次启动/后台轮询里被装上去(切渠道不等于切版本,必须把旧渠道的补丁作废)。
+ * 切渠道时调用——opt-out 后不能仍让 staged 的旧渠道 patch 在下次启动/后台
+ * 轮询里被装上去(切渠道不等于切版本,必须把旧渠道的补丁作废)。
+ * 自动重启已经过资格检查时不能清,否则 executeRelaunch 会走 no_ready_file。
  */
 function clearStagedPatch(): void {
+  if (isUpdateApplyInFlight()) {
+    log.info('skipping staged patch clear — update apply already in flight');
+    return;
+  }
   if (readyFilePath) {
     try { fs.unlinkSync(readyFilePath); } catch { /* ignore */ }
   }
@@ -1255,8 +1264,10 @@ export function initUpdateService(): void {
   // 更新设置或重启应用(旧 update-auto-settings 没断言是历史债,不构成豁免)。
   ipcMain.handle('update-channel-settings-get', (event) => {
     assertTrustedAppRendererEvent(event);
-    const state = readUpdateChannelSettingsState();
-    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+    return {
+      enableBeta: readUpdateChannelSettings().enableBeta,
+      isCustomized: isEnableBetaUserCustomized(),
+    };
   });
 
   ipcMain.handle('update-channel-settings-set', (event, payload: unknown) => {
@@ -1278,8 +1289,10 @@ export function initUpdateService(): void {
     if (wasBeta !== next) {
       clearStagedPatch();
     }
-    const state = readUpdateChannelSettingsState();
-    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+    return {
+      enableBeta: readUpdateChannelSettings().enableBeta,
+      isCustomized: isEnableBetaUserCustomized(),
+    };
   });
 
   ipcMain.handle('update-channel-settings-reset', (event) => {
@@ -1290,8 +1303,10 @@ export function initUpdateService(): void {
     if (wasBeta) {
       clearStagedPatch();
     }
-    const state = readUpdateChannelSettingsState();
-    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+    return {
+      enableBeta: readUpdateChannelSettings().enableBeta,
+      isCustomized: isEnableBetaUserCustomized(),
+    };
   });
 
   // 打开 beta 前的预检:探测 manifest-{platform}-beta.json 是否可达。
@@ -1480,7 +1495,13 @@ export function enableUncustomizedBetaChannel(): boolean {
   const wasBeta = readUpdateChannelSettings().enableBeta;
   const wrote = tryEnableUncustomizedBeta();
   if (wrote && !wasBeta) {
-    clearStagedPatch();
+    // 自动重启已经过资格检查、即将 executeRelaunch 时不能清补丁,
+    // 否则 readyFilePath 被拆掉会走 no_ready_file / updater_spawn_failed。
+    if (isUpdateApplyInFlight()) {
+      log.info('xd org beta default enabled — leaving in-flight update patch in place');
+    } else {
+      clearStagedPatch();
+    }
   }
   return wrote;
 }

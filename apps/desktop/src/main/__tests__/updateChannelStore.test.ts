@@ -40,18 +40,20 @@ afterEach(() => {
 });
 
 describe('tryEnableUncustomizedBeta', () => {
-  it('writes enableBeta=true when the device has never customized the switch', async () => {
+  it('turns beta on via org default without writing a user enableBeta override', async () => {
     const store = await loadStore();
 
     expect(store.readUpdateChannelSettingsState()).toMatchObject({
-      value: { enableBeta: false },
-      isCustomized: false,
+      value: { enableBeta: false, orgDefaultEnableBeta: false },
+      customizedKeys: [],
     });
     expect(store.tryEnableUncustomizedBeta()).toBe(true);
-    expect(store.readUpdateChannelSettingsState()).toMatchObject({
-      value: { enableBeta: true },
-      isCustomized: true,
+    expect(store.readUpdateChannelSettings()).toEqual({
+      enableBeta: true,
+      orgDefaultEnableBeta: true,
     });
+    expect(store.isEnableBetaUserCustomized()).toBe(false);
+    expect(store.readUpdateChannelSettingsState().customizedKeys).toEqual(['orgDefaultEnableBeta']);
   });
 
   it('does not reopen beta after the user turned it off', async () => {
@@ -59,23 +61,19 @@ describe('tryEnableUncustomizedBeta', () => {
     store.writeEnableBeta(true);
     store.writeEnableBeta(false);
 
-    expect(store.readUpdateChannelSettingsState()).toMatchObject({
-      value: { enableBeta: false },
-      isCustomized: true,
-    });
+    expect(store.readUpdateChannelSettings()).toMatchObject({ enableBeta: false });
+    expect(store.isEnableBetaUserCustomized()).toBe(true);
     expect(store.tryEnableUncustomizedBeta()).toBe(false);
-    expect(store.readUpdateChannelSettings()).toEqual({ enableBeta: false });
+    expect(store.readUpdateChannelSettings().enableBeta).toBe(false);
   });
 
-  it('keeps a never-enabled opt-out as customized', async () => {
+  it('keeps a never-enabled opt-out as a user choice', async () => {
     const store = await loadStore();
     store.writeEnableBeta(false);
 
-    expect(store.readUpdateChannelSettingsState()).toMatchObject({
-      value: { enableBeta: false },
-      isCustomized: true,
-    });
+    expect(store.isEnableBetaUserCustomized()).toBe(true);
     expect(store.tryEnableUncustomizedBeta()).toBe(false);
+    expect(store.readUpdateChannelSettings().enableBeta).toBe(false);
   });
 
   it('is a no-op when beta is already on', async () => {
@@ -83,6 +81,7 @@ describe('tryEnableUncustomizedBeta', () => {
     store.writeEnableBeta(true);
 
     expect(store.tryEnableUncustomizedBeta()).toBe(false);
-    expect(store.readUpdateChannelSettings()).toEqual({ enableBeta: true });
+    expect(store.readUpdateChannelSettings().enableBeta).toBe(true);
+    expect(store.isEnableBetaUserCustomized()).toBe(true);
   });
 });

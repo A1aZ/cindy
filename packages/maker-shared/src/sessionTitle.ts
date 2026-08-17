@@ -70,6 +70,10 @@ export function projectDraftSessionTitle(
  * 用户那句话」。mention / 引用的权威剔除仍在 desktop `deriveAutoTitleSeed`;
  * 这里只处理调用方已经确认可当标题的素材。
  */
+function optimisticFileBaseName(name: string): string {
+  return name.split(/[\\/]/).pop() ?? '';
+}
+
 export function deriveOptimisticSessionTitle(input: {
   text?: string | null;
   fileNames?: readonly string[] | null;
@@ -80,7 +84,7 @@ export function deriveOptimisticSessionTitle(input: {
   const fromText = normalizeAutoTitle(input.text ?? '');
   if (fromText) return fromText;
   for (const name of input.fileNames ?? []) {
-    const fromFile = normalizeAutoTitle(name);
+    const fromFile = normalizeAutoTitle(optimisticFileBaseName(name));
     if (fromFile) return fromFile;
   }
   if (input.firstFileIsImage) return normalizeAutoTitle(input.imageLabel ?? '');

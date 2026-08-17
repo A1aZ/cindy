@@ -3281,7 +3281,11 @@ export function NewMakerDraftRoute() {
                 autoTitleLabels,
               );
               if (optimisticTitle) {
-                remoteProjectsStore.setPendingTitlePreview(remoteSessionId, optimisticTitle, true);
+                remoteProjectsStore.setPendingTitlePreview(
+                  remoteSessionId,
+                  optimisticTitle,
+                  Boolean(normalizeAutoTitle(message)),
+                );
               }
             }
             // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
@@ -3420,6 +3424,7 @@ export function NewMakerDraftRoute() {
               providerId,
             });
             if (!newSession) {
+              if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);
               toastCreateSessionFailed();
               return;
             }
@@ -3646,6 +3651,7 @@ export function NewMakerDraftRoute() {
             providerId,
           });
           if (!newSession) {
+            if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);
             toastCreateSessionFailed();
             return;
           }

@@ -103,6 +103,15 @@ describe('deriveOptimisticSessionTitle', () => {
     })).toBe('需求评审.pdf');
   });
 
+  it('附件名是绝对路径 → 只取 basename,与权威链路一致', () => {
+    expect(deriveOptimisticSessionTitle({
+      fileNames: ['/Users/dash/Downloads/需求评审.pdf'],
+    })).toBe('需求评审.pdf');
+    expect(deriveOptimisticSessionTitle({
+      fileNames: ['C:\\Users\\dash\\Downloads\\shot.png'],
+    })).toBe('shot.png');
+  });
+
   it('没文字也没文件名、是图片 → 类别词', () => {
     expect(deriveOptimisticSessionTitle({
       fileNames: [],

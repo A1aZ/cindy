@@ -102,7 +102,10 @@ vi.mock('../../serverApiClient.js', () => ({
 vi.mock('../mediaInvocationStore.js', () => ({
   recoverInterruptedMediaInvocations: mocks.recover,
   pruneMediaInvocations: mocks.prune,
-  countMediaInvocations: async () => mocks.rows.size,
+  countMediaInvocations: async () =>
+    [...mocks.rows.values()].filter((row) =>
+      ['prepared', 'submitting', 'pending'].includes(String(row.state)),
+    ).length,
   createMediaInvocation: async ({
     id,
     owner,
@@ -259,8 +262,35 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(init.headers.Authorization).toBe('Bearer test-api-key');
     await expect(
       callCindyMedia({ action: 'request', invocationId, body: { prompt: 'again' } }),
-    ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
+    ).resolves.toMatchObject({
+      ok: true,
+      status: 'complete',
+      xdt_image_urls: [`cindy-media://blobs/${'a'.repeat(64)}.png`],
+    });
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.ingestMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('终态历史不占用在途 invocation 上限', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+        }),
+      ),
+    );
+    for (let index = 0; index < 128; index += 1) {
+      mocks.rows.set(`complete-${index}`, { state: 'complete' });
+    }
+
+    await expect(
+      callCindyMedia({
+        action: 'prepare',
+        modelId: 'image-model',
+        capability: 'image.generate',
+      }),
+    ).resolves.toMatchObject({ ok: true, status: 'prepared' });
   });
 
   it('按 Guide 把受管图片机械组装为 multipart 文件请求', async () => {
@@ -765,6 +795,84 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(mocks.outboundFetch.mock.calls[1][0]).toBe(
       'https://gateway.example.com/video/tasks/task-1',
     );
+  });
+
+  it('异步成功响应先持久化，临时下载失败后不再查询上游任务并可重放完成结果', async () => {
+    const asyncOperation = {
+      ...operation({
+        mode: 'async',
+        taskIdPath: ['task_id'],
+        poll: {
+          method: 'GET',
+          path: '/video/tasks/{taskId}',
+          statusPath: ['status'],
+          successValues: ['succeeded'],
+          failureValues: ['failed'],
+          recommendedIntervalMs: 10,
+          timeoutMs: 5_000,
+          maxResponseBytes: 1_048_576,
+          media: [
+            {
+              path: ['video'],
+              encoding: 'url',
+              kind: 'video',
+              allowedUrlHosts: ['cdn.example.com'],
+            },
+          ],
+        },
+      }, '/video/tasks'),
+      capability: 'video.generate',
+    };
+    mocks.models.mockResolvedValue([
+      { id: 'image-model', name: 'Video Model', mode: 'video_generation' },
+    ]);
+    mocks.guide.mockResolvedValue(resolvedGuide(asyncOperation));
+    const successPayload = {
+      status: 'succeeded',
+      video: 'https://cdn.example.com/generated.mp4',
+    };
+    mocks.outboundFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-retry' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(successPayload), { status: 200 }))
+      .mockRejectedValueOnce(new TypeError('temporary network failure'))
+      .mockResolvedValueOnce(
+        new Response(MP4, { status: 200, headers: { 'content-type': 'video/mp4' } }),
+      );
+    mocks.ingestMedia.mockResolvedValue({
+      url: `cindy-media://blobs/${'d'.repeat(64)}.mp4`,
+    });
+
+    const prepared = await callCindyMedia({
+      action: 'prepare',
+      modelId: 'image-model',
+      capability: 'video.generate',
+    });
+    const invocationId = prepared.invocation_id as string;
+    await callCindyMedia({ action: 'request', invocationId, body: { content: [] } });
+
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MEDIA_DOWNLOAD_FAILED',
+      retryable: true,
+      retry_action: 'poll',
+    });
+    expect(mocks.rows.get(invocationId)).toMatchObject({
+      state: 'pending',
+      responseJson: JSON.stringify(successPayload),
+    });
+
+    const completed = {
+      ok: true,
+      status: 'complete',
+      xdt_video_urls: [`cindy-media://blobs/${'d'.repeat(64)}.mp4`],
+    };
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject(completed);
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject(completed);
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(4);
+    expect(mocks.outboundFetch.mock.calls[1][0]).toBe(
+      'https://gateway.example.com/video/tasks/task-retry',
+    );
+    expect(mocks.ingestMedia).toHaveBeenCalledTimes(1);
   });
 
   it('异步任务成功但媒体结果确定无效时终止 invocation，不诱导重复 poll', async () => {

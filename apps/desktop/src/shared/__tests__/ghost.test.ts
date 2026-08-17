@@ -1451,6 +1451,20 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     expect(valid.ok).toBe(true);
     if (valid.ok) {
       expect(valid.manifest.tools?.[0]?.attachmentArgs).toEqual(['mediaUrl', 'references']);
+      const previous = validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['panel', 'tool'],
+        tools: [tool],
+      });
+      expect(previous.ok).toBe(true);
+      if (previous.ok) {
+        expect(diffGhostPermissionItems(previous.manifest, valid.manifest).added).toEqual([
+          expect.objectContaining({
+            key: 'tool:import_media',
+            detail: expect.stringContaining('attachmentArgs: mediaUrl, references'),
+          }),
+        ]);
+      }
     }
     expect(validate(['missing']).ok).toBe(false);
     expect(validate(['count']).ok).toBe(false);

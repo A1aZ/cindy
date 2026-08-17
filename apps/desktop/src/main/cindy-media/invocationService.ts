@@ -723,6 +723,52 @@ function persistedResponse(invocation: StoredMediaInvocation): unknown {
   }
 }
 
+function completedInvocationResult(invocation: StoredMediaInvocation): Record<string, unknown> {
+  const media = persistedResponse(invocation);
+  if (!media || typeof media !== 'object' || Array.isArray(media)) {
+    throw new MediaInvocationError('MEDIA_RESULT_INVALID', '已完成调用保存的媒体结果不合法');
+  }
+  return {
+    ...(media as Record<string, unknown>),
+    ok: true,
+    status: 'complete',
+    invocation_id: invocation.id,
+  };
+}
+
+async function persistCompletedInvocation(
+  invocation: StoredMediaInvocation,
+  media: Record<string, unknown>,
+  scope: MediaAuthScope,
+  db: DbClient,
+): Promise<Record<string, unknown>> {
+  const responseJson = JSON.stringify(media);
+  const persisted = await transitionMediaInvocation(
+    {
+      id: invocation.id,
+      owner: invocation.owner,
+      from: 'pending',
+      to: 'complete',
+      responseJson,
+    },
+    db,
+  );
+  assertAuthScope(scope, invocation.owner);
+  if (persisted) {
+    return completedInvocationResult({
+      ...invocation,
+      state: 'complete',
+      responseJson,
+    });
+  }
+  const current = await getMediaInvocation(invocation.id, invocation.owner, db);
+  assertAuthScope(scope, invocation.owner);
+  if (current?.state === 'complete' && current.responseJson) {
+    return completedInvocationResult(current);
+  }
+  return failure('INTERNAL', '媒体结果已生成，但本地未能保存最终结果');
+}
+
 async function materializeSyncInvocation(
   invocation: StoredMediaInvocation,
   response: unknown,
@@ -736,17 +782,7 @@ async function materializeSyncInvocation(
   try {
     const media = await materializeResults(response, responseGuide.media, scope, db);
     assertAuthScope(scope, invocation.owner);
-    await transitionMediaInvocation(
-      {
-        id: invocation.id,
-        owner: invocation.owner,
-        from: 'pending',
-        to: 'complete',
-      },
-      db,
-    );
-    assertAuthScope(scope, invocation.owner);
-    return { ok: true, status: 'complete', invocation_id: invocation.id, ...media };
+    return persistCompletedInvocation(invocation, media, scope, db);
   } catch (error) {
     assertAuthScope(scope, invocation.owner);
     if (error instanceof MediaInvocationError) {
@@ -903,6 +939,9 @@ async function submitInvocation(
   const scope = currentAuthScope();
   assertAuthScope(scope, invocation.owner);
   const db = captureMediaDb(scope);
+  if (invocation.state === 'complete') {
+    return completedInvocationResult(invocation);
+  }
   if (
     invocation.state === 'pending' &&
     invocation.guide.response.mode === 'sync' &&
@@ -1070,6 +1109,54 @@ function pollBody(guide: MediaAsyncPollGuide, taskId: string): Record<string, un
   return body;
 }
 
+async function materializeAsyncInvocation(
+  invocation: StoredMediaInvocation,
+  response: unknown,
+  scope: MediaAuthScope,
+  db: DbClient,
+): Promise<Record<string, unknown>> {
+  const responseGuide = invocation.guide.response;
+  if (responseGuide.mode !== 'async') {
+    throw new MediaInvocationError('MEDIA_RESULT_INVALID', '异步媒体调用缺少轮询响应说明');
+  }
+  try {
+    const media = await materializeResults(response, responseGuide.poll.media, scope, db);
+    assertAuthScope(scope, invocation.owner);
+    return persistCompletedInvocation(invocation, media, scope, db);
+  } catch (error) {
+    assertAuthScope(scope, invocation.owner);
+    if (error instanceof MediaInvocationError) {
+      if (TERMINAL_MEDIA_RESULT_ERRORS.has(error.code)) {
+        await transitionMediaInvocation(
+          {
+            id: invocation.id,
+            owner: invocation.owner,
+            from: 'pending',
+            to: 'failed',
+          },
+          db,
+        );
+        assertAuthScope(scope, invocation.owner);
+        return failure(error.code, error.message);
+      }
+      if (error.code === 'MEDIA_DOWNLOAD_FAILED') {
+        return {
+          ...failure(error.code, error.message, true),
+          retry_action: 'poll',
+        };
+      }
+      throw error;
+    }
+    log.warn('async media materialization failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ...failure('MEDIA_MATERIALIZATION_FAILED', '媒体结果暂时无法保存', true),
+      retry_action: 'poll',
+    };
+  }
+}
+
 async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record<string, unknown>> {
   const scope = currentAuthScope();
   assertAuthScope(scope, invocation.owner);
@@ -1077,10 +1164,16 @@ async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record
   if (invocation.guide.response.mode !== 'async') {
     return failure('POLL_NOT_SUPPORTED', '同步媒体调用不需要 poll');
   }
+  if (invocation.state === 'complete') {
+    return completedInvocationResult(invocation);
+  }
   if (invocation.state !== 'pending' || !invocation.taskId) {
     return failure('INVOCATION_NOT_PENDING', `该 invocation 当前状态为 ${invocation.state}`);
   }
   const guide = invocation.guide.response.poll;
+  if (invocation.responseJson) {
+    return materializeAsyncInvocation(invocation, persistedResponse(invocation), scope, db);
+  }
   try {
     const response = await dispatchRequest({
       connection: resolveConnection(invocation.guide.connection.providerId),
@@ -1096,37 +1189,40 @@ async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record
     const rawStatus = valuesAtPath(response, guide.statusPath)[0];
     const status = typeof rawStatus === 'string' ? rawStatus : '';
     if (guide.successValues.includes(status)) {
-      let media: Record<string, unknown>;
-      try {
-        media = await materializeResults(response, guide.media, scope, db);
-      } catch (error) {
-        assertAuthScope(scope, invocation.owner);
-        if (error instanceof MediaInvocationError && TERMINAL_MEDIA_RESULT_ERRORS.has(error.code)) {
-          await transitionMediaInvocation(
-            {
-              id: invocation.id,
-              owner: invocation.owner,
-              from: 'pending',
-              to: 'failed',
-            },
-            db,
-          );
-          assertAuthScope(scope, invocation.owner);
-          return failure(error.code, error.message);
-        }
-        throw error;
-      }
-      await transitionMediaInvocation(
+      const responseJson = JSON.stringify(response);
+      const persisted = await transitionMediaInvocation(
         {
           id: invocation.id,
           owner: invocation.owner,
           from: 'pending',
-          to: 'complete',
+          to: 'pending',
+          responseJson,
         },
         db,
       );
       assertAuthScope(scope, invocation.owner);
-      return { ok: true, status: 'complete', invocation_id: invocation.id, ...media };
+      if (!persisted) {
+        const current = await getMediaInvocation(invocation.id, invocation.owner, db);
+        assertAuthScope(scope, invocation.owner);
+        if (current?.state === 'complete' && current.responseJson) {
+          return completedInvocationResult(current);
+        }
+        if (current?.state === 'pending' && current.responseJson) {
+          return materializeAsyncInvocation(
+            current,
+            persistedResponse(current),
+            scope,
+            db,
+          );
+        }
+        return failure('POLL_UNAVAILABLE', '上游结果已生成，但本地未能保存结果', true);
+      }
+      return materializeAsyncInvocation(
+        { ...invocation, responseJson },
+        response,
+        scope,
+        db,
+      );
     }
     if (guide.failureValues.includes(status)) {
       await transitionMediaInvocation(

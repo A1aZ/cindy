@@ -2047,12 +2047,15 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     });
   }
   for (const tool of manifest.tools ?? []) {
+    const attachmentDetail = tool.attachmentArgs?.length
+      ? `attachmentArgs: ${[...tool.attachmentArgs].sort().join(', ')}`
+      : null;
     items.push({
       key: `tool:${tool.name}`,
       kind: 'tool',
       labelKey: 'tool',
       labelArgs: { name: tool.name },
-      detail: tool.description,
+      detail: attachmentDetail ? `${tool.description}\n${attachmentDetail}` : tool.description,
     });
   }
   if (manifest.command) {

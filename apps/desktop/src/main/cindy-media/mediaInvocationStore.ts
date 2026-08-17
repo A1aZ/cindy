@@ -104,7 +104,9 @@ export async function countMediaInvocations(
   db: DbClient = getDbClient(),
 ): Promise<number> {
   const row = await db.queryOne<{ count: number }>(
-    'SELECT COUNT(*) AS count FROM media_invocations WHERE owner = ?',
+    `SELECT COUNT(*) AS count
+     FROM media_invocations
+     WHERE owner = ? AND state IN ('prepared', 'submitting', 'pending')`,
     [owner],
   );
   return Number(row?.count ?? 0);

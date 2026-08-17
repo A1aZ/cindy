@@ -497,6 +497,22 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
   });
 
+  it('does not mark SuperGrok models as catalog additions when the probe has no xAI baseline', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([
+        ['anthropic', new Map([['claude-opus-5', piBundledModel('claude-opus-5', 'anthropic-messages')]])],
+      ]),
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.catalogAddition).toBeUndefined();
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
+  });
+
   it('namespaces only colliding BYOM runtime ids and preserves their persisted source ids', () => {
     const collisions: Array<[string, string]> = [];
     const merged = mergePiNativeProviderResults(

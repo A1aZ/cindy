@@ -372,7 +372,7 @@ async function requestAutoRelaunch(
       return { accepted: false, blockReason: 'not-ready' };
     }
 
-    if (deferredStagedPatch) {
+    if (shouldAbortStagedPatchApply()) {
       log.info('auto relaunch aborted — update channel changed during eligibility check');
       return { accepted: false, blockReason: 'not-ready' };
     }
@@ -647,11 +647,18 @@ function invalidateInFlightChannelDownloads(): void {
 }
 
 function syncObservedUpdateChannel(): boolean {
+  if (pendingChannelChangeHolds > 0) return false;
   const enableBeta = readUpdateChannelSettings().enableBeta;
   if (enableBeta === observedEnableBeta) return false;
   observedEnableBeta = enableBeta;
   invalidateInFlightChannelDownloads();
   return true;
+}
+
+function shouldAbortStagedPatchApply(): boolean {
+  if (pendingChannelChangeHolds > 0) return true;
+  if (!deferredStagedPatch) return false;
+  return !isCurrentPatchNewerThanDeferred(deferredStagedPatch);
 }
 
 function rememberDeferredStagedPatch(): void {
@@ -721,6 +728,7 @@ function discardStagedPatchFiles(): void {
 function flushDeferredStagedPatchClear(): void {
   if (!deferredStagedPatch) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
+  if (pendingChannelChangeHolds > 0) return;
   const stale = deferredStagedPatch;
   if (currentStatus === 'downloading' || currentStatus === 'superseding') {
     // 新渠道下载还在飞:不要再推进代际,也不要删同路径 dest。
@@ -1362,14 +1370,22 @@ function executeRelaunch(theme: 'light' | 'dark'): void {
     return;
   }
 
-  if (syncObservedUpdateChannel() || deferredStagedPatch) {
+  if (syncObservedUpdateChannel() || shouldAbortStagedPatchApply()) {
+    const pendingHold = pendingChannelChangeHolds > 0;
     log.info(
-      deferredStagedPatch
+      pendingHold || shouldAbortStagedPatchApply()
         ? 'executeRelaunch() aborted — update channel changed during eligibility check'
         : 'executeRelaunch() aborted — shared update channel changed',
     );
     isRelaunching = false;
     autoRelaunchInProgress = false;
+    // 写入还没落盘,或当前已经是新渠道补丁:只拦住 apply,别把 zip 清掉。
+    if (
+      pendingHold
+      || (deferredStagedPatch && isCurrentPatchNewerThanDeferred(deferredStagedPatch))
+    ) {
+      return;
+    }
     // 标志先放下,否则 clearStagedPatch 会当成 apply 已提交而跳过。
     clearStagedPatch();
     return;

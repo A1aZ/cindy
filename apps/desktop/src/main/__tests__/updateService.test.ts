@@ -21,6 +21,7 @@ const powerMonitorRemoveListener = vi.fn();
 const appGetVersion = vi.fn(() => '0.0.64');
 const appRelaunch = vi.fn();
 const appQuit = vi.fn();
+const appGetAppPath = vi.fn(() => path.join(TEST_ROOT, 'Cindy.app', 'Contents', 'Resources', 'app.asar'));
 const appIsInApplicationsFolder = vi.fn(() => true);
 const appGetPath = vi.fn((name: string) => {
   if (name === 'userData') return TEST_USER_DATA;
@@ -44,6 +45,7 @@ vi.mock('electron', () => ({
     getPath: appGetPath,
     relaunch: appRelaunch,
     quit: appQuit,
+    getAppPath: appGetAppPath,
     isPackaged: true,
     isInApplicationsFolder: appIsInApplicationsFolder,
     moveToApplicationsFolder: vi.fn(),
@@ -906,6 +908,93 @@ describe('startup update relaunch safety', () => {
         expect(service.getUpdateStatus()).toBe('idle');
       });
       expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('applies a newer same-path patch after a deferred channel change', async () => {
+    const sharedHotfix = 'app/darwin-arm64/xdt-maker-hotfix.zip';
+    const service = await bootWithStagedPatch({
+      enabled: true,
+      manifest: updateManifest('0.0.65', sharedHotfix),
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      service.setUpdateAutoRelaunchBusyProbe(() => true);
+      readAutoUpdateSettings.mockReturnValue({ autoRelaunchOnIdle: false });
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      fetchManifest.mockResolvedValue(updateManifest('0.0.66', sharedHotfix));
+      await expect(service.checkForUpdate()).resolves.toBe('ready');
+      expect(service.getUpdateStatus()).toBe('ready');
+      logInfo.mockClear();
+      ipcListeners.get('update-relaunch')?.({}, 'dark');
+      expect(logInfo.mock.calls.map((call) => String(call[0])).join('\n')).not.toContain(
+        'executeRelaunch() aborted',
+      );
+      expect(logInfo.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'executeRelaunch() called',
+      );
+      expect(
+        fs.readFileSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'), 'utf-8'),
+      ).toContain('0.0.66');
+    } finally {
+      exitSpy.mockRestore();
+      releaseProbe?.(true);
+      service.stopUpdateService();
+    }
+  });
+
+  it('does not treat a failed settings write as a committed channel change', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    let rejectWrite: ((error: Error) => void) | undefined;
+    writeEnableBeta.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+    );
+    try {
+      await probeStarted;
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      const writePromise = setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      await vi.waitFor(() => {
+        expect(rejectWrite).toBeTypeOf('function');
+      });
+      rejectWrite?.(new Error('lock timeout'));
+      await expect(writePromise).rejects.toThrow();
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('ready');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
     } finally {
       service.stopUpdateService();
     }

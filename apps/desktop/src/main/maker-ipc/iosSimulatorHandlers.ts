@@ -381,6 +381,35 @@ export function registerIOSSimulatorHandlers(
       }
     });
   };
+  const callIOSSimulatorHostForViewerStatus = <T>(
+    event: unknown,
+    sessionId: string,
+    call: (assertCurrent: () => void) => T | Promise<T>,
+  ): Promise<T> => {
+    const sender = readSenderWebContents(event);
+    let expectedAccess: IOSSimulatorRendererAccessSnapshot | null = null;
+    return callIOSSimulatorHost(resolved, 'status', sessionId, call, () => {
+      const currentAccess = resolved.getViewerAccess(sender, sessionId);
+      if (!expectedAccess) {
+        if (!currentAccess) {
+          throwIpcError('PERMISSION_DENIED', 'iOS Simulator access is limited to the current task');
+        }
+        // Capture only after callIOSSimulatorHost has validated the live
+        // plugin gate and owner scope. This lets a trusted panel surface the
+        // plugin's concrete unavailable reason after plugin changes cleared
+        // its grants, without weakening the Viewer boundary when the plugin
+        // remains available.
+        expectedAccess = currentAccess;
+        return;
+      }
+      if (
+        currentAccess?.sessionId !== expectedAccess.sessionId ||
+        currentAccess.generation !== expectedAccess.generation
+      ) {
+        throwIpcError('PERMISSION_DENIED', 'iOS Simulator viewer access grant expired');
+      }
+    });
+  };
   handle(MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, async (event, payload) => {
     const sessionId = readSessionId(payload);
     const sender = readSenderWebContents(event);
@@ -397,8 +426,7 @@ export function registerIOSSimulatorHandlers(
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (event, payload) => {
     const sessionId = readSessionId(payload);
-    assertSenderViewerSession(event, sessionId);
-    return callIOSSimulatorHostForViewerSession(event, sessionId, 'status', () =>
+    return callIOSSimulatorHostForViewerStatus(event, sessionId, () =>
       resolved.getStatus(sessionId),
     );
   });

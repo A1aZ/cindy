@@ -76,13 +76,15 @@ export function isMetroPid(pid) {
   return /expo|metro/i.test(commandOfPid(pid));
 }
 
+function normalizeComparablePath(value) {
+  return String(value ?? '').replaceAll('\\', '/').replace(/\/+$/, '');
+}
+
 export function isDedicatedMetroProcessGroup(entries, expectedWorktree = null) {
   if (!entries.length) return false;
-  const normalizedRoot = expectedWorktree
-    ? resolve(expectedWorktree).replaceAll('\\', '/').replace(/\/+$/, '')
-    : null;
+  const normalizedRoot = expectedWorktree ? normalizeComparablePath(expectedWorktree) : null;
   const allowedCwds = normalizedRoot
-    ? new Set([normalizedRoot, join(normalizedRoot, 'apps/mobile')])
+    ? new Set([normalizedRoot, `${normalizedRoot}/apps/mobile`])
     : null;
 
   return entries.every((entry) => {
@@ -90,7 +92,7 @@ export function isDedicatedMetroProcessGroup(entries, expectedWorktree = null) {
     const cwd = typeof entry === 'string' ? null : entry.cwd;
     if (!command || !/(?:^|\/)(?:node|pnpm|sh|zsh)(?:\s|$)/.test(command)) return false;
     if (!/(?:expo|metro|sim-start|mobile:sim:start)/i.test(command)) return false;
-    if (normalizedRoot && (!cwd || !allowedCwds.has(resolve(cwd).replaceAll('\\', '/')))) return false;
+    if (normalizedRoot && (!cwd || !allowedCwds.has(normalizeComparablePath(cwd)))) return false;
     return true;
   });
 }

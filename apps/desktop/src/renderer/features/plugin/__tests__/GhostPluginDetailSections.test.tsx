@@ -588,11 +588,17 @@ describe('Ghost plugin detail sections', () => {
           cindyPrefsSync: () => ({
             overrides: {},
             image: {
-              options: [{ id: 'image-default', label: 'Image Default' }],
+              options: [
+                { id: 'image-default', label: 'Image Default' },
+                { id: 'image-option', label: 'Image Option' },
+              ],
               defaultModel: { id: 'image-default', label: 'Image Default' },
             },
             imageEdit: {
-              options: [{ id: 'image-edit', label: 'Image Edit' }],
+              options: [
+                { id: 'image-edit', label: 'Image Edit' },
+                { id: 'image-edit-option', label: 'Image Edit Option' },
+              ],
               defaultModel: { id: 'image-edit', label: 'Image Edit' },
             },
             video: {
@@ -621,8 +627,14 @@ describe('Ghost plugin detail sections', () => {
     expect(container.querySelector('.cindy-capability-row')).toBeTruthy();
     const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
     expect(selects).toHaveLength(2);
-    expect(selects[0]!.options[0]!.textContent).toContain('Image Default');
-    expect(selects[1]!.options[0]!.textContent).toContain('Image Edit');
+    expect(Array.from(selects[0]!.options, (option) => option.value)).toEqual([
+      '__default__',
+      'image-option',
+    ]);
+    expect(Array.from(selects[1]!.options, (option) => option.value)).toEqual([
+      '__default__',
+      'image-edit-option',
+    ]);
     expect(selects[0]!.className).toContain('cindy-capability-select');
     expect(selects[0]!.className).toContain('max-w-[60%]');
   });

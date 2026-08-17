@@ -201,12 +201,12 @@ afterEach(() => {
   setPlatform(originalPlatform);
 });
 
-function updateManifest(version = '0.0.65') {
+function updateManifest(version = '0.0.65', hotfixFile?: string) {
   return {
     app: {
       version,
       hotfix: {
-        file: `app/darwin-arm64/xdt-maker-${version}.zip`,
+        file: hotfixFile ?? `app/darwin-arm64/xdt-maker-${version}.zip`,
         sha256: 'abc',
         size: 123,
       },
@@ -422,10 +422,13 @@ describe('startup update relaunch safety', () => {
   });
 
   /** Boots the startup flow (staging a patch) and hands back the live module. */
-  async function bootWithStagedPatch(options: { enabled?: boolean } = {}) {
+  async function bootWithStagedPatch(options: {
+    enabled?: boolean;
+    manifest?: ReturnType<typeof updateManifest>;
+  } = {}) {
     vi.useFakeTimers();
     readAutoUpdateSettings.mockReturnValue({ autoRelaunchOnIdle: options.enabled ?? true });
-    fetchManifest.mockResolvedValue(updateManifest());
+    fetchManifest.mockResolvedValue(options.manifest ?? updateManifest());
     download.mockImplementation(async ({ targetPath }: { targetPath: string }) => {
       fs.mkdirSync(path.join(TEST_USER_DATA, 'updates'), { recursive: true });
       fs.writeFileSync(targetPath, 'update');
@@ -568,6 +571,56 @@ describe('startup update relaunch safety', () => {
         expect(service.getUpdateStatus()).toBe('idle');
       });
       expect(service.isUpdateRelaunchImminent()).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('keeps a same-path newer patch after deferred channel-change clear', async () => {
+    const sharedHotfix = 'app/darwin-arm64/xdt-maker-hotfix.zip';
+    const service = await bootWithStagedPatch({
+      enabled: true,
+      manifest: updateManifest('0.0.65', sharedHotfix),
+    });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      expect(service.getUpdateStatus()).toBe('ready');
+      // 后续 ready 不要再挂住另一条 probe,否则延迟清理永远不会 flush。
+      service.setUpdateAutoRelaunchBusyProbe(() => true);
+
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      fetchManifest.mockResolvedValue(updateManifest('0.0.66', sharedHotfix));
+      await expect(service.checkForUpdate()).resolves.toBe('ready');
+      expect(service.getUpdateStatus()).toBe('ready');
+
+      const destPath = path.join(TEST_USER_DATA, 'updates', path.basename(sharedHotfix));
+      expect(fs.existsSync(destPath)).toBe(true);
+
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(
+          logInfo.mock.calls.some((call) =>
+            String(call[0]).includes('keeping newer staged patch after deferred channel-change clear'),
+          ),
+        ).toBe(true);
+      });
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(fs.existsSync(destPath)).toBe(true);
+      expect(fs.readFileSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'), 'utf-8')).toContain('0.0.66');
     } finally {
       service.stopUpdateService();
     }

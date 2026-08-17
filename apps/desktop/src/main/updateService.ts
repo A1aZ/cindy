@@ -142,6 +142,8 @@ const STARTUP_MANIFEST_TIMEOUT_MS = 8_000;
 let currentStatus: UpdateStatus = 'idle';
 let readyVersion: string | undefined;
 let readyFilePath: string | undefined;
+/** 当前 staged 补丁对应的渠道代际。延迟清理用它区分「同路径上的新旧包」。 */
+let readyChannelEpoch: number | undefined;
 /**
  * 更新渠道代际计数:用户在下载进行中关掉 beta(clearStagedPatch)时 +1,
  * 让 in-flight 的 checkForUpdate 在写回 patch-info / 恢复旧 patch 前察觉
@@ -158,10 +160,11 @@ let autoRelaunchInProgress = false;
 /** 资格检查(含异步 busyProbe)进行中的次数。这段窗口暂缓清补丁。 */
 let autoRelaunchDecisionDepth = 0;
 /**
- * 资格检查期间要求作废的那份旧补丁路径。
- * 只清这份文件,避免误删检查窗口里新渠道刚写下的 readyFilePath。
+ * 资格检查期间要求作废的那份旧补丁。
+ * 用路径 + 代际一起记:release / beta 资产 basename 相同时,新包会写回同一
+ * readyFilePath,只比路径会把刚下好的新渠道补丁清掉。
  */
-let deferredStagedPatchPath: string | undefined;
+let deferredStagedPatch: { path?: string; epoch?: number } | undefined;
 let lastAutoRelaunchBlockReason: AutoRelaunchBlockReason | null = null;
 let lastBusyAtMs: number | null = null;
 let lastResumeAtMs: number | null = null;
@@ -355,11 +358,11 @@ async function requestAutoRelaunch(
 
     if (syncObservedUpdateChannel()) {
       log.info('auto relaunch aborted — shared update channel changed');
-      deferredStagedPatchPath = readyFilePath ?? deferredStagedPatchPath;
+      rememberDeferredStagedPatch();
       return { accepted: false, blockReason: 'not-ready' };
     }
 
-    if (deferredStagedPatchPath) {
+    if (deferredStagedPatch) {
       log.info('auto relaunch aborted — update channel changed during eligibility check');
       return { accepted: false, blockReason: 'not-ready' };
     }
@@ -592,6 +595,7 @@ function checkExistingPatch(): { action: 'relaunch' | 'check' | 'none'; version?
   // Patch present, awaiting relaunch.
   readyVersion = patchInfo.version;
   readyFilePath = patchFilePath;
+  readyChannelEpoch = updateChannelEpoch;
   return { action: 'relaunch', version: patchInfo.version };
 }
 
@@ -627,14 +631,32 @@ function syncObservedUpdateChannel(): boolean {
   return true;
 }
 
+function rememberDeferredStagedPatch(): void {
+  deferredStagedPatch = {
+    path: readyFilePath ?? deferredStagedPatch?.path,
+    epoch: readyChannelEpoch ?? deferredStagedPatch?.epoch,
+  };
+}
+
+function isCurrentPatchNewerThanDeferred(
+  stale: { path?: string; epoch?: number },
+): boolean {
+  if (readyChannelEpoch != null && stale.epoch != null) {
+    return readyChannelEpoch > stale.epoch;
+  }
+  return Boolean(readyFilePath && readyFilePath !== stale.path);
+}
+
 function flushDeferredStagedPatchClear(): void {
-  if (!deferredStagedPatchPath) return;
+  if (!deferredStagedPatch) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
-  const stalePath = deferredStagedPatchPath;
-  deferredStagedPatchPath = undefined;
-  if (readyFilePath && readyFilePath !== stalePath) {
+  const stale = deferredStagedPatch;
+  deferredStagedPatch = undefined;
+  if (isCurrentPatchNewerThanDeferred(stale)) {
     log.info('keeping newer staged patch after deferred channel-change clear');
-    try { fs.unlinkSync(stalePath); } catch { /* ignore */ }
+    if (stale.path && stale.path !== readyFilePath) {
+      try { fs.unlinkSync(stale.path); } catch { /* ignore */ }
+    }
     return;
   }
   clearStagedPatch();
@@ -653,7 +675,7 @@ function clearStagedPatch(): void {
     return;
   }
   if (autoRelaunchDecisionDepth > 0) {
-    deferredStagedPatchPath = readyFilePath ?? deferredStagedPatchPath;
+    rememberDeferredStagedPatch();
     // 立刻作废旧渠道 in-flight 下载,避免下载完成后又把旧补丁写成 ready。
     invalidateInFlightChannelDownloads();
     log.info('deferring staged patch clear until auto-relaunch eligibility settles');
@@ -664,6 +686,7 @@ function clearStagedPatch(): void {
   }
   readyVersion = undefined;
   readyFilePath = undefined;
+  readyChannelEpoch = undefined;
   removePatchInfo();
   invalidateInFlightChannelDownloads();
   // downloading 也要重置:opt-out 若发生在「首次 beta 下载进行中」,status 仍是
@@ -1013,6 +1036,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
     }
     readyVersion = latestVersion;
     readyFilePath = result.path;
+    readyChannelEpoch = updateChannelEpoch;
     setStatus('ready', { version: latestVersion });
     return 'ready';
   } catch (err) {
@@ -1038,6 +1062,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       log.info('Superseding download failed — rolling back to ready v%s', previousReadyVersion);
       readyVersion = previousReadyVersion;
       readyFilePath = previousReadyFilePath;
+      readyChannelEpoch = channelEpochAtStart;
       setStatus('ready', { version: previousReadyVersion });
       return 'ready';
     }
@@ -1065,6 +1090,7 @@ function handleApplyFailure(reason: string): void {
   removePatchInfo();
   readyVersion = undefined;
   readyFilePath = undefined;
+  readyChannelEpoch = undefined;
   isRelaunching = false;
   autoRelaunchInProgress = false;
   setStatus('error', { errorCode: 'updater_spawn_failed' });
@@ -1506,6 +1532,7 @@ export function initUpdateService(): void {
         );
         readyVersion = undefined;
         readyFilePath = undefined;
+        readyChannelEpoch = undefined;
       }
 
       // Step 3: download (re-using the manifest we already have). Route through

@@ -2276,7 +2276,7 @@ export function ChatInput({
           !event.isComposing &&
           showRecommendationRef.current &&
           recommendedPromptRef.current &&
-          !voiceInputBusyRef.current
+          !composerMutationLockedRef.current
         ) {
           if (composerFullyEmptyRef.current()) {
             event.preventDefault();
@@ -2869,15 +2869,16 @@ export function ChatInput({
   // 此时按 Tab 仍会通过 showRecommendationRef.current 检查并插入不可见的推荐词。
   // voiceInput.isBusy 也需要纳入：用户通过快捷键开始听写时 isBusy 立即为 true，
   // 但 draftText 可能尚未到达，此时 overlay 已隐藏而 ref 未清除，Tab 仍会插入推荐词。
+  // composerMutationLocked 涵盖 disabled、sendDispatchInFlight、voiceInput.isBusy 及远程只读/锁定状态。
   useEffect(() => {
     if (
       recommendedPromptRef.current &&
-      (attachments.length > 0 || browserComments.length > 0 || voiceInput.isBusy || voiceInput.draftText.trim().length > 0)
+      (attachments.length > 0 || browserComments.length > 0 || composerMutationLocked || voiceInput.draftText.trim().length > 0)
     ) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
     }
-  }, [attachments.length, browserComments.length, voiceInput.isBusy, voiceInput.draftText]);
+  }, [attachments.length, browserComments.length, composerMutationLocked, voiceInput.draftText]);
 
   const captureSendFocusForRestore = useComposerSendFocusRestore(
     editor,
@@ -6742,7 +6743,8 @@ export function ChatInput({
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
   const hasVoiceDraftText = voiceInput.draftText.trim().length > 0;
-  // 推荐 overlay 的可见判据:开关开启 + 有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 不在语音态。
+  // 推荐 overlay 的可见判据:开关开启 + 有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 输入框未锁定。
+  // composerMutationLocked 涵盖 disabled、sendDispatchInFlight、voiceInput.isBusy 及远程只读/锁定状态。
   const showRecommendationOverlay =
     recommendationEnabled &&
     !!recommendedPrompt &&
@@ -6750,7 +6752,7 @@ export function ChatInput({
     !hasAttachments &&
     browserComments.length === 0 &&
     !hasVoiceDraftText &&
-    !voiceInput.isBusy;
+    !composerMutationLocked;
   const [voiceReleaseToSendActive, setVoiceReleaseToSendActive] = useState(false);
   const sendButtonDisabled = Boolean(
     disabled ||

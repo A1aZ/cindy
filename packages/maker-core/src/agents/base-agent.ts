@@ -317,12 +317,6 @@ export interface CodexExtraSpawnConfig {
   extraEnv: Record<string, string>;
   /** Cindy-side display fallback for Codex subagent cards. */
   subagentModelFallback?: string;
-  /** Provider route frozen alongside the default subagent model for this app-server. */
-  subagentRoute?: {
-    providerId: string;
-    catalogModel: string;
-    runtimeModel: string;
-  };
   /** Whether this exact app-server spawn was provisioned with Codex Chrome. */
   codexBrowserUseAvailable?: boolean;
   /** Exact verified Chrome plugin version provisioned into this app-server. */
@@ -929,11 +923,6 @@ export interface AgentDeps {
     sessionId: string;
     threadId: string;
     text: string;
-    subagentRoute?: {
-      providerId: string;
-      catalogModel: string;
-      runtimeModel: string;
-    };
   }) => void;
 
   /**

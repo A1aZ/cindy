@@ -482,21 +482,21 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         });
         return { prompt: null };
       }
-      // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。updatedAt + turnGen 联合去重:
-      // 两者都相同是真重复(拒绝);任一不同说明是新轮,替换旧条目放行。
+      // 多窗口去重:同一 session 同一 DB 轮次只能有一笔预测在途。
+      // updatedAt 是 DB 权威轮次标识:相同时拒绝(同一真实轮次,跨窗口 turnGen 不同
+      // 也不放行,避免重复付费调用);不同时替换旧条目放行(新轮已开始)。
+      // 注意:排队发送场景下相邻轮次可能共享 updatedAt(入队消息提前推进),此时后一轮
+      // 预测会被拒绝。这是可接受的 tradeoff:避免重复付费调用优先于排队轮次的即时预测。
       if (_predictingPromptSessions.has(sessionId)) {
         const existing = _predictingPromptSessions.get(sessionId)!;
-        if (existing.updatedAt === sessionRow.updatedAt && existing.turnGen === turnGen) {
+        if (existing.updatedAt === sessionRow.updatedAt) {
           return { prompt: null };
         }
         // 旧轮预测仍在途但新轮已开始,旧结果注定被 renderer 丢弃,放行新请求。
         log.debug('predict-prompt replacing stale in-flight prediction', {
           sessionId,
           oldUpdatedAt: existing.updatedAt,
-          oldTurnGen: existing.turnGen,
           newUpdatedAt: sessionRow.updatedAt,
-          newTurnGen: turnGen,
         });
       }
       _predictingPromptSessions.set(sessionId, { updatedAt: sessionRow.updatedAt, turnGen });

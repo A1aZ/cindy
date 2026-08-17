@@ -1261,6 +1261,7 @@ export function ChatInput({
               !cur.isDestroyed &&
               composerFullyEmptyRef.current() &&
               !showStopButtonRef.current &&
+              !composerMutationLockedRef.current &&
               prevSessionIdRef.current === requestSessionId &&
               turnGenRef.current === requestTurnGen &&
               workingDirRef.current === requestWorkingDir

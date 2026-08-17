@@ -4366,7 +4366,7 @@
       "planLine": "套餐 {{plan}}",
       "resetAt": "{{at}} 重置",
       "productLine": "{{product}} {{percent}}",
-      "extraCreditsLine": "额外积分 {{amount}}",
+      "extraCreditsLine": "额外点数 {{amount}}",
       "accountWeeklyHint": "账号周用量，不是本任务配额"
     },
     "dailyLimitLabel": "今日 {{spend}}/{{limit}}",

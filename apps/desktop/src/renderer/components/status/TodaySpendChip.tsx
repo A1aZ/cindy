@@ -1588,7 +1588,7 @@ export function TodaySpendChip({
       latestTurnUsage,
     );
   } else if (usesXaiQuotaForm) {
-    // 账号周用量进 chip;限流头与额外积分只在 tooltip。文案是账号级,不是本任务配额。
+    // 账号周用量进 chip;限流头与额外点数只在 tooltip。文案是账号级,不是本任务配额。
     const chipSegments = [...windowSegments];
     if (sessionSegment) chipSegments.push(sessionSegment);
     labelNode = chipSegments.length > 0

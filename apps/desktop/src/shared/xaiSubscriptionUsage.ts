@@ -28,7 +28,7 @@ export interface XaiSubscriptionUsageSnapshot {
   /** 分产品已用百分比。 */
   productUsage?: XaiProductUsage[];
   /**
-   * 额外使用积分余额。单位按 grok.com 页面为美元;0 / 缺失不要当「免费额度」展示。
+   * 额外使用点数余额。单位按 grok.com 页面为美元;0 / 缺失不要当「免费额度」展示。
    */
   prepaidBalance?: number | null;
   source?: 'cli-billing' | string | null;

@@ -1220,6 +1220,18 @@ async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record
   }
   const guide = invocation.guide.response.poll;
   if (invocation.responseJson) {
+    // 已有成功响应的 poll 是结果恢复重试；刷新活动时间，避免仍在主动恢复的
+    // 已付费结果被常规 TTL 清理。保持 pending，不引入新的本地状态。
+    await transitionMediaInvocation(
+      {
+        id: invocation.id,
+        owner: invocation.owner,
+        from: 'pending',
+        to: 'pending',
+      },
+      db,
+    );
+    assertAuthScope(scope, invocation.owner);
     return materializeAsyncInvocation(invocation, persistedResponse(invocation), scope, db);
   }
   try {

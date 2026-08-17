@@ -916,12 +916,14 @@ describe('Cindy Core media invocation state and security boundary', () => {
       responseJson: JSON.stringify(successPayload),
     });
 
+    mocks.rows.get(invocationId)!.updatedAt = 1;
     const completed = {
       ok: true,
       status: 'complete',
       xdt_video_urls: [`cindy-media://blobs/${'d'.repeat(64)}.mp4`],
     };
     await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject(completed);
+    expect(Number(mocks.rows.get(invocationId)!.updatedAt)).toBeGreaterThan(1);
     await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject(completed);
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(4);
     expect(mocks.outboundFetch.mock.calls[1][0]).toBe(

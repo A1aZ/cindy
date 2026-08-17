@@ -331,12 +331,24 @@ describe('SessionCard review regressions', () => {
     );
   });
 
-  it('lets the title truncate by putting hover actions in flow instead of overlaying them', () => {
+  it('lets the title truncate with an in-flow spacer while actions stay focusable', () => {
+    expect(sessionItemSource).toContain(
+      "'invisible col-start-1 row-start-1 h-6 items-center gap-0.5'",
+    );
     expect(sessionItemSource).toContain("'hidden group-hover:flex group-focus-within/slot:flex'");
+    expect(sessionItemSource).toContain('absolute right-0 top-0 flex h-6 items-center gap-0.5');
+    expect(sessionItemSource).toContain(
+      'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
+    );
     expect(sessionItemSource).not.toContain('SESSION_ACTION_HOVER_SCRIM_CLASS');
-    expect(sessionItemSource).not.toContain('sessionActionScrimClass');
+    expect(sessionCardSource).toContain(
+      "'invisible col-start-1 row-start-1 h-[22px] items-center gap-0.5'",
+    );
     expect(sessionCardSource).toContain(
       "'hidden group-hover/card:flex group-focus-within/slot:flex'",
+    );
+    expect(sessionCardSource).toContain(
+      'absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5',
     );
     expect(sessionCardSource).not.toContain('SESSION_ACTION_HOVER_SCRIM_CLASS');
   });

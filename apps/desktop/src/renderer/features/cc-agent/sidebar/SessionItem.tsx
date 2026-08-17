@@ -1148,18 +1148,36 @@ export const SessionItem = memo(function SessionItem({
                 - archived：More + Undo（lucide Undo），单击直接走 unarchive，
                   不像 Archive 那样需要二次确认 pill（unarchive 非破坏性）。 */}
             {!archivePending && (
-              <div
-                // 入流而不是 absolute:hover 时槽变宽,标题自己 truncate,不会盖到字上。
-                // 不要同时写死 flex 又 hidden —— 同特异性下源码顺序会让 hidden 失效。
-                className={cn(
-                  'col-start-1 row-start-1 h-6 items-center gap-0.5',
-                  menuPos !== null
-                    ? 'flex'
-                    : 'hidden group-hover:flex group-focus-within/slot:flex',
-                )}
-              >
-                {sessionActionButtons}
-              </div>
+              <>
+                {/* 入流占位只负责把标题挤窄;真正的按钮保持可聚焦,不能 display:none。 */}
+                <div
+                  aria-hidden
+                  className={cn(
+                    'invisible col-start-1 row-start-1 h-6 items-center gap-0.5',
+                    menuPos !== null
+                      ? 'flex'
+                      : 'hidden group-hover:flex group-focus-within/slot:flex',
+                  )}
+                >
+                  {showAutomationRunAction ? <span className="size-5 shrink-0" /> : null}
+                  <span className="size-5 shrink-0" />
+                  {isArchived && !remoteWritesBlocked ? (
+                    <span className="size-5 shrink-0" />
+                  ) : canQuickArchive ? (
+                    <span className="size-5 shrink-0" />
+                  ) : null}
+                </div>
+                <div
+                  className={cn(
+                    'absolute right-0 top-0 flex h-6 items-center gap-0.5',
+                    menuPos !== null
+                      ? 'opacity-100'
+                      : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
+                  )}
+                >
+                  {sessionActionButtons}
+                </div>
+              </>
             )}
           </div>
         </div>

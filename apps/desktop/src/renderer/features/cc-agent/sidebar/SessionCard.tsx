@@ -1291,40 +1291,56 @@ function TimeActionsSlot({
         )}
 
         {!archivePending && (
-          <div
-            className={cn(
-              'col-start-1 row-start-1 h-[22px] items-center gap-0.5',
-              menuOpen ? 'flex' : 'hidden group-hover/card:flex group-focus-within/slot:flex',
-            )}
-          >
-            <CardAction
-              variant="list"
-              isActive={isActive}
-              label={t('ccAgent.sidebar.sessionMenu.moreActions')}
-              onClick={onOpenMenu}
+          <>
+            <div
+              aria-hidden
+              className={cn(
+                'invisible col-start-1 row-start-1 h-[22px] items-center gap-0.5',
+                menuOpen ? 'flex' : 'hidden group-hover/card:flex group-focus-within/slot:flex',
+              )}
             >
-              <EllipsisVertical size={14} strokeWidth={2} />
-            </CardAction>
-            {isArchived && canUnarchive ? (
+              <span className="size-5 shrink-0" />
+              {(isArchived && canUnarchive) || canQuickArchive ? (
+                <span className="size-5 shrink-0" />
+              ) : null}
+            </div>
+            <div
+              className={cn(
+                'absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5',
+                menuOpen
+                  ? 'opacity-100'
+                  : 'pointer-events-none opacity-0 group-hover/card:pointer-events-auto group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
+              )}
+            >
               <CardAction
                 variant="list"
                 isActive={isActive}
-                label={t('ccAgent.sidebar.sessionMenu.unarchive')}
-                onClick={() => onUnarchive()}
+                label={t('ccAgent.sidebar.sessionMenu.moreActions')}
+                onClick={onOpenMenu}
               >
-                <Undo size={14} strokeWidth={2} />
+                <EllipsisVertical size={14} strokeWidth={2} />
               </CardAction>
-            ) : canQuickArchive ? (
-              <CardAction
-                variant="list"
-                isActive={isActive}
-                label={t('ccAgent.sidebar.sessionMenu.archived')}
-                onClick={() => setArchivePending(true)}
-              >
-                <Archive size={14} strokeWidth={2} />
-              </CardAction>
-            ) : null}
-          </div>
+              {isArchived && canUnarchive ? (
+                <CardAction
+                  variant="list"
+                  isActive={isActive}
+                  label={t('ccAgent.sidebar.sessionMenu.unarchive')}
+                  onClick={() => onUnarchive()}
+                >
+                  <Undo size={14} strokeWidth={2} />
+                </CardAction>
+              ) : canQuickArchive ? (
+                <CardAction
+                  variant="list"
+                  isActive={isActive}
+                  label={t('ccAgent.sidebar.sessionMenu.archived')}
+                  onClick={() => setArchivePending(true)}
+                >
+                  <Archive size={14} strokeWidth={2} />
+                </CardAction>
+              ) : null}
+            </div>
+          </>
         )}
       </div>
     </div>

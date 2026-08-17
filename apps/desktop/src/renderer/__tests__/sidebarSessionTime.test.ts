@@ -120,6 +120,10 @@ describe('SessionItem activity time', () => {
     expect(sessionItemSource).toContain(
       'grid h-6 grid-cols-[max-content] items-center justify-items-end',
     );
+    expect(sessionItemSource).toContain('absolute right-0 top-0 flex h-6 items-center gap-0.5');
+    expect(sessionItemSource).toContain(
+      'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100',
+    );
     expect(sessionItemSource).toContain("'hidden group-hover:flex group-focus-within/slot:flex'");
   });
 });

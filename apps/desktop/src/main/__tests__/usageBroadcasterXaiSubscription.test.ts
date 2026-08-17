@@ -90,4 +90,26 @@ describe('xai subscription snapshot hydration', () => {
       updatedAt: 2,
     });
   });
+
+  it('does not let a later partial record null out cached plan or weekly percent', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue(null);
+    await broadcaster.recordXaiSubscriptionUsageSnapshot({
+      planLabel: 'SuperGrok Heavy',
+      creditUsagePercent: 2,
+      accountFingerprint: 'bbbb',
+      updatedAt: 2,
+    });
+    await broadcaster.recordXaiSubscriptionUsageSnapshot({
+      planLabel: null,
+      creditUsagePercent: 5,
+      accountFingerprint: 'bbbb',
+      updatedAt: 3,
+    });
+    await expect(broadcaster.readXaiSubscriptionUsageSnapshot()).resolves.toMatchObject({
+      planLabel: 'SuperGrok Heavy',
+      creditUsagePercent: 5,
+      accountFingerprint: 'bbbb',
+    });
+  });
 });

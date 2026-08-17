@@ -983,9 +983,15 @@ export async function recordXaiSubscriptionUsageSnapshot(snapshot: unknown): Pro
   ) {
     xaiSubscriptionUsageSnapshot = incoming;
   } else {
+    // 已核验的同账号:只覆盖解析到的字段。incoming 里的 null 不能把套餐/周百分比抹掉。
     xaiSubscriptionUsageSnapshot = {
-      ...current,
-      ...incoming,
+      planLabel: incoming.planLabel ?? current.planLabel ?? null,
+      creditUsagePercent: incoming.creditUsagePercent ?? current.creditUsagePercent ?? null,
+      resetsAt: incoming.resetsAt ?? current.resetsAt ?? null,
+      productUsage: incoming.productUsage ?? current.productUsage ?? [],
+      prepaidBalance: incoming.prepaidBalance ?? current.prepaidBalance ?? null,
+      source: incoming.source ?? current.source ?? null,
+      updatedAt: incoming.updatedAt ?? current.updatedAt ?? null,
       accountFingerprint: incoming.accountFingerprint ?? current.accountFingerprint ?? null,
     };
   }

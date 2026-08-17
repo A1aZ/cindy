@@ -1331,7 +1331,7 @@ export function initUpdateService(): void {
     return channelSettingsWire();
   });
 
-  ipcMain.handle('update-channel-settings-set', (event, payload: unknown) => {
+  ipcMain.handle('update-channel-settings-set', async (event, payload: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (!payload || typeof payload !== 'object') {
       throwIpcError('INVALID_PARAMS', 'update channel settings payload required');
@@ -1341,7 +1341,7 @@ export function initUpdateService(): void {
       throwIpcError('INVALID_PARAMS', 'enableBeta required (boolean)');
     }
     const wasBeta = readUpdateChannelSettings().enableBeta;
-    writeEnableBeta(next);
+    await writeEnableBeta(next);
     // 渠道一变(无论 opt-in 还是 opt-out)就作废已 staged 的旧渠道补丁:
     // - opt-out(beta→release):否则用户关掉 beta 后仍被装到 beta 版本;
     // - opt-in(release→beta):否则旧 release 补丁仍 staged,重启后 beta manifest
@@ -1353,10 +1353,10 @@ export function initUpdateService(): void {
     return channelSettingsWire();
   });
 
-  ipcMain.handle('update-channel-settings-reset', (event) => {
+  ipcMain.handle('update-channel-settings-reset', async (event) => {
     assertTrustedAppRendererEvent(event);
     const wasBeta = readUpdateChannelSettings().enableBeta;
-    resetUpdateChannelSettings();
+    await resetUpdateChannelSettings();
     // 恢复默认 = 关闭 beta;同 set(false),渠道变化即作废已 staged 的补丁。
     if (wasBeta) {
       clearStagedPatch();
@@ -1546,9 +1546,11 @@ export function initUpdateService(): void {
  * 渠道从关变开时作废已 staged 的旧渠道补丁,与设置页手动打开同一口径。
  * 不 relaunch:本次进程继续走当前通道,下次冷启动 / 用户自行重启再生效。
  */
-export async function enableUncustomizedBetaChannel(): Promise<boolean> {
+export async function enableUncustomizedBetaChannel(
+  shouldWrite: () => boolean = () => true,
+): Promise<boolean> {
   const wasBeta = readUpdateChannelSettings().enableBeta;
-  const wrote = await tryEnableUncustomizedBetaAtomic();
+  const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
   if (wrote && !wasBeta) {
     // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
     clearStagedPatch();

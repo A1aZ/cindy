@@ -1473,7 +1473,11 @@ function scheduleXdOrgBetaDefault(input: {
         isCustomized: isEnableBetaUserCustomized(),
       }),
       probeBetaManifest,
-      enableBeta: () => enableUncustomizedBetaChannel(),
+      enableBeta: () =>
+        enableUncustomizedBetaChannel(
+          () =>
+            authStateEpoch === input.expectedAuthEpoch && currentUser?.id === input.expectedUserId,
+        ),
     },
   )
     .then((outcome) => {

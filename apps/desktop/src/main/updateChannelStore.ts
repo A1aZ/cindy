@@ -86,11 +86,12 @@ export function readUpdateChannelSettingsState(): OverrideSettingsState<UpdateCh
   return store.readState();
 }
 
-export function writeEnableBeta(enableBeta: boolean): void {
+export async function writeEnableBeta(enableBeta: boolean): Promise<void> {
   // 关 beta 的值等于系统默认 false。若不 preserveDefaults,override 会被删掉,
   // 用户键消失后会被当成未自定义,xd 组织下次登录又会默认打开。
   // 设置页每次拨动都写 enableBeta,与组织默认标记分开。
-  store.writePatch({ enableBeta }, { preserveDefaults: true });
+  // 和 tryEnableUncustomizedBetaAtomic 共用同一把跨进程锁,避免默认写入盖掉用户关闭。
+  await store.writePatchAtomic({ enableBeta }, { preserveDefaults: true });
   log.info('beta update channel setting written', { enableBeta });
 }
 
@@ -109,10 +110,16 @@ export function isEnableBetaUserCustomized(): boolean {
  * 跨进程锁内现读再决定是否打开组织默认。
  * probe 前后另一实例可能已经写下用户关闭,不能用过期的 isCustomized 缓存覆盖。
  */
-export async function tryEnableUncustomizedBetaAtomic(): Promise<boolean> {
+export async function tryEnableUncustomizedBetaAtomic(
+  shouldWrite: () => boolean = () => true,
+): Promise<boolean> {
   let wrote = false;
   await store.updateAtomic((current) => {
-    if (current.customizedKeys.includes('enableBeta') || current.value.enableBeta) {
+    if (
+      !shouldWrite() ||
+      current.customizedKeys.includes('enableBeta') ||
+      current.value.enableBeta
+    ) {
       return {};
     }
     wrote = true;
@@ -127,8 +134,8 @@ export async function tryEnableUncustomizedBetaAtomic(): Promise<boolean> {
   return wrote;
 }
 
-export function resetUpdateChannelSettings(): UpdateChannelSettings {
-  return store.reset();
+export async function resetUpdateChannelSettings(): Promise<UpdateChannelSettings> {
+  return store.resetAtomic();
 }
 
 /** manifestService 消费的单一读取入口:返回是否启用 beta(设备级)。 */

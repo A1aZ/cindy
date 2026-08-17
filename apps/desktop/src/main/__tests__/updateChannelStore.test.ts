@@ -58,8 +58,8 @@ describe('tryEnableUncustomizedBetaAtomic', () => {
 
   it('does not reopen beta after the user turned it off', async () => {
     const store = await loadStore();
-    store.writeEnableBeta(true);
-    store.writeEnableBeta(false);
+    await store.writeEnableBeta(true);
+    await store.writeEnableBeta(false);
 
     expect(store.readUpdateChannelSettings()).toMatchObject({ enableBeta: false });
     expect(store.isEnableBetaUserCustomized()).toBe(true);
@@ -69,7 +69,7 @@ describe('tryEnableUncustomizedBetaAtomic', () => {
 
   it('keeps a never-enabled opt-out as a user choice', async () => {
     const store = await loadStore();
-    store.writeEnableBeta(false);
+    await store.writeEnableBeta(false);
 
     expect(store.isEnableBetaUserCustomized()).toBe(true);
     expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(false);
@@ -78,10 +78,19 @@ describe('tryEnableUncustomizedBetaAtomic', () => {
 
   it('is a no-op when beta is already on', async () => {
     const store = await loadStore();
-    store.writeEnableBeta(true);
+    await store.writeEnableBeta(true);
 
     expect(await store.tryEnableUncustomizedBetaAtomic()).toBe(false);
     expect(store.readUpdateChannelSettings().enableBeta).toBe(true);
     expect(store.isEnableBetaUserCustomized()).toBe(true);
+  });
+
+  it('does not write when the lock-time identity guard rejects', async () => {
+    const store = await loadStore();
+    expect(await store.tryEnableUncustomizedBetaAtomic(() => false)).toBe(false);
+    expect(store.readUpdateChannelSettings()).toEqual({
+      enableBeta: false,
+      orgDefaultEnableBeta: false,
+    });
   });
 });

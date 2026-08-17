@@ -647,6 +647,23 @@ function isCurrentPatchNewerThanDeferred(
   return Boolean(readyFilePath && readyFilePath !== stale.path);
 }
 
+function discardStagedPatchFiles(): void {
+  if (readyFilePath) {
+    try { fs.unlinkSync(readyFilePath); } catch { /* ignore */ }
+  }
+  readyVersion = undefined;
+  readyFilePath = undefined;
+  readyChannelEpoch = undefined;
+  removePatchInfo();
+  if (
+    currentStatus === 'ready' ||
+    currentStatus === 'superseding' ||
+    currentStatus === 'downloading'
+  ) {
+    setStatus('idle');
+  }
+}
+
 function flushDeferredStagedPatchClear(): void {
   if (!deferredStagedPatch) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
@@ -659,7 +676,26 @@ function flushDeferredStagedPatchClear(): void {
     }
     return;
   }
-  clearStagedPatch();
+  if (currentStatus === 'downloading' || currentStatus === 'superseding') {
+    // 新渠道下载还在飞:不要再推进代际,也不要删同路径 dest。
+    if (readyChannelEpoch === stale.epoch) {
+      readyVersion = undefined;
+      readyFilePath = undefined;
+      readyChannelEpoch = undefined;
+    }
+    return;
+  }
+  discardStagedPatchFiles();
+}
+
+/**
+ * 渠道切换重启前把未应用的旧补丁从盘上拿掉。
+ * 延迟清理只活在内存里,这里不补清的话,下次启动仍可能把旧渠道 zip 当匹配补丁装上。
+ */
+function discardUnappliedStagedPatchForChannelRelaunch(): void {
+  if (isUpdateApplyCommitted()) return;
+  deferredStagedPatch = undefined;
+  discardStagedPatchFiles();
 }
 
 /**
@@ -667,7 +703,8 @@ function flushDeferredStagedPatchClear(): void {
  * 切渠道时调用——opt-out 后不能仍让 staged 的旧渠道 patch 在下次启动/后台
  * 轮询里被装上去(切渠道不等于切版本,必须把旧渠道的补丁作废)。
  * 已经开始应用时不能清,否则 executeRelaunch 会走 no_ready_file。
- * 资格检查还在等 busyProbe 时先记下,检查结束后若没真正开始应用再补清。
+ * 资格检查还在等 busyProbe 时先记下 zip,但立刻丢掉 patch-info,
+ * 避免用户马上切渠道重启后旧补丁跨进程复活。
  */
 function clearStagedPatch(): void {
   if (isUpdateApplyCommitted()) {
@@ -678,27 +715,13 @@ function clearStagedPatch(): void {
     rememberDeferredStagedPatch();
     // 立刻作废旧渠道 in-flight 下载,避免下载完成后又把旧补丁写成 ready。
     invalidateInFlightChannelDownloads();
+    // patch-info 立刻拿掉:渠道重启走 app.quit(),等不到 probe/finally。
+    removePatchInfo();
     log.info('deferring staged patch clear until auto-relaunch eligibility settles');
     return;
   }
-  if (readyFilePath) {
-    try { fs.unlinkSync(readyFilePath); } catch { /* ignore */ }
-  }
-  readyVersion = undefined;
-  readyFilePath = undefined;
-  readyChannelEpoch = undefined;
-  removePatchInfo();
   invalidateInFlightChannelDownloads();
-  // downloading 也要重置:opt-out 若发生在「首次 beta 下载进行中」,status 仍是
-  // downloading;不 reset 的话,in-flight 下载完成后 discard 分支只是 `return 'idle'`
-  // 而不 setStatus,update-get-status / update-check-now 会永远卡在 downloading。
-  if (
-    currentStatus === 'ready' ||
-    currentStatus === 'superseding' ||
-    currentStatus === 'downloading'
-  ) {
-    setStatus('idle');
-  }
+  discardStagedPatchFiles();
 }
 
 function incrementApplyAttempts(): void {
@@ -861,6 +884,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
   const wasReady = currentStatus === 'ready';
   const previousReadyVersion = wasReady ? readyVersion : undefined;
   const previousReadyFilePath = wasReady ? readyFilePath : undefined;
+  const previousReadyChannelEpoch = wasReady ? readyChannelEpoch : undefined;
 
   // 只有非 ready 路径才广播 'checking' — wasReady 路径下广播 checking 会让 banner
   // 的可见条件(status === 'ready' || 'superseding')瞬间不满足,banner 抖一下。
@@ -1062,7 +1086,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       log.info('Superseding download failed — rolling back to ready v%s', previousReadyVersion);
       readyVersion = previousReadyVersion;
       readyFilePath = previousReadyFilePath;
-      readyChannelEpoch = channelEpochAtStart;
+      readyChannelEpoch = previousReadyChannelEpoch;
       setStatus('ready', { version: previousReadyVersion });
       return 'ready';
     }
@@ -1436,6 +1460,7 @@ export function initUpdateService(): void {
   ipcMain.handle('update-channel-relaunch', (event) => {
     assertTrustedAppRendererEvent(event);
     log.info('relaunch requested for update channel change');
+    discardUnappliedStagedPatchForChannelRelaunch();
     app.relaunch();
     app.quit();
   });

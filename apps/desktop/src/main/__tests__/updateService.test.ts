@@ -19,6 +19,8 @@ const powerMonitorGetSystemIdleTime = vi.fn(() => 600);
 const powerMonitorOn = vi.fn();
 const powerMonitorRemoveListener = vi.fn();
 const appGetVersion = vi.fn(() => '0.0.64');
+const appRelaunch = vi.fn();
+const appQuit = vi.fn();
 const appIsInApplicationsFolder = vi.fn(() => true);
 const appGetPath = vi.fn((name: string) => {
   if (name === 'userData') return TEST_USER_DATA;
@@ -40,6 +42,8 @@ vi.mock('electron', () => ({
   app: {
     getVersion: appGetVersion,
     getPath: appGetPath,
+    relaunch: appRelaunch,
+    quit: appQuit,
     isPackaged: true,
     isInApplicationsFolder: appIsInApplicationsFolder,
     moveToApplicationsFolder: vi.fn(),
@@ -116,6 +120,11 @@ vi.mock('../cindy-brain/index', () => ({
   getGhostNodeRuntimeBroker: () => ({ destroyAll: vi.fn() }),
 }));
 
+vi.mock('../security/trustedAppRenderer', () => ({
+  assertTrustedAppRendererEvent: vi.fn(),
+}));
+
+
 vi.mock('../logger', () => ({
   createLogger: () => ({
     info: logInfo,
@@ -166,6 +175,8 @@ beforeEach(() => {
   powerMonitorRemoveListener.mockReset();
   appGetVersion.mockReset();
   appGetVersion.mockReturnValue('0.0.64');
+  appRelaunch.mockReset();
+  appQuit.mockReset();
   appIsInApplicationsFolder.mockReset();
   appIsInApplicationsFolder.mockReturnValue(true);
   appGetPath.mockReset();
@@ -621,6 +632,89 @@ describe('startup update relaunch safety', () => {
       expect(service.getUpdateStatus()).toBe('ready');
       expect(fs.existsSync(destPath)).toBe(true);
       expect(fs.readFileSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'), 'utf-8')).toContain('0.0.66');
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('drops patch-info immediately so a channel relaunch cannot revive the old zip', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+
+      const relaunch = ipcHandlers.get('update-channel-relaunch');
+      expect(relaunch).toBeTypeOf('function');
+      relaunch?.({ sender: { id: 1 } });
+      expect(appRelaunch).toHaveBeenCalled();
+      expect(appQuit).toHaveBeenCalled();
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      releaseProbe?.(true);
+      service.stopUpdateService();
+    }
+  });
+
+  it('does not bump the channel epoch again when flushing during a same-path download', async () => {
+    const sharedHotfix = 'app/darwin-arm64/xdt-maker-hotfix.zip';
+    const service = await bootWithStagedPatch({
+      enabled: true,
+      manifest: updateManifest('0.0.65', sharedHotfix),
+    });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    let finishDownload: (() => void) | undefined;
+    download.mockImplementation(async ({ targetPath }: { targetPath: string }) => {
+      await new Promise<void>((resolve) => {
+        finishDownload = resolve;
+      });
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, 'newer-update');
+      return { path: targetPath, size: 123 };
+    });
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      service.setUpdateAutoRelaunchBusyProbe(() => true);
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      fetchManifest.mockResolvedValue(updateManifest('0.0.66', sharedHotfix));
+      const checkPromise = service.checkForUpdate();
+      await vi.waitFor(() => {
+        expect(finishDownload).toBeTypeOf('function');
+      });
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('superseding');
+      });
+      finishDownload?.();
+      await expect(checkPromise).resolves.toBe('ready');
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(
+        fs.readFileSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'), 'utf-8'),
+      ).toContain('0.0.66');
     } finally {
       service.stopUpdateService();
     }

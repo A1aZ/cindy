@@ -424,11 +424,14 @@ export function createResponsesChatHandler(
         }
         if (upstreamErrored) {
           // 终态错误之后:当前 chunk 剩余帧不再解析,取消上游 reader 释放
-          // 连接,让下游响应立即收口。
+          // 连接。不 await:注入的 fetchImpl 可能给出取消长期 pending 的流,
+          // 挂起的取消不能阻塞下游收口。
           try {
-            await reader.cancel();
+            reader.cancel().catch(() => {
+              // 取消失败不影响下游收口。
+            });
           } catch {
-            // 取消失败不影响下游收口。
+            // 同步抛出的取消失败同样不影响下游收口。
           }
         } else {
           buffer += decoder.decode();

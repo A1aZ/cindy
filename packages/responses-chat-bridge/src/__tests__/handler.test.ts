@@ -534,6 +534,37 @@ describe('createResponsesChatHandler', () => {
     expect(cancelled).toHaveBeenCalled();
   });
 
+  it('finishes the downstream response even when upstream cancellation never settles (#2839)', async () => {
+    // 注入的 fetchImpl 可能给出取消长期 pending 的流:挂起的 reader.cancel()
+    // 不能阻塞下游收口。
+    const cancelled = vi.fn(() => new Promise<never>(() => {
+      // 故意永不 settle。
+    }));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"error":{"message":"provider failed","status":502}}\n\n',
+        ));
+        // 故意不 close。
+      },
+      cancel: cancelled,
+    });
+    const handler = createResponsesChatHandler({
+      upstreamBase: 'https://provider.example/v1',
+      buildHeaders: async () => ({}),
+    }, {
+      fetchImpl: vi.fn(async () => new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as typeof fetch,
+    });
+    const res = new FakeResponse();
+    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
+    expect(res.chunks.join('')).toContain('event: response.failed');
+    expect(res.ended).toBe(true);
+    expect(cancelled).toHaveBeenCalled();
+  });
+
   it('fails a malformed SSE frame instead of silently completing', async () => {
     const handler = createResponsesChatHandler({
       upstreamBase: 'https://provider.example/v1',

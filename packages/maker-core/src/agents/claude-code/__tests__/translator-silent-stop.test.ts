@@ -141,7 +141,7 @@ describe('Claude Code translator silent-stop observation (log only)', () => {
     expect(doneSilentStopFlag(events)).toBe(true);
   });
 
-  it('treats a leaked Grok stop token as empty wrap-up, not visible text', async () => {
+  it('hides a leaked Grok stop token without treating the wrap-up as silent-stop', async () => {
     const tracker = new UsageTracker();
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx(tracker);
@@ -160,8 +160,9 @@ describe('Claude Code translator silent-stop observation (log only)', () => {
 
     const events = await drain(queue);
     expect(events.filter((event) => event.type === 'text')).toEqual([]);
-    expect(silentStopWarned(ctx)).toBe(true);
-    expect(doneSilentStopFlag(events)).toBe(true);
+    expect(ctx.turn.lastAssistantMsgHadSubstance).toBe(true);
+    expect(silentStopWarned(ctx)).toBe(false);
+    expect(doneSilentStopFlag(events)).toBeUndefined();
   });
 
   it('does NOT log when the final assistant message carries text (normal completion)', async () => {

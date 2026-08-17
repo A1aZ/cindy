@@ -165,7 +165,7 @@ describe('Claude Code assistant text streaming contract', () => {
     expect(textEvents).toEqual([]);
     expect(ctx.turn.hasEmittedText).toBe(false);
     expect(ctx.turn.uiEmittedText).toBe('');
-    expect(ctx.turn.lastAssistantMsgHadSubstance).toBe(false);
+    expect(ctx.turn.lastAssistantMsgHadSubstance).toBe(true);
   });
 
   it('does not emit a stop token split across streaming deltas', async () => {

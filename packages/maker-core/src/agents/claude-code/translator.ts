@@ -1077,7 +1077,9 @@ function mapTaskUpdatedStatus(status: string | undefined, hasError: boolean): Ag
  */
 function assistantBlockHasSubstance(block: Record<string, unknown>): boolean {
   if (block.type === 'text') {
-    return typeof block.text === 'string' && stripInternalWebCitations(block.text).length > 0;
+    // Silent-stop 看上游有没有交出 text block，不看展示层清洗后还剩什么。
+    // 整条只剩 `<|eos|>` 仍算正常收口；泄漏只在可见文本 / 落库路径隐藏。
+    return typeof block.text === 'string' && block.text.length > 0;
   }
   if (block.type === 'thinking' || block.type === 'redacted_thinking') {
     return false;

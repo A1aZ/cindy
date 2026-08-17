@@ -4653,7 +4653,7 @@
       "requestingAccess": "Requesting Access…",
       "accessDialogTitle": "Allow iOS Simulator Control?",
       "accessDialogMessage": "Allow this Cindy window to view and control the iOS Simulator for “{{task}}”?",
-      "accessDialogDetail": "This permission applies only to this session and is revoked when you switch sessions.",
+      "accessDialogDetail": "This permission applies only to this session. Authorization is retained when you switch away, but control pauses until you return.",
       "accessDialogAllow": "Allow Simulator Control",
       "accessDialogCancel": "Cancel",
       "accessDialogUntitledTask": "Untitled Session",

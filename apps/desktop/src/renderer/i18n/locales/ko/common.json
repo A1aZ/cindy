@@ -4651,7 +4651,7 @@
       "requestingAccess": "접근 요청 중…",
       "accessDialogTitle": "iOS 시뮬레이터 제어를 허용할까요?",
       "accessDialogMessage": "이 Cindy 창에서 ‘{{task}}’의 iOS 시뮬레이터를 보고 제어하도록 허용할까요?",
-      "accessDialogDetail": "이 권한은 현재 세션에만 적용되며 다른 세션으로 전환하면 해제됩니다.",
+      "accessDialogDetail": "이 권한은 이 세션에만 적용됩니다. 다른 세션으로 전환해도 권한은 유지되지만, 돌아올 때까지 제어가 일시 중지됩니다.",
       "accessDialogAllow": "시뮬레이터 제어 허용",
       "accessDialogCancel": "취소",
       "accessDialogUntitledTask": "이름 없는 세션",

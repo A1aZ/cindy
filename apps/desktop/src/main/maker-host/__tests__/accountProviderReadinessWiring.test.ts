@@ -50,7 +50,7 @@ describe('account provider readiness wiring', () => {
     );
     expect(bootstrapSource).not.toContain('await makerProviderRefreshConfigured');
     expect(bootstrapSource).toContain(
-      'else startPendingAccountProviderReadiness = startProviderReadiness',
+      'startPendingAccountProviderReadiness = { ownerId: userId, start: startProviderReadiness }',
     );
 
     const barrierStart = bootstrapSource.indexOf('accountProviderReadinessBarrier.start(');
@@ -67,9 +67,13 @@ describe('account provider readiness wiring', () => {
       'await refreshCustomProvidersIntoCatalog(',
       customMcpRefresh,
     );
-    const providerRefresh = bootstrapSource.indexOf(
-      'await refreshProviderModelsAfterAccountReady',
+    const runtimeReset = bootstrapSource.indexOf(
+      'await resetAccountProviderRuntimes(',
       customProviderRefresh,
+    );
+    const providerRefresh = bootstrapSource.indexOf(
+      'await discoverAccountProviderModels(',
+      runtimeReset,
     );
     const piShutdown = bootstrapSource.indexOf('await shutdownPiEnvironment()', providerRefresh);
 
@@ -77,7 +81,8 @@ describe('account provider readiness wiring', () => {
     expect(initialMcpRefresh).toBeGreaterThan(makerRecreated);
     expect(customMcpRefresh).toBeGreaterThan(initialMcpRefresh);
     expect(customProviderRefresh).toBeGreaterThan(customMcpRefresh);
-    expect(providerRefresh).toBeGreaterThan(customProviderRefresh);
+    expect(runtimeReset).toBeGreaterThan(customProviderRefresh);
+    expect(providerRefresh).toBeGreaterThan(runtimeReset);
     expect(piShutdown).toBeGreaterThan(providerRefresh);
   });
 
@@ -113,7 +118,7 @@ describe('account provider readiness wiring', () => {
 
     const prepareStartOptions = makerHostSource.indexOf('prepareStartOptions: async');
     const hostGate = makerHostSource.indexOf(
-      'await accountProviderReadinessBarrier.waitForScope(providerScopeKey)',
+      'await ensureCurrentAccountProviderReadiness()',
       prepareStartOptions,
     );
     const failClosed = makerHostSource.indexOf('!providerReady', hostGate);
@@ -124,6 +129,41 @@ describe('account provider readiness wiring', () => {
     expect(hostGate).toBeGreaterThan(prepareStartOptions);
     expect(failClosed).toBeGreaterThan(hostGate);
     expect(persistedOrca).toBeGreaterThan(hostGate);
+  });
+
+  it('adopts same-owner generation rollover instead of restarting account-switch discovery', () => {
+    const waitFn = bootstrapSource.indexOf(
+      'async function waitForCurrentAccountProviderModelsReady',
+    );
+    expect(waitFn).toBeGreaterThanOrEqual(0);
+    expect(
+      bootstrapSource.indexOf('ensureCurrentAccountProviderReadiness()', waitFn),
+    ).toBeGreaterThan(waitFn);
+
+    const unchanged = bootstrapSource.indexOf("dbClientTakeover.mode === 'unchanged'");
+    const unchangedAdopt = bootstrapSource.indexOf(
+      'adoptSameOwnerAfterPreviousSettles(',
+      unchanged,
+    );
+    const unchangedReturn = bootstrapSource.indexOf('return;', unchangedAdopt);
+    expect(unchanged).toBeGreaterThanOrEqual(0);
+    expect(unchangedAdopt).toBeGreaterThan(unchanged);
+    expect(unchangedReturn).toBeGreaterThan(unchangedAdopt);
+    expect(
+      bootstrapSource.slice(unchanged, unchangedReturn).includes('startIfOwnerMatches'),
+    ).toBe(false);
+
+    expect(bootstrapSource).toContain(
+      'accountProviderReadinessArm.publish(userId, startProviderReadiness, resumeIncompleteDiscovery)',
+    );
+    expect(bootstrapSource).toContain('accountProviderReadinessArm.clear()');
+    expect(bootstrapSource).toContain('startPendingAccountProviderReadiness = null');
+    expect(bootstrapSource).toContain('invalidateAdoption()');
+    expect(bootstrapSource).toContain('needsIncompleteDiscoveryResume');
+    expect(bootstrapSource).toContain('shouldFirePendingReadinessStart');
+    expect(bootstrapSource).toContain('markDiscoveryComplete()');
+    expect(bootstrapSource).toContain('discoverAccountProviderModels(');
+    expect(bootstrapSource).toContain('resetAccountProviderRuntimes(');
   });
 
   it('starts autonomous route consumers only after provider readiness settles', () => {

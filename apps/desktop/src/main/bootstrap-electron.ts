@@ -537,8 +537,23 @@ import {
   requestProviderModelAutoRefresh,
   resetProviderModelAutoRefreshCooldowns,
 } from './maker-host/provider-model-auto-refresh.js';
-import { refreshProviderModelsAfterAccountReady } from './maker-host/account-provider-model-refresh.js';
-import { accountProviderReadinessBarrier } from './maker-host/account-provider-readiness-barrier.js';
+import {
+  discoverAccountProviderModels,
+  resetAccountProviderRuntimes,
+} from './maker-host/account-provider-model-refresh.js';
+import {
+  accountProviderReadinessBarrier,
+  isSameOwnerScopeKey,
+} from './maker-host/account-provider-readiness-barrier.js';
+import {
+  accountProviderReadinessArm,
+  shouldFirePendingReadinessStart,
+} from './maker-host/account-provider-readiness-arm.js';
+import {
+  ensureCurrentAccountProviderReadiness,
+  setAccountProviderReadinessReadyHandler,
+  shouldStartReadinessConsumers,
+} from './maker-host/account-provider-readiness-ensure.js';
 import {
   readImDefaultSettingsState,
   resetImDefaultSettings,
@@ -816,19 +831,27 @@ import { registerGoalHandlers, broadcastGoalStatus } from './maker-ipc/goal.js';
 import { createLogger as createSchedulerLogger } from './logger.js';
 
 let makerProviderRefreshConfigured = false;
-let startPendingAccountProviderReadiness: (() => void) | null = null;
+let startPendingAccountProviderReadiness: { ownerId: string; start: () => void } | null = null;
 
 function markMakerProviderRefreshConfigured(): void {
   makerProviderRefreshConfigured = true;
   const startPending = startPendingAccountProviderReadiness;
   startPendingAccountProviderReadiness = null;
-  startPending?.();
+  if (
+    startPending &&
+    shouldFirePendingReadinessStart({
+      pendingOwnerId: startPending.ownerId,
+      currentOwnerId: getActiveAppSession().dataOwnerId,
+      boundaryPending: isAppSessionBoundaryPending(),
+    })
+  ) {
+    startPending.start();
+  }
 }
 
 async function waitForCurrentAccountProviderModelsReady(): Promise<void> {
-  const scopeKey = activeOwnerScopeKey();
-  const ready = await accountProviderReadinessBarrier.waitForScope(scopeKey);
-  if (!ready || activeOwnerScopeKey() !== scopeKey || isAppSessionBoundaryPending()) {
+  const ready = await ensureCurrentAccountProviderReadiness();
+  if (!ready) {
     throwIpcError(
       'PRECONDITION_FAILED',
       'Account provider models are not ready for this app session; retry.',
@@ -1193,6 +1216,9 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // before any Agent route can start. A failed DB read therefore stays fail-closed (empty)
   // instead of retaining the previous owner's endpoint or model entries.
   setCustomProviders([]);
+  accountProviderReadinessArm.clear();
+  startPendingAccountProviderReadiness = null;
+  accountProviderReadinessBarrier.invalidateAdoption();
   clearModelVisibilityMirror();
   // 远程会话的镜像冷缓存里是别的设备的聊天内容。owner 命名空间已经保证下一个账号读不到
   // 它,但登出后不该在盘上留着 —— 这里 owner 还指向**旧账号**(commitActiveAppSession 在
@@ -6880,6 +6906,12 @@ app.on('ready', async () => {
             userId,
           });
         }
+        // Same-owner generation bump also lands here. Adopt the settled
+        // discovery task onto the new generation; do not start a second
+        // account-switch refresh from this duplicate-owner path.
+        void accountProviderReadinessBarrier.adoptSameOwnerAfterPreviousSettles(
+          activeOwnerScopeKey(),
+        );
         return;
       }
       // Phase 1.1: file worker 接管 DB 连接后,释放 main 端的 _db + optimize 定时器。
@@ -6988,9 +7020,44 @@ app.on('ready', async () => {
       //
       // 模型发现必须排在 Codex 重启序列之后：后者末尾会按 auth 边界重读
       // models_cache（cache miss 即清空防串号），并发跑会让刚发现的清单被空快照覆盖。
-      const providerScopeKey = activeOwnerScopeKey();
+      const resumeIncompleteDiscovery = async (): Promise<void> => {
+        const scopeKey = activeOwnerScopeKey();
+        if (
+          getActiveAppSession().dataOwnerId !== userId ||
+          !accountProviderReadinessBarrier.needsIncompleteDiscoveryResume(scopeKey)
+        ) {
+          return;
+        }
+        await discoverAccountProviderModels({
+          loadXaiLkg: loadXaiModelsFromDiskCache,
+          refreshProviderModels: requestProviderModelAutoRefresh,
+          log: accountSwitchLog,
+        });
+        if (accountProviderReadinessBarrier.hasAdoptableSameOwner(activeOwnerScopeKey())) {
+          accountProviderReadinessBarrier.markDiscoveryComplete();
+        }
+      };
       const startProviderReadiness = (): void => {
-        if (activeOwnerScopeKey() !== providerScopeKey || isAppSessionBoundaryPending()) return;
+        if (!makerProviderRefreshConfigured) {
+          startPendingAccountProviderReadiness = { ownerId: userId, start: startProviderReadiness };
+          return;
+        }
+        const providerScopeKey = activeOwnerScopeKey();
+        const currentOwnerId = getActiveAppSession().dataOwnerId;
+        if (!currentOwnerId || currentOwnerId !== userId || isAppSessionBoundaryPending()) {
+          return;
+        }
+        if (accountProviderReadinessBarrier.needsIncompleteDiscoveryResume(providerScopeKey)) {
+          void resumeIncompleteDiscovery();
+          return;
+        }
+        if (
+          accountProviderReadinessBarrier.hasScope(providerScopeKey) ||
+          (accountProviderReadinessBarrier.hasAdoptableSameOwner(providerScopeKey) &&
+            accountProviderReadinessBarrier.isDiscoveryComplete())
+        ) {
+          return;
+        }
         const providerReadiness = accountProviderReadinessBarrier.start(
           providerScopeKey,
           async () => {
@@ -7010,16 +7077,37 @@ app.on('ready', async () => {
                   error: err instanceof Error ? err.message : String(err),
                 });
               }
-              await refreshCustomProvidersIntoCatalog(
-                () => activeOwnerScopeKey() === providerScopeKey && !isAppSessionBoundaryPending(),
-              );
-              await refreshProviderModelsAfterAccountReady({
-                restartCodex: restartCodexAfterAuthModeChange,
-                shutdownCodexEnvironment,
-                loadXaiLkg: loadXaiModelsFromDiskCache,
-                refreshProviderModels: requestProviderModelAutoRefresh,
-                log: accountSwitchLog,
-              });
+              const stillExactScope = () =>
+                activeOwnerScopeKey() === providerScopeKey && !isAppSessionBoundaryPending();
+              const stillSameOwnerIncarnation = () =>
+                accountProviderReadinessBarrier.isCurrentAdoptable() &&
+                isSameOwnerScopeKey(activeOwnerScopeKey(), providerScopeKey);
+              await refreshCustomProvidersIntoCatalog(stillSameOwnerIncarnation);
+              // Real account switch keeps Codex reset *before* discovery so models_cache
+              // is re-read on the new auth boundary. Same-owner generation rollover skips
+              // the destructive reset but still finishes catalog discovery so adopt can
+              // only succeed for a complete model list.
+              if (stillExactScope()) {
+                await resetAccountProviderRuntimes(
+                  {
+                    restartCodex: restartCodexAfterAuthModeChange,
+                    shutdownCodexEnvironment,
+                    log: accountSwitchLog,
+                  },
+                  stillExactScope,
+                );
+              }
+              if (stillSameOwnerIncarnation()) {
+                await discoverAccountProviderModels({
+                  loadXaiLkg: loadXaiModelsFromDiskCache,
+                  refreshProviderModels: requestProviderModelAutoRefresh,
+                  log: accountSwitchLog,
+                });
+                if (stillSameOwnerIncarnation()) {
+                  accountProviderReadinessBarrier.markDiscoveryComplete();
+                }
+              }
+              if (!stillExactScope()) return;
               // Pi bridge 与 Codex 同源（HTTP bridge + gateway key），账号切换后也必须
               // 清掉旧账号环境，让下一次 Pi 会话按新账号凭证重建。
               try {
@@ -7069,7 +7157,17 @@ app.on('ready', async () => {
         // every direct create path. The scope check prevents an old completion from reviving hosts
         // after an account boundary.
         void providerReadiness.then(() => {
-          if (activeOwnerScopeKey() !== providerScopeKey || isAppSessionBoundaryPending()) return;
+          if (
+            !shouldStartReadinessConsumers({
+              capturedScopeKey: providerScopeKey,
+              currentScopeKey: activeOwnerScopeKey(),
+              boundaryPending: isAppSessionBoundaryPending(),
+              adoptable: accountProviderReadinessBarrier.isCurrentAdoptable(),
+            }) ||
+            !accountProviderReadinessBarrier.markConsumersStarted()
+          ) {
+            return;
+          }
           startAccountIntegrationsAfterOwnerDbReady(userId, {
             isOwnerCurrent: (ownerId) =>
               isLocalDbOwnerCurrent(
@@ -7087,8 +7185,24 @@ app.on('ready', async () => {
       };
       // localDb 与 splash 可以任意先后完成。协调器已配置就立即开后台任务；
       // 否则只登记当前 scope 的启动闭包，不创建一个可能永久 pending 的 Promise。
+      setAccountProviderReadinessReadyHandler((ownerId) => {
+        startAccountIntegrationsAfterOwnerDbReady(ownerId, {
+          isOwnerCurrent: (id) =>
+            isLocalDbOwnerCurrent(
+              authManager.getAuthState(),
+              id,
+              isAppSessionBoundaryPending(),
+            ),
+          startHookControlAccount,
+          startImConnection,
+          log: dbClientLog,
+        });
+        attemptStartScheduler();
+        attemptStartEmbeddingHost();
+      });
+      accountProviderReadinessArm.publish(userId, startProviderReadiness, resumeIncompleteDiscovery);
       if (makerProviderRefreshConfigured) startProviderReadiness();
-      else startPendingAccountProviderReadiness = startProviderReadiness;
+      else startPendingAccountProviderReadiness = { ownerId: userId, start: startProviderReadiness };
       logStartupPhase('post-db-hooks-scheduled');
     },
   });

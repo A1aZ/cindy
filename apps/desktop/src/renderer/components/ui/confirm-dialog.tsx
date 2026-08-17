@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { flashScrollbar } from '@/lib/scrollbarAutoHide';
 import { cn } from '@/lib/utils';
+import { WINDOW_DRAG_STYLE, WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import { Spinner } from '@/components/ui/spinner';
 
 export interface ConfirmDialogProps {
@@ -145,18 +146,23 @@ export function ConfirmDialog({
           )}
           // 遮罩保留窗口拖动，避免无边框窗口在单屏边缘打开确认框后无法移回；
           // 下方弹窗内容仍是 no-drag，按钮、复选框和滚动区继续正常交互。
-          style={{ WebkitAppRegion: 'drag', zIndex } as React.CSSProperties}
+          style={{ ...WINDOW_DRAG_STYLE, zIndex }}
         />
         <AlertDialog.Content
           className={cn(
-            'fixed left-1/2 top-1/2 z-[10000] -translate-x-1/2 -translate-y-1/2',
+            // 居中不用 transform（-translate-x/y-1/2）：Electron 的 -webkit-app-region
+            // 命中区域按布局矩形计算、不跟随 transform（见 windowDrag.tsx /
+            // ChromeActions.tsx 的既有结论），transform 定位会让 no-drag 挖洞与
+            // 弹窗视觉位置错位，点弹窗内容会变成拖窗。
+            // inset-0 + m-auto + h-fit：布局矩形即视觉矩形，挖洞与弹窗严格重合。
+            'fixed inset-0 z-[10000] m-auto h-fit',
             'flex max-h-[85vh] flex-col',
             'w-full select-none rounded-xl p-4',
             'bg-[var(--confirm-bg)] shadow-[var(--confirm-shadow)]',
             'data-[state=open]:animate-confirm-content-in',
             'data-[state=closed]:animate-confirm-content-out',
           )}
-          style={{ WebkitAppRegion: 'no-drag', maxWidth: maxWidth ?? 400, zIndex } as React.CSSProperties}
+          style={{ ...WINDOW_NO_DRAG_STYLE, maxWidth: maxWidth ?? 400, zIndex }}
           {...(describeContent && content
             ? // 指向滚动区(含 description 与 content):开场朗读覆盖清单全文。
               { 'aria-describedby': bodyId }

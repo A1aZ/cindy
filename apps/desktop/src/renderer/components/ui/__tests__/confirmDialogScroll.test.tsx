@@ -7,7 +7,9 @@
  * 2. 滚动主体只有一个 —— caller 不必也不该再套一层限高;
  * 3. 弹窗一出现就闪一下滚动条:thumb 默认透明,不提示就等于让用户在
  *    「还有权限没看到」的情况下点同意;
- * 4. 确认框打开时,遮罩仍可拖动无边框窗口,但弹窗内容本身保持 no-drag。
+ * 4. 确认框打开时,遮罩仍可拖动无边框窗口,弹窗内容本身保持 no-drag,且
+ *    居中走布局而非 transform —— app-region 命中区不跟随 transform,
+ *    挖洞必须与弹窗视觉位置重合。
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -66,7 +68,7 @@ describe('ConfirmDialog 长内容布局', () => {
     expect((confirmBtn.parentElement as HTMLElement).className).toContain('shrink-0');
   });
 
-  it('确认框遮罩保留窗口拖动,弹窗内容保持 no-drag', () => {
+  it('确认框遮罩保留窗口拖动,弹窗内容保持 no-drag,且居中不走 transform', () => {
     render(
       <ConfirmDialog
         open
@@ -78,7 +80,8 @@ describe('ConfirmDialog 长内容布局', () => {
     );
 
     const dialog = screen.getByRole('alertdialog');
-    const overlay = document.querySelector('.fixed.inset-0') as HTMLElement;
+    // Portal 内 Overlay 固定渲染在 Content 之前。
+    const overlay = dialog.previousElementSibling as HTMLElement;
     expect(overlay).not.toBeNull();
     expect((overlay.style as CSSStyleDeclaration & { WebkitAppRegion: string }).WebkitAppRegion).toBe(
       'drag',
@@ -86,6 +89,13 @@ describe('ConfirmDialog 长内容布局', () => {
     expect((dialog.style as CSSStyleDeclaration & { WebkitAppRegion: string }).WebkitAppRegion).toBe(
       'no-drag',
     );
+    // 居中必须走布局(inset-0 + m-auto)而非 transform:Electron 的 app-region
+    // 命中区按布局矩形计算、不跟随 transform,用 -translate-* 定位会让
+    // no-drag 挖洞与弹窗视觉位置错位(点击弹窗内容会变成拖窗)。
+    expect(dialog.className).not.toMatch(/-translate-/);
+    expect(dialog.className).toContain('inset-0');
+    expect(dialog.className).toContain('m-auto');
+    expect(dialog.className).toContain('h-fit');
   });
 
   it('打开时闪一下滚动条,内容里的点击(如展开折叠区)后再闪一次', async () => {

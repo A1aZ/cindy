@@ -113,13 +113,17 @@ const config: Config = {
           from: { opacity: '1' },
           to: { opacity: '0' },
         },
+        // 弹窗居中已改为 inset-0 + m-auto 的 transform-free 方案(confirm-dialog.tsx),
+        // keyframes 里不得再带回 translate —— app-region 命中区不跟随 transform,
+        // 入场/退场期间 translate 会把弹窗甩出 no-drag 挖洞。fade + scale 仍按
+        // DESIGN.md §14.4 的 heavy-overlay 规格(250ms in / 150ms out)。
         'confirm-content-in': {
-          from: { opacity: '0', transform: 'translate(-50%, -50%) scale(0.95)' },
-          to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+          from: { opacity: '0', transform: 'scale(0.95)' },
+          to: { opacity: '1', transform: 'scale(1)' },
         },
         'confirm-content-out': {
-          from: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
-          to: { opacity: '0', transform: 'translate(-50%, -50%) scale(0.95)' },
+          from: { opacity: '1', transform: 'scale(1)' },
+          to: { opacity: '0', transform: 'scale(0.95)' },
         },
       },
       animation: {

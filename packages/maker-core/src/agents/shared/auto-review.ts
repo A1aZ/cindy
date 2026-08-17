@@ -5350,6 +5350,31 @@ function gitCatFileReadsUnscopedContent(args: readonly string[]): boolean {
   return contentMode && !objectArgs.some(isSafeGitObjectPath);
 }
 
+// Git parse-options accepts unique long-option prefixes. Keep the complete status option
+// set here so ambiguous prefixes such as `--s` do not resolve to one arbitrary candidate.
+const GIT_STATUS_LONG_OPTIONS = [
+  '--verbose', '--short', '--branch', '--show-stash', '--ahead-behind', '--porcelain', '--long',
+  '--null', '--untracked-files', '--ignored', '--ignore-submodules', '--column', '--renames',
+  '--find-renames',
+] as const;
+
+function resolveGitStatusLongOption(name: string): typeof GIT_STATUS_LONG_OPTIONS[number] | null {
+  const exact = GIT_STATUS_LONG_OPTIONS.find((option) => option === name);
+  if (exact) return exact;
+  const matches = GIT_STATUS_LONG_OPTIONS.filter((option) => option.startsWith(name));
+  return matches.length === 1 ? matches[0] ?? null : null;
+}
+
+function gitStatusRequestsVerbose(args: readonly string[]): boolean {
+  for (const token of args) {
+    if (token === '--') break;
+    if (/^-[^-]*v/.test(token)) return true;
+    if (!token.startsWith('--') || token.includes('=') || token.startsWith('--no-')) continue;
+    if (resolveGitStatusLongOption(token) === '--verbose') return true;
+  }
+  return false;
+}
+
 function gitContentReadWithoutPath(sub: string, args: readonly string[]): boolean {
   if (sub === 'grep') return !gitGrepListsOnly(args);
   if (sub === 'diff') return !gitMetadataOnlyRequested(args) || gitPatchRequested(args);
@@ -5360,7 +5385,7 @@ function gitContentReadWithoutPath(sub: string, args: readonly string[]): boolea
   }
   if (sub === 'log' || sub === 'whatchanged') return gitPatchRequested(args);
   if (sub === 'cat-file') return gitCatFileReadsUnscopedContent(args);
-  if (sub === 'status') return args.some((arg) => arg === '--verbose' || /^-[^-]*v/.test(arg));
+  if (sub === 'status') return gitStatusRequestsVerbose(args);
   return false;
 }
 

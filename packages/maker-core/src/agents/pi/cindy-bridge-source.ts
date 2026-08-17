@@ -439,14 +439,18 @@ function bashOperatorAfterRedirections(command: string, start: number): BashPost
   return { operator: '', end: cursor, unresolved: false, hadRedirection };
 }
 
-function bashInheritedDirectoryChangeIsUncertain(target: string): boolean {
+function bashInheritedDirectoryChangeIsUncertain(
+  command: 'cd' | 'pushd' | 'popd',
+  target: string,
+): boolean {
   if (path.sep !== '/') return false;
 
   // Non-interactive Bash startup files and exported builtin overrides can change
   // directory semantics before this command runs; their contents are not static evidence.
   const bashEnv = process.env.BASH_ENV;
   if (typeof bashEnv === 'string' && bashEnv.trim().length > 0) return true;
-  if (Object.keys(process.env).some((name) => /^BASH_FUNC_(?:cd|pushd)%%$/.test(name))) return true;
+  if (Object.keys(process.env).some((name) => /^BASH_FUNC_(?:cd|pushd|popd)%%$/.test(name))) return true;
+  if (command === 'popd') return false;
 
   const bashOptions = (process.env.BASHOPTS ?? '').split(':');
   if (bashOptions.includes('cdable_vars') && /^[A-Za-z_][A-Za-z0-9_]*$/.test(target)) return true;
@@ -464,7 +468,7 @@ type BashLeadingRedirection = { end: number; unresolved: boolean };
 type BashAssignmentPrefix = { end: number; name: string; unresolved: boolean };
 type BashDirectoryChangeHead = {
   cursor: number;
-  command: 'cd' | 'pushd' | null;
+  command: 'cd' | 'pushd' | 'popd' | null;
   hadRedirection: boolean;
   unresolved: boolean;
 };
@@ -565,7 +569,7 @@ function bashUnresolvedHeadHasDirectoryChange(codeMask: string, start: number): 
     if (/[;&|\n]/.test(char)) break;
     visible += char;
   }
-  return /^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=\S*\s+)*(?:(?:command|builtin)\s+)*(?:cd|pushd)(?:\s|$)/
+  return /^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=\S*\s+)*(?:(?:command|builtin)\s+)*(?:cd|pushd|popd)(?:\s|$)/
     .test(visible);
 }
 
@@ -618,7 +622,7 @@ function bashDirectoryChangeHead(
       : null;
   }
 
-  if ((word.target !== 'cd' && word.target !== 'pushd') || word.unresolved) {
+  if ((word.target !== 'cd' && word.target !== 'pushd' && word.target !== 'popd') || word.unresolved) {
     if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
       return { cursor, command: null, hadRedirection, unresolved: true };
     }
@@ -627,8 +631,30 @@ function bashDirectoryChangeHead(
   return { cursor: word.end, command: word.target, hadRedirection, unresolved };
 }
 
+type BashDirectoryState = { stack: string[] };
+const BASH_DIRECTORY_STATE_LIMIT = 128;
+const BASH_DIRECTORY_STACK_LIMIT = 128;
+
+function bashUniqueDirectoryStates(states: readonly BashDirectoryState[]): BashDirectoryState[] | null {
+  const unique = new Map<string, BashDirectoryState>();
+  for (const state of states) {
+    unique.set(state.stack.join('\u0000'), state);
+    if (unique.size > BASH_DIRECTORY_STATE_LIMIT) return null;
+  }
+  return [...unique.values()];
+}
+
+function bashPopdIndex(operand: string, stackLength: number): number | null {
+  if (!operand) return 0;
+  const match = /^([+-])(\d+)$/.exec(operand);
+  if (!match) return null;
+  const offset = Number(match[2]);
+  if (!Number.isSafeInteger(offset)) return null;
+  return match[1] === '+' ? offset : stackLength - 1 - offset;
+}
+
 function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBudget): BashPathCandidates {
-  let candidates = [process.cwd()];
+  let states: BashDirectoryState[] = [{ stack: [process.cwd()] }];
   let unresolved = false;
   const codeMask = bashShellCodeMask(command);
   const commandStart = /(?:^(?=[^;&|(){}\n])|[;&|(){}\n])\s*(?:(?:if|then|elif|else|while|until|do)\s+)?/g;
@@ -636,15 +662,11 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     const matchIndex = match.index ?? 0;
     const head = bashDirectoryChangeHead(command, codeMask, matchIndex + match[0].length);
     if (!head) continue;
-    if (head.unresolved) {
+    if (head.unresolved || !head.command) {
       unresolved = true;
       continue;
     }
     let cursor = head.cursor;
-    let hadRedirection = head.hadRedirection;
-    const precededByConditionalOperator = matchIndex > 0
-      && ((codeMask[matchIndex] === '&' && codeMask[matchIndex - 1] === '&')
-        || (codeMask[matchIndex] === '|' && codeMask[matchIndex - 1] === '|'));
     const changeDepth = bashSubshellDepthAt(codeMask, cursor);
     if (!bashSubshellScopeRemainsOpen(codeMask, cursor, changeDepth)) continue;
     let parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
@@ -654,29 +676,40 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
       cursor = bashInlinePaddingEnd(command, cursor);
       const redirection = bashLeadingRedirectionAt(command, cursor);
       if (redirection) {
-        hadRedirection = true;
         unresolved ||= redirection.unresolved;
         cursor = redirection.end;
         parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
         continue;
       }
-      const knownOption = head.command === 'pushd'
+      const stackOption = head.command === 'pushd' || head.command === 'popd';
+      const knownOption = stackOption
         ? parsed.target === '-n'
         : parsed.target !== '--' && /^-[LPe]+$/.test(parsed.target);
       if (parsed.target !== '--' && !knownOption) break;
       if (parsed.target === '--') optionsEnded = true;
-      if (head.command === 'pushd' && parsed.target === '-n') suppressDirectoryChange = true;
+      if (stackOption && parsed.target === '-n') suppressDirectoryChange = true;
       cursor = parsed.end;
       parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
     }
-    if (head.command === 'pushd' && !optionsEnded && /^[+-]\d+$/.test(parsed.target)) {
+
+    const pushdRotation = head.command === 'pushd'
+      && !optionsEnded && /^[+-]\d+$/.test(parsed.target);
+    if (pushdRotation) {
+      // Rotation can include an inherited stack that is unavailable to this invocation.
       unresolved = true;
       continue;
     }
-    if (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-'))) {
+    if (head.command !== 'popd'
+      && (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-')))) {
       unresolved = true;
       continue;
     }
+    if (head.command === 'popd' && (parsed.unresolved
+      || (parsed.target && !optionsEnded && !/^[+-]\d+$/.test(parsed.target)))) {
+      unresolved = true;
+      continue;
+    }
+
     const operatorEvidence = bashOperatorAfterRedirections(command, parsed.end);
     if (operatorEvidence.unresolved) {
       unresolved = true;
@@ -684,35 +717,67 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     }
     const operator = operatorEvidence.operator;
     if (!operator || operator === '|' || operator === '&') continue;
-    if (suppressDirectoryChange) continue;
-    if (bashInheritedDirectoryChangeIsUncertain(parsed.target)) {
+    if (bashInheritedDirectoryChangeIsUncertain(head.command, parsed.target)) {
       unresolved = true;
       continue;
     }
 
-    const changed: string[] = [];
-    for (const cwd of candidates) {
-      const expanded = bashExpandedPathCandidates(parsed.target, cwd, parsed.mayExpand, globBudget);
-      unresolved ||= expanded.unresolved;
-      for (const candidate of expanded.paths) {
-        try {
-          if (statSync(candidate).isDirectory()) changed.push(candidate);
-        } catch {
-          // A failed cd leaves cwd unchanged for later ;/newline commands.
+    const changed: BashDirectoryState[] = [];
+    let stateChangeUnresolved = false;
+    if (head.command === 'popd') {
+      if (suppressDirectoryChange) {
+        unresolved = true;
+        continue;
+      }
+      for (const state of states) {
+        const index = bashPopdIndex(parsed.target, state.stack.length);
+        if (index === null || index < 0 || index >= state.stack.length
+          || (index === 0 && state.stack.length < 2)) {
+          stateChangeUnresolved = true;
+          continue;
+        }
+        const stack = [...state.stack];
+        stack.splice(index, 1);
+        changed.push({ stack });
+      }
+    } else {
+      for (const state of states) {
+        const cwd = state.stack[0];
+        const expanded = bashExpandedPathCandidates(parsed.target, cwd, parsed.mayExpand, globBudget);
+        unresolved ||= expanded.unresolved;
+        for (const candidate of expanded.paths) {
+          try {
+            if (!statSync(candidate).isDirectory()) continue;
+            if (head.command === 'cd') {
+              changed.push({ stack: [candidate, ...state.stack.slice(1)] });
+            } else if (suppressDirectoryChange) {
+              changed.push({ stack: [cwd, candidate, ...state.stack.slice(1)] });
+            } else if (state.stack.length < BASH_DIRECTORY_STACK_LIMIT) {
+              changed.push({ stack: [candidate, ...state.stack] });
+            } else {
+              stateChangeUnresolved = true;
+            }
+          } catch {
+            // A failed cd/pushd leaves cwd and the directory stack unchanged.
+          }
         }
       }
     }
+    unresolved ||= stateChangeUnresolved;
+
     const branchMayHaveBeenSkipped = /\b(?:elif|else|fi|done|esac)\b/.test(
       codeMask.slice(operatorEvidence.end),
     );
-    if (operator === '||' || branchMayHaveBeenSkipped || precededByConditionalOperator
-      || ((hadRedirection || operatorEvidence.hadRedirection) && (operator === ';' || operator === '\n'))) {
-      candidates = [...new Set([...candidates, ...changed])];
-    } else if (changed.length > 0) {
-      candidates = [...new Set(changed)];
+    const retainsPriorState = operator === '||' || operator === ';' || operator === '\n'
+      || branchMayHaveBeenSkipped;
+    const nextStates = retainsPriorState ? [...states, ...changed] : changed;
+    if (nextStates.length > 0) {
+      const unique = bashUniqueDirectoryStates(nextStates);
+      if (!unique) unresolved = true;
+      else states = unique;
     }
   }
-  return { paths: candidates, unresolved };
+  return { paths: [...new Set(states.map((state) => state.stack[0]))], unresolved };
 }
 
 function bashShellCodeMask(command: string): string {

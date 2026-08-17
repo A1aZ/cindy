@@ -537,6 +537,49 @@ describe('cindy-bridge extension source', () => {
             stackOtherOrdinaryLink,
           ].includes(target)), command).toBe(true);
         }
+        for (const command of [
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && builtin popd +0 && cat <${cwdSwitchName}`,
+          `pushd -n ${nestedDir} && popd && cat <${cwdSwitchName}`,
+        ]) {
+          const evidence = context.bashInputReadEvidence?.({ command });
+          expect(evidence, command).toEqual({ targets: [nestedCwdSwitchSecretLink], unresolved: false });
+          expect(context.collectResolvedCredentialPaths?.(evidence?.targets), command)
+            .toEqual([realpathSync(secretPath)]);
+        }
+        for (const command of [
+          `pushd ${nestedDir} && popd && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd && popd && cat <${cwdSwitchName}`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
+            targets: [rootCwdSwitchOrdinaryLink],
+            unresolved: false,
+          });
+        }
+        for (const command of [
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd +1 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -0 && cat <${cwdSwitchName}`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
+            targets: [stackOtherOrdinaryLink],
+            unresolved: false,
+          });
+        }
+        const sequentialPopdCommand = `pushd ${nestedDir}; pushd ${stackOtherDir}; popd; cat <${cwdSwitchName}`;
+        const sequentialPopdEvidence = context.bashInputReadEvidence?.({ command: sequentialPopdCommand });
+        expect(sequentialPopdEvidence?.unresolved, sequentialPopdCommand).toBe(true);
+        expect(sequentialPopdEvidence?.targets, sequentialPopdCommand)
+          .toContain(nestedCwdSwitchSecretLink);
+        expect(context.collectResolvedCredentialPaths?.(sequentialPopdEvidence?.targets))
+          .toEqual([realpathSync(secretPath)]);
+        expect(context.bashInputReadEvidence?.({
+          command: `popd >/dev/null; cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
+        context.process.env['BASH_FUNC_popd%%'] = '() { builtin cd "$HOME"; }';
+        expect(context.bashInputReadEvidence?.({
+          command: `popd >/dev/null; cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
+        delete context.process.env['BASH_FUNC_popd%%'];
         expect(context.bashInputReadEvidence?.({
           command: `pushd -n ${nestedDir} >/dev/null && cat <ordinary-link.txt`,
         })).toEqual({
@@ -546,7 +589,7 @@ describe('cindy-bridge extension source', () => {
         expect(context.bashInputReadEvidence?.({
           command: `true && 2>/dev/null builtin pushd ${nestedDir} && cat <${cwdSwitchName}`,
         })).toEqual({
-          targets: [rootCwdSwitchOrdinaryLink, nestedCwdSwitchSecretLink],
+          targets: [nestedCwdSwitchSecretLink],
           unresolved: false,
         });
         expect(context.bashInputReadEvidence?.({

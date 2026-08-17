@@ -2131,6 +2131,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
 
         for (const [sessionId, command] of [
           ['perm-auto-bash-symlink-dotenv-pushd-rotation', 'pushd sub >/dev/null; pushd ../stack-other >/dev/null; pushd +1 >/dev/null; cat<link'],
+          ['perm-auto-bash-symlink-dotenv-popd', 'pushd sub; pushd ../stack-other; popd; cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-cd', 'X=1 cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-leading-redirect', 'X=1 2>/dev/null builtin cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-leading-assignment-wrapper', '2>/dev/null X=1 command -- cd sub && cat<link'],
@@ -2159,6 +2160,27 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           expect(followUp.some((b) => b.includes('FAKE_REDIRECT_DOTENV_SECRET')), command).toBe(false);
           expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.')), command).toBe(true);
         }
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', {
+            command: 'pushd sub && popd && cat<link',
+          }),
+          anthropicStreamBody('bash ordinary popd turn finished'),
+        );
+        const ordinaryPopdReqBefore = seenRequests.length;
+        const ordinaryPopdTurn = await runPermissionTurn({
+          sessionId: 'perm-full-access-bash-popd-plain',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(ordinaryPopdTurn.resolverTools).toEqual([]);
+        const ordinaryPopdFollowUp = seenRequests.slice(ordinaryPopdReqBefore)
+          .map((request) => request.body);
+        expect(ordinaryPopdFollowUp.some((body) => body.includes('ordinary-content'))).toBe(true);
+        expect(ordinaryPopdFollowUp.some((body) => body.includes('FAKE_REDIRECT_DOTENV_SECRET')))
+          .toBe(false);
 
         scriptedResponses.length = 0;
         scriptedResponses.push(

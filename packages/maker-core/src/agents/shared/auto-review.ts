@@ -40,6 +40,7 @@
 import {
   isDotenvCredentialPath,
   isSensitiveCredentialPath,
+  SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   SENSITIVE_CREDENTIAL_PATH_PATTERNS,
 } from './sensitive-credential-paths.js';
 import { parseShellInputRedirections } from './shell-input-redirections.js';
@@ -4935,6 +4936,188 @@ function selectorCouldMatchDotenv(value: string): boolean {
   );
 }
 
+const CREDENTIAL_SELECTOR_WORD_BOUNDARY = '\u0001';
+const SHELL_CREDENTIAL_SELECTOR_GLOBS = [...new Set(
+  SENSITIVE_CREDENTIAL_GLOB_PATTERNS.flatMap((pattern) => {
+    const variants: string[] = [pattern];
+    const directory = pattern.endsWith('/**') ? pattern.slice(0, -3) : undefined;
+    if (directory) {
+      variants.push(directory, directory + CREDENTIAL_SELECTOR_WORD_BOUNDARY + '**');
+    } else if (pattern !== '**/.env' && pattern !== '**/.env.*' && !pattern.endsWith('*')) {
+      variants.push(pattern + CREDENTIAL_SELECTOR_WORD_BOUNDARY + '**');
+    }
+    return variants.flatMap((variant) =>
+      variant.startsWith('**/') ? [variant, variant.slice(3)] : [variant]);
+  }),
+)];
+
+type ShellSelectorGlobLabel =
+  | { kind: 'literal'; value: string }
+  | { kind: 'class'; values: ReadonlySet<string>; negated: boolean }
+  | { kind: 'non-slash' | 'non-word' | 'any' };
+
+type ShellSelectorGlobToken =
+  | { kind: 'literal'; value: string }
+  | { kind: 'class'; label: ShellSelectorGlobLabel }
+  | { kind: 'one' | 'star' | 'globstar' | 'nonword' };
+
+function shellSelectorClassLabel(value: string): ShellSelectorGlobLabel | null {
+  if (!value || value.includes('[:')) return null;
+  let cursor = 0;
+  const negated = value.startsWith('!') || value.startsWith('^');
+  if (negated) cursor += 1;
+  const values = new Set<string>();
+  while (cursor < value.length) {
+    const start = value.charCodeAt(cursor);
+    if (value[cursor + 1] === '-' && cursor + 2 < value.length) {
+      const end = value.charCodeAt(cursor + 2);
+      if (end < start || end - start > 64) return null;
+      for (let code = start; code <= end; code += 1) {
+        values.add(String.fromCharCode(code).toLowerCase());
+      }
+      cursor += 3;
+    } else {
+      values.add(value[cursor].toLowerCase());
+      cursor += 1;
+    }
+    if (values.size > 128) return null;
+  }
+  return values.size > 0 ? { kind: 'class', values, negated } : null;
+}
+
+const SHELL_SELECTOR_MAX_PATTERN_LENGTH = 4_096;
+
+function shellSelectorGlobTokens(pattern: string): ShellSelectorGlobToken[] | null {
+  if (pattern.length > SHELL_SELECTOR_MAX_PATTERN_LENGTH || /[{}()|+@]/.test(pattern)) return null;
+  const normalized = pattern.replace(/\\/g, '/').toLowerCase();
+  const tokens: ShellSelectorGlobToken[] = [];
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (char === CREDENTIAL_SELECTOR_WORD_BOUNDARY) {
+      tokens.push({ kind: 'nonword' });
+      continue;
+    }
+    if (char === '[') {
+      const end = normalized.indexOf(']', index + 1);
+      if (end < 0) return null;
+      const label = shellSelectorClassLabel(normalized.slice(index + 1, end));
+      if (!label) return null;
+      tokens.push({ kind: 'class', label });
+      index = end;
+      continue;
+    }
+    if (char === ']') return null;
+    if (char === '?') {
+      tokens.push({ kind: 'one' });
+      continue;
+    }
+    if (char === '*') {
+      let end = index + 1;
+      while (normalized[end] === '*') end += 1;
+      tokens.push({ kind: end - index >= 2 ? 'globstar' : 'star' });
+      index = end - 1;
+      continue;
+    }
+    tokens.push({ kind: 'literal', value: char });
+  }
+  return tokens;
+}
+
+function shellSelectorGlobTransition(
+  tokens: readonly ShellSelectorGlobToken[],
+  index: number,
+): { next: number; label: ShellSelectorGlobLabel } | null {
+  const token = tokens[index];
+  if (!token) return null;
+  if (token.kind === 'literal') return { next: index + 1, label: token };
+  if (token.kind === 'class') return { next: index + 1, label: token.label };
+  if (token.kind === 'one') return { next: index + 1, label: { kind: 'non-slash' } };
+  if (token.kind === 'nonword') return { next: index + 1, label: { kind: 'non-word' } };
+  if (token.kind === 'star') return { next: index, label: { kind: 'non-slash' } };
+  return { next: index, label: { kind: 'any' } };
+}
+
+function shellSelectorClassAllows(
+  label: Extract<ShellSelectorGlobLabel, { kind: 'class' }>,
+  value: string,
+): boolean {
+  if (value === '/') return false;
+  return label.negated !== label.values.has(value);
+}
+
+function shellSelectorGlobLabelsOverlap(
+  left: ShellSelectorGlobLabel,
+  right: ShellSelectorGlobLabel,
+): boolean {
+  if (left.kind === 'any' || right.kind === 'any') return true;
+  if (left.kind === 'literal' && right.kind === 'literal') return left.value === right.value;
+  if (left.kind === 'literal') {
+    if (right.kind === 'class') return shellSelectorClassAllows(right, left.value);
+    if (right.kind === 'non-word') return !/[a-z0-9_]/i.test(left.value);
+    return left.value !== '/';
+  }
+  if (right.kind === 'literal') return shellSelectorGlobLabelsOverlap(right, left);
+  if (left.kind === 'class' && right.kind === 'class') {
+    if (!left.negated && !right.negated) {
+      return [...left.values].some((value) => shellSelectorClassAllows(right, value));
+    }
+    if (!left.negated) return [...left.values].some((value) => shellSelectorClassAllows(right, value));
+    if (!right.negated) return [...right.values].some((value) => shellSelectorClassAllows(left, value));
+    return true;
+  }
+  if (left.kind === 'class') {
+    if (left.negated) return true;
+    return [...left.values].some((value) => value !== '/'
+      && (right.kind !== 'non-word' || !/[a-z0-9_]/i.test(value)));
+  }
+  if (right.kind === 'class') return shellSelectorGlobLabelsOverlap(right, left);
+  return true;
+}
+
+function shellSelectorGlobsIntersect(leftPattern: string, rightPattern: string): boolean | null {
+  const left = shellSelectorGlobTokens(leftPattern);
+  const right = shellSelectorGlobTokens(rightPattern);
+  if (!left || !right) return null;
+  const pending: Array<[number, number]> = [[0, 0]];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const [leftIndex, rightIndex] = pending.pop()!;
+    const key = `${leftIndex}:${rightIndex}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (leftIndex === left.length && rightIndex === right.length) return true;
+
+    const leftToken = left[leftIndex];
+    const rightToken = right[rightIndex];
+    if (leftToken?.kind === 'star' || leftToken?.kind === 'globstar') {
+      pending.push([leftIndex + 1, rightIndex]);
+    }
+    if (rightToken?.kind === 'star' || rightToken?.kind === 'globstar') {
+      pending.push([leftIndex, rightIndex + 1]);
+    }
+
+    const leftTransition = shellSelectorGlobTransition(left, leftIndex);
+    const rightTransition = shellSelectorGlobTransition(right, rightIndex);
+    if (leftTransition && rightTransition
+      && shellSelectorGlobLabelsOverlap(leftTransition.label, rightTransition.label)) {
+      pending.push([leftTransition.next, rightTransition.next]);
+    }
+  }
+  return false;
+}
+
+function selectorCouldMatchCredential(value: string): boolean {
+  if (value.startsWith('!')) return false;
+  return braceExpansionCouldMatch(value, (candidate) =>
+    SHELL_CREDENTIAL_SELECTOR_GLOBS.some((credentialGlob) => {
+      if (!candidate.includes('/') && credentialGlob.endsWith('/**')) return false;
+      const sensitivePattern = candidate.includes('/')
+        ? credentialGlob
+        : credentialGlob.replace(/\\/g, '/').split('/').pop() ?? '';
+      return shellSelectorGlobsIntersect(candidate, sensitivePattern) !== false;
+    }));
+}
+
 function shellOperandCouldMatchDotenv(
   value: string,
   exactMatcher: (candidate: string) => boolean = isDotenvCredentialPath,
@@ -4951,7 +5134,7 @@ function readerOptionValueIsSensitive(
   value: string | undefined,
   isSensitiveOperand: (value: string) => boolean,
 ): boolean {
-  if (kind === 'selector') return selectorCouldMatchDotenv(value ?? '');
+  if (kind === 'selector') return selectorCouldMatchCredential(value ?? '');
   if (!value || (kind !== 'data-file' && kind !== 'aux-file' && kind !== 'aux-file-list')) return false;
   const operands = kind === 'aux-file-list' ? value.split(/[:;]/) : [value];
   return operands.some((operand) => shellOperandCouldMatchDotenv(operand, isSensitiveOperand));
@@ -5073,7 +5256,7 @@ function grepRecursesIntoPotentialDotenv(bin: string, args: readonly string[]): 
     }
   }
 
-  return recursive && (includes.length === 0 || includes.some(selectorCouldMatchDotenv));
+  return recursive && (includes.length === 0 || includes.some(selectorCouldMatchCredential));
 }
 
 type RgTypeDefinition = { globs: string[]; includes: string[] };
@@ -5097,7 +5280,7 @@ function parseRgTypeSpec(value: string): ParsedRgTypeSpec | null {
     : null;
 }
 
-function rgCustomTypeCouldMatchDotenv(
+function rgCustomTypeCouldMatchCredential(
   name: string,
   definitions: ReadonlyMap<string, RgTypeDefinition>,
   visiting = new Set<string>(),
@@ -5105,10 +5288,10 @@ function rgCustomTypeCouldMatchDotenv(
   if (visiting.has(name)) return true;
   const definition = definitions.get(name);
   if (!definition) return true;
-  if (definition.globs.some(selectorCouldMatchDotenv)) return true;
+  if (definition.globs.some(selectorCouldMatchCredential)) return true;
   const nextVisiting = new Set(visiting).add(name);
   return definition.includes.some((included) =>
-    rgCustomTypeCouldMatchDotenv(included, definitions, nextVisiting));
+    rgCustomTypeCouldMatchCredential(included, definitions, nextVisiting));
 }
 
 function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
@@ -5117,19 +5300,23 @@ function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
   let typeParsingUnresolved = false;
   const globs: string[] = [];
   const definitions = new Map<string, RgTypeDefinition>();
-  const includedTypes = new Set<string>();
-  const excludedTypes = new Set<string>();
+  let allTypesIncluded = false;
+  const typeSelections = new Map<string, boolean>();
   const applyTypeOption = (kind: ReaderOptionKind, value: string | undefined): void => {
     if (!value) {
       typeParsingUnresolved = true;
       return;
     }
-    if (kind === 'type-include') {
-      includedTypes.add(value);
-      return;
-    }
-    if (kind === 'type-exclude') {
-      excludedTypes.add(value);
+    if (kind === 'type-include' || kind === 'type-exclude') {
+      const included = kind === 'type-include';
+      if (value === 'all') {
+        allTypesIncluded = included;
+        typeSelections.clear();
+      } else if (!/^[\p{L}\p{N}]+$/u.test(value)) {
+        typeParsingUnresolved = true;
+      } else {
+        typeSelections.set(value, included);
+      }
       return;
     }
     if (kind === 'type-clear') {
@@ -5183,18 +5370,15 @@ function rgSearchesPotentialDotenv(args: readonly string[]): boolean {
   }
 
   if (typeParsingUnresolved) return true;
-  const selectedCustomTypes = includedTypes.has('all')
-    ? [...definitions.keys()]
-    : [...includedTypes].filter((name) => definitions.has(name));
-  if (!excludedTypes.has('all') && selectedCustomTypes.some((name) =>
-    !excludedTypes.has(name) && rgCustomTypeCouldMatchDotenv(name, definitions))) return true;
+  const selectedCustomTypes = [...definitions.keys()].filter((name) =>
+    typeSelections.get(name) ?? allTypesIncluded);
+  if (selectedCustomTypes.some((name) =>
+    rgCustomTypeCouldMatchCredential(name, definitions))) return true;
 
   const positive = globs.filter((glob) => !glob.startsWith('!'));
-  const positiveCouldMatchDotenv = positive.some(selectorCouldMatchDotenv);
-  const excludesDotenv = !positiveCouldMatchDotenv
-    && globs.some((glob) => glob === '!.env*' || glob === '!**/.env*');
-  const positiveIsSafe = positive.length > 0 && !positiveCouldMatchDotenv;
-  return hidden && !excludesDotenv && !positiveIsSafe;
+  const positiveCouldMatchCredential = positive.some(selectorCouldMatchCredential);
+  const positiveIsSafe = positive.length > 0 && !positiveCouldMatchCredential;
+  return hidden && !positiveIsSafe;
 }
 
 function gitGrepExpandsSearchScope(args: readonly string[]): boolean {

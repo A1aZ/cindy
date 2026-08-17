@@ -99,3 +99,32 @@ describe('manifestService cache channel identity', () => {
     expect(service.getCachedManifest()).toBeNull();
   });
 });
+
+describe('probeBetaManifest', () => {
+  beforeEach(() => {
+    netRequest.mockReset();
+    canaryRead.mockReset();
+    canaryRead.mockReturnValue(false);
+    isBetaChannelEnabled.mockReset();
+    isBetaChannelEnabled.mockReturnValue(false);
+    getClientEndpoint.mockReset();
+    getClientEndpoint.mockReturnValue(TEST_CDN_BASE_URL);
+  });
+
+  afterEach(async () => {
+    const { clearCachedManifest } = await import('../manifestService');
+    clearCachedManifest();
+  });
+
+  it('rejects an HTTP 200 body that is not a usable beta manifest', async () => {
+    mockManifestResponse('<html>error</html>');
+    const service = await import('../manifestService');
+    await expect(service.probeBetaManifest()).resolves.toBe(false);
+  });
+
+  it('accepts a parseable beta manifest', async () => {
+    mockManifestResponse(RELEASE_MANIFEST);
+    const service = await import('../manifestService');
+    await expect(service.probeBetaManifest()).resolves.toBe(true);
+  });
+});

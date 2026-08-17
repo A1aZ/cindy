@@ -277,8 +277,8 @@ export function clearCachedManifest(): void {
  * 「manifest 之后才判 isInstalled」顺序)——所以「能不能开」必须提前探明,
  * 而不是等用户重启后才发现坏了。
  *
- * 只判 HTTP 200 可达,不解析正文、不写 cache、不改当前发布通道。dev 不联网,
- * 直接返回 true(dev 不消费远程 manifest,无需预检)。
+ * HTTP 200 之后还要能解析出 app.version。截断 JSON / 错误页不能当成渠道可用。
+ * 不写 cache、不改当前发布通道。dev 不联网,直接返回 true。
  */
 export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
   if (isDev()) return Promise.resolve(true);
@@ -286,6 +286,7 @@ export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     try {
       const request = net.request(url);
+      let body = '';
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const finish = (value: boolean, abortRequest = false): void => {
@@ -297,9 +298,23 @@ export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
       };
       timeout = setTimeout(() => finish(false, true), timeoutMs);
       request.on('response', (response) => {
-        // 读完响应体以正确触发流结束、避免连接泄漏(内容不关心)。
-        response.on('data', () => {});
-        response.on('end', () => finish(response.statusCode === 200));
+        if (response.statusCode !== 200) {
+          response.on('data', () => {});
+          response.on('end', () => finish(false));
+          response.on('error', () => finish(false));
+          return;
+        }
+        response.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        response.on('end', () => {
+          try {
+            const json = JSON.parse(body) as Manifest;
+            finish(typeof json.app?.version === 'string' && json.app.version.length > 0);
+          } catch {
+            finish(false);
+          }
+        });
         response.on('error', () => finish(false));
       });
       request.on('error', () => finish(false));

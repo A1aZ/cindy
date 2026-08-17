@@ -731,6 +731,7 @@ function isCurrentPatchNewerThanDeferred(
 }
 
 function discardStagedPatchFiles(): void {
+  const discardedVersion = readyVersion;
   if (readyFilePath) {
     try { fs.unlinkSync(readyFilePath); } catch { /* ignore */ }
   }
@@ -738,6 +739,10 @@ function discardStagedPatchFiles(): void {
   readyFilePath = undefined;
   readyChannelEpoch = undefined;
   removePatchInfo();
+  const flag = discardedVersion ? readReloginFlag() : null;
+  if (flag?.version === discardedVersion) {
+    clearReloginFlag();
+  }
   if (
     currentStatus === 'ready' ||
     currentStatus === 'superseding' ||

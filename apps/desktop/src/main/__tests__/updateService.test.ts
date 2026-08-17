@@ -541,6 +541,18 @@ describe('startup update relaunch safety', () => {
     }
   });
 
+  it('clears a matching relogin flag when the staged patch is discarded', async () => {
+    const service = await bootWithStagedPatch({ enabled: false });
+    const flagPath = path.join(TEST_USER_DATA, 'relogin-required.flag');
+    fs.writeFileSync(flagPath, JSON.stringify({ version: '0.0.65' }));
+    try {
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
+      expect(fs.existsSync(flagPath)).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
   it('clears the deferred staged patch after a busy eligibility check settles', async () => {
     const service = await bootWithStagedPatch({ enabled: true });
     let releaseProbe: ((busy: boolean) => void) | undefined;

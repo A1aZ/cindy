@@ -650,8 +650,11 @@ function readObservedEnableBetaFromDisk(): boolean {
   return readUpdateChannelSettings().enableBeta;
 }
 
-function restoreObservedEnableBetaFromDisk(): void {
-  observedEnableBeta = readObservedEnableBetaFromDisk();
+function restoreObservedEnableBetaFromDisk(): boolean {
+  const enableBeta = readObservedEnableBetaFromDisk();
+  const changed = enableBeta !== observedEnableBeta;
+  observedEnableBeta = enableBeta;
+  return changed;
 }
 
 function syncObservedUpdateChannel(): boolean {
@@ -693,12 +696,23 @@ function holdStagedPatchForPendingChannelChange(): void {
   rememberDeferredStagedPatch();
 }
 
-/** 只放掉本次未提交的 hold。已落盘的渠道切换仍要拦住旧补丁。 */
+/** 只放掉本次未提交的 hold。已落盘或共库已切渠道的作废请求必须留下。 */
 function releasePendingChannelChangeHold(): void {
   pendingChannelChangeHolds = Math.max(0, pendingChannelChangeHolds - 1);
   if (pendingChannelChangeHolds === 0 && !committedChannelChangeInvalidation) {
     deferredStagedPatch = undefined;
   }
+}
+
+/**
+ * 本次写入没提交。磁盘若已被别的实例改过,转成交割作废,不能把别人的标记清掉。
+ */
+function abandonPendingChannelChangeHold(): void {
+  if (restoreObservedEnableBetaFromDisk()) {
+    commitPendingChannelChange();
+    return;
+  }
+  releasePendingChannelChangeHold();
 }
 
 /** 本次写入已经改到盘上。后续失败的并发写入不能再放开 apply。 */
@@ -1528,9 +1542,7 @@ export function initUpdateService(): void {
       await writeEnableBeta(next);
     } catch (err) {
       if (wasBeta !== next) {
-        // 另一笔并发写入可能已经落盘成功,不能用本次开始时的 wasBeta 盖回去。
-        restoreObservedEnableBetaFromDisk();
-        releasePendingChannelChangeHold();
+        abandonPendingChannelChangeHold();
       }
       log.error('writeEnableBeta failed:', err);
       throwIpcError('INTERNAL', 'failed to write update channel settings');
@@ -1554,8 +1566,7 @@ export function initUpdateService(): void {
       await resetUpdateChannelSettings();
     } catch (err) {
       if (wasBeta) {
-        restoreObservedEnableBetaFromDisk();
-        releasePendingChannelChangeHold();
+        abandonPendingChannelChangeHold();
       }
       log.error('resetUpdateChannelSettings failed:', err);
       throwIpcError('INTERNAL', 'failed to reset update channel settings');
@@ -1771,14 +1782,12 @@ export async function enableUncustomizedBetaChannel(
       return wrote;
     }
     if (!wasBeta) {
-      restoreObservedEnableBetaFromDisk();
-      releasePendingChannelChangeHold();
+      abandonPendingChannelChangeHold();
     }
     return wrote;
   } catch (err) {
     if (!wasBeta) {
-      restoreObservedEnableBetaFromDisk();
-      releasePendingChannelChangeHold();
+      abandonPendingChannelChangeHold();
     }
     throw err;
   }

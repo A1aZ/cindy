@@ -1041,6 +1041,39 @@ describe('startup update relaunch safety', () => {
     }
   });
 
+  it('invalidates the staged patch when another instance already enabled beta', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    tryEnableUncustomizedBetaAtomic.mockImplementation(async () => {
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      return false;
+    });
+    try {
+      await probeStarted;
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(false);
+      expect(service.getUpdateStatus()).toBe('ready');
+      releaseProbe?.(false);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('idle');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
   it('releases a pending hold when the org-default write throws', async () => {
     const service = await bootWithStagedPatch({ enabled: true });
     let releaseProbe: ((busy: boolean) => void) | undefined;

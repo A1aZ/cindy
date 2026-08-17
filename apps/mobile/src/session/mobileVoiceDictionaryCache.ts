@@ -17,7 +17,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { hlcNodeId, isCanonicalHlc } from '@cindy/voice-input-core';
 import { listMobileVoiceHistoryHosts } from '@/session/mobileVoiceHistoryStore';
-import { isFresherMobileVoiceDictionarySnapshot } from '@/session/mobileVoiceDictionaryView';
+import { isFresherSameHostMobileVoiceDictionarySnapshot } from '@/session/mobileVoiceDictionaryView';
 import type {
   MobileVoiceCredentialSyncDictionaryEntry,
   MobileVoiceDictionarySnapshotResult,
@@ -272,11 +272,9 @@ function shouldAcceptIncomingSnapshot(
   current: CachedDictionary,
   next: CachedDictionary,
 ): boolean {
-  // 同一 host 只接受更新鲜的快照。新鲜度唯一判据是版本向量包含关系,
-  // 并列或都没有向量时才比到达时间。同步关闭的空投影必须自带当时的
-  // stateVector,才能清掉同一代缓存;无向量的空表不能覆盖已证明自己
-  // 更新的快照。
-  return isFresherMobileVoiceDictionarySnapshot(next, current);
+  // 同一 host 只接受更新鲜的快照。先比版本向量,并列时比桌面 emittedAt。
+  // 跨桌面展示不走这条,避免各自主机时钟互比。
+  return isFresherSameHostMobileVoiceDictionarySnapshot(next, current);
 }
 
 /**

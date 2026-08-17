@@ -127,18 +127,37 @@ export function isFresherMobileVoiceDictionarySnapshot(
   candidate: MobileVoiceDictionarySnapshot,
   best: MobileVoiceDictionarySnapshot,
 ): boolean {
+  return compareSnapshotFreshness(candidate, best, (left, right) => left.fetchedAt > right.fetchedAt);
+}
+
+/** 同一 host 入站防倒灌:并列时比桌面发出时间,不用手机到达时间。 */
+export function isFresherSameHostMobileVoiceDictionarySnapshot(
+  candidate: MobileVoiceDictionarySnapshot,
+  best: MobileVoiceDictionarySnapshot,
+): boolean {
+  return compareSnapshotFreshness(candidate, best, isLaterByEmittedAt);
+}
+
+function compareSnapshotFreshness(
+  candidate: MobileVoiceDictionarySnapshot,
+  best: MobileVoiceDictionarySnapshot,
+  isLater: (
+    candidate: MobileVoiceDictionarySnapshot,
+    best: MobileVoiceDictionarySnapshot,
+  ) => boolean,
+): boolean {
   if (candidate.stateVector && best.stateVector) {
     const candidateDominates = dominates(candidate.stateVector, best.stateVector);
     const bestDominates = dominates(best.stateVector, candidate.stateVector);
     if (candidateDominates !== bestDominates) return candidateDominates;
-    return isLaterSnapshot(candidate, best);
+    return isLater(candidate, best);
   }
   if (candidate.stateVector) return true;
   if (best.stateVector) return false;
-  return isLaterSnapshot(candidate, best);
+  return isLater(candidate, best);
 }
 
-function isLaterSnapshot(
+function isLaterByEmittedAt(
   candidate: MobileVoiceDictionarySnapshot,
   best: MobileVoiceDictionarySnapshot,
 ): boolean {

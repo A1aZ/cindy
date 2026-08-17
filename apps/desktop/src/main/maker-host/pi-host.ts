@@ -410,6 +410,29 @@ export async function readPiBundledModels(
   return pending;
 }
 
+function catalogCostForPiNative(cost: {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+} | undefined): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
+  if (
+    !cost ||
+    (typeof cost.input !== 'number' &&
+      typeof cost.output !== 'number' &&
+      typeof cost.cacheRead !== 'number' &&
+      typeof cost.cacheWrite !== 'number')
+  ) {
+    return undefined;
+  }
+  return {
+    input: cost.input ?? 0,
+    output: cost.output ?? 0,
+    cacheRead: cost.cacheRead ?? 0,
+    cacheWrite: cost.cacheWrite ?? 0,
+  };
+}
+
 /**
  * Overlay Cindy's host-managed subscription endpoints onto PI's bundled
  * provider catalog. No model is copied into models.json unless the daily Cindy
@@ -460,6 +483,7 @@ export function buildPiSubscriptionNativeProviders(
           !!bundledModel &&
           bundledModel.api !== model.piApi;
         const preserved = isProtocolCorrection ? bundledModel : undefined;
+        const catalogCost = catalogCostForPiNative(model.cost);
         return {
           id: model.id,
           wireId,
@@ -514,8 +538,8 @@ export function buildPiSubscriptionNativeProviders(
               : {}),
           ...(preserved?.cost
             ? { cost: { ...preserved.cost } }
-            : model.cost
-              ? { cost: { ...model.cost } }
+            : catalogCost
+              ? { cost: catalogCost }
               : {}),
           ...(preserved?.headers ? { headers: { ...preserved.headers } } : {}),
           ...(preserved?.compat ? { compat: structuredClone(preserved.compat) } : {}),

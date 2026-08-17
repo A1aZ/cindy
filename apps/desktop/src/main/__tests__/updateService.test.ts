@@ -1000,6 +1000,35 @@ describe('startup update relaunch safety', () => {
     }
   });
 
+  it('does not treat a failed settings write as an external channel change', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    writeEnableBeta.mockRejectedValueOnce(new Error('lock timeout'));
+    try {
+      await probeStarted;
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      await expect(setHandler?.({ sender: { id: 1 } }, { enableBeta: true })).rejects.toThrow();
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('ready');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
   it('does not let a failed settings write overwrite a committed observed channel', async () => {
     const service = await bootWithStagedPatch({ enabled: false });
     let releaseFirstWrite: (() => void) | undefined;

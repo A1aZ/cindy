@@ -1534,8 +1534,9 @@ export function initUpdateService(): void {
     const wasBeta = readUpdateChannelSettings().enableBeta;
     // 先拦住 apply 再等落盘:writeEnableBeta 可能卡住跨进程锁。
     // 真正写成之后再删 zip;写入失败则放开 hold,旧补丁还能用。
+    // 写入前不要改 observedEnableBeta:失败路径会按磁盘对账,
+    // 乐观改成目标值会把「磁盘没变」误判成别人已经切过渠道。
     if (wasBeta !== next) {
-      observedEnableBeta = next;
       holdStagedPatchForPendingChannelChange();
     }
     try {
@@ -1559,7 +1560,6 @@ export function initUpdateService(): void {
     assertTrustedAppRendererEvent(event);
     const wasBeta = readUpdateChannelSettings().enableBeta;
     if (wasBeta) {
-      observedEnableBeta = false;
       holdStagedPatchForPendingChannelChange();
     }
     try {

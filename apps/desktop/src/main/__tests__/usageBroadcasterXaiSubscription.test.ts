@@ -63,4 +63,31 @@ describe('xai subscription snapshot hydration', () => {
       accountFingerprint: 'bbbb',
     });
   });
+
+  it('does not merge an unsourced first record into a leftover disk snapshot', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({
+        planLabel: 'Account A',
+        creditUsagePercent: 40,
+        accountFingerprint: 'aaaa',
+        updatedAt: 1,
+      }),
+    });
+
+    await expect(broadcaster.readXaiSubscriptionUsageSnapshot()).resolves.toBeNull();
+
+    await broadcaster.recordXaiSubscriptionUsageSnapshot({
+      planLabel: 'Account B',
+      creditUsagePercent: 2,
+      accountFingerprint: null,
+      updatedAt: 2,
+    });
+    await expect(broadcaster.readXaiSubscriptionUsageSnapshot()).resolves.toEqual({
+      planLabel: 'Account B',
+      creditUsagePercent: 2,
+      accountFingerprint: null,
+      updatedAt: 2,
+    });
+  });
 });

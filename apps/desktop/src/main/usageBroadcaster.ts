@@ -972,17 +972,21 @@ export async function recordXaiSubscriptionUsageSnapshot(snapshot: unknown): Pro
   if (generation !== xaiSubscriptionUsageGeneration) return;
 
   const incoming = snapshot as XaiSubscriptionUsageSnapshot;
-  if (
-    xaiSubscriptionUsageSnapshot?.accountFingerprint
+  const current = xaiSubscriptionUsageSnapshot;
+  // 磁盘 hydrate 在本进程 record 之前不可信。无指纹的首次写入不得并入旧账号字段。
+  if (!xaiSubscriptionUsageServable || !current) {
+    xaiSubscriptionUsageSnapshot = incoming;
+  } else if (
+    current.accountFingerprint
     && incoming.accountFingerprint
-    && xaiSubscriptionUsageSnapshot.accountFingerprint !== incoming.accountFingerprint
+    && current.accountFingerprint !== incoming.accountFingerprint
   ) {
     xaiSubscriptionUsageSnapshot = incoming;
   } else {
     xaiSubscriptionUsageSnapshot = {
-      ...xaiSubscriptionUsageSnapshot,
+      ...current,
       ...incoming,
-      accountFingerprint: incoming.accountFingerprint ?? xaiSubscriptionUsageSnapshot?.accountFingerprint ?? null,
+      accountFingerprint: incoming.accountFingerprint ?? current.accountFingerprint ?? null,
     };
   }
   const next = xaiSubscriptionUsageSnapshot;

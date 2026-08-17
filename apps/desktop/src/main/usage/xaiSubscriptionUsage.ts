@@ -166,16 +166,16 @@ export async function fetchXaiSubscriptionUsageSnapshot(opts: {
     const planLabel = parseXaiSettingsPlanLabel(settings.data);
     const parsedCredits = parseXaiBillingCreditsConfig(credits.data);
     const subject = subjectFromUserinfo(userinfo);
+    if (!credits.ok || !parsedCredits) {
+      // billing 非 ok,或 200 但没有周窗口字段:只剩套餐名,不能当全量快照盖掉缓存。
+      return null;
+    }
     const snapshot = buildXaiSubscriptionUsageSnapshot({
       planLabel,
       credits: parsedCredits,
       accountFingerprint: subject ? fingerprintXaiSubject(subject) : null,
       now,
     });
-    if (!credits.ok) {
-      // billing 瞬时失败时只剩套餐名,不能当全量快照盖掉上次的周百分比/重置。
-      return null;
-    }
     if (!snapshot) {
       // 两个权威端点都成功但解析不出字段 → empty(清缓存)。任一非 ok 当瞬时失败保缓存。
       if (settings.ok) {

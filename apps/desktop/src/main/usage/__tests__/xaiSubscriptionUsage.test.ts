@@ -89,6 +89,21 @@ describe('fetchXaiSubscriptionUsageSnapshot', () => {
     });
   });
 
+  it('does not replace cache with plan-only data when billing is unparseable', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('/settings')) {
+        return jsonResponse(200, { subscription_tier_display: 'SuperGrok Heavy' });
+      }
+      if (url.includes('format=credits')) return jsonResponse(200, { config: {} });
+      if (url.includes('/user?') || url.includes('/userinfo')) return jsonResponse(200, {});
+      return jsonResponse(404, {});
+    });
+    await expect(fetchXaiSubscriptionUsageSnapshot({
+      accessToken: 'tok',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })).resolves.toBeNull();
+  });
+
   it('does not replace cache with plan-only data when billing fails', async () => {
     const fetchFn = vi.fn(async (url: string) => {
       if (url.includes('/settings')) {

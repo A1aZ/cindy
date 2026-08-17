@@ -585,6 +585,110 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('rebuilds a missing subagent snapshot on same-route SuperGrok setModel without RPC', async () => {
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'SuperGrok', authSource: 'oauth' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: 'gateway-key' }),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [{
+          id: 'grok-4.6',
+          displayName: 'Grok 4.6',
+          contextWindow: 500_000,
+          efforts: [],
+          defaultEffort: null,
+        }],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiNativeProviders: async () => ({
+        providers: [{
+          id: 'xai',
+          name: 'xAI',
+          baseUrl: 'http://127.0.0.1:9',
+          api: 'anthropic-messages',
+          models: [{ id: 'grok-4.6' }],
+        }],
+        env: {},
+      }),
+    });
+    const handle = await agent.startSession({
+      sessionId: 'grok-46-snapshot-retry',
+      workingDir: cwd,
+      model: 'grok-4.6',
+      providerId: 'xai',
+    });
+    const snapshotPath = runtimeFileOf('subagent', 'grok-46-snapshot-retry');
+    rmSync(snapshotPath, { force: true });
+    captured.requests.length = 0;
+    await expect(handle.setModel!('grok-4.6', { providerId: 'xai' })).resolves.toBeUndefined();
+    expect(captured.requests.filter((request) => request.type === 'set_model')).toEqual([]);
+    expect(JSON.parse(readFileSync(snapshotPath, 'utf8'))).toEqual({
+      model: 'grok-4.6',
+      provider: 'xai',
+    });
+    await handle.close();
+  });
+
+  it('clears a stuck pending subagent snapshot on same-route SuperGrok setModel', async () => {
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'SuperGrok', authSource: 'oauth' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: 'gateway-key' }),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [{
+          id: 'grok-4.6',
+          displayName: 'Grok 4.6',
+          contextWindow: 500_000,
+          efforts: [],
+          defaultEffort: null,
+        }],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiNativeProviders: async () => ({
+        providers: [{
+          id: 'xai',
+          name: 'xAI',
+          baseUrl: 'http://127.0.0.1:9',
+          api: 'anthropic-messages',
+          models: [{ id: 'grok-4.6' }],
+        }],
+        env: {},
+      }),
+    });
+    const handle = await agent.startSession({
+      sessionId: 'grok-46-pending-clear',
+      workingDir: cwd,
+      model: 'grok-4.6',
+      providerId: 'xai',
+    });
+    const snapshotPath = runtimeFileOf('subagent', 'grok-46-pending-clear');
+    writeFileSync(snapshotPath, JSON.stringify({
+      model: 'grok-4.6',
+      provider: 'xai',
+      pending: true,
+    }) + '\n');
+    captured.requests.length = 0;
+    await expect(handle.setModel!('grok-4.6', { providerId: 'xai' })).resolves.toBeUndefined();
+    expect(captured.requests.filter((request) => request.type === 'set_model')).toEqual([]);
+    expect(JSON.parse(readFileSync(snapshotPath, 'utf8'))).toEqual({
+      model: 'grok-4.6',
+      provider: 'xai',
+    });
+    await handle.close();
+  });
+
   it('applies each native provider alias during provider-less compatibility routing', async () => {
     const provider = (id: string, aliases?: Record<string, string>) => ({
       id,

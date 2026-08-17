@@ -2425,9 +2425,20 @@ export class PiAgent extends BaseAgent {
         if (setOpts?.effort) {
           assertStartupEffortAllowed(activeEffortSnapshot, setOpts.effort);
         }
+        // 同路由不打 set_model，但仍要重试子代理快照：初始写失败或确认写失败
+        // 留下 pending 时，心跳复用活进程必须能把文件重建/清 pending，
+        // 否则扩展会一直 fail-closed。不带 pending，路由已确认。
+        const provider = resolveProviderForModel(model, requestedProviderId);
+        const wireModel = resolveWireModel(provider, model);
+        if (!(await writeSubagentRuntimeFile({ model: wireModel, provider }))) {
+          deps.logger.warn('pi: same-route setModel could not refresh subagent snapshot', {
+            model,
+            provider,
+          });
+        }
         deps.logger.debug('pi: setModel no-op; already on requested route', {
           model,
-          providerId: requestedProviderId ?? mutableProviderId ?? null,
+          providerId: requestedProviderId,
         });
         return;
       }

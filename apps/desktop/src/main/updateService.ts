@@ -44,6 +44,7 @@ import {
   readUpdateChannelSettings,
   readUpdateChannelSettingsState,
   resetUpdateChannelSettings,
+  tryEnableUncustomizedBeta,
   writeEnableBeta,
 } from './updateChannelStore';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer';
@@ -1468,6 +1469,20 @@ export function initUpdateService(): void {
   }, FIRST_CHECK_DELAY_MS);
 
   log.info('Initialized — first check in 10s, polling every 30min');
+}
+
+/**
+ * 登录态落地后给尚未自定义过开关的设备打开 beta。
+ * 渠道从关变开时作废已 staged 的旧渠道补丁,与设置页手动打开同一口径。
+ * 不 relaunch:本次进程继续走当前通道,下次冷启动 / 用户自行重启再生效。
+ */
+export function enableUncustomizedBetaChannel(): boolean {
+  const wasBeta = readUpdateChannelSettings().enableBeta;
+  const wrote = tryEnableUncustomizedBeta();
+  if (wrote && !wasBeta) {
+    clearStagedPatch();
+  }
+  return wrote;
 }
 
 export function stopUpdateService(): void {

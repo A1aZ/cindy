@@ -10,6 +10,8 @@
  *     所以这里用 createOverrideSettingsFile(与 auto-update-settings 同一套
  *     override 语义:默认值 + 用户 override、恢复默认只删 override),而不是仿
  *     canaryFlagStore 的裸 JSON。
+ *   - xd 组织登录后可由 authManager 在「尚未自定义」时补一次默认打开;用户
+ *     手动关过(isCustomized)后重启 / 重登都不再打开。
  *
  * 落盘:userData/update-channel-settings.json,字段 { enableBeta: boolean }。
  * 默认关闭。manifestService.fetchManifest() 用 resolveUpdateChannel 把本开关与
@@ -65,8 +67,24 @@ export function readUpdateChannelSettingsState(): OverrideSettingsState<UpdateCh
 }
 
 export function writeEnableBeta(enableBeta: boolean): void {
-  store.writePatch({ enableBeta });
+  // 关 beta 的值等于系统默认 false。若不 preserveDefaults,override 会被删掉,
+  // isCustomized 变回 false,xd 组织下次登录又会把开关默认打开,盖掉用户的
+  // 手动关闭。设置页每次拨动都算显式自定义。
+  store.writePatch({ enableBeta }, { preserveDefaults: true });
   log.info('beta update channel setting written', { enableBeta });
+}
+
+/**
+ * 仅在用户从没改过这个开关时打开 beta。
+ * 给 xd 组织默认打开用:用户手动关过(isCustomized)后必须保持关。
+ * 返回是否实际写入了 true。
+ */
+export function tryEnableUncustomizedBeta(): boolean {
+  const state = store.readState();
+  if (state.value.enableBeta || state.isCustomized) return false;
+  store.writePatch({ enableBeta: true });
+  log.info('beta update channel setting written', { enableBeta: true, source: 'xd-org-default' });
+  return true;
 }
 
 export function resetUpdateChannelSettings(): UpdateChannelSettings {

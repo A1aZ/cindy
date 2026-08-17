@@ -3043,6 +3043,7 @@ export function NewMakerDraftRoute() {
       // catch 里撤回,否则空会话会跨列表刷新一直显示一句**没发出去**的话
       // (PR #1031 review P1;worktree 与 goal 两条路径各有自己的撤回点)。
       let optimisticTitleSessionId: string | null = null;
+      let remoteOptimisticTitleSessionId: string | null = null;
       const autoTitleLabels = {
         image: t('ccAgent.autoTitle.image'),
         file: t('ccAgent.autoTitle.file'),
@@ -3286,6 +3287,7 @@ export function NewMakerDraftRoute() {
                   optimisticTitle,
                   Boolean(normalizeAutoTitle(message)),
                 );
+                remoteOptimisticTitleSessionId = remoteSessionId;
               }
             }
             // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
@@ -3751,6 +3753,9 @@ export function NewMakerDraftRoute() {
           log.error('[draft send]', err);
           // 交接失败 → 撤回乐观标题预览(理由见上面 optimisticTitleSessionId 的注释)。
           if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);
+          if (remoteOptimisticTitleSessionId) {
+            remoteProjectsStore.clearPendingTitlePreview(remoteOptimisticTitleSessionId);
+          }
           toast.error(
             isRemotePrecreatedWorktreeCleanupPendingError(err)
               ? t('ccAgent.draft.remoteWorktreeCleanupPending')

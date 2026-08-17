@@ -75,6 +75,10 @@ describe('desktop 会话标题投影出口', () => {
     expect(draftRoute).toContain(
       'if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);',
     );
+    expect(draftRoute).toContain('let remoteOptimisticTitleSessionId: string | null = null;');
+    expect(draftRoute).toContain(
+      'remoteProjectsStore.clearPendingTitlePreview(remoteOptimisticTitleSessionId);',
+    );
     // createSession 返回 null 是 return,不进外层 catch,必须就地撤回。
     expect(draftRoute).toContain(
       'if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);\n              toastCreateSessionFailed();',

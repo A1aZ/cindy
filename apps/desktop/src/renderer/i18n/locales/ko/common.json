@@ -473,6 +473,13 @@
         "hint": "사이드바 기본 목록(고정 제외)의 표시 형식입니다. 텍스트는 간결한 한 줄, 목록은 미리보기가 있는 두 줄입니다.",
         "aria": "세션 목록 표시 방식 전환"
       },
+      "ghostPanelRestore": {
+        "label": "플러그인 패널 복원 위치",
+        "hint": "최소화한 플러그인 패널을 어디에서 복원할지 선택합니다.",
+        "aria": "플러그인 패널 복원 위치 선택",
+        "bubble": "플로팅 버블",
+        "sidebar": "사이드바"
+      },
       "layout": {
         "label": "패널 레이아웃",
         "hint": "패널 위치와 너비는 다음 실행에도 유지됩니다. 사용하기 어려운 배치가 되면 기본 레이아웃으로 복원할 수 있습니다.",
@@ -4543,7 +4550,7 @@
     "maximizeAria": "패널 최대화",
     "restoreAria": "패널 크기 복원",
     "detachAria": "새 창에서 열기",
-    "minimizeAria": "플로팅 버블로 최소화",
+    "minimizeAria": "패널 최소화",
     "closeAria": "패널 닫기 및 플러그인 비활성화"
   },
   "ghostPanel": {
@@ -4561,6 +4568,10 @@
     "restoreAria": "{{name}} 패널 복원",
     "stackExpandAria": "플러그인 패널 {{count}}개가 최소화됨. 클릭하여 펼치기",
     "stackCollapseAria": "플러그인 패널 목록 접기"
+  },
+  "ghostPanelRestore": {
+    "single": "{{name}} 복원",
+    "multiple": "플러그인 패널 복원({{count}})"
   },
   "rightSidebar": {
     "ariaLabel": "오른쪽 사이드바",

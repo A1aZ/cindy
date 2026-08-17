@@ -153,8 +153,10 @@ let autoRelaunchPollTimer: ReturnType<typeof setInterval> | null = null;
 let isRelaunching = false;
 let lastErrorCode: string | undefined;
 let autoRelaunchInProgress = false;
-/** 资格检查(含异步 busyProbe)进行中的次数。清补丁必须避开这个窗口。 */
+/** 资格检查(含异步 busyProbe)进行中的次数。这段窗口暂缓清补丁。 */
 let autoRelaunchDecisionDepth = 0;
+/** 资格检查期间有人要求作废旧渠道补丁,检查结束后若没真正开始应用再补清。 */
+let stagedPatchClearDeferred = false;
 let lastAutoRelaunchBlockReason: AutoRelaunchBlockReason | null = null;
 let lastBusyAtMs: number | null = null;
 let lastResumeAtMs: number | null = null;
@@ -342,6 +344,9 @@ async function requestAutoRelaunch(
     return { accepted: true };
   } finally {
     autoRelaunchDecisionDepth = Math.max(0, autoRelaunchDecisionDepth - 1);
+    if (autoRelaunchDecisionDepth === 0 && !isRelaunching && !autoRelaunchInProgress) {
+      flushDeferredStagedPatchClear();
+    }
   }
 }
 
@@ -573,19 +578,32 @@ function removePatchInfo(): void {
   try { fs.unlinkSync(path.join(getUpdatesDir(), PATCH_INFO_FILE)); } catch { /* ignore */ }
 }
 
-function isUpdateApplyInFlight(): boolean {
-  return isRelaunching || autoRelaunchInProgress || autoRelaunchDecisionDepth > 0;
+function isUpdateApplyCommitted(): boolean {
+  return isRelaunching || autoRelaunchInProgress;
+}
+
+function flushDeferredStagedPatchClear(): void {
+  if (!stagedPatchClearDeferred) return;
+  if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
+  stagedPatchClearDeferred = false;
+  clearStagedPatch();
 }
 
 /**
  * 清掉已 staged 的补丁(ready 态):删 zip + patch-info.json,状态回 idle。
  * 切渠道时调用——opt-out 后不能仍让 staged 的旧渠道 patch 在下次启动/后台
  * 轮询里被装上去(切渠道不等于切版本,必须把旧渠道的补丁作废)。
- * 自动重启已经过资格检查时不能清,否则 executeRelaunch 会走 no_ready_file。
+ * 已经开始应用时不能清,否则 executeRelaunch 会走 no_ready_file。
+ * 资格检查还在等 busyProbe 时先记下,检查结束后若没真正开始应用再补清。
  */
 function clearStagedPatch(): void {
-  if (isUpdateApplyInFlight()) {
+  if (isUpdateApplyCommitted()) {
     log.info('skipping staged patch clear — update apply already in flight');
+    return;
+  }
+  if (autoRelaunchDecisionDepth > 0) {
+    stagedPatchClearDeferred = true;
+    log.info('deferring staged patch clear until auto-relaunch eligibility settles');
     return;
   }
   if (readyFilePath) {
@@ -1509,13 +1527,8 @@ export function enableUncustomizedBetaChannel(): boolean {
   const wasBeta = readUpdateChannelSettings().enableBeta;
   const wrote = tryEnableUncustomizedBeta();
   if (wrote && !wasBeta) {
-    // 自动重启已经过资格检查、即将 executeRelaunch 时不能清补丁,
-    // 否则 readyFilePath 被拆掉会走 no_ready_file / updater_spawn_failed。
-    if (isUpdateApplyInFlight()) {
-      log.info('xd org beta default enabled — leaving in-flight update patch in place');
-    } else {
-      clearStagedPatch();
-    }
+    // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
+    clearStagedPatch();
   }
   return wrote;
 }

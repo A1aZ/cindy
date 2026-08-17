@@ -80,6 +80,7 @@ vi.mock('../manifestService', () => ({
   fetchManifest,
   getBaseUrl,
   isDev,
+  clearCachedManifest: vi.fn(),
 }));
 
 vi.mock('../updateChannelStore', () => ({
@@ -517,6 +518,31 @@ describe('startup update relaunch safety', () => {
       expect(service.getUpdateStatus()).toBe('ready');
     } finally {
       releaseProbe?.(true);
+      service.stopUpdateService();
+    }
+  });
+
+  it('clears the deferred staged patch after a busy eligibility check settles', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      expect(service.getUpdateStatus()).toBe('ready');
+      releaseProbe?.(true);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('idle');
+      });
+    } finally {
       service.stopUpdateService();
     }
   });

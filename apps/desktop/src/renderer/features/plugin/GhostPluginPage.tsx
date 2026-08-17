@@ -2177,17 +2177,13 @@ export function GhostPluginCard({
           {unreadSummary || item.description || item.id}
         </span>
       </span>
-      {/* 右列控制区:自行消费点击,不冒泡到整卡主动作(纯冒泡拦截层,无独立语义)。 */}
-      <span
-        className="flex shrink-0 flex-col items-end justify-between gap-2 self-stretch"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-      >
+      {/* 右列只在真实控件上拦截冒泡;空白与「由 Agent 调用」提示仍走整卡进详情。 */}
+      <span className="flex shrink-0 flex-col items-end justify-between gap-2 self-stretch">
         <span className="flex items-center gap-1.5">
           {updateVersion && onUpdate ? (
             <button
               type="button"
-              onClick={onUpdate}
+              onClick={stopAnd(onUpdate)}
               disabled={updateBusy}
               aria-label={t('settings.ghosts.page.updateAria', {
                 name: item.name,
@@ -2206,7 +2202,7 @@ export function GhostPluginCard({
           ) : null}
           <button
             type="button"
-            onClick={onManage}
+            onClick={stopAnd(onManage)}
             aria-label={t('settings.ghosts.page.manageAria', { name: item.name })}
             title={t('settings.ghosts.page.manageAction')}
             className="grid size-7 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors duration-150 hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
@@ -2218,6 +2214,13 @@ export function GhostPluginCard({
       </span>
     </article>
   );
+}
+
+function stopAnd(handler: () => void) {
+  return (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+    handler();
+  };
 }
 
 function CardPillButton({
@@ -2234,7 +2237,7 @@ function CardPillButton({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={stopAnd(onClick)}
       aria-label={ariaLabel ?? label}
       className={cn(
         'inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-[var(--surface-chip)] px-3.5 text-12 font-medium text-[var(--text-primary)]',

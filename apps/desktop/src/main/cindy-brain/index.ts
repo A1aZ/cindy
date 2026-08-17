@@ -3215,16 +3215,9 @@ async function getGhostConfigurableMediaModels(
     };
   }
   try {
-    const requiredCapabilities: MediaCapability[] = declared.map((action) =>
-      type === 'image'
-        ? action === 'generate'
-          ? 'image.generate'
-          : 'image.edit'
-        : action === 'generate'
-          ? 'video.generate'
-          : 'video.image_to_video',
-    );
-    const availability = await listExecutableMediaModels(requiredCapabilities);
+    // 类型目录返回该大类所有至少有一种可执行操作的模型；具体支持动作由
+    // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
+    const availability = await listExecutableMediaModels();
     const mode = type === 'image' ? 'image_generation' : 'video_generation';
     const models = availability.models.filter((model) => model.mode === mode);
     if (

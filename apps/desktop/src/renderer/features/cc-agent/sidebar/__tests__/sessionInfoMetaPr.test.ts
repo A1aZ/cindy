@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createElement } from 'react';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionInfoMeta } from '../SessionInfoMeta';
@@ -37,6 +37,9 @@ afterEach(() => {
   cleanup();
   status = undefined;
   document.documentElement.classList.remove('dark');
+  delete document.documentElement.dataset.theme;
+  document.documentElement.style.removeProperty('--sidebar');
+  document.documentElement.style.removeProperty('--sidebar-item-active');
 });
 
 beforeEach(() => {
@@ -120,5 +123,40 @@ describe('SessionInfoMeta PR 徽标', () => {
     );
 
     expect(container.querySelector('[aria-hidden].rounded-full')).toBeNull();
+  });
+
+  it('同模式切主题只改 data-theme 时重读选中表面', async () => {
+    status = {
+      ok: true,
+      owner: prRef.owner,
+      repo: prRef.repo,
+      prNumber: prRef.prNumber,
+      status: 'open',
+      title: 'demo',
+      htmlUrl: prRef.url,
+      branch: 'feat/demo',
+      unresolvedCount: 0,
+    };
+    document.documentElement.style.setProperty('--sidebar-item-active', '0.0 0.0% 93.3%');
+
+    const { container } = render(
+      createElement(SessionInfoMeta, {
+        pieces: [{ key: 'pr', text: '' }],
+        prRef,
+        isActive: true,
+      }),
+    );
+    expect((container.querySelector('svg') as SVGElement).style.color).toBe(
+      'var(--pr-open-on-light)',
+    );
+
+    document.documentElement.style.setProperty('--sidebar-item-active', '0.0 0.0% 18.0%');
+    document.documentElement.dataset.theme = 'monokai-pro';
+
+    await waitFor(() => {
+      expect((container.querySelector('svg') as SVGElement).style.color).toBe(
+        'var(--pr-open-on-dark)',
+      );
+    });
   });
 });

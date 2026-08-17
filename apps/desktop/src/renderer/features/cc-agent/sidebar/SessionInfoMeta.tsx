@@ -153,7 +153,9 @@ function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: bo
     const observer = new MutationObserver(read);
     observer.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['class', 'style'],
+      // data-theme:同模式切社区/导入主题时 class 与 colorScheme 都不动,
+      // applyTheme 只改 dataset.theme(2026-08-17 review P1)。
+      attributeFilter: ['class', 'style', 'data-theme'],
     });
     return () => observer.disconnect();
   }, [isActive, themeIsDark]);

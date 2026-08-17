@@ -354,11 +354,11 @@ interface PredictPromptRequest {
   turnGen: number;
 }
 
-/** 主进程级去重:同一 session 同一 updatedAt 同时只能有一笔预测在途,
- * 避免多窗口重复付费调用。使用 DB session.updatedAt 而非 renderer 上报的 turnGen:
- * 同一真实轮次在不同窗口的局部 turnGen 可能不同,但 DB updatedAt 跨窗口一致。
- * Map<sessionId, updatedAt>——新 turn 的不同 updatedAt 会替换旧条目,不阻塞新轮预测。 */
-const _predictingPromptSessions = new Map<string, number>();
+/** 主进程级去重:同一 session 同一去重键同时只能有一笔预测在途,
+ * 避免多窗口重复付费调用。使用 DB session.updatedAt + renderer turnGen 联合去重:
+ * updatedAt 排队场景下相邻轮次可能相同,但 turnGen 逐轮递增,联合后可区分真重复与
+ * 不同轮次。Map<sessionId, {updatedAt, turnGen}>——新轮会替换旧条目,不阻塞新轮预测。 */
+const _predictingPromptSessions = new Map<string, { updatedAt: number; turnGen: number }>();
 
 function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -483,27 +483,42 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
-      // 等多窗口场景下重复触发付费 provider 调用。同 updatedAt 的请求是真重复(拒绝);
-      // 不同 updatedAt 说明新轮已开始,旧轮结果终将被 renderer 的 turnGen 校验丢弃,
-      // 替换旧条目放行新请求,避免旧轮吞掉新轮预测导致当前轮永久没有推荐词。
+      // 等多窗口场景下重复触发付费 provider 调用。updatedAt + turnGen 联合去重:
+      // 两者都相同是真重复(拒绝);任一不同说明是新轮,替换旧条目放行。
       if (_predictingPromptSessions.has(sessionId)) {
-        const existingUpdatedAt = _predictingPromptSessions.get(sessionId);
-        if (existingUpdatedAt === sessionRow.updatedAt) {
+        const existing = _predictingPromptSessions.get(sessionId)!;
+        if (existing.updatedAt === sessionRow.updatedAt && existing.turnGen === turnGen) {
           return { prompt: null };
         }
         // 旧轮预测仍在途但新轮已开始,旧结果注定被 renderer 丢弃,放行新请求。
         log.debug('predict-prompt replacing stale in-flight prediction', {
           sessionId,
-          oldUpdatedAt: existingUpdatedAt,
+          oldUpdatedAt: existing.updatedAt,
+          oldTurnGen: existing.turnGen,
           newUpdatedAt: sessionRow.updatedAt,
+          newTurnGen: turnGen,
         });
       }
-      _predictingPromptSessions.set(sessionId, sessionRow.updatedAt);
+      _predictingPromptSessions.set(sessionId, { updatedAt: sessionRow.updatedAt, turnGen });
       try {
         // 素材只从 DB 读取,不信任 renderer 上报的 messages / workingDir:受信 renderer 或
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
         // 付费调用。先排空落盘队列,确保刚结束 turn 的最终回复已持久化,再读最近消息。
+        // 与 REGENERATE_TITLE 对齐:在 drain 前后各拍一次 isSessionTurnPendingCompletion,
+        // 捕获 drain 期间封存的终末消息——避免在 terminal delivery 短窗口内把施工中的
+        // Assistant 行当作完整回复,预测基于不完整上下文落地后 renderer 不会再重试。
+        const pendingCompletionBeforeDrain =
+          options.isSessionTurnPendingCompletion?.(sessionId) === true;
         await drainPersistQueue();
+        let pendingCompletionObserved = pendingCompletionBeforeDrain;
+        const latestTurnIsPendingCompletion = (): boolean => {
+          if (!pendingCompletionObserved) {
+            pendingCompletionObserved =
+              options.isSessionTurnPendingCompletion?.(sessionId) === true;
+          }
+          return pendingCompletionObserved;
+        };
+        latestTurnIsPendingCompletion();
         // drainPersistQueue 等待期间 session 可能被软删除或转为远程/review，
         // 或用户发起新 turn（session.updatedAt 变化）。上方基于 status / source /
         // remoteHostId 的防御纵深检查会过期（TOCTOU）。此处再从 DB 读取同一行
@@ -547,7 +562,11 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           });
           return { prompt: null };
         }
-        const material = await regenerateTitleMaterial(sessionId, PREDICTION_RECENT_MESSAGE_LIMIT);
+        const material = await regenerateTitleMaterial(
+          sessionId,
+          PREDICTION_RECENT_MESSAGE_LIMIT,
+          latestTurnIsPendingCompletion,
+        );
         const messages = material.recent.map((m) => ({ role: m.role, content: m.text }));
         return {
           prompt: await generatePromptPrediction({
@@ -560,8 +579,9 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         };
       } finally {
         // 同 session 的预测在上一笔在途时会被拒绝,正常情况下条目始终为请求时刻的
-        // updatedAt。此处保留相等性校验作为防御性编程。
-        if (_predictingPromptSessions.get(sessionId) === sessionRow.updatedAt) {
+        // updatedAt + turnGen。此处保留相等性校验作为防御性编程。
+        const current = _predictingPromptSessions.get(sessionId);
+        if (current && current.updatedAt === sessionRow.updatedAt && current.turnGen === turnGen) {
           _predictingPromptSessions.delete(sessionId);
         }
       }

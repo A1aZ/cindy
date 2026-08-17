@@ -835,9 +835,23 @@ describe('startup update relaunch safety', () => {
       await vi.waitFor(() => {
         expect(releaseWrite).toBeTypeOf('function');
       });
-      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
       releaseWrite?.();
       await writePromise;
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('keeps the staged patch when an org-default write is rejected', async () => {
+    const service = await bootWithStagedPatch({ enabled: false });
+    tryEnableUncustomizedBetaAtomic.mockResolvedValue(false);
+    try {
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(false);
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
     } finally {
       service.stopUpdateService();
     }

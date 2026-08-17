@@ -638,6 +638,11 @@ function rememberDeferredStagedPatch(): void {
   };
 }
 
+/** 先拦住 apply,不删 zip / patch-info。写入没成功时还能继续用这份补丁。 */
+function holdStagedPatchForPendingChannelChange(): void {
+  rememberDeferredStagedPatch();
+}
+
 function isCurrentPatchNewerThanDeferred(
   stale: { path?: string; epoch?: number },
 ): boolean {
@@ -1438,17 +1443,24 @@ export function initUpdateService(): void {
       throwIpcError('INVALID_PARAMS', 'enableBeta required (boolean)');
     }
     const wasBeta = readUpdateChannelSettings().enableBeta;
-    // 先作废旧补丁再等落盘:writeEnableBeta 可能卡住跨进程锁,这段空窗里
-    // busyProbe 若返回,资格检查仍会看到旧渠道+旧 zip 并提交 apply。
+    // 先拦住 apply 再等落盘:writeEnableBeta 可能卡住跨进程锁。
+    // 真正写成之后再删 zip;写入失败则放开 hold,旧补丁还能用。
     if (wasBeta !== next) {
       observedEnableBeta = next;
-      clearStagedPatch();
+      holdStagedPatchForPendingChannelChange();
     }
     try {
       await writeEnableBeta(next);
     } catch (err) {
+      if (wasBeta !== next) {
+        observedEnableBeta = wasBeta;
+        deferredStagedPatch = undefined;
+      }
       log.error('writeEnableBeta failed:', err);
       throwIpcError('INTERNAL', 'failed to write update channel settings');
+    }
+    if (wasBeta !== next) {
+      clearStagedPatch();
     }
     return channelSettingsWire();
   });
@@ -1458,13 +1470,20 @@ export function initUpdateService(): void {
     const wasBeta = readUpdateChannelSettings().enableBeta;
     if (wasBeta) {
       observedEnableBeta = false;
-      clearStagedPatch();
+      holdStagedPatchForPendingChannelChange();
     }
     try {
       await resetUpdateChannelSettings();
     } catch (err) {
+      if (wasBeta) {
+        observedEnableBeta = wasBeta;
+        deferredStagedPatch = undefined;
+      }
       log.error('resetUpdateChannelSettings failed:', err);
       throwIpcError('INTERNAL', 'failed to reset update channel settings');
+    }
+    if (wasBeta) {
+      clearStagedPatch();
     }
     return channelSettingsWire();
   });
@@ -1658,15 +1677,19 @@ export async function enableUncustomizedBetaChannel(
   shouldWrite: () => boolean = () => true,
 ): Promise<boolean> {
   const wasBeta = readUpdateChannelSettings().enableBeta;
-  // 先作废旧补丁再等落盘,避免原子写等待期间自动重启把旧渠道包装上去。
-  // 没真正写成开之前,不要把 observedEnableBeta 提前改成 true。
+  // 先拦住 apply 再等落盘。身份守卫拒绝或写入失败时,旧补丁还得能用。
   if (!wasBeta) {
-    clearStagedPatch();
+    holdStagedPatchForPendingChannelChange();
   }
   const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
   if (wrote && !wasBeta) {
     observedEnableBeta = true;
+    clearStagedPatch();
     broadcastChannelSettings();
+    return wrote;
+  }
+  if (!wasBeta) {
+    deferredStagedPatch = undefined;
   }
   return wrote;
 }

@@ -12,7 +12,8 @@
     "REMOTE_PROVIDER_UPDATING": "プロバイダーの認証情報を更新中です。しばらくしてから再試行してください",
     "REMOTE_PROVIDER_UNSUPPORTED": "このプロバイダーは SSH リモートセッションに対応していません。別のソースを選択してください",
     "REMOTE_NATIVE_OAUTH_UNAVAILABLE": "Claude.ai サブスクリプションが未接続です。先に接続するか、ゲートウェイモデルを選択してください",
-    "DEVICE_LINK_DEVICE_UNRESPONSIVE": "対象デバイスが応答していません。リモートデバイスを確認して再試行してください。"
+    "DEVICE_LINK_DEVICE_UNRESPONSIVE": "対象デバイスが応答していません。リモートデバイスを確認して再試行してください。",
+    "INTERNAL": "操作に失敗しました。しばらくしてから再試行してください。"
   },
   "providerError": {
     "AUTH_INVALID": "API キーが無効か期限切れです（401）。キーを確認して再試行してください",

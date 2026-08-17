@@ -530,6 +530,32 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('付费提交收到 2xx 非法 JSON 时保留 unknown，禁止再次 POST', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+        }),
+      ),
+    );
+    mocks.outboundFetch.mockResolvedValue(new Response('{invalid-json', { status: 200 }));
+
+    const invocationId = await prepare();
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SUBMISSION_OUTCOME_UNKNOWN',
+      outcomeKnown: false,
+    });
+    expect(mocks.rows.get(invocationId)?.state).toBe('unknown');
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
+    expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('建连失败发生在派发前时恢复 prepared，不把 invocation 卡在 submitting', async () => {
     const resolved = resolvedGuide(
       operation({

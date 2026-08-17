@@ -400,6 +400,13 @@ async function dispatchRequest(input: {
     try {
       return JSON.parse(buffer.toString('utf8')) as unknown;
     } catch {
+      if (input.operation === 'submit') {
+        throw new MediaInvocationError(
+          'SUBMISSION_OUTCOME_UNKNOWN',
+          '上游已返回成功状态，但响应不是合法 JSON，无法确认任务结果；不要自动重提',
+          true,
+        );
+      }
       throw new MediaInvocationError('UPSTREAM_RESPONSE_INVALID', '上游成功响应不是合法 JSON');
     }
   } catch (error) {

@@ -593,6 +593,10 @@ function checkExistingPatch(): { action: 'relaunch' | 'check' | 'none'; version?
     );
     try { fs.unlinkSync(patchFilePath); } catch { /* ignore */ }
     removePatchInfo();
+    const flag = readReloginFlag();
+    if (flag?.version === patchInfo.version) {
+      clearReloginFlag();
+    }
     return { action: 'check' };
   }
 

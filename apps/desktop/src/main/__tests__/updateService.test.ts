@@ -1155,6 +1155,8 @@ describe('startup update relaunch safety', () => {
         enableBeta: false,
       }),
     );
+    const flagPath = path.join(TEST_USER_DATA, 'relogin-required.flag');
+    fs.writeFileSync(flagPath, JSON.stringify({ version: '0.0.65' }));
     readUpdateChannelSettings.mockReturnValue({
       enableBeta: true,
       orgDefaultEnableBeta: true,
@@ -1173,6 +1175,7 @@ describe('startup update relaunch safety', () => {
       expect(service.getUpdateStatus()).toBe('idle');
       expect(fs.existsSync(path.join(updatesDir, 'patch-info.json'))).toBe(false);
       expect(fs.existsSync(path.join(updatesDir, 'xdt-maker-0.0.65.zip'))).toBe(false);
+      expect(fs.existsSync(flagPath)).toBe(false);
     } finally {
       service.stopUpdateService();
     }

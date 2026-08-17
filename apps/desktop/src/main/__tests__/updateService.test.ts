@@ -572,6 +572,21 @@ describe('startup update relaunch safety', () => {
       service.stopUpdateService();
     }
   });
+
+  it('invalidates an in-flight check when another instance changes the shared channel', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    try {
+      expect(service.getUpdateStatus()).toBe('ready');
+      readUpdateChannelSettings.mockReturnValue({
+        enableBeta: true,
+        orgDefaultEnableBeta: true,
+      });
+      await expect(service.checkForUpdate()).resolves.toBe('idle');
+      expect(service.getUpdateStatus()).toBe('idle');
+    } finally {
+      service.stopUpdateService();
+    }
+  });
 });
 
 describe('splash 启动下载 0% 显式广播', () => {

@@ -60,12 +60,19 @@ function normalize(raw: unknown): UpdateChannelSettings {
   };
 }
 
+export function resolveEffectiveEnableBeta(
+  state: OverrideSettingsState<UpdateChannelSettings>,
+): boolean {
+  return state.customizedKeys.includes('enableBeta')
+    ? state.value.enableBeta
+    : state.value.orgDefaultEnableBeta;
+}
+
 function resolveEffectiveSettings(
   state: OverrideSettingsState<UpdateChannelSettings>,
 ): UpdateChannelSettings {
-  const userCustomized = state.customizedKeys.includes('enableBeta');
   return {
-    enableBeta: userCustomized ? state.value.enableBeta : state.value.orgDefaultEnableBeta,
+    enableBeta: resolveEffectiveEnableBeta(state),
     orgDefaultEnableBeta: state.value.orgDefaultEnableBeta,
   };
 }
@@ -79,6 +86,7 @@ const store = createOverrideSettingsFile<UpdateChannelSettings>({
 });
 
 export function readUpdateChannelSettings(): UpdateChannelSettings {
+  store.invalidateIfChanged();
   return resolveEffectiveSettings(store.readState());
 }
 

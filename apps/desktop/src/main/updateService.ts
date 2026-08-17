@@ -148,6 +148,8 @@ let readyFilePath: string | undefined;
  * 「渠道已变」,放弃本次下载产物,避免 opt-out 后仍被装到 beta 版本。
  */
 let updateChannelEpoch = 0;
+/** 本进程上次看到的有效渠道。别的共库实例改开关后,用这个发现跨进程渠道变化。 */
+let observedEnableBeta = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let autoRelaunchPollTimer: ReturnType<typeof setInterval> | null = null;
 let isRelaunching = false;
@@ -349,6 +351,12 @@ async function requestAutoRelaunch(
         }
       }
       return { accepted: false, blockReason };
+    }
+
+    if (syncObservedUpdateChannel()) {
+      log.info('auto relaunch aborted — shared update channel changed');
+      deferredStagedPatchPath = readyFilePath ?? deferredStagedPatchPath;
+      return { accepted: false, blockReason: 'not-ready' };
     }
 
     if (deferredStagedPatchPath) {
@@ -611,6 +619,14 @@ function invalidateInFlightChannelDownloads(): void {
   clearCachedManifest();
 }
 
+function syncObservedUpdateChannel(): boolean {
+  const enableBeta = readUpdateChannelSettings().enableBeta;
+  if (enableBeta === observedEnableBeta) return false;
+  observedEnableBeta = enableBeta;
+  invalidateInFlightChannelDownloads();
+  return true;
+}
+
 function flushDeferredStagedPatchClear(): void {
   if (!deferredStagedPatchPath) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
@@ -794,6 +810,12 @@ export function isVersionlessAppVersion(version: string): boolean {
 
 async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<CheckForUpdateResult> {
   log.info('checkForUpdate() called, currentStatus=%s', currentStatus);
+  // 先跟共享设置对一次有效渠道:共库另一实例改过开关时,本进程内存代际还停在旧值。
+  if (syncObservedUpdateChannel()) {
+    log.info('shared update channel changed — discarding staged patch before check');
+    clearStagedPatch();
+    return 'idle';
+  }
   // 快照发起时的渠道代际;下载期间若用户 opt-out(clearStagedPatch 递增),
   // 成功/失败写回前都据此作废本次产物。
   const channelEpochAtStart = updateChannelEpoch;
@@ -1222,6 +1244,14 @@ function executeRelaunch(theme: 'light' | 'dark'): void {
     return;
   }
 
+  if (syncObservedUpdateChannel()) {
+    log.info('executeRelaunch() aborted — shared update channel changed');
+    isRelaunching = false;
+    autoRelaunchInProgress = false;
+    clearStagedPatch();
+    return;
+  }
+
   log.info('executeRelaunch() called, theme=%s, readyFilePath=%s', theme, maskPath(readyFilePath));
   if (!readyFilePath || !fs.existsSync(readyFilePath)) {
     log.error('No ready update file to apply');
@@ -1348,6 +1378,7 @@ export function initUpdateService(): void {
     //   拉取失败时 checkExistingPatch() 会兜底把用户装到 release 版本。
     // 切渠道不等于切版本,两个方向都要清。
     if (wasBeta !== next) {
+      observedEnableBeta = next;
       clearStagedPatch();
     }
     return channelSettingsWire();
@@ -1359,6 +1390,7 @@ export function initUpdateService(): void {
     await resetUpdateChannelSettings();
     // 恢复默认 = 关闭 beta;同 set(false),渠道变化即作废已 staged 的补丁。
     if (wasBeta) {
+      observedEnableBeta = false;
       clearStagedPatch();
     }
     return channelSettingsWire();
@@ -1538,6 +1570,7 @@ export function initUpdateService(): void {
     }, POLL_INTERVAL_MS);
   }, FIRST_CHECK_DELAY_MS);
 
+  observedEnableBeta = readUpdateChannelSettings().enableBeta;
   log.info('Initialized — first check in 10s, polling every 30min');
 }
 
@@ -1552,6 +1585,7 @@ export async function enableUncustomizedBetaChannel(
   const wasBeta = readUpdateChannelSettings().enableBeta;
   const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
   if (wrote && !wasBeta) {
+    observedEnableBeta = true;
     // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
     clearStagedPatch();
     broadcastChannelSettings();

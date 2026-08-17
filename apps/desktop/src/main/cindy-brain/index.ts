@@ -2323,10 +2323,10 @@ const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
 
 function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | null): void {
-  // Renderer route reports are not an authority to mint Simulator Viewer
-  // access. They may only select an exact Viewer grant that the Host already
-  // retained for this session-scoped sidebar bucket, or clear a stale active
-  // mutation grant when the window family moves elsewhere.
+  // Renderer route reports are not an authorization source. They may only
+  // pause a stale active mutation grant when the window family moves away;
+  // retained Viewer grants require Main/Host confirmation or focus to become
+  // active again.
   const previous = ghostSessionFocusByWebContents.get(sender.id);
   if (previous !== sessionId) {
     syncIOSSimulatorRendererAccessForSessionChange(sender, sessionId);

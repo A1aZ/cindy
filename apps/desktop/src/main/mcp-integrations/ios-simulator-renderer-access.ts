@@ -373,23 +373,15 @@ export class IOSSimulatorRendererAccessRegistry {
         this.bumpTargetEpoch(target.id);
       }
       const current = this.activeGrants.get(target.id);
-      const retained = resolved && normalizedSessionId
-        ? this.viewerGrants.get(target.id)?.get(normalizedSessionId)
-        : undefined;
-      const next =
-        retained?.target === target && !retained.target.isDestroyed() ? retained : undefined;
-      if (current?.target !== target && !next) continue;
-      if (current === next) continue;
+      if (current?.target !== target) continue;
+      if (normalizedSessionId && current.sessionId === normalizedSessionId) continue;
 
-      // The route report may select only a Viewer grant that the Host already
-      // minted for this exact WebContents. It never creates or transfers a
-      // Viewer authorization from renderer-supplied session data.
+      // Renderer route reports are revocation-only. A renderer-controlled
+      // sessionId may pause a stale active mutation grant, but it must never
+      // promote any retained Viewer grant. Only Main/Host confirmation and
+      // focus flows may select the active grant again.
       this.bumpTargetEpoch(target.id);
-      if (next) {
-        this.activeGrants.set(target.id, next);
-      } else if (current?.target === target) {
-        this.activeGrants.delete(target.id);
-      }
+      this.activeGrants.delete(target.id);
       changed += 1;
     }
     return changed;

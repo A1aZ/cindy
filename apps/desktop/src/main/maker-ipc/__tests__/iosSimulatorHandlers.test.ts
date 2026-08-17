@@ -311,6 +311,40 @@ describe('iOS Simulator IPC handlers', () => {
     expect(getStatus).toHaveBeenCalledWith('session-a');
   });
 
+  it.each([
+    ['active', { sessionId: 'session-a', generation: 1 }],
+    ['paused', { sessionId: 'session-b', generation: 2 }],
+  ] as const)('projects %s control access from the Main-owned grant', async (expected, grant) => {
+    const harness = new IpcHarness();
+    registerTrusted(harness, {
+      getSessionAccess: () => grant,
+      getStatus: async () => ({
+        ok: true,
+        sessionId: 'session-a',
+        instances: [],
+        deviceGrants: [],
+        mutationStates: [],
+        environment: {
+          platform: 'darwin',
+          supported: true,
+          ready: true,
+          xcodeVersion: 'Xcode 26.4',
+          runtimes: [],
+          devices: [],
+          issue: null,
+          error: null,
+          setupSteps: [],
+        },
+      }),
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).resolves.toMatchObject({ controlAccess: expected });
+  });
+
   it('rejects a request before calling the host while the owner boundary is pending', async () => {
     const harness = new IpcHarness();
     const getStatus = vi.fn();

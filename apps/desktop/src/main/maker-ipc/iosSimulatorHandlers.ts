@@ -426,9 +426,16 @@ export function registerIOSSimulatorHandlers(
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (event, payload) => {
     const sessionId = readSessionId(payload);
-    return callIOSSimulatorHostForViewerStatus(event, sessionId, () =>
+    const sender = readSenderWebContents(event);
+    const status = await callIOSSimulatorHostForViewerStatus(event, sessionId, () =>
       resolved.getStatus(sessionId),
     );
+    if (!status.ok) return status;
+    return {
+      ...status,
+      controlAccess:
+        resolved.getSessionAccess(sender)?.sessionId === sessionId ? 'active' : 'paused',
+    };
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (event, payload) => {
     const record = readRecord(payload);

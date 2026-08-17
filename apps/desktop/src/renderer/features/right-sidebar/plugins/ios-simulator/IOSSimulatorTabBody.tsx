@@ -442,7 +442,7 @@ export function IOSSimulatorTabBody({
         sessionId: ctx.sessionId,
       });
       if (requestVersion === requestVersionRef.current) {
-        setAccessRequired(false);
+        setAccessRequired(next.ok && next.controlAccess === 'paused');
         setStatus(next);
       }
       return next;
@@ -570,7 +570,8 @@ export function IOSSimulatorTabBody({
   const agentBusy = Boolean(
     mutation?.activeSource === 'agent' || (mutation?.queuedAgentMutations ?? 0) > 0,
   );
-  const busy = operation !== null || interactionBusy || agentBusy;
+  const controlPaused = Boolean(status?.ok && status.controlAccess === 'paused');
+  const busy = operation !== null || interactionBusy || agentBusy || controlPaused;
   const viewerVisible = Boolean(
     active && shellVisible && attachedInstance?.lifecycleState === 'ready',
   );
@@ -1926,7 +1927,7 @@ export function IOSSimulatorTabBody({
                             : 'rightSidebar.iosSimulator.takeControl',
                         )}
                         icon={mutation?.agentPaused ? Play : ShieldCheck}
-                        disabled={operation !== null || mutation?.takeoverPending}
+                        disabled={operation !== null || mutation?.takeoverPending || controlPaused}
                         onClick={() => void setMutationControl()}
                       />
                     </div>
@@ -2016,7 +2017,7 @@ export function IOSSimulatorTabBody({
                             )}
                             icon={nativeRecoveryPending ? Loader2 : RefreshCw}
                             spinning={nativeRecoveryPending}
-                            disabled={nativeRecoveryPending || !viewerReadyToken}
+                            disabled={nativeRecoveryPending || !viewerReadyToken || controlPaused}
                             onClick={() => void retryNativeRoute()}
                           />
                         </>

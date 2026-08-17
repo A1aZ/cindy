@@ -86,7 +86,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.accessSnapshot(main.target)).toBeNull();
   });
 
-  it('retains authorized Viewer sessions and restores the active grant on session return', () => {
+  it('retains authorized Viewer sessions without restoring control from a route report', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(21);
     registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
@@ -100,10 +100,10 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
 
     expect(registry.syncForSessionChange(main.target, 'session-a')).toBe(1);
     expect(registry.hasAccess(main.target, 'session-a')).toBe(true);
-    expect(registry.accessSnapshot(main.target)).toEqual({
-      sessionId: 'session-a',
-      generation: 1,
-    });
+    expect(registry.accessSnapshot(main.target)).toBeNull();
+
+    expect(registry.syncForSessionChange(main.target, 'session-b')).toBe(0);
+    expect(registry.accessSnapshot(main.target)).toBeNull();
   });
 
   it('restores the previous active session when a new focus command cannot be delivered', () => {
@@ -556,7 +556,7 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(false);
   });
 
-  it('restores an inherited family when returning to a retained Viewer session', () => {
+  it('keeps an inherited family paused until an authoritative focus grant returns', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(101);
     const sidebar = fakeWebContents(102);
@@ -576,14 +576,18 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.accessSnapshot(sidebar.target)).toBeNull();
     expect(revoked).not.toHaveBeenCalled();
 
-    expect(registry.syncForSessionChange(sidebar.target, 'session-a')).toBe(2);
+    expect(registry.syncForSessionChange(sidebar.target, 'session-a')).toBe(0);
+    expect(registry.accessSnapshot(main.target)).toBeNull();
+    expect(registry.accessSnapshot(sidebar.target)).toBeNull();
+
+    expect(registry.grantAndFocus('session-a')).toBe(true);
     expect(registry.accessSnapshot(main.target)).toEqual({
       sessionId: 'session-a',
-      generation: 1,
+      generation: 2,
     });
     expect(registry.accessSnapshot(sidebar.target)).toEqual({
       sessionId: 'session-a',
-      generation: 1,
+      generation: 2,
     });
   });
 

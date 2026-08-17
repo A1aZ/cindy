@@ -364,6 +364,38 @@ afterEach(() => {
 });
 
 describe('IOSSimulatorTabBody', () => {
+  it('keeps Viewer status visible while control waits for renewed authorization', async () => {
+    const pausedStatus = readyStatus();
+    if (!pausedStatus.ok) throw new Error('Expected a ready simulator status.');
+    pausedStatus.controlAccess = 'paused';
+    const api = installStatus(pausedStatus);
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await screen.findByText('rightSidebar.iosSimulator.accessRequiredTitle');
+    expect(screen.getByText('iPhone 17 Pro')).toBeTruthy();
+    expect(
+      (
+        screen.getByRole('combobox', {
+          name: 'rightSidebar.iosSimulator.streamProfile',
+        }) as HTMLSelectElement
+      ).disabled,
+    ).toBe(true);
+    expect(api.requestAccess).not.toHaveBeenCalled();
+    api.requestAccess.mockImplementationOnce(async () => {
+      api.setStatusValue({ ...pausedStatus, controlAccess: 'active' });
+      return { granted: true };
+    });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.allowTaskAccess' }),
+    );
+    await waitFor(() => {
+      expect(api.requestAccess).toHaveBeenCalledWith({ sessionId: 'session-a' });
+      expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
+    });
+  });
+
   it('requires a user gesture before requesting native access for a restored panel', async () => {
     const api = installStatus(readyStatus());
     api.status.mockRejectedValueOnce(

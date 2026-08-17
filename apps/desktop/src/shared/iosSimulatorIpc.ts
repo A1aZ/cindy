@@ -103,6 +103,8 @@ export type IOSSimulatorSessionStatus =
       instances: IOSSimulatorPublicInstance[];
       deviceGrants: IOSSimulatorDeviceGrant[];
       mutationStates: IOSSimulatorMutationState[];
+      /** Optional for compatibility with older Main processes. */
+      controlAccess?: 'active' | 'paused';
       /** Optional for compatibility with older Host builds. */
       resource?: IOSSimulatorPublicResourceStatus;
       /** Optional for compatibility with older detached/sidebar renderers. */

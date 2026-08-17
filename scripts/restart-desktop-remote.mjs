@@ -17,6 +17,10 @@ const forceTimeoutMs = 5000;
 const pollIntervalMs = 150;
 const startupReadyTimeoutMs = 120_000;
 const forceKillLabel = process.platform === 'win32' ? 'taskkill /F /T' : 'kill -9';
+const desktopDevCacheRelativeDirs = Object.freeze([
+  path.join('apps', 'desktop', 'node_modules', '.vite'),
+  path.join('apps', 'desktop', '.vite'),
+]);
 
 /**
  * 产品默认 userData 目录基名。⚠️ 值必须与
@@ -220,6 +224,42 @@ function upsertEnvValue(content, key, value, options = {}) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function desktopDevCacheDirs(root = rootDir) {
+  return desktopDevCacheRelativeDirs.map((entry) => path.join(root, entry));
+}
+
+function assertDesktopDevCachePath(root, target) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  const allowedTargets = new Set(desktopDevCacheDirs(resolvedRoot).map((entry) => path.resolve(entry)));
+  if (!allowedTargets.has(resolvedTarget)) {
+    throw new Error(`Refusing to remove unexpected desktop dev cache path: ${resolvedTarget}`);
+  }
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to remove desktop dev cache outside repository: ${resolvedTarget}`);
+  }
+}
+
+export function clearDesktopDevCaches(root = rootDir, { logger = console } = {}) {
+  const removed = [];
+  for (const cacheDir of desktopDevCacheDirs(root)) {
+    assertDesktopDevCachePath(root, cacheDir);
+    if (!fs.existsSync(cacheDir)) continue;
+    fs.rmSync(cacheDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    removed.push(cacheDir);
+  }
+
+  if (removed.length > 0) {
+    logger.log(
+      `==> Cleared desktop dev cache: ${removed.map((entry) => path.relative(root, entry)).join(', ')}`,
+    );
+  } else {
+    logger.log('==> Desktop dev cache already clean.');
+  }
+  return removed;
 }
 
 function listWindowsProcesses() {
@@ -1011,6 +1051,8 @@ async function main() {
   }
 
   if (killOnly) return;
+
+  if (!preserveRunning) clearDesktopDevCaches(rootDir);
 
   let startupStatusPath = null;
   if (waitReady) {

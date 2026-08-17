@@ -8,8 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import {
 	applyDesktopStartupConfigForPhase,
+	clearDesktopDevCaches,
 	commandUsesUserDataDir,
 	defaultIsolatedUserDataDir,
+	desktopDevCacheDirs,
 	devEnvPrefix,
 	isRepositoryDesktopDevProcess,
 	formatDesktopStartupFailure,
@@ -63,6 +65,39 @@ test("desktop restart no longer depends on the retired Feishu build app id", () 
 		"utf8",
 	);
 	assert.equal(source.includes("VITE_FEISHU_APP_ID"), false);
+});
+
+test("desktop restart clears only desktop Vite dev caches", () => {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cindy-dev-cache-"));
+	const desktopCacheDirs = desktopDevCacheDirs(repo);
+	const preservedDirs = [
+		path.join(repo, "node_modules", ".vite"),
+		path.join(repo, "apps", "mobile", "node_modules", ".vite"),
+		path.join(repo, "packages", "maker-shared", "node_modules", ".vite"),
+	];
+	try {
+		for (const dir of [...desktopCacheDirs, ...preservedDirs]) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "marker"), "cached\n");
+		}
+
+		const logs = [];
+		const removed = clearDesktopDevCaches(repo, { logger: { log: (message) => logs.push(message) } });
+
+		assert.deepEqual(removed.map((entry) => path.relative(repo, entry)), [
+			path.join("apps", "desktop", "node_modules", ".vite"),
+			path.join("apps", "desktop", ".vite"),
+		]);
+		for (const dir of desktopCacheDirs) {
+			assert.equal(fs.existsSync(dir), false);
+		}
+		for (const dir of preservedDirs) {
+			assert.equal(fs.existsSync(path.join(dir, "marker")), true);
+		}
+		assert.match(logs.join("\n"), /Cleared desktop dev cache/);
+	} finally {
+		fs.rmSync(repo, { recursive: true, force: true });
+	}
 });
 
 test("desktop restart recognizes dev processes from sibling repository worktrees", () => {

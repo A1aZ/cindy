@@ -22,6 +22,29 @@ describe('任务消息内存治理页面接线', () => {
     expect(screen).toContain('handledMessageReloadRevisionRef.current = messageReloadRevision;');
   });
 
+  it('首次进入详情在取得 authority 后触发同步，不依赖更早的 mount load', () => {
+    const authorityStart = screen.indexOf('const messageAuthorityRef = useRef');
+    const authorityEnd = screen.indexOf('const auth = useAuth();', authorityStart);
+    const authorityBlock = screen.slice(authorityStart, authorityEnd);
+    const firstEnter = authorityBlock.indexOf(
+      'messageAuthorityRef.current = remoteSessionStore.enterSessionMessageDetail(sessionId);',
+    );
+    const firstReload = authorityBlock.indexOf(
+      'setMessageReloadRevision((value) => value + 1);',
+      firstEnter,
+    );
+    expect(firstEnter).toBeGreaterThanOrEqual(0);
+    expect(firstReload).toBeGreaterThan(firstEnter);
+    expect(authorityBlock).not.toContain('shouldReload');
+    expect(authorityBlock).not.toContain('lastEnteredMessageSessionRef');
+    expect(authorityBlock).toContain('}, [deviceId, sessionId]),');
+
+    const subscriptionStart = screen.indexOf('return startFocusedTopicSubscription({');
+    const optimisticOlderStart = screen.indexOf('// 乐观点亮「加载更早」入口', subscriptionStart);
+    const subscriptionBlock = screen.slice(subscriptionStart, optimisticOlderStart);
+    expect(subscriptionBlock).not.toContain('void load();');
+  });
+
   it('详情读取在请求开始捕获 authority，并在所有消息写入口提交', () => {
     expect(screen).toContain('const messageAuthority = remoteSessionStore.captureSessionMessageAuthority(sessionId);');
     expect(screen).toContain('remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)');

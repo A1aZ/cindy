@@ -896,17 +896,16 @@ export default function SessionScreen() {
   > | null>(null);
   const messageScreenFocusedRef = useRef(false);
   const messageAppActiveRef = useRef(AppState.currentState === 'active');
-  const lastEnteredMessageSessionRef = useRef<string | null>(null);
   const handledMessageReloadRevisionRef = useRef(0);
   const [messageReloadRevision, setMessageReloadRevision] = useState(0);
   useFocusEffect(
     useCallback(() => {
       messageScreenFocusedRef.current = true;
       if (messageAppActiveRef.current) {
-        const shouldReload = lastEnteredMessageSessionRef.current === sessionId;
         messageAuthorityRef.current = remoteSessionStore.enterSessionMessageDetail(sessionId);
-        lastEnteredMessageSessionRef.current = sessionId;
-        if (shouldReload) setMessageReloadRevision((value) => value + 1);
+        // authority 是消息同步的前置条件。首次 focus 也必须在 enter 成功后触发 load；
+        // 否则导航 focus 晚于 mount effect 时，首轮 sync 会因无 authority 被丢弃且不再补发。
+        setMessageReloadRevision((value) => value + 1);
       }
       return () => {
         messageScreenFocusedRef.current = false;
@@ -916,7 +915,7 @@ export default function SessionScreen() {
           remoteSessionStore.leaveSessionMessageDetail(sessionId, 'detail-blur', authority);
         }
       };
-    }, [sessionId]),
+    }, [deviceId, sessionId]),
   );
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -932,7 +931,6 @@ export default function SessionScreen() {
       }
       if (!messageScreenFocusedRef.current || messageAuthorityRef.current) return;
       messageAuthorityRef.current = remoteSessionStore.enterSessionMessageDetail(sessionId);
-      lastEnteredMessageSessionRef.current = sessionId;
       setMessageReloadRevision((value) => value + 1);
     });
     return () => subscription.remove();
@@ -4152,11 +4150,10 @@ export default function SessionScreen() {
   );
 
   useEffect(() => {
-    void load();
     return () => {
       void unsubscribe(`session:${sessionId}`, deviceId, ['sessions', `session:${sessionId}`]).catch(() => undefined);
     };
-  }, [deviceId, load, sessionId, unsubscribe]);
+  }, [deviceId, sessionId, unsubscribe]);
 
   // 乐观点亮「加载更早」入口:缓存消息 hydrate 后(messages 已有内容),不等首开那次慢 listMessages(A1,
   // device-link 往返可能数秒)回来,就用已存 session 的 _count.messages 与 in-store 已加载真实条数比较,

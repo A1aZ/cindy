@@ -180,6 +180,22 @@ function broadcastStatus(payload: UpdateStatusPayload): void {
   }
 }
 
+function channelSettingsWire() {
+  return {
+    enableBeta: readUpdateChannelSettings().enableBeta,
+    isCustomized: isEnableBetaUserCustomized(),
+  };
+}
+
+function broadcastChannelSettings(): void {
+  const payload = channelSettingsWire();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('update-channel-settings', payload);
+    }
+  }
+}
+
 function setStatus(status: UpdateStatus, extra?: Partial<UpdateStatusPayload>): void {
   currentStatus = status;
   lastErrorCode = extra?.errorCode;
@@ -330,6 +346,11 @@ async function requestAutoRelaunch(
         }
       }
       return { accepted: false, blockReason };
+    }
+
+    if (stagedPatchClearDeferred) {
+      log.info('auto relaunch aborted — update channel changed during eligibility check');
+      return { accepted: false, blockReason: 'not-ready' };
     }
 
     if (!readyFilePath || !fs.existsSync(readyFilePath)) {
@@ -582,6 +603,11 @@ function isUpdateApplyCommitted(): boolean {
   return isRelaunching || autoRelaunchInProgress;
 }
 
+function invalidateInFlightChannelDownloads(): void {
+  updateChannelEpoch += 1;
+  clearCachedManifest();
+}
+
 function flushDeferredStagedPatchClear(): void {
   if (!stagedPatchClearDeferred) return;
   if (isUpdateApplyCommitted() || autoRelaunchDecisionDepth > 0) return;
@@ -603,6 +629,8 @@ function clearStagedPatch(): void {
   }
   if (autoRelaunchDecisionDepth > 0) {
     stagedPatchClearDeferred = true;
+    // 立刻作废旧渠道 in-flight 下载,避免下载完成后又把旧补丁写成 ready。
+    invalidateInFlightChannelDownloads();
     log.info('deferring staged patch clear until auto-relaunch eligibility settles');
     return;
   }
@@ -612,12 +640,7 @@ function clearStagedPatch(): void {
   readyVersion = undefined;
   readyFilePath = undefined;
   removePatchInfo();
-  // 递增代际:任何 in-flight 的 checkForUpdate 在写回 patch 前都会看到代际变化,
-  // 从而放弃本次(基于旧渠道的)下载产物,不把 beta patch 重新落盘。
-  updateChannelEpoch += 1;
-  // 切渠道后旧渠道的 manifest 缓存作废:否则 agent 二进制 prepare 先
-  // getCachedManifest() 会继续按旧渠道的版本号/下载地址安装资产。
-  clearCachedManifest();
+  invalidateInFlightChannelDownloads();
   // downloading 也要重置:opt-out 若发生在「首次 beta 下载进行中」,status 仍是
   // downloading;不 reset 的话,in-flight 下载完成后 discard 分支只是 `return 'idle'`
   // 而不 setStatus,update-get-status / update-check-now 会永远卡在 downloading。
@@ -1296,10 +1319,7 @@ export function initUpdateService(): void {
   // 更新设置或重启应用(旧 update-auto-settings 没断言是历史债,不构成豁免)。
   ipcMain.handle('update-channel-settings-get', (event) => {
     assertTrustedAppRendererEvent(event);
-    return {
-      enableBeta: readUpdateChannelSettings().enableBeta,
-      isCustomized: isEnableBetaUserCustomized(),
-    };
+    return channelSettingsWire();
   });
 
   ipcMain.handle('update-channel-settings-set', (event, payload: unknown) => {
@@ -1321,10 +1341,7 @@ export function initUpdateService(): void {
     if (wasBeta !== next) {
       clearStagedPatch();
     }
-    return {
-      enableBeta: readUpdateChannelSettings().enableBeta,
-      isCustomized: isEnableBetaUserCustomized(),
-    };
+    return channelSettingsWire();
   });
 
   ipcMain.handle('update-channel-settings-reset', (event) => {
@@ -1335,10 +1352,7 @@ export function initUpdateService(): void {
     if (wasBeta) {
       clearStagedPatch();
     }
-    return {
-      enableBeta: readUpdateChannelSettings().enableBeta,
-      isCustomized: isEnableBetaUserCustomized(),
-    };
+    return channelSettingsWire();
   });
 
   // 打开 beta 前的预检:探测 manifest-{platform}-beta.json 是否可达。
@@ -1529,6 +1543,7 @@ export function enableUncustomizedBetaChannel(): boolean {
   if (wrote && !wasBeta) {
     // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
     clearStagedPatch();
+    broadcastChannelSettings();
   }
   return wrote;
 }

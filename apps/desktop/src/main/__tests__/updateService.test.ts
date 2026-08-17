@@ -546,6 +546,32 @@ describe('startup update relaunch safety', () => {
       service.stopUpdateService();
     }
   });
+
+  it('aborts auto-relaunch when the channel changes during eligibility', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      expect(service.getUpdateStatus()).toBe('ready');
+      releaseProbe?.(false);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('idle');
+      });
+      expect(service.isUpdateRelaunchImminent()).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
 });
 
 describe('splash 启动下载 0% 显式广播', () => {

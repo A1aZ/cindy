@@ -46,8 +46,12 @@ export function useBetaChannelSettings(): {
       .catch(() => {
         if (!cancelled) setState((current) => ({ ...current, loading: false }));
       });
+    const unsubscribe = window.electronAPI.onUpdateChannelSettings((payload) => {
+      if (!cancelled) setState(normalize(payload));
+    });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, []);
 

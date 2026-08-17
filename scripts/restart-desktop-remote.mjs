@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   applyDesktopDevStartupConfig,
+  DESKTOP_DEV_REGIONS,
   desktopUserDataDirNameForRegion,
   resolveDesktopDevRegion,
 } from './shared/desktop-dev-region.mjs';
@@ -489,6 +490,101 @@ function userDataDirNamed(dirName) {
   return path.join(xdgConfig, dirName);
 }
 
+export function hasIsolationIntent(argv = [], env = process.env) {
+  return argv.some((arg) => arg === '--isolated' || arg.startsWith('--isolated='))
+    || env.XDT_ISOLATED === '1';
+}
+
+export function officialProductionUserDataDirs() {
+  return DESKTOP_DEV_REGIONS.map((region) => productionUserDataDir(region));
+}
+
+/** 与 devCliFlags ISOLATION_NAME_RE 一致：非法名字回落默认沙箱，不把路径段写进目录。 */
+export const ISOLATION_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+export function sanitizeIsolationName(raw) {
+  const name = typeof raw === 'string' ? raw.trim() : '';
+  return ISOLATION_NAME_RE.test(name) ? name : '';
+}
+
+function volumeIsCaseInsensitive(existingDir) {
+  let dir = existingDir;
+  for (;;) {
+    const parent = path.dirname(dir);
+    const atRoot = parent === dir;
+    if (!atRoot) {
+      try {
+        if (fs.statSync(parent).dev !== fs.statSync(dir).dev) return false;
+      } catch {
+        return false;
+      }
+    }
+    const name = path.basename(dir);
+    const flipped = name.replace(/[a-zA-Z]/g, (ch) => (
+      ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()
+    ));
+    if (flipped !== name) {
+      try {
+        return fs.realpathSync.native(path.join(parent, flipped))
+          === fs.realpathSync.native(dir);
+      } catch {
+        return false;
+      }
+    }
+    if (atRoot) return false;
+    dir = parent;
+  }
+}
+
+export function canonicalizeUserDataDir(dir) {
+  const resolved = path.resolve(dir);
+  try {
+    const real = fs.realpathSync.native(resolved);
+    return volumeIsCaseInsensitive(real) ? real.toLowerCase() : real;
+  } catch {
+    // 叶子还不存在:沿最近存在祖先做 realpath,再按该卷语义接回剩余段。
+  }
+  let current = resolved;
+  const suffix = [];
+  for (;;) {
+    const parent = path.dirname(current);
+    suffix.unshift(path.basename(current));
+    if (parent === current) return resolved;
+    current = parent;
+    try {
+      const ancestorReal = fs.realpathSync.native(current);
+      const joined = path.join(ancestorReal, ...suffix);
+      return volumeIsCaseInsensitive(ancestorReal) ? joined.toLowerCase() : joined;
+    } catch {
+      // 继续上溯
+    }
+  }
+}
+
+export function isOfficialProductionUserDataDir(dir) {
+  const resolved = canonicalizeUserDataDir(dir);
+  return officialProductionUserDataDirs().some(
+    (official) => canonicalizeUserDataDir(official) === resolved,
+  );
+}
+
+export function resolveRestartTargetUserDataDir({
+  envUserDataDir,
+  isolatedArg,
+  isolatedEnv,
+  isolatedName,
+  selectedRegion,
+}) {
+  const isolationName = sanitizeIsolationName(
+    isolatedArg ? parseIsolationName(isolatedArg) : isolatedName,
+  );
+  const isolated = Boolean(isolatedArg) || isolatedEnv === '1';
+  return envUserDataDir
+    || (isolated
+      ? defaultIsolatedUserDataDir(isolationName, selectedRegion)
+      : productionUserDataDir(selectedRegion));
+}
+
 export function defaultIsolatedUserDataDir(isolationName, region = 'global') {
   // 目录纪元 v2(-dev2),与 devCliFlags.ts 的派生保持一字不差:#871 起隔离沙箱用
   // CindyDev 钥匙串身份,旧 -dev 目录留给旧 checkout(#912 review)。
@@ -831,9 +927,9 @@ async function main() {
       '--preserve-running only supports remote mode: sharing remote login storage with a local auth server could invalidate the persisted credential',
     );
   }
-  if (preserveRunning && isolatedArg) {
+  if (preserveRunning && hasIsolationIntent(argv, process.env)) {
     throw new Error(
-      '--preserve-running reuses the current Cindy login via shared userData and cannot be combined with --isolated',
+      '--preserve-running reuses the current Cindy login via shared userData and cannot be combined with --isolated or XDT_ISOLATED=1',
     );
   }
   if (startupConfig) {
@@ -893,8 +989,6 @@ async function main() {
       // 路径以默认身份打开造成双身份互写(#912 review P1)。
       process.env.XDT_USER_DATA_DIR_EPOCH = '1';
     }
-    fs.mkdirSync(process.env.XDT_USER_DATA_DIR, { recursive: true });
-    console.log(`==> Isolated dev user data${isolationName ? ` (sandbox "${isolationName}")` : ''}: ${process.env.XDT_USER_DATA_DIR}`);
   }
   if (startupConfig) ensureDesktopEnv();
 
@@ -927,10 +1021,33 @@ async function main() {
   // --isolated 名字,或用户自己停掉那个实例。preserve-running 不进此门 ——
   // 它的语义就是共享 userData 的被动预览。检测是尽力而为:靠 helper 进程命令行
   // 上的 --user-data-dir,对方实例刚启动还没起 helper 时可能漏检。
-  const targetUserDataDir = process.env.XDT_USER_DATA_DIR
-    || (isolatedArg
-      ? defaultIsolatedUserDataDir(parseIsolationName(isolatedArg), selectedRegion)
-      : productionUserDataDir(selectedRegion));
+  const targetUserDataDir = resolveRestartTargetUserDataDir({
+    envUserDataDir: process.env.XDT_USER_DATA_DIR,
+    isolatedArg,
+    isolatedEnv: process.env.XDT_ISOLATED,
+    isolatedName: process.env.XDT_ISOLATED_NAME,
+    selectedRegion,
+  });
+  if (
+    hasIsolationIntent(argv, process.env)
+    && isOfficialProductionUserDataDir(targetUserDataDir)
+  ) {
+    throw new Error(
+      `--isolated cannot use the official Cindy profile (${targetUserDataDir}). ` +
+        'Omit XDT_USER_DATA_DIR, or point it at a sandbox directory.',
+    );
+  }
+  if (startupConfig && hasIsolationIntent(argv, process.env)) {
+    if (!process.env.XDT_USER_DATA_DIR) {
+      process.env.XDT_USER_DATA_DIR = targetUserDataDir;
+      process.env.XDT_USER_DATA_DIR_EPOCH = '1';
+    }
+    fs.mkdirSync(process.env.XDT_USER_DATA_DIR, { recursive: true });
+    const isolationName = isolatedArg
+      ? parseIsolationName(isolatedArg)
+      : (process.env.XDT_ISOLATED_NAME || '');
+    console.log(`==> Isolated dev user data${isolationName ? ` (sandbox "${isolationName}")` : ''}: ${process.env.XDT_USER_DATA_DIR}`);
+  }
   if (!preserveRunning) {
     const conflicts = listDesktopDevProcesses().filter(
       (proc) => !commandContainsPath(proc.command, rootDir)

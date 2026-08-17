@@ -3,8 +3,9 @@
  *
  * 这一层不碰合并语义(那在 voice-input-core 里),只回答三个问题:什么时候发、
  * 发给谁、收到什么才处理。盯住的边界:
- *  - 用户关掉开关后必须彻底静默(既不发也不合并);
- *  - 只发给桌面 —— 手机在后台收不到 push,给它发是纯浪费;
+ *  - 关掉同步开关后,桌面 CRDT 通道彻底静默(既不发也不合并);
+ *  - 手机只读投影不受「允许被控」限制;开关关闭时只在手机上线或开关切换时
+ *    推一次空投影清缓存,本地学习/编辑不再持续推空表;
  *  - 认不出的帧结构直接忽略,坏帧不能污染本机词典。
  */
 
@@ -32,21 +33,23 @@ vi.mock('../VoiceInputDataStore.js', () => ({
 const syncState = { version: 1 as const, records: {}, suppressed: {} };
 /** 让个别用例把状态换成超大对象,验证帧上限把关。 */
 const stateOverride: { value: unknown } = { value: null };
+const defaultMaterializedEntry = {
+  id: 'dict-sync-cindy',
+  text: 'Cindy',
+  source: 'manual' as const,
+  frequency: 2,
+  aliases: [{ text: 'sindy', count: 1, lastSeenAt: 5 }],
+  createdAt: 1,
+  updatedAt: 2,
+};
+const materialized = {
+  entries: [defaultMaterializedEntry],
+};
 vi.mock('../VoiceDictionarySyncStore.js', () => ({
   voiceDictionarySyncStore: {
     getState: () => stateOverride.value ?? syncState,
     materialize: () => ({
-      entries: [
-        {
-          id: 'dict-sync-cindy',
-          text: 'Cindy',
-          source: 'manual' as const,
-          frequency: 2,
-          aliases: [{ text: 'sindy', count: 1, lastSeenAt: 5 }],
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      ],
+      entries: materialized.entries,
       candidates: [],
       suppressedTexts: [],
     }),
@@ -54,28 +57,38 @@ vi.mock('../VoiceDictionarySyncStore.js', () => ({
 }));
 
 const {
+  broadcastDictionaryNow,
   handleDesktopPeerOnline,
   handleIncomingDictionaryState,
+  handleMobilePeerOnline,
   initVoiceDictionarySync,
   isDesktopPlatform,
+  notifyLocalDictionaryChanged,
   readDictionaryProjectionForMobile,
   shouldExchangeDictionaryWith,
   stopVoiceDictionarySync,
 } = await import('../dictionarySyncDriver.js');
 
 const sendState = vi.fn();
+const sendMobileSnapshot = vi.fn();
 const onlineDesktops: string[] = [];
+const onlineMobiles: string[] = [];
 
 beforeEach(() => {
   syncEnabled.value = true;
   sendState.mockClear();
+  sendMobileSnapshot.mockClear();
   mergeRemoteDictionaryState.mockClear();
   mergeRemoteDictionaryState.mockReturnValue(true);
   onlineDesktops.length = 0;
+  onlineMobiles.length = 0;
   stateOverride.value = null;
+  materialized.entries = [defaultMaterializedEntry];
   initVoiceDictionarySync({
     sendState: (deviceId, payload) => sendState(deviceId, payload),
     listOnlineDesktopDevices: () => [...onlineDesktops],
+    sendMobileSnapshot: (deviceId, payload) => sendMobileSnapshot(deviceId, payload),
+    listOnlineMobileDevices: () => [...onlineMobiles],
   });
 });
 
@@ -147,6 +160,54 @@ describe('出站', () => {
     // 合并引入新信息 → 回发;这里借回发路径触发一次广播语义的失败隔离。
     handleIncomingDictionaryState('peer-1', { frameVersion: 1, state: syncState });
     expect(() => handleDesktopPeerOnline('peer-2')).not.toThrow();
+  });
+
+  it('手机上线时主动推只读快照,不依赖远程控制开关', () => {
+    handleMobilePeerOnline('phone-1');
+    expect(sendMobileSnapshot).toHaveBeenCalledWith('phone-1', {
+      ok: true,
+      entries: [
+        { text: 'Cindy', frequency: 2, aliases: [{ text: 'sindy', count: 1 }] },
+      ],
+    });
+  });
+
+  it('同步关闭时仍推空投影给手机,让旧缓存及时清空', () => {
+    syncEnabled.value = false;
+    handleMobilePeerOnline('phone-1');
+    expect(sendMobileSnapshot).toHaveBeenCalledWith('phone-1', { ok: true, entries: [] });
+  });
+
+  it('立即广播会同时刷新所有在线手机', () => {
+    onlineMobiles.push('phone-1', 'phone-2');
+    broadcastDictionaryNow();
+    expect(sendMobileSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('同步关闭后本地变更不再向手机推空投影', () => {
+    syncEnabled.value = false;
+    onlineMobiles.push('phone-1');
+    notifyLocalDictionaryChanged();
+    expect(sendMobileSnapshot).not.toHaveBeenCalled();
+    expect(sendState).not.toHaveBeenCalled();
+  });
+
+  it('手机快照超过单帧上限时不发送', () => {
+    materialized.entries = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `term-${index}`,
+      text: '词'.repeat(80),
+      source: 'manual' as const,
+      frequency: 1,
+      aliases: Array.from({ length: 8 }, () => ({
+        text: '别'.repeat(120),
+        count: 1,
+        lastSeenAt: 1,
+      })),
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    handleMobilePeerOnline('phone-1');
+    expect(sendMobileSnapshot).not.toHaveBeenCalled();
   });
 });
 

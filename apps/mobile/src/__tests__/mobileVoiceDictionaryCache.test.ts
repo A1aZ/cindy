@@ -28,12 +28,14 @@ vi.mock('@/session/mobileVoiceHistoryStore', () => ({
 
 const {
   __resetMobileVoiceDictionaryCacheForTests,
+  applyMobileVoiceDictionarySnapshot,
   setMobileVoiceDictionaryAccountScope,
   clearAllMobileVoiceDictionaryCaches,
   hydrateMobileVoiceDictionary,
   readCachedMobileVoiceDictionary,
   readCachedMobileVoiceDictionarySnapshot,
   refreshMobileVoiceDictionary,
+  subscribeMobileVoiceDictionaryCache,
 } = await import('@/session/mobileVoiceDictionaryCache');
 
 const HOST = 'desktop-1';
@@ -45,6 +47,20 @@ beforeEach(() => {
 });
 
 describe('mobileVoiceDictionaryCache', () => {
+  it('接收桌面主动推送的快照后立即可读并落盘', async () => {
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '推送词', frequency: 4 }],
+    });
+
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([
+      { text: '推送词', frequency: 4, aliases: [] },
+    ]);
+    __resetMobileVoiceDictionaryCacheForTests();
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('推送词');
+  });
+
   it('拉取成功后缓存并落盘,重启后能恢复', async () => {
     await refreshMobileVoiceDictionary(HOST, async () => ({
       ok: true,
@@ -198,6 +214,35 @@ describe('mobileVoiceDictionaryCache', () => {
 });
 
 describe('账号分区', () => {
+  it('不把 v1 未分区缓存导入当前账号,只删除遗留键', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    storage.set(
+      'xdt.mobileVoiceDictionary.v1.desktop-1',
+      JSON.stringify({
+        entries: [{ text: '旧版离线词', frequency: 2 }],
+        fetchedAt: 123,
+      }),
+    );
+
+    await hydrateMobileVoiceDictionary(HOST);
+
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+    expect(storage.has('xdt.mobileVoiceDictionary.v2.user-a.desktop-1')).toBe(false);
+    expect(storage.has('xdt.mobileVoiceDictionary.v1.desktop-1')).toBe(false);
+  });
+
+  it('匿名分区也不接管 v1 未分区缓存,并清掉遗留键', async () => {
+    storage.set(
+      'xdt.mobileVoiceDictionary.v1.desktop-1',
+      JSON.stringify({ entries: [{ text: '不能泄漏' }], fetchedAt: 123 }),
+    );
+
+    await hydrateMobileVoiceDictionary(HOST);
+
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+    expect(storage.has('xdt.mobileVoiceDictionary.v1.desktop-1')).toBe(false);
+  });
+
   it('切换账号后读不到上一个账号的快照 —— 即使清理没删干净', async () => {
     setMobileVoiceDictionaryAccountScope('user-a');
     await refreshMobileVoiceDictionary(HOST, async () => ({
@@ -352,5 +397,53 @@ describe('版本向量的入站校验', () => {
     __resetMobileVoiceDictionaryCacheForTests();
     await hydrateMobileVoiceDictionary(HOST);
     expect(readCachedMobileVoiceDictionarySnapshot(HOST).stateVector).toEqual({ 'node-a': STAMP_A });
+  });
+
+  it('后到的旧快照不能覆盖已有的更新状态', async () => {
+    const newer = '0000000rt0.0000.node-a';
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '新词' }],
+      stateVector: { 'node-a': newer },
+    });
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '旧词' }],
+      stateVector: { 'node-a': STAMP_A },
+    });
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
+  });
+
+  it('无版本向量的空投影可以清空已有缓存', async () => {
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '旧词' }],
+      stateVector: { 'node-a': STAMP_A },
+    });
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [],
+    });
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+  });
+});
+
+describe('缓存订阅隔离', () => {
+  it('订阅者抛错不打断落盘', async () => {
+    const unsubscribe = subscribeMobileVoiceDictionaryCache(() => {
+      throw new Error('subscriber failed');
+    });
+    try {
+      await expect(applyMobileVoiceDictionarySnapshot(HOST, {
+        ok: true,
+        entries: [{ text: '推送词', frequency: 1 }],
+      })).resolves.toBeUndefined();
+      expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('推送词');
+      __resetMobileVoiceDictionaryCacheForTests();
+      await hydrateMobileVoiceDictionary(HOST);
+      expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('推送词');
+    } finally {
+      unsubscribe();
+    }
   });
 });

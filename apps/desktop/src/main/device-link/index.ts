@@ -36,6 +36,7 @@ import {
   DeviceLinkError,
   INVOKE_TIMEOUT_OVERRIDES_MS,
 } from '@cindy/device-link';
+import { DEVICE_LINK_VOICE_DICTIONARY_SNAPSHOT_CHANNEL } from '@cindy/maker-shared/device-link-contract';
 import * as authManager from '../authManager';
 import { getActiveDataOwnerPushStamp } from '../appSessionState.js';
 import { createLogger } from '../logger';
@@ -84,6 +85,7 @@ import {
 import {
   clearControllerPlatforms,
   getControllerPlatform,
+  isMobilePlatform,
   setControllerPlatform,
 } from './controllerPlatform';
 import {
@@ -103,6 +105,7 @@ import {
   broadcastDictionaryNow,
   handleDesktopPeerOnline,
   handleIncomingDictionaryState,
+  handleMobilePeerOnline,
   initVoiceDictionarySync,
   notifyLocalDictionaryChanged,
   shouldExchangeDictionaryWith,
@@ -766,6 +769,16 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     ) {
       handleDesktopPeerOnline(snap.deviceId);
     }
+    // 手机只接收只读投影:push 不属于 relay 的 CONTROL_KINDS,因此不要求桌面
+    // 打开「允许被控」。来源平台只用于体验分流,撤销状态仍是实际准入边界。
+    if (
+      wasOnline !== true &&
+      snap.online &&
+      isMobilePlatform(snap.platform) &&
+      !isDeviceRevoked(snap.deviceId)
+    ) {
+      handleMobilePeerOnline(snap.deviceId);
+    }
   });
 
   let updateRelaunchControllersBusy = false;
@@ -883,6 +896,17 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
             platform: getControllerPlatform(deviceId),
             revoked: isDeviceRevoked(deviceId),
           }),
+        )
+        .map(([deviceId]) => deviceId),
+    sendMobileSnapshot: (deviceId, payload) => {
+      client?.sendPush(deviceId, DEVICE_LINK_VOICE_DICTIONARY_SNAPSHOT_CHANNEL, payload);
+    },
+    listOnlineMobileDevices: () =>
+      [...presenceOnlineByDevice.entries()]
+        .filter(([deviceId, online]) =>
+          online &&
+          isMobilePlatform(getControllerPlatform(deviceId)) &&
+          !isDeviceRevoked(deviceId),
         )
         .map(([deviceId]) => deviceId),
   });

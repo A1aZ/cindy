@@ -1538,11 +1538,10 @@ export function TodaySpendChip({
   //     且无空闲期 app-server 催刷通道, 靠下一个 turn 事件或悬念超时回落兜底;
   //   - Claude 订阅形态催订阅端点。
   const hasPendingResetWindow = chipWindows.some((window) => window.resetPending);
-  const xaiWeeklyStale = usesXaiQuotaForm
-    && Boolean(xaiSubscriptionUsage)
+  const xaiNeedsWeeklyRefresh = usesXaiQuotaForm
     && !isXaiWeeklyUsageCurrent(xaiSubscriptionUsage, windowLabelNowMs);
   React.useEffect(() => {
-    if (!hasPendingResetWindow && !xaiWeeklyStale) return;
+    if (!hasPendingResetWindow && !xaiNeedsWeeklyRefresh) return;
     if (isChatgptBridge) {
       requestCodexAccountRefresh();
     } else if (usesXaiQuotaForm) {
@@ -1550,7 +1549,7 @@ export function TodaySpendChip({
     } else if (isClaudeSubscription && !usesCodexQuotaForm) {
       requestClaudeSubscriptionRefresh();
     }
-  }, [hasPendingResetWindow, xaiWeeklyStale, isChatgptBridge, isClaudeSubscription, usesCodexQuotaForm, usesXaiQuotaForm, windowLabelNowMs]);
+  }, [hasPendingResetWindow, xaiNeedsWeeklyRefresh, isChatgptBridge, isClaudeSubscription, usesCodexQuotaForm, usesXaiQuotaForm, windowLabelNowMs]);
 
   const isDashboardClickable = usageDashboardUrl !== null;
   const handleClick = () => {

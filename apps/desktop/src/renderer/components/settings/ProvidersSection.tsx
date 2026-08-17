@@ -802,7 +802,7 @@ function XaiAssetModule({ connected }: { connected: boolean }) {
     return () => window.clearInterval(timer);
   }, [connected]);
   useEffect(() => {
-    if (!connected || !usage) return;
+    if (!connected) return;
     if (isXaiWeeklyUsageCurrent(usage, nowMs)) return;
     requestXaiSubscriptionRefresh();
   }, [connected, usage, nowMs]);

@@ -205,6 +205,46 @@ describe('createXaiSubscriptionUsageReader', () => {
     expect(recordSnapshot).toHaveBeenCalled();
   });
 
+  it('does not let a late stale read overwrite a newer queued account', async () => {
+    let releaseFetchA!: () => void;
+    const fetchAGate = new Promise<void>((resolve) => {
+      releaseFetchA = resolve;
+    });
+    let releaseCache!: () => void;
+    const cacheGate = new Promise<void>((resolve) => {
+      releaseCache = resolve;
+    });
+    let cacheWaits = 0;
+    const fetchSnapshot = vi.fn(async (creds: XaiSubscriptionCredentialInfo) => {
+      if (creds.accessToken === 'token-a') await fetchAGate;
+      return makeSnapshot(creds.accessToken === 'token-b' ? 2 : 1);
+    });
+    const { deps, recordSnapshot } = makeDeps({ fetchSnapshot });
+    deps.readCachedSnapshot = vi.fn(async () => {
+      cacheWaits += 1;
+      if (cacheWaits >= 2) await cacheGate;
+      return null;
+    });
+    const reader = createXaiSubscriptionUsageReader(deps, { throttleMs: 1 });
+
+    const first = reader.read();
+    await settle();
+    const lateRead = reader.read();
+    await settle();
+    deps.readCredentials = vi.fn(async () => ({ accessToken: 'token-b' }));
+    await reader.syncForCredentialChange();
+    releaseCache();
+    await lateRead;
+    releaseFetchA();
+    await first;
+    await settle();
+    await settle();
+    await settle();
+
+    expect(fetchSnapshot).toHaveBeenCalledWith({ accessToken: 'token-b' });
+    expect(recordSnapshot).toHaveBeenCalledWith(makeSnapshot(2));
+  });
+
   it('does not queue a second fetch for the same in-flight token', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

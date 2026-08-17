@@ -55,7 +55,8 @@ export function createXaiSubscriptionUsageReader(
   let inFlight: Promise<void> | null = null;
   let inFlightToken: string | null = null;
   let inFlightGeneration = 0;
-  let queuedCredentials: XaiSubscriptionCredentialInfo | null = null;
+  // 只记「需要再跑一次」,不存 token。排空时重读当前凭证,迟到的旧 token 盖不掉新号。
+  let queuedReplay = false;
   let lastRefreshAt = 0;
   let backoffMs = 0;
   let backoffUntil = 0;
@@ -74,7 +75,7 @@ export function createXaiSubscriptionUsageReader(
 
   async function clearCachedSnapshot(opts: { resetThrottle: boolean }): Promise<void> {
     refreshGeneration += 1;
-    queuedCredentials = null;
+    queuedReplay = false;
     if (opts.resetThrottle) {
       lastRefreshAt = 0;
       backoffMs = 0;
@@ -142,15 +143,12 @@ export function createXaiSubscriptionUsageReader(
   ): void {
     const now = deps.now();
     if (inFlight) {
-      // 同凭证且仍是同一世代:复用在途请求。clear 已经提升 generation 时,
-      // 在途结果会被丢掉,必须再排一次,否则新账号周用量会空到下一次 turn。
-      if (inFlightToken === credentials.accessToken) {
-        if (inFlightGeneration !== refreshGeneration) {
-          queuedCredentials = credentials;
-        }
+      // 同凭证且仍是同一世代:复用在途请求。clear 已经提升 generation,
+      // 或后来的调用带了别的 token 时,只记「要再跑」,排空时重读当前凭证。
+      if (inFlightToken === credentials.accessToken && inFlightGeneration === refreshGeneration) {
         return;
       }
-      queuedCredentials = credentials;
+      queuedReplay = true;
       return;
     }
     if (!opts?.bypassThrottle) {
@@ -158,7 +156,8 @@ export function createXaiSubscriptionUsageReader(
       if (lastRefreshAt > 0 && now - lastRefreshAt < throttleMs) return;
     }
     const generation = refreshGeneration;
-    inFlightToken = credentials.accessToken;
+    const startedToken = credentials.accessToken;
+    inFlightToken = startedToken;
     inFlightGeneration = generation;
     const pending = runRefresh(credentials, generation).finally(() => {
       if (inFlight === pending) {
@@ -166,9 +165,15 @@ export function createXaiSubscriptionUsageReader(
         inFlightToken = null;
         inFlightGeneration = 0;
       }
-      const queued = queuedCredentials;
-      queuedCredentials = null;
-      if (queued) startRefresh(queued, { bypassThrottle: true });
+      const shouldReplay = queuedReplay;
+      queuedReplay = false;
+      if (!shouldReplay) return;
+      void (async () => {
+        const latest = await readCredentialsSafe();
+        if (!latest) return;
+        if (latest.accessToken === startedToken && refreshGeneration === generation) return;
+        startRefresh(latest, { bypassThrottle: true });
+      })();
     });
     inFlight = pending;
   }

@@ -121,7 +121,7 @@ export interface MobileVoiceDictionarySnapshot {
  * 的快照)。两份都带时:一方包含另一方就选包含者;互不包含(真并发)时没有正确答案,
  * 退回按拉取时间取较新的。
  */
-function isFresherThan(
+export function isFresherMobileVoiceDictionarySnapshot(
   candidate: MobileVoiceDictionarySnapshot,
   best: MobileVoiceDictionarySnapshot,
 ): boolean {
@@ -152,7 +152,7 @@ export function buildMobileVoiceDictionaryEntryViews(
   const maxAliases = options?.maxAliases ?? 3;
   const freshest = snapshots.reduce<MobileVoiceDictionarySnapshot | null>((best, snapshot) => {
     if (!snapshot || snapshot.fetchedAt <= 0) return best;
-    return !best || isFresherThan(snapshot, best) ? snapshot : best;
+    return !best || isFresherMobileVoiceDictionarySnapshot(snapshot, best) ? snapshot : best;
   }, null);
   if (!freshest) return [];
 

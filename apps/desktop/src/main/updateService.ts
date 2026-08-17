@@ -1306,10 +1306,15 @@ function executeRelaunch(theme: 'light' | 'dark'): void {
     return;
   }
 
-  if (syncObservedUpdateChannel()) {
-    log.info('executeRelaunch() aborted — shared update channel changed');
+  if (syncObservedUpdateChannel() || deferredStagedPatch) {
+    log.info(
+      deferredStagedPatch
+        ? 'executeRelaunch() aborted — update channel changed during eligibility check'
+        : 'executeRelaunch() aborted — shared update channel changed',
+    );
     isRelaunching = false;
     autoRelaunchInProgress = false;
+    // 标志先放下,否则 clearStagedPatch 会当成 apply 已提交而跳过。
     clearStagedPatch();
     return;
   }
@@ -1433,15 +1438,17 @@ export function initUpdateService(): void {
       throwIpcError('INVALID_PARAMS', 'enableBeta required (boolean)');
     }
     const wasBeta = readUpdateChannelSettings().enableBeta;
-    await writeEnableBeta(next);
-    // 渠道一变(无论 opt-in 还是 opt-out)就作废已 staged 的旧渠道补丁:
-    // - opt-out(beta→release):否则用户关掉 beta 后仍被装到 beta 版本;
-    // - opt-in(release→beta):否则旧 release 补丁仍 staged,重启后 beta manifest
-    //   拉取失败时 checkExistingPatch() 会兜底把用户装到 release 版本。
-    // 切渠道不等于切版本,两个方向都要清。
+    // 先作废旧补丁再等落盘:writeEnableBeta 可能卡住跨进程锁,这段空窗里
+    // busyProbe 若返回,资格检查仍会看到旧渠道+旧 zip 并提交 apply。
     if (wasBeta !== next) {
       observedEnableBeta = next;
       clearStagedPatch();
+    }
+    try {
+      await writeEnableBeta(next);
+    } catch (err) {
+      log.error('writeEnableBeta failed:', err);
+      throwIpcError('INTERNAL', 'failed to write update channel settings');
     }
     return channelSettingsWire();
   });
@@ -1449,11 +1456,15 @@ export function initUpdateService(): void {
   ipcMain.handle('update-channel-settings-reset', async (event) => {
     assertTrustedAppRendererEvent(event);
     const wasBeta = readUpdateChannelSettings().enableBeta;
-    await resetUpdateChannelSettings();
-    // 恢复默认 = 关闭 beta;同 set(false),渠道变化即作废已 staged 的补丁。
     if (wasBeta) {
       observedEnableBeta = false;
       clearStagedPatch();
+    }
+    try {
+      await resetUpdateChannelSettings();
+    } catch (err) {
+      log.error('resetUpdateChannelSettings failed:', err);
+      throwIpcError('INTERNAL', 'failed to reset update channel settings');
     }
     return channelSettingsWire();
   });
@@ -1647,11 +1658,14 @@ export async function enableUncustomizedBetaChannel(
   shouldWrite: () => boolean = () => true,
 ): Promise<boolean> {
   const wasBeta = readUpdateChannelSettings().enableBeta;
+  // 先作废旧补丁再等落盘,避免原子写等待期间自动重启把旧渠道包装上去。
+  // 没真正写成开之前,不要把 observedEnableBeta 提前改成 true。
+  if (!wasBeta) {
+    clearStagedPatch();
+  }
   const wrote = await tryEnableUncustomizedBetaAtomic(shouldWrite);
   if (wrote && !wasBeta) {
     observedEnableBeta = true;
-    // 真正开始应用时 clearStagedPatch 会跳过;资格检查中会记下,结束后再补清。
-    clearStagedPatch();
     broadcastChannelSettings();
   }
   return wrote;

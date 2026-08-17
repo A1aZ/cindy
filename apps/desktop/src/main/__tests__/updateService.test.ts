@@ -75,6 +75,7 @@ vi.mock('../auto-update-settings-store', () => ({
 }));
 
 const tryEnableUncustomizedBetaAtomic = vi.fn(async () => true);
+const writeEnableBeta = vi.fn(async () => undefined);
 const readUpdateChannelSettings = vi.fn(() => ({
   enableBeta: false,
   orgDefaultEnableBeta: false,
@@ -96,7 +97,7 @@ vi.mock('../updateChannelStore', () => ({
     defaults: { enableBeta: false, orgDefaultEnableBeta: false },
   }),
   resetUpdateChannelSettings: () => ({ enableBeta: false, orgDefaultEnableBeta: false }),
-  writeEnableBeta: vi.fn(),
+  writeEnableBeta,
   tryEnableUncustomizedBetaAtomic,
   isEnableBetaUserCustomized: () => false,
   isBetaChannelEnabled: () => readUpdateChannelSettings().enableBeta === true,
@@ -193,6 +194,8 @@ beforeEach(() => {
   download.mockReset();
   tryEnableUncustomizedBetaAtomic.mockReset();
   tryEnableUncustomizedBetaAtomic.mockResolvedValue(true);
+  writeEnableBeta.mockReset();
+  writeEnableBeta.mockResolvedValue(undefined);
   readUpdateChannelSettings.mockReset();
   readUpdateChannelSettings.mockReturnValue({
     enableBeta: false,
@@ -773,6 +776,68 @@ describe('startup update relaunch safety', () => {
       await expect(checkPromise).resolves.toBe('idle');
       expect(service.getUpdateStatus()).toBe('idle');
       expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('aborts a manual relaunch when a channel change is still deferred', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      await setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      expect(service.getUpdateStatus()).toBe('ready');
+      const relaunch = ipcListeners.get('update-relaunch');
+      expect(relaunch).toBeTypeOf('function');
+      logInfo.mockClear();
+      relaunch?.({}, 'dark');
+      expect(logInfo.mock.calls.map((call) => String(call[0]))).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('executeRelaunch() aborted'),
+        ]),
+      );
+      releaseProbe?.(false);
+      await vi.waitFor(() => {
+        expect(service.getUpdateStatus()).toBe('idle');
+      });
+      expect(service.isUpdateRelaunchImminent()).toBe(false);
+    } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('invalidates the staged patch before the settings write settles', async () => {
+    const service = await bootWithStagedPatch({ enabled: false });
+    let releaseWrite: (() => void) | undefined;
+    writeEnableBeta.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseWrite = () => resolve(undefined);
+        }),
+    );
+    try {
+      const setHandler = ipcHandlers.get('update-channel-settings-set');
+      expect(setHandler).toBeTypeOf('function');
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(true);
+      const writePromise = setHandler?.({ sender: { id: 1 } }, { enableBeta: true });
+      await vi.waitFor(() => {
+        expect(releaseWrite).toBeTypeOf('function');
+      });
+      expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
+      releaseWrite?.();
+      await writePromise;
     } finally {
       service.stopUpdateService();
     }

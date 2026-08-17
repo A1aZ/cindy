@@ -1081,7 +1081,7 @@ export function GhostPluginPage() {
     [confirm, ghosts, navigate, openGhostConfiguration, t],
   );
 
-  /** 卡片/详情主动作分发:面板型开页面内面板,指令/Host 能力型起对话,工具型进管理。 */
+  /** 卡片胶囊/详情主动作分发:面板型开页面内面板,指令/Host 能力型起对话,工具型进管理。整卡点击不走这里。 */
   const handlePrimaryAction = useCallback(
     (item: Pick<GhostPluginListItem, 'id' | 'name' | 'tabPanel' | 'canUse' | 'hostCapability'>) => {
       const action = ghostPrimaryAction(item);
@@ -2048,7 +2048,8 @@ function GhostPluginActions({
 
 /**
  * 已安装插件卡片(设计定稿):
- * - 整卡可点 = 主动作(面板「使用」/ 指令「对话」/ 工具型与停用态进管理);
+ * - 整卡可点 = 进详情(与滑杆管理入口同目标);
+ * - 主动作留在右下角胶囊(面板「使用」/ 指令或能力「对话」/ 工具型无按钮);
  * - 无启用开关(收进详情页);滑杆图标 = 管理入口;
  * - 更新 = 文字胶囊「更新到 vX」,无任何小圆点(绿点专职未读语义,PR-B 接入)。
  */
@@ -2081,12 +2082,11 @@ export function GhostPluginCard({
   const unread = useGhostUnread(item.id);
   const unreadSummary = useGhostUnreadSummary(item.id);
   const primary = ghostPrimaryAction(item);
-  const cardAction = enabled && primary !== 'manage' ? onPrimary : onManage;
   const handleCardKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.target !== event.currentTarget) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
-    cardAction();
+    onManage();
   };
   let primaryControl: ReactNode;
   if (!enabled) {
@@ -2122,7 +2122,7 @@ export function GhostPluginCard({
     <article
       role="button"
       tabIndex={0}
-      onClick={cardAction}
+      onClick={onManage}
       onKeyDown={handleCardKeyDown}
       aria-label={item.name}
       className={cn(

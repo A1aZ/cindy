@@ -89,7 +89,7 @@ export function isDedicatedMetroProcessGroup(entries, expectedWorktree = null) {
     const command = typeof entry === 'string' ? entry : entry.command;
     const cwd = typeof entry === 'string' ? null : entry.cwd;
     if (!command || !/(?:^|\/)(?:node|pnpm|sh|zsh)(?:\s|$)/.test(command)) return false;
-    if (!/(?:expo|metro|sim-start|mobile:sim:start|pnpm)/i.test(command)) return false;
+    if (!/(?:expo|metro|sim-start|mobile:sim:start)/i.test(command)) return false;
     if (normalizedRoot && (!cwd || !allowedCwds.has(resolve(cwd).replaceAll('\\', '/')))) return false;
     return true;
   });

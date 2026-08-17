@@ -57,6 +57,10 @@ describe('mobile simulator Metro takeover', () => {
       'pnpm mobile:sim:start',
       'Cindy.app/Contents/MacOS/Cindy Helper',
     ])).toBe(false);
+    expect(isDedicatedMetroProcessGroup([
+      'pnpm test',
+      'node expo start --dev-client --port 8081',
+    ])).toBe(false);
   });
 
   it('requires every process group member to stay in the Metro worktree', () => {

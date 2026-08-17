@@ -71,6 +71,11 @@ describe('mobile:sim takeover and JSON arguments', () => {
       source: 'branch@commit',
       targetWorktree: '/repo-target',
     })).toEqual({ confirmed: true, worktree: '/repo', isTarget: false });
+    expect(classifySimMetroListener({
+      cwd: '/repo/apps/mobile/',
+      source: 'branch@commit',
+      targetWorktree: '/repo/',
+    })).toEqual({ confirmed: true, worktree: '/repo', isTarget: true });
   });
 });
 

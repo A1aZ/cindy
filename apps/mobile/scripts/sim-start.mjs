@@ -94,10 +94,16 @@ if (portArgs.port === DEFAULT_PORT) {
       source: runningSource,
       targetWorktree: worktreeRoot,
     });
-    const listenerSourceIdentity = listener.confirmed
-      ? gitSourceIdentity(listener.worktree)
-      : null;
+    let listenerSourceIdentity = null;
+    if (listener.confirmed) {
+      try {
+        listenerSourceIdentity = gitSourceIdentity(listener.worktree);
+      } catch {
+        listenerSourceIdentity = null;
+      }
+    }
     const listenerConfirmed = listener.confirmed && listenerSourceIdentity === runningSource;
+    const canTakeOverListener = listener.isTarget ? listener.confirmed : listenerConfirmed;
 
     if (listenerConfirmed && listener.isTarget) {
       // 是本 worktree 的 Metro —— 但还要确认它注入了**当前分支**的 git env,否则 build label branch
@@ -117,11 +123,7 @@ if (portArgs.port === DEFAULT_PORT) {
         console.error('  这通常表示 Metro 启动后又 amend/rebase/reset/改过文件。需要接管时传 `--takeover` 重起。');
         process.exit(1);
       }
-      if (!takeover && listener.isTarget) {
-        console.error(`✗ ${DEFAULT_PORT} 上是本 worktree 的 Metro,但无法确认它对应当前源码。`);
-        process.exit(1);
-      }
-    } else if (!takeover || !listenerConfirmed) {
+    } else if (!(takeover && canTakeOverListener)) {
       console.error(`✗ 端口 ${DEFAULT_PORT} 被其他进程占用:${cwd || '(未知进程)'}`);
       console.error(`  本 app 无 expo-dev-client、只会连默认 ${DEFAULT_PORT};默认不会自动接管。`);
       console.error('  只有确认它是本 Cindy worktree 的 Metro 后，传 `--takeover` 才能安全切换。');

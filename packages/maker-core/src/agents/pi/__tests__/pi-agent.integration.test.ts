@@ -2127,6 +2127,9 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         symlinkSync(ordinaryPath, path.join(subDir, 'ordinary'));
 
         for (const [sessionId, command] of [
+          ['perm-auto-bash-symlink-dotenv-assignment-cd', 'X=1 cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-assignment-leading-redirect', 'X=1 2>/dev/null builtin cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-leading-assignment-wrapper', '2>/dev/null X=1 command -- cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-post-cd', 'cd sub >/dev/null && cat<link'],
           ['perm-auto-bash-symlink-dotenv-leading-redirect', '2>/dev/null cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-builtin-cd', 'builtin cd sub && cat<link'],
@@ -2155,7 +2158,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
 
         scriptedResponses.length = 0;
         scriptedResponses.push(
-          anthropicToolUseBody('bash', { command: '2>/dev/null builtin cd sub && cat<link' }),
+          anthropicToolUseBody('bash', { command: 'X=1 2>/dev/null builtin cd sub && cat<link' }),
           anthropicStreamBody('bash Full Access prefixed cd turn finished'),
         );
         const fullAccessReqBefore = seenRequests.length;
@@ -2341,7 +2344,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         scriptedResponses.length = 0;
         scriptedResponses.push(
           anthropicToolUseBody('bash', {
-            command: `2>/dev/null builtin cd sub <${redirectLinkName} && cat<link`,
+            command: `X=1 2>/dev/null builtin cd sub <${redirectLinkName} && cat<link`,
           }),
           anthropicStreamBody('bash ordinary symlink turn finished'),
         );
@@ -2359,7 +2362,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         scriptedResponses.length = 0;
         scriptedResponses.push(
           anthropicToolUseBody('bash', {
-            command: `2>/dev/null command -- cd sub <>${redirectLinkName} && cat<link`,
+            command: `2>/dev/null X=1 command -- cd sub <>${redirectLinkName} && cat<link`,
           }),
           anthropicStreamBody('bash ordinary read-write symlink turn finished'),
         );

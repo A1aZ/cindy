@@ -461,6 +461,7 @@ function bashInheritedDirectoryChangeIsUncertain(target: string): boolean {
 }
 
 type BashLeadingRedirection = { end: number; unresolved: boolean };
+type BashAssignmentPrefix = { end: number; name: string; unresolved: boolean };
 type BashDirectoryChangeHead = {
   cursor: number;
   hadRedirection: boolean;
@@ -505,11 +506,46 @@ function bashLeadingRedirectionAt(command: string, start: number): BashLeadingRe
   };
 }
 
+function bashAssignmentPrefixAt(command: string, start: number): BashAssignmentPrefix | null {
+  const word = readShellRedirectionTarget(command, start);
+  const assignment = /^([A-Za-z_][A-Za-z0-9_]*)(?:\+)?=/.exec(word.target);
+  return assignment
+    ? { end: word.end, name: assignment[1], unresolved: word.unresolved }
+    : null;
+}
+
+function bashAssignmentCanChangeDirectory(name: string): boolean {
+  return name === 'CDPATH' || name === 'HOME' || name === 'OLDPWD' || name === 'PWD';
+}
+
+function bashUnescapedBacktickAt(command: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && command[cursor] === '\\'; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 0;
+}
+
 function bashUnresolvedHeadHasDirectoryChange(codeMask: string, start: number): boolean {
   let visible = '';
   let depth = 0;
+  let inBacktick = false;
+  for (let index = 0; index < start; index += 1) {
+    if (codeMask.charCodeAt(index) === 96 && bashUnescapedBacktickAt(codeMask, index)) {
+      inBacktick = !inBacktick;
+    }
+  }
   for (let index = start; index < codeMask.length; index += 1) {
     const char = codeMask.charAt(index);
+    if (char.charCodeAt(0) === 96 && bashUnescapedBacktickAt(codeMask, index)) {
+      inBacktick = !inBacktick;
+      visible += ' ';
+      continue;
+    }
+    if (inBacktick) {
+      visible += /\s/.test(char) ? char : ' ';
+      continue;
+    }
     if (char === '(') {
       depth += 1;
       visible += ' ';
@@ -528,7 +564,8 @@ function bashUnresolvedHeadHasDirectoryChange(codeMask: string, start: number): 
     if (/[;&|\n]/.test(char)) break;
     visible += char;
   }
-  return /\b(?:(?:command|builtin)\s+)*(?:cd|pushd)(?:\s|$)/.test(visible);
+  return /^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=\S*\s+)*(?:(?:command|builtin)\s+)*(?:cd|pushd)(?:\s|$)/
+    .test(visible);
 }
 
 function bashDirectoryChangeHead(
@@ -541,10 +578,16 @@ function bashDirectoryChangeHead(
   let unresolved = false;
   while (true) {
     const redirection = bashLeadingRedirectionAt(command, cursor);
-    if (!redirection) break;
-    hadRedirection = true;
-    unresolved ||= redirection.unresolved;
-    cursor = bashInlinePaddingEnd(command, redirection.end);
+    if (redirection) {
+      hadRedirection = true;
+      unresolved ||= redirection.unresolved;
+      cursor = bashInlinePaddingEnd(command, redirection.end);
+      continue;
+    }
+    const assignment = bashAssignmentPrefixAt(command, cursor);
+    if (!assignment) break;
+    unresolved ||= assignment.unresolved || bashAssignmentCanChangeDirectory(assignment.name);
+    cursor = bashInlinePaddingEnd(command, assignment.end);
   }
 
   let word = readShellRedirectionTarget(command, cursor);

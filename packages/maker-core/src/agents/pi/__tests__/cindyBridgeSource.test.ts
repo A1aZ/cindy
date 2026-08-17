@@ -472,6 +472,12 @@ describe('cindy-bridge extension source', () => {
           ), redirectedCommand).toEqual([realpathSync(secretPath)]);
         }
         for (const command of [
+          `X=1 cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X=1 Y=2 builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X='hello world' 2>/dev/null command -- cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X=1 2>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `2>/dev/null X=1 command -- cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X=1 command builtin 2>/dev/null pushd ${nestedDir} && cat <${cwdSwitchName}`,
           `2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
           `>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
           `builtin 2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
@@ -487,6 +493,35 @@ describe('cindy-bridge extension source', () => {
           expect(context.collectResolvedCredentialPaths?.(evidence?.targets), command)
             .toEqual([realpathSync(secretPath)]);
         }
+        expect(context.bashInputReadEvidence?.({
+          command: `CDPATH=${cdPathRoot} cd sub && cat <${cwdSwitchName}`,
+        })).toEqual({
+          targets: [rootCwdSwitchOrdinaryLink],
+          unresolved: true,
+        });
+        for (const dynamicAssignmentCommand of [
+          `X=$TARGET cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X=$(printf value) cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `X=\`printf value\` cd ${nestedDir} && cat <${cwdSwitchName}`,
+        ]) {
+          const evidence = context.bashInputReadEvidence?.({ command: dynamicAssignmentCommand });
+          expect(evidence?.unresolved, dynamicAssignmentCommand).toBe(true);
+          expect(evidence?.targets.every((target) =>
+            target === rootCwdSwitchOrdinaryLink || target === nestedCwdSwitchSecretLink),
+          dynamicAssignmentCommand).toBe(true);
+        }
+        expect(context.bashInputReadEvidence?.({
+          command: `X=1 printf '%s' cd; cat <${cwdSwitchName}`,
+        })).toEqual({
+          targets: [rootCwdSwitchOrdinaryLink],
+          unresolved: false,
+        });
+        expect(context.bashInputReadEvidence?.({
+          command: `X=\`printf cd\` printf ok; cat <${cwdSwitchName}`,
+        })).toEqual({
+          targets: [rootCwdSwitchOrdinaryLink],
+          unresolved: false,
+        });
         expect(context.bashInputReadEvidence?.({
           command: `true && 2>/dev/null builtin pushd ${nestedDir} && cat <${cwdSwitchName}`,
         })).toEqual({

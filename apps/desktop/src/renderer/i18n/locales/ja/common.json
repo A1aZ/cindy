@@ -4571,7 +4571,8 @@
   },
   "ghostPanelRestore": {
     "single": "{{name}}を復元",
-    "multiple": "プラグインパネルを復元（{{count}}）"
+    "multiple": "最小化したプラグインパネル",
+    "multipleAria": "{{count}}個のプラグインパネルが最小化されています。復元するパネルを選択"
   },
   "rightSidebar": {
     "ariaLabel": "右サイドバー",

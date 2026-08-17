@@ -4571,7 +4571,8 @@
   },
   "ghostPanelRestore": {
     "single": "{{name}} 복원",
-    "multiple": "플러그인 패널 복원({{count}})"
+    "multiple": "최소화된 플러그인 패널",
+    "multipleAria": "플러그인 패널 {{count}}개가 최소화되었습니다. 복원할 패널 선택"
   },
   "rightSidebar": {
     "ariaLabel": "오른쪽 사이드바",

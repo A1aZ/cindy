@@ -88,7 +88,13 @@ describe('GhostPanelRestoreEntry', () => {
     render(<GhostPanelRestoreEntry variant="row" />);
 
     const trigger = screen.getByTestId('ghost-panel-restore-entry');
-    expect(trigger.textContent).toContain('2');
+    expect(screen.getByTestId('ghost-panel-restore-label').textContent).toBe(
+      'ghostPanelRestore.multiple',
+    );
+    expect(screen.getByTestId('ghost-panel-restore-label').className).toContain('text-left');
+    expect(screen.getByTestId('ghost-panel-restore-count').textContent).toBe('2');
+    expect(trigger.getAttribute('title')).toBe('ghostPanelRestore.multiple');
+    expect(trigger.getAttribute('aria-label')).toContain('"count":2');
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
     fireEvent.click(screen.getByText('a 面板'));
 

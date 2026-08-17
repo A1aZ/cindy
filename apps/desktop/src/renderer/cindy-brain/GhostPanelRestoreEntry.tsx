@@ -50,15 +50,24 @@ export function GhostPanelRestoreEntry({
   const single = minimized.length === 1 ? minimized[0] : null;
   const label = single
     ? t('ghostPanelRestore.single', { name: panelName(single) })
-    : t('ghostPanelRestore.multiple', { count: minimized.length });
+    : t('ghostPanelRestore.multiple');
+  const ariaLabel = single
+    ? label
+    : t('ghostPanelRestore.multipleAria', { count: minimized.length });
   const content = (
     <>
       <GhostEntryIcon ghost={single ?? undefined} size={variant === 'rail' ? 18 : 15} />
       {variant === 'row' ? (
         <>
-          <span className="min-w-0 flex-1 truncate leading-none">{label}</span>
+          <span
+            data-testid="ghost-panel-restore-label"
+            className="min-w-0 flex-1 truncate text-left leading-none"
+          >
+            {label}
+          </span>
           {minimized.length > 1 ? (
             <span
+              data-testid="ghost-panel-restore-count"
               aria-hidden
               className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--surface-chip)] px-1 text-10 font-medium leading-none text-[var(--text-secondary)]"
             >
@@ -82,7 +91,7 @@ export function GhostPanelRestoreEntry({
       <button
         type="button"
         data-testid="ghost-panel-restore-entry"
-        aria-label={label}
+        aria-label={ariaLabel}
         title={label}
         onClick={() => restoreGhostPanel(single.manifest.id)}
         className={className}
@@ -98,7 +107,7 @@ export function GhostPanelRestoreEntry({
         <button
           type="button"
           data-testid="ghost-panel-restore-entry"
-          aria-label={label}
+          aria-label={ariaLabel}
           title={label}
           className={cn('relative', className)}
         >

@@ -4573,7 +4573,8 @@
   },
   "ghostPanelRestore": {
     "single": "Restore {{name}}",
-    "multiple": "Restore plugin panels ({{count}})"
+    "multiple": "Minimized plugin panels",
+    "multipleAria": "{{count}} plugin panels minimized. Choose a panel to restore"
   },
   "rightSidebar": {
     "ariaLabel": "Right sidebar",

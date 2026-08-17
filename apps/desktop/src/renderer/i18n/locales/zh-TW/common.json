@@ -4571,7 +4571,8 @@
   },
   "ghostPanelRestore": {
     "single": "恢復 {{name}}",
-    "multiple": "恢復插件面板（{{count}}）"
+    "multiple": "已收起的插件面板",
+    "multipleAria": "已收起 {{count}} 個插件面板，點擊選擇要恢復的面板"
   },
   "rightSidebar": {
     "ariaLabel": "右側邊欄",

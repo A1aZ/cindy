@@ -390,6 +390,39 @@ describe('IOSSimulatorTabBody', () => {
     expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
   });
 
+  it('shows the exact plugin-session reason instead of reporting an environment probe failure', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE] The iOS Simulator plugin is unavailable in the current Cindy session.',
+      ),
+    );
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.pluginSessionUnavailable')).toBeTruthy();
+    });
+    expect(screen.queryByText('rightSidebar.iosSimulator.connectionError')).toBeNull();
+    expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
+  });
+
+  it('distinguishes an internal Host status failure from a simulator environment failure', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [INTERNAL] iOS Simulator status is temporarily unavailable.',
+      ),
+    );
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.statusInternalError')).toBeTruthy();
+    });
+    expect(screen.queryByText('rightSidebar.iosSimulator.connectionError')).toBeNull();
+  });
+
   it('animates the access loader on an HTML wrapper instead of the SVG', async () => {
     const api = installStatus(readyStatus());
     api.status.mockRejectedValueOnce(

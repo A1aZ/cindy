@@ -17,12 +17,14 @@ describe('iOS Simulator IPC handlers', () => {
   function registerTrusted(harness: IpcHarness, deps: Partial<IOSSimulatorHandlerDeps> = {}): void {
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
-      isPluginAvailable: () => true,
+      getPluginAccess: () => ({ allowed: true }),
       getSessionContext: async () => ({ workingDir: '/repo/session-a' }),
       getOwnerScopeKey: () => 'local:owner-a:1',
       isOwnerBoundaryPending: () => false,
       getSessionAccess: () => ({ sessionId: 'session-a', generation: 1 }),
-      hasSessionAccess: (_target, sessionId) => sessionId === 'session-a',
+      getViewerAccess: (_target, sessionId) =>
+        sessionId === 'session-a' ? { sessionId, generation: 1 } : null,
+      hasViewerAccess: (_target, sessionId) => sessionId === 'session-a',
       ...deps,
     });
   }
@@ -63,8 +65,15 @@ describe('iOS Simulator IPC handlers', () => {
     const requestSessionAccess = vi.fn();
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
-      isPluginAvailable: () => false,
+      getPluginAccess: () => ({
+        allowed: false,
+        errorCode: 'IOS_SIMULATOR_PLUGIN_DISABLED',
+        message: 'unavailable',
+        data: { reason: 'session-unavailable' },
+      }),
       getSessionContext: async () => ({ workingDir: '/repo/session-a' }),
+      getViewerAccess: (_target, sessionId) => ({ sessionId, generation: 1 }),
+      hasViewerAccess: () => true,
       getStatus,
       requestSessionAccess,
     });
@@ -73,12 +82,12 @@ describe('iOS Simulator IPC handlers', () => {
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
         sessionId: 'session-a',
       }),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    ).rejects.toMatchObject({ code: 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE' });
     await expect(
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
         sessionId: 'session-a',
       }),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    ).rejects.toMatchObject({ code: 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE' });
     expect(requestSessionAccess).not.toHaveBeenCalled();
     expect(getStatus).not.toHaveBeenCalled();
   });
@@ -96,12 +105,39 @@ describe('iOS Simulator IPC handlers', () => {
     expect(requestSessionAccess).not.toHaveBeenCalled();
   });
 
+  it('does not treat retained Viewer access as an active access request grant', async () => {
+    const harness = new IpcHarness();
+    const requestSessionAccess = vi.fn(async () => false);
+    registerTrusted(harness, {
+      getSessionAccess: () => ({ sessionId: 'session-b', generation: 2 }),
+      getViewerAccess: (_target, sessionId) =>
+        sessionId === 'session-a' ? { sessionId, generation: 1 } : null,
+      hasViewerAccess: (_target, sessionId) => sessionId === 'session-a',
+      requestSessionAccess,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
+        sessionId: 'session-a',
+      }),
+    ).resolves.toEqual({ granted: false });
+    expect(requestSessionAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 17 }),
+      'session-a',
+    );
+  });
+
   it('passes the authoritative session workdir to the plugin gate', async () => {
     const harness = new IpcHarness();
-    const isPluginAvailable = vi.fn(() => false);
+    const getPluginAccess = vi.fn(() => ({
+      allowed: false as const,
+      errorCode: 'IOS_SIMULATOR_DISABLED' as const,
+      message: 'disabled',
+      data: { reason: 'disabled-in-workdir' },
+    }));
     const getStatus = vi.fn();
     registerTrusted(harness, {
-      isPluginAvailable,
+      getPluginAccess,
       getSessionContext: async () => ({ workingDir: '/repo/disabled' }),
       getStatus,
     });
@@ -110,9 +146,37 @@ describe('iOS Simulator IPC handlers', () => {
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
         sessionId: 'session-a',
       }),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
-    expect(isPluginAvailable).toHaveBeenCalledWith('/repo/disabled');
+    ).rejects.toMatchObject({ code: 'IOS_SIMULATOR_DISABLED' });
+    expect(getPluginAccess).toHaveBeenCalledWith('/repo/disabled');
     expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['not-installed', 'IOS_SIMULATOR_PLUGIN_REQUIRED'],
+    ['disabled', 'IOS_SIMULATOR_PLUGIN_DISABLED'],
+    ['disabled-in-workdir', 'IOS_SIMULATOR_DISABLED'],
+    ['session-unavailable', 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE'],
+  ] as const)('preserves the plugin access reason %s across IPC', async (reason, code) => {
+    const harness = new IpcHarness();
+    registerTrusted(harness, {
+      getPluginAccess: () => ({
+        allowed: false,
+        errorCode:
+          reason === 'not-installed'
+            ? 'IOS_SIMULATOR_PLUGIN_REQUIRED'
+            : reason === 'disabled-in-workdir'
+              ? 'IOS_SIMULATOR_DISABLED'
+              : 'IOS_SIMULATOR_PLUGIN_DISABLED',
+        message: 'safe plugin gate message',
+        data: { reason },
+      }),
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code });
   });
 
   it('returns the explicit native confirmation result for a manual access request', async () => {
@@ -123,7 +187,8 @@ describe('iOS Simulator IPC handlers', () => {
       return true;
     });
     registerTrusted(harness, {
-      hasSessionAccess: () => granted,
+      getSessionAccess: () => (granted ? { sessionId: 'session-a', generation: 1 } : null),
+      hasViewerAccess: () => granted,
       requestSessionAccess,
     });
 
@@ -142,7 +207,8 @@ describe('iOS Simulator IPC handlers', () => {
     const harness = new IpcHarness();
     const requestSessionAccess = vi.fn(async () => false);
     registerTrusted(harness, {
-      hasSessionAccess: () => false,
+      getSessionAccess: () => null,
+      hasViewerAccess: () => false,
       requestSessionAccess,
     });
 
@@ -160,7 +226,8 @@ describe('iOS Simulator IPC handlers', () => {
     );
     const reportError = vi.fn();
     registerTrusted(harness, {
-      hasSessionAccess: () => false,
+      getSessionAccess: () => null,
+      hasViewerAccess: () => false,
       requestSessionAccess: vi.fn(async () => {
         throw internalError;
       }),
@@ -303,8 +370,8 @@ describe('iOS Simulator IPC handlers', () => {
       };
     });
     registerTrusted(harness, {
-      hasSessionAccess: () => hasAccess,
-      getSessionAccess: () => (hasAccess ? { sessionId: 'session-a', generation: 1 } : null),
+      hasViewerAccess: () => hasAccess,
+      getViewerAccess: () => (hasAccess ? { sessionId: 'session-a', generation: 1 } : null),
       getStatus,
       reportError,
     });
@@ -331,7 +398,7 @@ describe('iOS Simulator IPC handlers', () => {
       };
     });
     registerTrusted(harness, {
-      getSessionAccess: () => ({ sessionId: 'session-a', generation: grantGeneration }),
+      getViewerAccess: () => ({ sessionId: 'session-a', generation: grantGeneration }),
       getStatus,
       reportError,
     });
@@ -385,9 +452,9 @@ describe('iOS Simulator IPC handlers', () => {
     const callTool = vi.fn();
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
-      isPluginAvailable: () => true,
+      getPluginAccess: () => ({ allowed: true }),
       getSessionContext: async () => ({ workingDir: '/repo/session-a' }),
-      hasSessionAccess: () => false,
+      hasViewerAccess: () => false,
       getStatus,
       callTool,
     });
@@ -406,6 +473,75 @@ describe('iOS Simulator IPC handlers', () => {
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     expect(getStatus).not.toHaveBeenCalled();
     expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it('restores retained Viewer access without lending the active mutation grant', async () => {
+    const harness = new IpcHarness();
+    const getStatus = vi.fn(async () => ({
+      ok: false as const,
+      sessionId: 'session-a',
+      errorCode: 'UNSUPPORTED_SESSION_KIND' as const,
+      message: 'viewer status',
+    }));
+    const setViewerVisibility = vi.fn(async () => ({ ok: true as const, data: {} }));
+    const callTool = vi.fn();
+    const updateViewerTouch = vi.fn();
+    registerTrusted(harness, {
+      getSessionAccess: () => ({ sessionId: 'session-b', generation: 2 }),
+      getViewerAccess: (_target, sessionId) =>
+        sessionId === 'session-a' ? { sessionId, generation: 1 } : null,
+      hasViewerAccess: (_target, sessionId) => sessionId === 'session-a',
+      getStatus,
+      setViewerVisibility,
+      callTool,
+      updateViewerTouch,
+    });
+    const route = {
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 3,
+      leaseId: 'lease-a',
+    };
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).resolves.toMatchObject({ sessionId: 'session-a' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+        ...route,
+        visible: false,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+        sessionId: 'session-a',
+        name: 'attach_device',
+        args: {},
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
+        ...route,
+        gestureId: 'gesture-a',
+        phase: 'begin',
+        xRatio: 0.5,
+        yRatio: 0.5,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_RETRY_NATIVE_ROUTE, {
+        ...route,
+        viewerToken: 'viewer-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    expect(getStatus).toHaveBeenCalledWith('session-a');
+    expect(setViewerVisibility).toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+    expect(updateViewerTouch).not.toHaveBeenCalled();
   });
 
   it('validates and routes user lifecycle calls through the shared host', async () => {

@@ -62,6 +62,46 @@ type StandardStreamProfileName = 'low' | 'balanced' | 'high';
 type StreamProfileName = StandardStreamProfileName | 'experimental60';
 type StreamProfile = { framesPerSecond: number; jpegQuality: number; scalingPercent: number };
 type NativeStreamProfile = { framesPerSecond: number; scalingPercent: number };
+type StatusErrorKey =
+  | 'rightSidebar.iosSimulator.connectionError'
+  | 'rightSidebar.iosSimulator.pluginNotInstalled'
+  | 'rightSidebar.iosSimulator.pluginDisabled'
+  | 'rightSidebar.iosSimulator.pluginDisabledForProject'
+  | 'rightSidebar.iosSimulator.pluginSessionUnavailable'
+  | 'rightSidebar.iosSimulator.pluginStateChanging'
+  | 'rightSidebar.iosSimulator.statusInternalError';
+
+function statusErrorI18nKey(error: unknown): StatusErrorKey {
+  switch (extractIpcError(error)?.code) {
+    case 'IOS_SIMULATOR_PLUGIN_REQUIRED':
+      return 'rightSidebar.iosSimulator.pluginNotInstalled';
+    case 'IOS_SIMULATOR_PLUGIN_DISABLED':
+      return 'rightSidebar.iosSimulator.pluginDisabled';
+    case 'IOS_SIMULATOR_DISABLED':
+      return 'rightSidebar.iosSimulator.pluginDisabledForProject';
+    case 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE':
+      return 'rightSidebar.iosSimulator.pluginSessionUnavailable';
+    case 'PRECONDITION_FAILED':
+      return 'rightSidebar.iosSimulator.pluginStateChanging';
+    case 'INTERNAL':
+      return 'rightSidebar.iosSimulator.statusInternalError';
+    default:
+      return 'rightSidebar.iosSimulator.connectionError';
+  }
+}
+
+function statusErrorInvalidatesSimulatorAccess(error: unknown): boolean {
+  switch (extractIpcError(error)?.code) {
+    case 'IOS_SIMULATOR_PLUGIN_REQUIRED':
+    case 'IOS_SIMULATOR_PLUGIN_DISABLED':
+    case 'IOS_SIMULATOR_DISABLED':
+    case 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE':
+    case 'PRECONDITION_FAILED':
+      return true;
+    default:
+      return false;
+  }
+}
 
 function actionErrorI18nKey(errorCode: string): string {
   switch (errorCode) {
@@ -283,7 +323,7 @@ export function IOSSimulatorTabBody({
   const [routeStatuses, setRouteStatuses] = useState<Record<string, IOSSimulatorPublicRouteStatus>>(
     {},
   );
-  const [transportError, setTransportError] = useState(false);
+  const [statusErrorKey, setStatusErrorKey] = useState<StatusErrorKey | null>(null);
   const [accessRequired, setAccessRequired] = useState(false);
   const [requestingAccess, setRequestingAccess] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -396,7 +436,7 @@ export function IOSSimulatorTabBody({
   const refresh = useCallback(async () => {
     const requestVersion = ++requestVersionRef.current;
     setRefreshing(true);
-    setTransportError(false);
+    setStatusErrorKey(null);
     try {
       const next = await window.electronAPI.maker.iosSimulator.status({
         sessionId: ctx.sessionId,
@@ -413,7 +453,12 @@ export function IOSSimulatorTabBody({
           setStatus(null);
           setRouteStatuses({});
         } else {
-          setTransportError(true);
+          setAccessRequired(false);
+          if (statusErrorInvalidatesSimulatorAccess(error)) {
+            setStatus(null);
+            setRouteStatuses({});
+          }
+          setStatusErrorKey(statusErrorI18nKey(error));
         }
       }
       return null;
@@ -424,7 +469,7 @@ export function IOSSimulatorTabBody({
 
   const requestAccess = useCallback(async () => {
     setRequestingAccess(true);
-    setTransportError(false);
+    setStatusErrorKey(null);
     try {
       const result = await window.electronAPI.maker.iosSimulator.requestAccess({
         sessionId: ctx.sessionId,
@@ -433,8 +478,13 @@ export function IOSSimulatorTabBody({
         setAccessRequired(false);
         await refresh();
       }
-    } catch {
-      setTransportError(true);
+    } catch (error) {
+      if (extractIpcError(error)?.code === 'PERMISSION_DENIED') {
+        setAccessRequired(true);
+      } else {
+        setAccessRequired(false);
+        setStatusErrorKey(statusErrorI18nKey(error));
+      }
     } finally {
       setRequestingAccess(false);
     }
@@ -1674,7 +1724,7 @@ export function IOSSimulatorTabBody({
           />
         </header>
 
-        {!status && !transportError && !accessRequired && (
+        {!status && !statusErrorKey && !accessRequired && (
           <StatusCard icon={RefreshCw} title={t('rightSidebar.iosSimulator.checking')} />
         )}
 
@@ -1709,11 +1759,11 @@ export function IOSSimulatorTabBody({
           </div>
         )}
 
-        {transportError && (
+        {statusErrorKey && (
           <StatusCard
             icon={AlertTriangle}
             title={t('rightSidebar.iosSimulator.unavailableTitle')}
-            description={t('rightSidebar.iosSimulator.connectionError')}
+            description={t(statusErrorKey)}
           />
         )}
 

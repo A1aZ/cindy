@@ -4744,6 +4744,8 @@ type ReaderOptionKind =
   | 'filter'
   | 'aux-file'
   | 'aux-file-list'
+  | 'named-data'
+  | 'named-file'
   | 'type-definition'
   | 'type-include'
   | 'type-exclude'
@@ -4775,6 +4777,11 @@ const SED_LONG_OPTIONS: readonly ReaderLongOption[] = [
 ];
 const JQ_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--from-file', kind: 'data-file' },
+  { name: '--arg', kind: 'named-data' },
+  { name: '--argjson', kind: 'named-data' },
+  { name: '--argfile', kind: 'named-file' },
+  { name: '--slurpfile', kind: 'named-file' },
+  { name: '--rawfile', kind: 'named-file' },
 ];
 const DIFF_LONG_OPTIONS: readonly ReaderLongOption[] = [
   { name: '--from-file', kind: 'data-file' },
@@ -5137,7 +5144,8 @@ function readerOptionValueIsSensitive(
   if (kind === 'selector') return selectorCouldMatchCredential(value ?? '');
   if (!value || (kind !== 'data-file' && kind !== 'aux-file' && kind !== 'aux-file-list')) return false;
   const operands = kind === 'aux-file-list' ? value.split(/[:;]/) : [value];
-  return operands.some((operand) => shellOperandCouldMatchDotenv(operand, isSensitiveOperand));
+  return operands.some((operand) =>
+    isSensitiveOperand(operand) || selectorCouldMatchCredential(operand));
 }
 
 function readerArgumentsReadDotenv(
@@ -5162,6 +5170,15 @@ function readerArgumentsReadDotenv(
       const kind = resolveReaderLongOption(bin, name);
       if (kind) {
         const attached = equalsIndex >= 0 ? token.slice(equalsIndex + 1) : undefined;
+        if (kind === 'named-data' || kind === 'named-file') {
+          const nameValue = attached ?? args[index + 1];
+          const secondValue = attached === undefined ? args[index + 2] : args[index + 1];
+          if (nameValue === undefined || secondValue === undefined) return true;
+          if (kind === 'named-file'
+            && readerOptionValueIsSensitive('data-file', secondValue, isSensitiveOperand)) return true;
+          index += attached === undefined ? 2 : 1;
+          continue;
+        }
         const value = attached ?? args[index + 1];
         const isSensitive = readerOptionValueIsSensitive(kind, value, isSensitiveOperand);
         if (kind !== 'data' && isSensitive) return true;

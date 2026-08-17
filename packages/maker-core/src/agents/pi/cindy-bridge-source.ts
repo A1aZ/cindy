@@ -596,7 +596,10 @@ function bashDirectoryChangeHead(
   }
 
   let word = readShellRedirectionTarget(command, cursor);
-  if (!word.target || word.unresolved) {
+  if (word.target.includes('$') || word.target.charCodeAt(0) === 96) {
+    return { cursor, command: null, hadRedirection, unresolved: true };
+  }
+  if (!word.target) {
     if (unresolved && bashUnresolvedHeadHasDirectoryChange(codeMask, cursor)) {
       return { cursor, command: null, hadRedirection, unresolved: true };
     }
@@ -614,12 +617,17 @@ function bashDirectoryChangeHead(
         continue;
       }
       word = readShellRedirectionTarget(command, cursor);
-      if (wrapper !== 'command' || (word.target !== '--' && !/^-p+$/.test(word.target))) break;
+      const wrapperOption = word.target === '--'
+        || (wrapper === 'command' && /^-p+$/.test(word.target));
+      if (!wrapperOption) break;
       cursor = bashInlinePaddingEnd(command, word.end);
     }
-    if (!word.target || word.unresolved) return unresolved
+    if (!word.target) return unresolved
       ? { cursor, command: null, hadRedirection, unresolved: true }
       : null;
+    if (word.target.includes('$') || word.target.charCodeAt(0) === 96) {
+      return { cursor, command: null, hadRedirection, unresolved: true };
+    }
   }
 
   if ((word.target !== 'cd' && word.target !== 'pushd' && word.target !== 'popd') || word.unresolved) {
@@ -631,14 +639,14 @@ function bashDirectoryChangeHead(
   return { cursor: word.end, command: word.target, hadRedirection, unresolved };
 }
 
-type BashDirectoryState = { stack: string[] };
+type BashDirectoryState = { cwd: string; stack: string[] };
 const BASH_DIRECTORY_STATE_LIMIT = 128;
 const BASH_DIRECTORY_STACK_LIMIT = 128;
 
 function bashUniqueDirectoryStates(states: readonly BashDirectoryState[]): BashDirectoryState[] | null {
   const unique = new Map<string, BashDirectoryState>();
   for (const state of states) {
-    unique.set(state.stack.join('\u0000'), state);
+    unique.set([state.cwd, ...state.stack].join('\u0000'), state);
     if (unique.size > BASH_DIRECTORY_STATE_LIMIT) return null;
   }
   return [...unique.values()];
@@ -654,7 +662,7 @@ function bashPopdIndex(operand: string, stackLength: number): number | null {
 }
 
 function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBudget): BashPathCandidates {
-  let states: BashDirectoryState[] = [{ stack: [process.cwd()] }];
+  let states: BashDirectoryState[] = [{ cwd: process.cwd(), stack: [process.cwd()] }];
   let unresolved = false;
   const codeMask = bashShellCodeMask(command);
   const commandStart = /(?:^(?=[^;&|(){}\n])|[;&|(){}\n])\s*(?:(?:if|then|elif|else|while|until|do)\s+)?/g;
@@ -667,6 +675,8 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
       continue;
     }
     let cursor = head.cursor;
+    const precededByOrOperator = matchIndex > 0
+      && codeMask[matchIndex] === '|' && codeMask[matchIndex - 1] === '|';
     const changeDepth = bashSubshellDepthAt(codeMask, cursor);
     if (!bashSubshellScopeRemainsOpen(codeMask, cursor, changeDepth)) continue;
     let parsed = readShellRedirectionTarget(command, bashInlinePaddingEnd(command, cursor));
@@ -694,12 +704,7 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
 
     const pushdRotation = head.command === 'pushd'
       && !optionsEnded && /^[+-]\d+$/.test(parsed.target);
-    if (pushdRotation) {
-      // Rotation can include an inherited stack that is unavailable to this invocation.
-      unresolved = true;
-      continue;
-    }
-    if (head.command !== 'popd'
+    if (head.command !== 'popd' && !pushdRotation
       && (!parsed.target || parsed.unresolved || (!optionsEnded && parsed.target.startsWith('-')))) {
       unresolved = true;
       continue;
@@ -725,35 +730,52 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
     const changed: BashDirectoryState[] = [];
     let stateChangeUnresolved = false;
     if (head.command === 'popd') {
-      if (suppressDirectoryChange) {
-        unresolved = true;
-        continue;
-      }
       for (const state of states) {
-        const index = bashPopdIndex(parsed.target, state.stack.length);
+        let index = bashPopdIndex(parsed.target, state.stack.length);
+        // With -n, Bash preserves the current directory in slot 0; +0/-last
+        // therefore removes the first saved entry instead of the cwd slot.
+        if (suppressDirectoryChange && index === 0) index = 1;
         if (index === null || index < 0 || index >= state.stack.length
-          || (index === 0 && state.stack.length < 2)) {
+          || (!suppressDirectoryChange && index === 0 && state.stack.length < 2)) {
           stateChangeUnresolved = true;
           continue;
         }
         const stack = [...state.stack];
         stack.splice(index, 1);
-        changed.push({ stack });
+        const cwd = !suppressDirectoryChange && index === 0 ? stack[0] : state.cwd;
+        if (!cwd) {
+          stateChangeUnresolved = true;
+          continue;
+        }
+        changed.push({ cwd, stack });
+      }
+    } else if (pushdRotation) {
+      for (const state of states) {
+        const index = bashPopdIndex(parsed.target, state.stack.length);
+        if (index === null || index < 0 || index >= state.stack.length) {
+          stateChangeUnresolved = true;
+          continue;
+        }
+        const stack = [...state.stack.slice(index), ...state.stack.slice(0, index)];
+        // pushd -n rotates saved entries but pins the actual cwd back into slot 0.
+        const cwd = suppressDirectoryChange ? state.cwd : stack[0];
+        if (suppressDirectoryChange) stack[0] = state.cwd;
+        changed.push({ cwd, stack });
       }
     } else {
       for (const state of states) {
-        const cwd = state.stack[0];
+        const cwd = state.cwd;
         const expanded = bashExpandedPathCandidates(parsed.target, cwd, parsed.mayExpand, globBudget);
         unresolved ||= expanded.unresolved;
         for (const candidate of expanded.paths) {
           try {
             if (!statSync(candidate).isDirectory()) continue;
             if (head.command === 'cd') {
-              changed.push({ stack: [candidate, ...state.stack.slice(1)] });
+              changed.push({ cwd: candidate, stack: [candidate, ...state.stack.slice(1)] });
             } else if (suppressDirectoryChange) {
-              changed.push({ stack: [cwd, candidate, ...state.stack.slice(1)] });
+              changed.push({ cwd, stack: [cwd, candidate, ...state.stack.slice(1)] });
             } else if (state.stack.length < BASH_DIRECTORY_STACK_LIMIT) {
-              changed.push({ stack: [candidate, ...state.stack] });
+              changed.push({ cwd: candidate, stack: [candidate, ...state.stack] });
             } else {
               stateChangeUnresolved = true;
             }
@@ -769,7 +791,7 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
       codeMask.slice(operatorEvidence.end),
     );
     const retainsPriorState = operator === '||' || operator === ';' || operator === '\n'
-      || branchMayHaveBeenSkipped;
+      || branchMayHaveBeenSkipped || precededByOrOperator;
     const nextStates = retainsPriorState ? [...states, ...changed] : changed;
     if (nextStates.length > 0) {
       const unique = bashUniqueDirectoryStates(nextStates);
@@ -777,7 +799,7 @@ function bashWorkingDirectoryCandidates(command: string, globBudget: BashGlobBud
       else states = unique;
     }
   }
-  return { paths: [...new Set(states.map((state) => state.stack[0]))], unresolved };
+  return { paths: [...new Set(states.map((state) => state.cwd))], unresolved };
 }
 
 function bashShellCodeMask(command: string): string {

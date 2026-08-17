@@ -2132,6 +2132,13 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         for (const [sessionId, command] of [
           ['perm-auto-bash-symlink-dotenv-pushd-rotation', 'pushd sub >/dev/null; pushd ../stack-other >/dev/null; pushd +1 >/dev/null; cat<link'],
           ['perm-auto-bash-symlink-dotenv-popd', 'pushd sub; pushd ../stack-other; popd; cat<link'],
+          ['perm-auto-bash-symlink-dotenv-popd-index', 'pushd sub && pushd ../stack-other && popd +0 && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-builtin-terminator', 'builtin -- cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-dynamic-cd', 'D=cd; $D sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-interpolated-cd', 'UNSET=; c${UNSET}d sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-interpolated-builtin', 'UNSET=; bu${UNSET}iltin -- cd sub && cat<link'],
+          ['perm-auto-bash-symlink-dotenv-conditional-cd', 'true || cd sub && cat<cd-innocent'],
+          ['perm-auto-bash-symlink-dotenv-pushd-index', 'pushd sub && pushd ../stack-other && pushd +1 && cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-cd', 'X=1 cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-assignment-leading-redirect', 'X=1 2>/dev/null builtin cd sub && cat<link'],
           ['perm-auto-bash-symlink-dotenv-leading-assignment-wrapper', '2>/dev/null X=1 command -- cd sub && cat<link'],
@@ -2161,26 +2168,34 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.')), command).toBe(true);
         }
 
-        scriptedResponses.length = 0;
-        scriptedResponses.push(
-          anthropicToolUseBody('bash', {
-            command: 'pushd sub && popd && cat<link',
-          }),
-          anthropicStreamBody('bash ordinary popd turn finished'),
-        );
-        const ordinaryPopdReqBefore = seenRequests.length;
-        const ordinaryPopdTurn = await runPermissionTurn({
-          sessionId: 'perm-full-access-bash-popd-plain',
-          workingDir,
-          permissionMode: 'bypassPermissions',
-          resolverBehavior: 'allow',
-        });
-        expect(ordinaryPopdTurn.resolverTools).toEqual([]);
-        const ordinaryPopdFollowUp = seenRequests.slice(ordinaryPopdReqBefore)
-          .map((request) => request.body);
-        expect(ordinaryPopdFollowUp.some((body) => body.includes('ordinary-content'))).toBe(true);
-        expect(ordinaryPopdFollowUp.some((body) => body.includes('FAKE_REDIRECT_DOTENV_SECRET')))
-          .toBe(false);
+        for (const [sessionId, command] of [
+          ['perm-full-access-bash-popd-plain', 'pushd sub && popd && cat<link'],
+          ['perm-full-access-bash-builtin-terminator-plain', 'builtin -- cd sub && cat<ordinary'],
+          ['perm-full-access-bash-popd-index-plain', 'pushd sub && pushd ../stack-other && popd +1 && cat<link'],
+          ['perm-full-access-bash-pushd-zero-plain', 'pushd +0 && cat<link'],
+          ['perm-full-access-bash-popd-no-cd-plain', 'pushd sub && pushd ../stack-other && popd -n +1 && cat<link'],
+          ['perm-full-access-bash-pushd-no-cd-plain', 'pushd sub && pushd ../stack-other && pushd -n +1 && cat<link'],
+          ['perm-full-access-bash-conditional-cd-plain', 'false || cd sub && cat<ordinary'],
+        ] as const) {
+          scriptedResponses.length = 0;
+          scriptedResponses.push(
+            anthropicToolUseBody('bash', { command }),
+            anthropicStreamBody('bash ordinary cwd turn finished'),
+          );
+          const ordinaryReqBefore = seenRequests.length;
+          const ordinaryTurn = await runPermissionTurn({
+            sessionId,
+            workingDir,
+            permissionMode: 'bypassPermissions',
+            resolverBehavior: 'allow',
+          });
+          expect(ordinaryTurn.resolverTools, command).toEqual([]);
+          const ordinaryFollowUp = seenRequests.slice(ordinaryReqBefore)
+            .map((request) => request.body);
+          expect(ordinaryFollowUp.some((body) => body.includes('ordinary-content')), command).toBe(true);
+          expect(ordinaryFollowUp.some((body) => body.includes('FAKE_REDIRECT_DOTENV_SECRET')), command)
+            .toBe(false);
+        }
 
         scriptedResponses.length = 0;
         scriptedResponses.push(

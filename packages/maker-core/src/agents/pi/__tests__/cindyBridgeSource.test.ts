@@ -487,6 +487,7 @@ describe('cindy-bridge extension source', () => {
           `builtin 2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
           `command -p 2>/dev/null cd ${nestedDir} && cat <${cwdSwitchName}`,
           `command -- cd ${nestedDir} && cat <${cwdSwitchName}`,
+          `builtin -- cd ${nestedDir} && cat <${cwdSwitchName}`,
           `builtin command cd ${nestedDir} && cat <${cwdSwitchName}`,
           `command builtin 2>/dev/null pushd ${nestedDir} && cat <${cwdSwitchName}`,
           `{saved}>/dev/null builtin cd ${nestedDir} && cat <${cwdSwitchName}`,
@@ -538,8 +539,23 @@ describe('cindy-bridge extension source', () => {
           ].includes(target)), command).toBe(true);
         }
         for (const command of [
+          `D=cd; $D ${nestedDir} && cat <${cwdSwitchName}`,
+          `UNSET=; c${'${UNSET}'}d ${nestedDir} && cat <${cwdSwitchName}`,
+          `UNSET=; bu${'${UNSET}'}iltin -- cd ${nestedDir} && cat <${cwdSwitchName}`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command)
+            .toEqual({ targets: [rootCwdSwitchOrdinaryLink], unresolved: true });
+        }
+        const mixedConditionalCommand = `true || cd ${nestedDir} && cat <${scopedLinkName}`;
+        const mixedConditionalEvidence = context.bashInputReadEvidence?.({ command: mixedConditionalCommand });
+        expect(mixedConditionalEvidence?.targets, mixedConditionalCommand)
+          .toEqual([rootScopedSecretLink, nestedScopedOrdinaryLink]);
+        expect(context.collectResolvedCredentialPaths?.(mixedConditionalEvidence?.targets))
+          .toEqual([realpathSync(secretPath)]);
+        for (const command of [
           `pushd ${nestedDir} && pushd ${stackOtherDir} && popd && cat <${cwdSwitchName}`,
           `pushd ${nestedDir} && pushd ${stackOtherDir} && builtin popd +0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -2 && cat <${cwdSwitchName}`,
           `pushd -n ${nestedDir} && popd && cat <${cwdSwitchName}`,
         ]) {
           const evidence = context.bashInputReadEvidence?.({ command });
@@ -558,13 +574,36 @@ describe('cindy-bridge extension source', () => {
         }
         for (const command of [
           `pushd ${nestedDir} && pushd ${stackOtherDir} && popd +1 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd +2 && cat <${cwdSwitchName}`,
           `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -1 && cat <${cwdSwitchName}`,
         ]) {
           expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
             targets: [stackOtherOrdinaryLink],
             unresolved: false,
           });
         }
+        for (const command of [
+          `pushd +0 && cat <ordinary-link.txt`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && pushd +0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -n +0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -n +1 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -n -0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && popd -n +0 && pushd +0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && pushd -n +0 && cat <${cwdSwitchName}`,
+          `pushd ${nestedDir} && pushd ${stackOtherDir} && pushd -n +1 && cat <${cwdSwitchName}`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command).toEqual({
+            targets: [command.startsWith('pushd +0') ? ordinaryLink : stackOtherOrdinaryLink],
+            unresolved: false,
+          });
+        }
+        const pushdRotationCommand = `pushd ${nestedDir} && pushd ${stackOtherDir} && pushd +1 && cat <${cwdSwitchName}`;
+        const pushdRotationEvidence = context.bashInputReadEvidence?.({ command: pushdRotationCommand });
+        expect(pushdRotationEvidence, pushdRotationCommand)
+          .toEqual({ targets: [nestedCwdSwitchSecretLink], unresolved: false });
+        expect(context.collectResolvedCredentialPaths?.(pushdRotationEvidence?.targets))
+          .toEqual([realpathSync(secretPath)]);
         const sequentialPopdCommand = `pushd ${nestedDir}; pushd ${stackOtherDir}; popd; cat <${cwdSwitchName}`;
         const sequentialPopdEvidence = context.bashInputReadEvidence?.({ command: sequentialPopdCommand });
         expect(sequentialPopdEvidence?.unresolved, sequentialPopdCommand).toBe(true);
@@ -606,10 +645,13 @@ describe('cindy-bridge extension source', () => {
         expect(context.bashInputReadEvidence?.({
           command: '>$(printf cd) cat <ordinary-link.txt',
         })).toEqual({ targets: [ordinaryLink], unresolved: false });
-        const ordinaryPrefixedCommand = `2>/dev/null builtin cd ${nestedDir} && cat <${nestedOrdinaryReadName}`;
+        const ordinaryPrefixedCommand = `2>/dev/null builtin -- cd ${nestedDir} && cat <${nestedOrdinaryReadName}`;
         const ordinaryPrefixedEvidence = context.bashInputReadEvidence?.({ command: ordinaryPrefixedCommand });
         expect(ordinaryPrefixedEvidence).toEqual({ targets: [nestedOrdinaryReadLink], unresolved: false });
         expect(context.collectResolvedCredentialPaths?.(ordinaryPrefixedEvidence?.targets)).toEqual([]);
+        expect(context.bashInputReadEvidence?.({
+          command: `builtin $BUILTIN_OPTION cd ${nestedDir} && cat <ordinary-link.txt`,
+        })).toEqual({ targets: [ordinaryLink], unresolved: true });
 
         expect(context.bashInputReadEvidence?.({
           command: `cd ${nestedDir} >/dev/null && cat <${scopedLinkName}`,

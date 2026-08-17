@@ -401,6 +401,42 @@ describe('cindy-bridge extension source', () => {
           command: `cd ${dotglobDir} && cat <*>`,
         })).toEqual({ targets: [], unresolved: true });
         delete context.process.env.BASHOPTS;
+        for (const command of [
+          `cd ${dotglobDir} && shopt -s dotglob; cat <*>`,
+          `cd ${dotglobDir} && builtin shopt -s nullglob dotglob && cat <*>`,
+          `cd ${dotglobDir} && builtin 2>/dev/null shopt -s dotglob; cat <*>`,
+          `cd ${dotglobDir} && command shopt -u dotglob; cat <*>`,
+          `cd ${dotglobDir} && set +f; cat <*>`,
+          `cd ${dotglobDir} && set -o noglob; cat <*>`,
+          `cd ${dotglobDir} && GLOBIGNORE=ordinary; cat <*>`,
+          `cd ${dotglobDir} && export GLOBIGNORE=ordinary; cat <*>`,
+          `cd ${dotglobDir} && declare GLOBIGNORE=ordinary; cat <*>`,
+          `cd ${dotglobDir} && printf -v GLOBIGNORE ordinary; cat <*>`,
+          `cd ${dotglobDir} && read GLOBIGNORE <<<ordinary; cat <*>`,
+          `cd ${dotglobDir} && unset GLOBIGNORE; cat <*>`,
+          `cd ${dotglobDir} && trap 'shopt -s dotglob' DEBUG; cat <*>`,
+          `cd ${dotglobDir} && LC_COLLATE=C; cat <[.-0]env`,
+          `HOME=${dotglobDir}; cat <~/*`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command)
+            .toEqual({ targets: [], unresolved: true });
+        }
+        for (const command of [
+          `cd ${ordinaryGlobDir} && shopt -q dotglob; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && shopt -p dotglob; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && set -euo pipefail; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && printf '%s' GLOBIGNORE; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && printf '%s' "$GLOBIGNORE"; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && >$LOG shopt -q dotglob; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && GLOBIGNORE_TEXT=x; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && trap; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && (shopt -s dotglob); cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && bash -O dotglob -c true; cat <ordinary*`,
+          `cd ${ordinaryGlobDir} && shopt -s dotglob <ordinary*`,
+        ]) {
+          expect(context.bashInputReadEvidence?.({ command }), command)
+            .toEqual({ targets: [ordinaryGlobPath], unresolved: false });
+        }
         expect(context.bashInputReadEvidence?.({
           command: `cd ${ordinaryGlobDir} && cat <*.txt`,
         })).toEqual({ targets: [ordinaryGlobPath], unresolved: false });

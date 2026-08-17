@@ -2229,7 +2229,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it.skipIf(process.platform === 'win32')(
-    'redirect globs fail closed on inherited Bash options while ordinary globs stay fast',
+    'redirect globs fail closed on inherited or runtime Bash options while ordinary globs stay fast',
     { timeout: 60_000 },
     async () => {
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-auto-bash-glob-options-'));
@@ -2275,6 +2275,48 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           .toBe(true);
 
         delete process.env.BASHOPTS;
+        for (const [sessionId, command] of [
+          ['perm-auto-bash-runtime-dotglob', 'shopt -s dotglob; cat <*>'],
+          ['perm-auto-bash-runtime-globignore', 'GLOBIGNORE=ordinary.txt; cat <*>'],
+        ] as const) {
+          scriptedResponses.length = 0;
+          scriptedResponses.push(
+            anthropicToolUseBody('bash', { command }),
+            anthropicStreamBody('bash runtime glob state turn finished'),
+          );
+          const runtimeReqBefore = seenRequests.length;
+          const runtimeTurn = await runPermissionTurn({
+            sessionId,
+            workingDir,
+            permissionMode: 'auto',
+            resolverBehavior: 'deny',
+          });
+          expect(runtimeTurn.resolverTools, command).toEqual(['bash']);
+          const runtimeFollowUp = seenRequests.slice(runtimeReqBefore).map((request) => request.body);
+          expect(runtimeFollowUp.some((body) => body.includes('FAKE_DOTGLOB_SECRET')), command).toBe(false);
+          expect(runtimeFollowUp.some((body) => body.includes('User denied this tool call via Cindy.')), command)
+            .toBe(true);
+        }
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'shopt -s dotglob; cat <*' }),
+          anthropicStreamBody('bash Full Access runtime dotglob turn finished'),
+        );
+        const runtimeFullAccessReqBefore = seenRequests.length;
+        const runtimeFullAccessTurn = await runPermissionTurn({
+          sessionId: 'perm-full-access-bash-runtime-dotglob',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(runtimeFullAccessTurn.resolverTools).toEqual([]);
+        const runtimeFullAccessFollowUp = seenRequests.slice(runtimeFullAccessReqBefore)
+          .map((request) => request.body);
+        expect(runtimeFullAccessFollowUp.some((body) => body.includes('FAKE_DOTGLOB_SECRET'))).toBe(false);
+        expect(runtimeFullAccessFollowUp.some((body) =>
+          body.includes('Cindy blocks reading credential or key paths'))).toBe(true);
+
         scriptedResponses.length = 0;
         scriptedResponses.push(
           anthropicToolUseBody('bash', { command: 'cat <ordinary*' }),

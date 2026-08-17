@@ -332,8 +332,14 @@ function bashInputReadEvidence(input: unknown): BashInputReadEvidence {
   const globBudget = bashGlobBudget();
   let unresolved = parsed.hasUnresolvedTarget;
   const targets = parsed.targets.flatMap((target, index) => {
-    const cwdEvidence = bashWorkingDirectoryCandidates(parsed.targetPrefixes[index] ?? '', globBudget);
+    const prefix = parsed.targetPrefixes[index] ?? '';
+    const cwdEvidence = bashWorkingDirectoryCandidates(prefix, globBudget);
     unresolved ||= cwdEvidence.unresolved;
+    const mayExpand = parsed.targetMayExpand[index] === true;
+    if (mayExpand && bashRuntimeGlobExpansionIsUncertain(prefix, target)) {
+      unresolved = true;
+      return [];
+    }
     // POSIX allows a literal backslash in a filename, while the embedded runtime's
     // tool-call and execution stages have not normalized that shell input consistently.
     // Preserve the target and require consent unless canonical evidence settles it.
@@ -342,7 +348,7 @@ function bashInputReadEvidence(input: unknown): BashInputReadEvidence {
       const expanded = bashExpandedPathCandidates(
         target,
         cwd,
-        parsed.targetMayExpand[index] === true,
+        mayExpand,
         globBudget,
       );
       unresolved ||= expanded.unresolved;
@@ -706,6 +712,171 @@ function bashOpaqueEvaluatorCompletesBeforeRead(
     if (depth !== initialDepth || !/[;&|\n]/.test(char)) continue;
     if (char === '\n' && bashCharacterIsEscapedAt(command, index)) continue;
     return true;
+  }
+  return false;
+}
+
+const BASH_GLOB_SEMANTIC_VARIABLES: ReadonlySet<string> = new Set([
+  'BASH_COMPAT', 'GLOBIGNORE', 'HOME', 'LANG', 'LC_ALL', 'LC_COLLATE',
+]);
+const BASH_GLOB_VARIABLE_MUTATORS: ReadonlySet<string> = new Set([
+  'declare', 'export', 'getopts', 'let', 'local', 'mapfile', 'read', 'readarray',
+  'readonly', 'typeset', 'unset',
+]);
+
+type BashStaticArguments = { args: string[]; cursor: number; unresolved: boolean };
+
+function bashStaticArguments(command: string, start: number): BashStaticArguments {
+  const args: string[] = [];
+  let cursor = start;
+  let unresolved = false;
+  while (cursor < command.length) {
+    cursor = bashInlinePaddingEnd(command, cursor);
+    if (/[;&|(){}\n]/.test(command[cursor] ?? '') || command[cursor] === '#') break;
+    const redirection = bashLeadingRedirectionAt(command, cursor);
+    if (redirection) {
+      unresolved ||= redirection.unresolved;
+      cursor = redirection.end;
+      continue;
+    }
+    const word = readShellRedirectionTarget(command, cursor);
+    if (!word.target) break;
+    args.push(word.target);
+    unresolved ||= word.unresolved;
+    cursor = word.end;
+  }
+  return { args, cursor, unresolved };
+}
+
+function bashGlobVariableFromWord(word: string): string | null {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\+?=|$)/.exec(word);
+  return match?.[1] ?? null;
+}
+
+function bashShoptMutatesGlob(args: readonly string[], unresolved: boolean): boolean {
+  if (unresolved) return true;
+  let mutates = false;
+  let optionsEnded = false;
+  const names: string[] = [];
+  for (const arg of args) {
+    if (!optionsEnded && arg === '--') {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && /^-[^-]/.test(arg)) {
+      if (arg.slice(1).includes('s') || arg.slice(1).includes('u')) mutates = true;
+      continue;
+    }
+    names.push(arg);
+  }
+  return mutates && names.some((name) =>
+    name === 'noglob' || BASH_PATHNAME_SHOPT_OPTIONS.has(name));
+}
+
+function bashSetMutatesGlob(args: readonly string[], unresolved: boolean): boolean {
+  if (unresolved) return true;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--') break;
+    if (/^[+-][^-]*f/.test(arg)) return true;
+    if ((arg === '-o' || arg === '+o') && /^(?:noglob|posix)$/.test(args[index + 1] ?? '')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function bashVariableBuiltinMutatesGlob(
+  command: string,
+  args: readonly string[],
+  unresolved: boolean,
+  relevantVariables: ReadonlySet<string>,
+): boolean {
+  if (command === 'printf') {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      const variable = arg === '-v' ? args[index + 1] : arg.startsWith('-v') ? arg.slice(2) : '';
+      if (!variable) continue;
+      if (relevantVariables.has(variable) || variable.includes('$') || variable.charCodeAt(0) === 96) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (unresolved) return true;
+  return args.some((arg) => {
+    const variable = bashGlobVariableFromWord(arg);
+    return variable !== null && relevantVariables.has(variable);
+  });
+}
+
+function bashRuntimeGlobExpansionIsUncertain(command: string, target: string): boolean {
+  const pathnameExpansion = /[?*\[]/.test(target) || /[@+?!*]\(/.test(target);
+  const tildeExpansion = target.startsWith('~');
+  if (!pathnameExpansion && !tildeExpansion) return false;
+
+  const relevantVariables = new Set<string>();
+  if (pathnameExpansion) {
+    for (const variable of BASH_GLOB_SEMANTIC_VARIABLES) relevantVariables.add(variable);
+    relevantVariables.delete('HOME');
+  }
+  if (tildeExpansion) relevantVariables.add('HOME');
+
+  const codeMask = bashShellCodeMask(command);
+  const commandStart = /(?:^(?=[^;&|(){}\n])|[;&|(){}\n])\s*(?:(?:if|then|elif|else|while|until|do)\s+)?/g;
+  for (const match of codeMask.matchAll(commandStart)) {
+    let cursor = bashInlinePaddingEnd(command, (match.index ?? 0) + match[0].length);
+    let assignmentMutation = false;
+    while (true) {
+      const redirection = bashLeadingRedirectionAt(command, cursor);
+      if (redirection) {
+        cursor = bashInlinePaddingEnd(command, redirection.end);
+        continue;
+      }
+      const assignment = bashAssignmentPrefixAt(command, cursor);
+      if (!assignment) break;
+      assignmentMutation ||= relevantVariables.has(assignment.name);
+      cursor = bashInlinePaddingEnd(command, assignment.end);
+    }
+
+    let word = readShellRedirectionTarget(command, cursor);
+    while (word.target === 'command' || word.target === 'builtin') {
+      const wrapper = word.target;
+      cursor = bashInlinePaddingEnd(command, word.end);
+      while (true) {
+        const redirection = bashLeadingRedirectionAt(command, cursor);
+        if (redirection) {
+          cursor = bashInlinePaddingEnd(command, redirection.end);
+          continue;
+        }
+        word = readShellRedirectionTarget(command, cursor);
+        const wrapperOption = word.target === '--'
+          || (wrapper === 'command' && /^-p+$/.test(word.target));
+        if (!wrapperOption) break;
+        cursor = bashInlinePaddingEnd(command, word.end);
+      }
+    }
+
+    const depth = bashSubshellDepthAt(codeMask, word.end || cursor);
+    if (!bashSubshellScopeRemainsOpen(codeMask, word.end || cursor, depth)) continue;
+    if (assignmentMutation) return true;
+    if (!word.target) continue;
+
+    const args = bashStaticArguments(command, word.end);
+    const completion = bashOperatorAfterRedirections(command, args.cursor);
+    if (!completion.operator) continue;
+    const argsUnresolved = word.unresolved || args.unresolved;
+    if (pathnameExpansion && word.target === 'shopt'
+      && bashShoptMutatesGlob(args.args, argsUnresolved)) return true;
+    if (pathnameExpansion && word.target === 'set'
+      && bashSetMutatesGlob(args.args, argsUnresolved)) return true;
+    if (pathnameExpansion && word.target === 'trap' && (argsUnresolved || args.args.length > 0)) {
+      return true;
+    }
+    if ((BASH_GLOB_VARIABLE_MUTATORS.has(word.target) || word.target === 'printf')
+      && bashVariableBuiltinMutatesGlob(word.target, args.args, argsUnresolved, relevantVariables)) {
+      return true;
+    }
   }
   return false;
 }

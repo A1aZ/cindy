@@ -112,6 +112,7 @@ import type { ListAgentSkillsOptions, ListAgentSkillsResult } from '../../types/
 import type { ListCustomizationsOptions, ListCustomizationsResult } from '../../types/customizations.js';
 import { scanPiCustomizations } from './customization-scanner.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
+import { formatManagedImageReferences } from '../shared/managed-image-reference.js';
 import { resolveMcpToolTarget } from '../shared/mcp-tool-target.js';
 import {
   assertReviewMessageContentPaths,
@@ -499,6 +500,8 @@ async function buildPiPrompt(
       }
     }
   }
+  const managedImageReferences = formatManagedImageReferences(message.content);
+  if (managedImageReferences) textParts.push(managedImageReferences);
   return { text: textParts.join(' ').trim(), images };
 }
 

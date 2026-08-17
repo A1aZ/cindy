@@ -194,6 +194,8 @@ describe('mobile settings overview', () => {
     expect(dictionaryOpenIndex).toBeGreaterThan(-1);
     expect(hydrateIndex).toBeGreaterThan(dictionaryEffectIndex);
     expect(source).toContain('[desktopDevices, dictionaryScreenOpen, refreshVoiceDictionary]');
+    expect(source).toContain('[desktopDevices, invoke]');
+    expect(source).not.toContain('[desktopDevices, deviceLink]');
     expect(source).toContain('subscribeMobileVoiceDictionaryCache(() => {');
   });
 

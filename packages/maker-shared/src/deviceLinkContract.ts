@@ -91,6 +91,12 @@ export type MobileVoiceDictionarySnapshotResult =
        * 拿它当完整答案会漏词。老版本被控端不带这个字段,手机退回按到达时间比较。
        */
       stateVector?: Record<string, string>;
+      /**
+       * 桌面生成这份投影的本地时间(unix ms)。同一台电脑、同一代版本向量里,
+       * 用它而不是手机到达时间判断谁先发出 —— 晚到的旧拉取不能盖掉先发出的新推送。
+       * 老版本被控端不带这个字段。
+       */
+      emittedAt?: number;
     }
   | {
       ok: false;

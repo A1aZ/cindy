@@ -92,6 +92,8 @@ export interface MobileVoiceDictionarySnapshot {
   fetchedAt: number;
   /** 被控端上报的版本向量 `{nodeId: 最大 HLC}`;老版本被控端没有。 */
   stateVector?: Record<string, string>;
+  /** 桌面生成投影的时间;有则优先于 fetchedAt 做并列时的先后判断。 */
+  emittedAt?: number;
 }
 
 /**
@@ -129,10 +131,22 @@ export function isFresherMobileVoiceDictionarySnapshot(
     const candidateDominates = dominates(candidate.stateVector, best.stateVector);
     const bestDominates = dominates(best.stateVector, candidate.stateVector);
     if (candidateDominates !== bestDominates) return candidateDominates;
-    return candidate.fetchedAt > best.fetchedAt;
+    return isLaterSnapshot(candidate, best);
   }
   if (candidate.stateVector) return true;
   if (best.stateVector) return false;
+  return isLaterSnapshot(candidate, best);
+}
+
+function isLaterSnapshot(
+  candidate: MobileVoiceDictionarySnapshot,
+  best: MobileVoiceDictionarySnapshot,
+): boolean {
+  if (candidate.emittedAt !== undefined && best.emittedAt !== undefined) {
+    return candidate.emittedAt > best.emittedAt;
+  }
+  if (candidate.emittedAt !== undefined) return true;
+  if (best.emittedAt !== undefined) return false;
   return candidate.fetchedAt > best.fetchedAt;
 }
 

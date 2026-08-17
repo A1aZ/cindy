@@ -261,6 +261,37 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.accessSnapshot(sidebar.target)?.sessionId).toBe('session-b');
   });
 
+  it('refreshes a cached hidden sidebar from the current Main grant before reuse', () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(551);
+    const sidebar = fakeWebContents(552);
+    let sidebarVisible = true;
+    registry.configureResolver((preferred) => {
+      if (!sidebarVisible && preferred === sidebar.target) return null;
+      return {
+        grantTargets: sidebarVisible ? [main.target, sidebar.target] : [main.target],
+        focusTarget: sidebarVisible ? sidebar.target : main.target,
+      };
+    });
+    registry.grantAndFocus('session-a');
+
+    sidebarVisible = false;
+    registry.grantAndFocus('session-b');
+    expect(registry.accessSnapshot(main.target)?.sessionId).toBe('session-b');
+    expect(registry.accessSnapshot(sidebar.target)?.sessionId).toBe('session-a');
+
+    expect(registry.syncForSessionChange(sidebar.target, null)).toBe(1);
+    expect(registry.accessSnapshot(main.target)?.sessionId).toBe('session-b');
+    expect(registry.accessSnapshot(sidebar.target)).toBeNull();
+    expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(true);
+
+    sidebarVisible = true;
+    expect(registry.inheritAccess(main.target, sidebar.target)).toBe(true);
+    expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(true);
+    expect(registry.hasAccess(sidebar.target, 'session-b')).toBe(true);
+    expect(registry.accessSnapshot(sidebar.target)?.sessionId).toBe('session-b');
+  });
+
   it('removes the inherited active grant when its session is revoked', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(57);

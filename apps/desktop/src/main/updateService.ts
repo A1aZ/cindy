@@ -153,6 +153,8 @@ let autoRelaunchPollTimer: ReturnType<typeof setInterval> | null = null;
 let isRelaunching = false;
 let lastErrorCode: string | undefined;
 let autoRelaunchInProgress = false;
+/** 资格检查(含异步 busyProbe)进行中的次数。清补丁必须避开这个窗口。 */
+let autoRelaunchDecisionDepth = 0;
 let lastAutoRelaunchBlockReason: AutoRelaunchBlockReason | null = null;
 let lastBusyAtMs: number | null = null;
 let lastResumeAtMs: number | null = null;
@@ -311,24 +313,36 @@ async function requestAutoRelaunch(
 ): Promise<AutoRelaunchRequestResult> {
   // The startup/splash apply path uses the lighter gate (no idle/busy checks —
   // nothing is in flight at launch); background triggers keep the full policy.
-  const blockReason = useStartupPolicy
-    ? await getStartupRelaunchBlockReason()
-    : await getAutoRelaunchBlockReasonForCurrentState();
-  if (blockReason) {
-    if (blockReason !== lastAutoRelaunchBlockReason) {
-      lastAutoRelaunchBlockReason = blockReason;
-      if (readAutoUpdateSettings().autoRelaunchOnIdle && currentStatus === 'ready') {
-        log.info('auto relaunch blocked (%s)', blockReason);
+  // 资格检查开始就抬深度:后台路径会 await busyProbe,这段空窗里 clearStagedPatch
+  // 若放行,随后 executeRelaunch 会走 no_ready_file。
+  autoRelaunchDecisionDepth += 1;
+  try {
+    const blockReason = useStartupPolicy
+      ? await getStartupRelaunchBlockReason()
+      : await getAutoRelaunchBlockReasonForCurrentState();
+    if (blockReason) {
+      if (blockReason !== lastAutoRelaunchBlockReason) {
+        lastAutoRelaunchBlockReason = blockReason;
+        if (readAutoUpdateSettings().autoRelaunchOnIdle && currentStatus === 'ready') {
+          log.info('auto relaunch blocked (%s)', blockReason);
+        }
       }
+      return { accepted: false, blockReason };
     }
-    return { accepted: false, blockReason };
-  }
 
-  lastAutoRelaunchBlockReason = null;
-  autoRelaunchInProgress = true;
-  log.info('auto relaunch conditions met (%s), applying update v%s', reason, readyVersion ?? '<unknown>');
-  executeRelaunch(theme);
-  return { accepted: true };
+    if (!readyFilePath || !fs.existsSync(readyFilePath)) {
+      log.info('auto relaunch aborted — staged patch disappeared during eligibility check');
+      return { accepted: false, blockReason: 'not-ready' };
+    }
+
+    lastAutoRelaunchBlockReason = null;
+    autoRelaunchInProgress = true;
+    log.info('auto relaunch conditions met (%s), applying update v%s', reason, readyVersion ?? '<unknown>');
+    executeRelaunch(theme);
+    return { accepted: true };
+  } finally {
+    autoRelaunchDecisionDepth = Math.max(0, autoRelaunchDecisionDepth - 1);
+  }
 }
 
 async function evaluateAutoRelaunch(reason: string): Promise<void> {
@@ -560,7 +574,7 @@ function removePatchInfo(): void {
 }
 
 function isUpdateApplyInFlight(): boolean {
-  return isRelaunching || autoRelaunchInProgress;
+  return isRelaunching || autoRelaunchInProgress || autoRelaunchDecisionDepth > 0;
 }
 
 /**

@@ -70,10 +70,31 @@ vi.mock('../auto-update-settings-store', () => ({
   writeAutoRelaunchOnIdle: vi.fn(),
 }));
 
+const tryEnableUncustomizedBeta = vi.fn(() => true);
+const readUpdateChannelSettings = vi.fn(() => ({
+  enableBeta: false,
+  orgDefaultEnableBeta: false,
+}));
+
 vi.mock('../manifestService', () => ({
   fetchManifest,
   getBaseUrl,
   isDev,
+}));
+
+vi.mock('../updateChannelStore', () => ({
+  readUpdateChannelSettings,
+  readUpdateChannelSettingsState: () => ({
+    value: readUpdateChannelSettings(),
+    isCustomized: false,
+    customizedKeys: [],
+    defaults: { enableBeta: false, orgDefaultEnableBeta: false },
+  }),
+  resetUpdateChannelSettings: () => ({ enableBeta: false, orgDefaultEnableBeta: false }),
+  writeEnableBeta: vi.fn(),
+  tryEnableUncustomizedBeta,
+  isEnableBetaUserCustomized: () => false,
+  isBetaChannelEnabled: () => readUpdateChannelSettings().enableBeta === true,
 }));
 
 vi.mock('../downloader/index', () => ({
@@ -158,6 +179,13 @@ beforeEach(() => {
   isDev.mockReset();
   isDev.mockReturnValue(false);
   download.mockReset();
+  tryEnableUncustomizedBeta.mockReset();
+  tryEnableUncustomizedBeta.mockReturnValue(true);
+  readUpdateChannelSettings.mockReset();
+  readUpdateChannelSettings.mockReturnValue({
+    enableBeta: false,
+    orgDefaultEnableBeta: false,
+  });
   readAutoUpdateSettings.mockReset();
   readAutoUpdateSettings.mockReturnValue({ autoRelaunchOnIdle: true });
   logInfo.mockReset();
@@ -466,6 +494,29 @@ describe('startup update relaunch safety', () => {
       isDev.mockReturnValue(true);
       expect(service.isUpdateRelaunchImminent()).toBe(false);
     } finally {
+      service.stopUpdateService();
+    }
+  });
+
+  it('does not clear the staged patch while busyProbe is still pending', async () => {
+    const service = await bootWithStagedPatch({ enabled: true });
+    let releaseProbe: ((busy: boolean) => void) | undefined;
+    const probeStarted = new Promise<void>((resolveStarted) => {
+      service.setUpdateAutoRelaunchBusyProbe(
+        () =>
+          new Promise<boolean>((resolveProbe) => {
+            resolveStarted();
+            releaseProbe = resolveProbe;
+          }),
+      );
+    });
+    try {
+      await probeStarted;
+      expect(service.getUpdateStatus()).toBe('ready');
+      expect(service.enableUncustomizedBetaChannel()).toBe(true);
+      expect(service.getUpdateStatus()).toBe('ready');
+    } finally {
+      releaseProbe?.(true);
       service.stopUpdateService();
     }
   });

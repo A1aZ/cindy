@@ -150,7 +150,9 @@ import {
 } from './lib/sidebarProjectVisibility';
 import {
   collectRestorableProjectKeys,
+  registerSidebarProjectRestoreHandler,
   restoreHiddenProjectIfPresent,
+  restoreSelectedHiddenProject,
 } from './lib/sidebarProjectRestore';
 import { PinnedSection, type PinnedSidebarEntry } from './sidebar/sections/PinnedSection';
 import { ProjectNode as ProjectNodeView } from './sidebar/sections/ProjectNode';
@@ -203,6 +205,7 @@ import { hasSessionSelectionModifier, type SessionClickModifiers } from './sideb
 import type { SessionMoveTarget } from './sidebar/sessionMoveTarget';
 import {
   DIALOGUE_FILTER_KEY,
+  projectFilterIncludes,
   mergeVisibleReorder,
   normalizeManualPinnedOrder,
 } from './hooks/helpers/sidebarFilterCore';
@@ -412,6 +415,31 @@ export function CCAgentSidebarUpper() {
   );
   const projectAliases = useProjectAliases();
   const searchProjectGroups = useProjectGroups(searchProjectSessions, projectAliases.aliases);
+  const restorableSelectionProjectKeys = useMemo(
+    () => new Set(searchProjectGroups.projects.map((project) => project.projectKey)),
+    [searchProjectGroups.projects],
+  );
+  const restorableSelectionProjectKeysRef = useRef(restorableSelectionProjectKeys);
+  restorableSelectionProjectKeysRef.current = restorableSelectionProjectKeys;
+  useLayoutEffect(
+    () =>
+      registerSidebarProjectRestoreHandler((projectKey) =>
+        restoreSelectedHiddenProject({
+          projectKey,
+          hiddenProjectKeys,
+          setProjectHidden: hiddenProjects.setProjectHidden,
+          getCurrentProjectKeys: () => restorableSelectionProjectKeysRef.current,
+          ensureProjectIncluded: filter.ensureProjectIncluded,
+          localPlatform,
+        }),
+      ),
+    [
+      filter.ensureProjectIncluded,
+      hiddenProjectKeys,
+      hiddenProjects.setProjectHidden,
+      localPlatform,
+    ],
+  );
   const visibleSearchProjects = useMemo(
     () => visibleSidebarProjects(searchProjectGroups.projects, hiddenProjectKeys, localPlatform),
     [searchProjectGroups.projects, hiddenProjectKeys, localPlatform],
@@ -1474,7 +1502,9 @@ function ExpandedView({
     );
     if (filter.projectsAsSet === null) return notHidden;
     const allowed = filter.projectsAsSet;
-    return notHidden.filter((p) => allowed.has(p.projectKey));
+    return notHidden.filter((project) =>
+      projectFilterIncludes(allowed, project.projectKey, localPlatform),
+    );
   }, [groupsWithPinnedProjects.projects, hiddenProjectKeys, filter.projectsAsSet, localPlatform]);
 
   /* ---- M41: Vendor 过滤 — 应用到 pinned / unclassified / project sessions ---- */

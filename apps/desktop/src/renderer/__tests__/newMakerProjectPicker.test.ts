@@ -23,6 +23,7 @@ const newMakerDraftRouteSource = readSource('features', 'cc-agent', 'NewMakerDra
 const worktreeChipsSource = readSource('components', 'new-chat', 'WorktreeChipsRow.tsx');
 
 const folderPickerPopoverSource = readSource('components', 'new-chat', 'FolderPickerPopover.tsx');
+const mainLayoutSource = readSource('components', 'layout', 'MainLayout.tsx');
 
 const addRemoteProjectDialogSource = readSource(
   'components',
@@ -134,6 +135,96 @@ describe('Shared create project picker', () => {
     expect(selectAt).toBeGreaterThan(-1);
     expect(closeAt).toBeGreaterThan(selectAt);
     expect(body).toContain('finally {');
+  });
+
+  it('restores a hidden local project before applying the selected folder to the draft', () => {
+    const handlerStart = newMakerDraftRouteSource.indexOf(
+      'const handleModePickerSelect = useCallback(',
+    );
+    const handlerEnd = newMakerDraftRouteSource.indexOf(
+      'const handleWtEnabledChange = useCallback(',
+      handlerStart,
+    );
+    const handler = newMakerDraftRouteSource.slice(handlerStart, handlerEnd);
+
+    expect(handler).toContain("source !== 'dialogue' && !effectiveDeviceLinkDeviceId");
+    expect(handler).toContain('await requestSidebarProjectRestore(localProjectKey)');
+    expect(handler).toContain('selectionSeq !== modePickerSelectionSeqRef.current');
+    expect(handler.indexOf('await requestSidebarProjectRestore(localProjectKey)')).toBeLessThan(
+      handler.indexOf("handleWorkingDirChange(source === 'dialogue' ? null : path)"),
+    );
+    expect(sidebarUpperSource).toContain('registerSidebarProjectRestoreHandler((projectKey) =>');
+    expect(sidebarUpperSource).toContain('restoreSelectedHiddenProject({');
+  });
+
+  it('holds the existing creation lock until project restoration commits the draft target', () => {
+    const handlerStart = newMakerDraftRouteSource.indexOf(
+      'const handleModePickerSelect = useCallback(',
+    );
+    const handlerEnd = newMakerDraftRouteSource.indexOf(
+      'const handleWtEnabledChange = useCallback(',
+      handlerStart,
+    );
+    const handler = newMakerDraftRouteSource.slice(handlerStart, handlerEnd);
+    const guardAt = handler.indexOf('if (sendInFlightRef.current) return;');
+    const selectionAt = handler.indexOf(
+      'const selectionSeq = ++modePickerSelectionSeqRef.current;',
+    );
+    const lockAt = handler.indexOf('markSendInFlight(true);');
+    const restoreAt = handler.indexOf('await requestSidebarProjectRestore(localProjectKey);');
+    const applyAt = handler.indexOf('handleWorkingDirChange(path);');
+    const unlockAt = handler.indexOf('markSendInFlight(false);');
+
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(selectionAt).toBeGreaterThan(guardAt);
+    expect(lockAt).toBeGreaterThan(selectionAt);
+    expect(restoreAt).toBeGreaterThan(lockAt);
+    expect(applyAt).toBeGreaterThan(restoreAt);
+    expect(unlockAt).toBeGreaterThan(applyAt);
+    expect(handler.slice(lockAt, unlockAt)).toContain('finally {');
+  });
+
+  it('keeps picker choices disabled until the accepted selection finishes', () => {
+    expect(folderPickerPopoverSource).toContain('if (selectionPendingRef.current) return;');
+    expect(folderPickerPopoverSource).toContain('selectionPendingRef.current = true;');
+    expect((folderPickerPopoverSource.match(/disabled=\{selectionPending\}/g) ?? []).length).toBe(
+      8,
+    );
+
+    const handlerStart = folderPickerPopoverSource.indexOf('const handleSelectPath = async (');
+    const handlerEnd = folderPickerPopoverSource.indexOf(
+      'const handleRemoveProject =',
+      handlerStart,
+    );
+    const handler = folderPickerPopoverSource.slice(handlerStart, handlerEnd);
+    expect(handler.indexOf('selectionPendingRef.current = true;')).toBeLessThan(
+      handler.indexOf('await onSelect(folderPath, source, option);'),
+    );
+    expect(handler.indexOf('await onSelect(folderPath, source, option);')).toBeLessThan(
+      handler.indexOf('onOpenChange(false);'),
+    );
+  });
+
+  it('keeps the sidebar restore owner mounted on the new-task route', () => {
+    expect(mainLayoutSource).toContain(
+      "forceMountFeatureContent={location.pathname === '/cc-agent/new'}",
+    );
+  });
+
+  it('invalidates an in-flight folder restore before applying a same-route dialogue target', () => {
+    const effectStart = newMakerDraftRouteSource.indexOf(
+      '// “对话”分组可能在 /cc-agent/new 已经打开时再次导航到同一路由',
+    );
+    const effectEnd = newMakerDraftRouteSource.indexOf(
+      '// 弹窗确认添加后的落点',
+      effectStart,
+    );
+    const effect = newMakerDraftRouteSource.slice(effectStart, effectEnd);
+    const invalidateAt = effect.indexOf('modePickerSelectionSeqRef.current += 1;');
+    const applyAt = effect.indexOf('applyDraftTarget({');
+
+    expect(invalidateAt).toBeGreaterThan(-1);
+    expect(applyAt).toBeGreaterThan(invalidateAt);
   });
 
   it('keeps dialogue outside of the project group in the picker menu', () => {

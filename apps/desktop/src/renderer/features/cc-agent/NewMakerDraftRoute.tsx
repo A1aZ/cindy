@@ -242,6 +242,8 @@ import { resolveNewMakerDraftRightSidebar } from './newMakerDraftRightSidebar';
 import { resolveNewMakerDraftEffort } from './newMakerDraftModelPrefs';
 import { closeAllTabs as closeRightSidebarTabs } from '@/features/right-sidebar/store';
 import { revealOrcaWorkersTab } from '@/features/right-sidebar/plugins/orca-workers/actions';
+import { normalizeProjectKey } from './lib/projectGrouping';
+import { requestSidebarProjectRestore } from './lib/sidebarProjectRestore';
 
 const log = createLogger('NewMakerDraftRoute');
 const IS_MAC_PLATFORM = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
@@ -581,6 +583,7 @@ export function NewMakerDraftRoute() {
     [location.state],
   );
   const handledDialogueTargetRequestRef = useRef<string | null>(null);
+  const modePickerSelectionSeqRef = useRef(0);
   // 首参 914=内容封顶宽(→ inputWidth 封顶 934):大屏留出左右呼吸空间,不再顶满全宽;
   // 与进行中对话页(CCAgentSessionView 同传 914)一致,发送首条消息时输入框宽度不跳变。
   // minWidth=640:小屏兜一个体面下限(与对话页对称);窄于下限时 hook 自动回落成
@@ -2094,6 +2097,9 @@ export function NewMakerDraftRoute() {
       return;
     }
     handledDialogueTargetRequestRef.current = dialogueTargetRequest.requestId;
+    // 同路由的对话目标是比在途目录恢复更新的用户选择。先推进同一 sequence owner，
+    // 让旧 restore completion 只能释放锁，不能把目录重新写回草稿。
+    modePickerSelectionSeqRef.current += 1;
     patchCollab({ enabled: false });
     applyDraftTarget({
       deviceId: dialogueTargetRequest.deviceId,
@@ -2541,6 +2547,12 @@ export function NewMakerDraftRoute() {
     setDevicePickerOpen(open);
     if (open) setFolderPickerOpen(false);
   }, []);
+  useEffect(
+    () => () => {
+      modePickerSelectionSeqRef.current += 1;
+    },
+    [],
+  );
   /**
    * 选中的设备真正从可选列表里消失时(对方撤销「允许被控」/ 本机关掉对它的控制 / 解除配对),
    * 把草稿收敛回本机。
@@ -2566,6 +2578,16 @@ export function NewMakerDraftRoute() {
     // 去清远程运行配置 —— 能跑,但没人能一眼看出为什么。现在与另三条路径走同一个动作。
     applyDraftTarget({ deviceId: null, deviceName: null, workingDir: null });
   }, [effectiveDeviceLinkDeviceId, selectableDevices, selectableDevicesLoaded, applyDraftTarget]);
+
+  // 创建目标正在异步提交时，发送、建目标以及设备／工作区切换必须共用同一把锁。
+  // ref 负责同步 guard，state 只负责驱动 UI 禁用；所有写入都经 markSendInFlight，
+  // 避免其中一半提前释放后让旧草稿目标被消费。
+  const sendInFlightRef = useRef(false);
+  const [sendInFlight, setSendInFlight] = useState(false);
+  const markSendInFlight = useCallback((value: boolean) => {
+    sendInFlightRef.current = value;
+    setSendInFlight(value);
+  }, []);
 
   /**
    * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
@@ -2605,13 +2627,48 @@ export function NewMakerDraftRoute() {
    * picker 里列的项目必然属于当前设备,path 直接写进 draft 即可。
    */
   const handleModePickerSelect = useCallback(
-    (path: string, source: FolderPickerSelectSource) => {
+    async (path: string, source: FolderPickerSelectSource) => {
       // 与设备 pill 同款保护:发送已在途时那次调用的闭包持有旧工作区,draft 却会可见地切到
       // 新的 —— 会话建在旧工作区里,而用户刚选的那个又被 create 后的重置清掉。
       if (sendInFlightRef.current) return;
+      // 只有真正接受的选择才能作废上一轮。若锁已占用却先递增，第二次点击会同时被拒绝、
+      // 又让第一轮完成后命中 sequence fence，最终两个选择都不生效。
+      const selectionSeq = ++modePickerSelectionSeqRef.current;
+      // 本机项目可能曾被用户「从侧栏移除」:任务和 workingDir 仍在,但 hidden overlay
+      // 会把它们投影到「对话」。旧段头「新建项目」按钮会在重选目录时解除隐藏；按钮移除后
+      // 创建页必须接过这条恢复路径。远程项目由各自设备维护可见性,纯对话也没有项目可恢复。
+      if (source !== 'dialogue' && !effectiveDeviceLinkDeviceId) {
+        const localProjectKey = normalizeProjectKey(path);
+        if (localProjectKey?.startsWith('local:')) {
+          // 恢复和草稿目标应用是一笔提交：期间复用创建锁，阻止 Send / Goal 或其它目标切换
+          // 消费旧 workingDir。锁保持到新目标同步写入完成，reject / fence 早退也由 finally 释放。
+          markSendInFlight(true);
+          try {
+            // Selecting a folder commits its project restoration. The fence below only prevents
+            // an older async completion from overwriting a newer draft target; rolling shared
+            // visibility back could re-hide a project restored by another window.
+            await requestSidebarProjectRestore(localProjectKey);
+            // 恢复在途期间手动发送和目标切换都被同一把锁挡住；这里仍保留 sequence / device
+            // fence，覆盖卸载与权威设备状态变化等不经过交互 handler 的路径。
+            if (
+              selectionSeq !== modePickerSelectionSeqRef.current ||
+              (getDraft().deviceLinkDeviceId ?? null) !== null
+            ) {
+              return;
+            }
+            handleWorkingDirChange(path);
+          } catch (err) {
+            log.warn('[new-maker] restore selected project failed', err);
+            toast.error(t('ccAgent.sidebar.createProjectFailed'));
+          } finally {
+            markSendInFlight(false);
+          }
+          return;
+        }
+      }
       handleWorkingDirChange(source === 'dialogue' ? null : path);
     },
-    [handleWorkingDirChange],
+    [effectiveDeviceLinkDeviceId, handleWorkingDirChange, markSendInFlight, t],
   );
 
   // 用户点击 checkbox 是唯一改动路径。本地草稿直接写工作端偏好;
@@ -2840,17 +2897,6 @@ export function NewMakerDraftRoute() {
     setWtName(name);
   }, []);
 
-  // 防止用户在 send 流程中再次按下 send(异步 createSession 期间)。
-  const sendInFlightRef = useRef(false);
-  /**
-   * 与 sendInFlightRef 同步的渲染态。ref 用于同步 guard(重复发送、切设备)——它必须即时可读;
-   * state 只负责让「发送在途」能驱动 UI 禁用(ref 变化不触发渲染)。两者一起改,别只动一个。
-   */
-  const [sendInFlight, setSendInFlight] = useState(false);
-  const markSendInFlight = useCallback((value: boolean) => {
-    sendInFlightRef.current = value;
-    setSendInFlight(value);
-  }, []);
   const wtRef = useRef({
     enabled: wtEnabled,
     name: wtName,

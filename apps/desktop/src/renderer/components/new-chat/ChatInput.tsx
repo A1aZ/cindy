@@ -115,6 +115,14 @@ import {
   getEffortChangeCoordinator,
   isSessionScopeCurrent,
 } from './effortChangeQueue';
+import {
+  applyVoiceResultToSerializedText,
+  armDetachedVoiceDraftPersist,
+  editorOwnsSourceDraft,
+  mergeDetachedVoiceTextIntoDocument,
+  resolveSourceOwnedComposerExtras,
+  voiceLocksCurrentComposer,
+} from './composerSendOwnership';
 import { captureComposerSendSnapshot, isComposerSendSnapshotCurrent } from './composerSendSnapshot';
 import { useRemoteSessionConnection } from '@/features/cc-agent/hooks/useRemoteSessionConnection';
 
@@ -266,7 +274,11 @@ import {
   type ComposerRenderSnapshot,
 } from './composerRenderGate';
 import { createComposerFrameScheduler } from './composerFrameScheduler';
-import { serializeEditorContent, serializeEditorSlice } from './composerContentSerialization';
+import {
+  serializeEditorContent,
+  serializeEditorSlice,
+  type SerializedComposerContent,
+} from './composerContentSerialization';
 import {
   composerDocumentContainsHostCapabilityChip,
   composerDocumentContainsList,
@@ -2850,14 +2862,98 @@ export function ChatInput({
     }
   }, [confirmDialog, t]);
 
+  const voiceOwnerStorageKeyRef = useRef<string | undefined>(undefined);
+  const frozenVoiceSendRef = useRef<{
+    kind: 'send' | 'persist';
+    sourceStorageKey: string;
+    serialized: SerializedComposerContent;
+    attachments: AttachedFile[];
+    comments: BrowserCommentDraftItem[];
+  } | null>(null);
   const voiceInputOptions = useMemo(
-    () => ({ onMicrophonePermissionRequired: handleVoiceInputPermissionRequired }),
+    () => ({
+      onMicrophonePermissionRequired: handleVoiceInputPermissionRequired,
+      shouldApplyToEditor: () =>
+        voiceOwnerStorageKeyRef.current === undefined ||
+        voiceOwnerStorageKeyRef.current === storageKeyForDraftRef.current,
+      getDraftStorageKey: () => storageKeyForDraftRef.current,
+    }),
     [handleVoiceInputPermissionRequired],
   );
 
+  const voiceInputBusyRef = useRef(false);
+  const voiceInputStopAndSendPromiseRef = useRef<Promise<void> | null>(null);
+
+  // Declared before useVoiceInput so React 19 runs this cleanup first
+  // (declaration order). Arm must be visible before the voice hook decides
+  // whether to cancel or settle; otherwise the run is cancelled and a later
+  // unmount can skip microphone teardown.
+  useEffect(() => {
+    if (!editor) return;
+    const dataOwnerAtEffect = editorDataOwnerRef.current;
+    return () => {
+      if (!isDataOwnerGenerationCurrent(dataOwnerAtEffect)) {
+        draftSaveSchedulerRef.current?.cancel();
+        return;
+      }
+      draftSaveSchedulerRef.current?.flush();
+      const editorStorageKey = storageKeyForDraftRef.current;
+      if (!editorStorageKey) return;
+      const existing = getComposerDraft(editorStorageKey);
+      const hasText = !isEditorEmpty(editor);
+      if (hasText || existing) {
+        saveComposerDraft(
+          editorStorageKey,
+          {
+            text: editor.getJSON(),
+            attachments: existing?.attachments ?? [],
+            quotes: existing?.quotes ?? [],
+            browserComments: existing?.browserComments ?? [],
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
+          },
+          { silent: true },
+        );
+      }
+      const persistKey = voiceOwnerStorageKeyRef.current ?? editorStorageKey;
+      // Only arm the composer that still owns this voice run. After a session
+      // switch the switch effect already persists to the source; do not write
+      // the source preview into the destination draft.
+      if (
+        voiceInputBusyRef.current &&
+        !voiceInputStopAndSendPromiseRef.current &&
+        persistKey &&
+        persistKey === editorStorageKey
+      ) {
+        armDetachedVoiceDraftPersist(
+          persistKey,
+          voiceDraftTextRef.current.trim(),
+        );
+      }
+    };
+  }, [editor]);
+
   const voiceInput = useVoiceInput(editor, disabled, messages, voiceInputOptions);
+  if (voiceInput.isBusy) {
+    if (voiceOwnerStorageKeyRef.current === undefined) {
+      voiceOwnerStorageKeyRef.current = storageKeyForDraftRef.current ?? storageKey;
+    }
+  } else {
+    voiceOwnerStorageKeyRef.current = undefined;
+    if (frozenVoiceSendRef.current?.kind === 'persist') {
+      frozenVoiceSendRef.current = null;
+    }
+  }
   voiceDraftTextRef.current = voiceInput.draftText;
-  const composerMutationLocked = composerEditorLocked || voiceInput.isBusy;
+  const voiceBusyOnCurrentComposer = voiceLocksCurrentComposer({
+    isBusy: voiceInput.isBusy,
+    ownerStorageKey: voiceOwnerStorageKeyRef.current,
+    currentStorageKey: storageKeyForDraftRef.current,
+  });
+  const composerMutationLocked = composerEditorLocked || voiceBusyOnCurrentComposer;
   composerMutationLockedRef.current = composerMutationLocked;
   useEffect(() => {
     editor?.setEditable(!composerMutationLocked);
@@ -2933,13 +3029,12 @@ export function ChatInput({
   const voiceShortcutRef = useRef(voiceInputSettings.shortcut);
   const voiceInputStateRef = useRef(voiceInput.state);
   const voiceInputStopRef = useRef(handleVoiceInputStopWithRefinement);
-  const voiceInputBusyRef = useRef(voiceInput.isBusy);
   voiceInputBusyRef.current = voiceInput.isBusy;
+  voiceDraftTextRef.current = voiceInput.draftText;
   const voiceInputCancelRef = useRef(voiceInput.cancel);
   const voiceInputStopAndSendRef = useRef<
     (deliveryMode?: MessageDeliveryMode) => void | Promise<void>
   >(() => {});
-  const voiceInputStopAndSendPromiseRef = useRef<Promise<void> | null>(null);
   const voiceInputCanStopAndSendRef = useRef(false);
   const composerCanSubmitRef = useRef(false);
   const handleVoiceInputStartRef = useRef(handleVoiceInputStart);
@@ -3025,10 +3120,14 @@ export function ChatInput({
       }
       const platform = window.electronAPI?.platform;
       if (event.key === 'Escape' && !event.repeat && !event.isComposing) {
+        const voiceOwnsCurrentComposer =
+          voiceOwnerStorageKeyRef.current === undefined ||
+          voiceOwnerStorageKeyRef.current === storageKeyForDraftRef.current;
         if (
-          currentState === 'listening' ||
-          currentState === 'submitting' ||
-          currentState === 'refining'
+          voiceOwnsCurrentComposer &&
+          (currentState === 'listening' ||
+            currentState === 'submitting' ||
+            currentState === 'refining')
         ) {
           event.preventDefault();
           clearPressTimer();
@@ -3298,29 +3397,32 @@ export function ChatInput({
   // While dictation holds the editor read-only the native caret disappears;
   // the decoration renders a mic-shaped caret at the insertion point instead
   // (listening = animated level bars, submitting/refining = spinner).
-  const voiceCaretState: VoiceInputCaretState | null = voiceInput.isListening
-    ? 'listening'
-    : voiceInput.isBusy
-      ? 'processing'
-      : null;
+  const voiceCaretState: VoiceInputCaretState | null = !voiceBusyOnCurrentComposer
+    ? null
+    : voiceInput.isListening
+      ? 'listening'
+      : voiceInput.isBusy
+        ? 'processing'
+        : null;
 
   useEffect(() => {
     setVoiceInputDraftDecoration(
       editor,
-      voiceInput.draftText,
-      voiceInput.draftSource,
-      voiceInput.draftRange,
+      voiceBusyOnCurrentComposer ? voiceInput.draftText : '',
+      voiceBusyOnCurrentComposer ? voiceInput.draftSource : null,
+      voiceBusyOnCurrentComposer ? voiceInput.draftRange : null,
       voiceCaretState,
     );
     // Caret-only (no draft text yet) must also stay visible: the insertion
     // point can sit outside the viewport when the composer is scrolled.
-    if (voiceInput.draftText || voiceCaretState) {
+    if (voiceBusyOnCurrentComposer && (voiceInput.draftText || voiceCaretState)) {
       requestAnimationFrame(() => {
         if (editor) scrollVoiceInputDraftEndIntoView(editor);
       });
     }
   }, [
     editor,
+    voiceBusyOnCurrentComposer,
     voiceCaretState,
     voiceInput.draftRange,
     voiceInput.draftSource,
@@ -3328,39 +3430,8 @@ export function ChatInput({
   ]);
 
   // Route changes such as Chat -> Settings unmount the composer immediately.
-  // `onUpdate` is still the primary "instant save" path, but this cleanup
-  // snapshots the final editor state before React tears the instance down.
-  useEffect(() => {
-    if (!editor) return;
-    const dataOwnerAtEffect = editorDataOwnerRef.current;
-    return () => {
-      if (!isDataOwnerGenerationCurrent(dataOwnerAtEffect)) {
-        draftSaveSchedulerRef.current?.cancel();
-        return;
-      }
-      draftSaveSchedulerRef.current?.flush();
-      const editorStorageKey = storageKeyForDraftRef.current;
-      if (!editorStorageKey) return;
-      const existing = getComposerDraft(editorStorageKey);
-      const hasText = !isEditorEmpty(editor);
-      if (!hasText && !existing) return;
-      saveComposerDraft(
-        editorStorageKey,
-        {
-          text: editor.getJSON(),
-          attachments: existing?.attachments ?? [],
-          quotes: existing?.quotes ?? [],
-          browserComments: existing?.browserComments ?? [],
-          ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
-          ...(existing?.pendingHostCapabilityGhostId
-            ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
-            : {}),
-          ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
-        },
-        { silent: true },
-      );
-    };
-  }, [editor]);
+  // Draft snapshot + detached-voice arm run in the earlier effect declared
+  // before useVoiceInput, so React 19 cleanup arms persist first.
 
   // ── composer-draft-per-session: restore on storageKey change ────────
   // Whenever the parent switches `storageKey` (= `draftKey ?? sessionId`),
@@ -3494,29 +3565,78 @@ export function ChatInput({
     };
 
     const pendingStopAndSend = voiceInputStopAndSendPromiseRef.current;
-    if (pendingStopAndSend || voiceInputBusyRef.current) {
-      void (async () => {
-        try {
-          if (pendingStopAndSend) {
-            await pendingStopAndSend;
-          } else {
-            await voiceInputStopRef.current({ waitForRefinement: true });
-          }
-        } finally {
-          if (isCurrentTransition()) {
-            saveCurrentEditorDraft();
-          }
-          restoreNextDraft();
-        }
-      })();
-      return () => {
-        cancelled = true;
-      };
+    const wasBusyWithoutSend = !pendingStopAndSend && voiceInputBusyRef.current;
+    const submittedAtSwitch = wasBusyWithoutSend ? voiceInput.getLastSubmittedText().trim() : '';
+    const unlandedPreview =
+      wasBusyWithoutSend && !submittedAtSwitch ? voiceDraftTextRef.current.trim() : '';
+    const voiceOwnerKey = voiceOwnerStorageKeyRef.current ?? prevEditorKey;
+    if ((pendingStopAndSend || voiceInputBusyRef.current) && prevEditorKey && voiceOwnerKey) {
+      const existingFreeze = frozenVoiceSendRef.current;
+      if (
+        prevEditorKey === voiceOwnerKey &&
+        (!existingFreeze || existingFreeze.sourceStorageKey === voiceOwnerKey)
+      ) {
+        const sourceDraft = getComposerDraft(prevEditorKey);
+        frozenVoiceSendRef.current = {
+          kind: pendingStopAndSend ? 'send' : 'persist',
+          sourceStorageKey: voiceOwnerKey,
+          serialized: serializeEditorContent(editor),
+          attachments: [...(sourceDraft?.attachments ?? [])],
+          comments: [...(sourceDraft?.browserComments ?? browserCommentsRef.current)],
+        };
+      }
     }
 
-    // storageKey actually changed — swap the editor's content.
+    // storageKey actually changed — swap the editor's content immediately so
+    // the next task never paints the previous session's listening/refining text.
     saveCurrentEditorDraft();
     restoreNextDraft();
+    // The reused composer now shows the destination draft. Drop the source
+    // send lock so the next task is immediately editable.
+    setSendDispatchInFlight(false);
+    if (wasBusyWithoutSend && prevEditorKey && prevEditorKey === voiceOwnerKey) {
+      const sourceKey = prevEditorKey;
+      const persistDetachedVoice = (previousVoiceText: string, nextVoiceText: string) => {
+        if (!nextVoiceText) return;
+        const existing = getComposerDraft(sourceKey);
+        saveComposerDraft(
+          sourceKey,
+          {
+            text: mergeDetachedVoiceTextIntoDocument(
+              existing?.text,
+              previousVoiceText,
+              nextVoiceText,
+            ),
+            attachments: existing?.attachments ?? [],
+            quotes: existing?.quotes ?? [],
+            browserComments: existing?.browserComments ?? [],
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
+          },
+          { silent: latestStorageKeyRef.current !== sourceKey },
+        );
+      };
+      // Submitted text is already in the editor snapshot. Only persist a
+      // still-ghost listening preview, then upgrade it after stop/refine.
+      if (unlandedPreview) persistDetachedVoice('', unlandedPreview);
+      void (async () => {
+        try {
+          await voiceInputStopRef.current({ waitForRefinement: true });
+        } catch {
+          const submitted = voiceInput.getLastSubmittedText().trim();
+          if (submitted && unlandedPreview) persistDetachedVoice(unlandedPreview, submitted);
+          return;
+        }
+        const submitted = voiceInput.getLastSubmittedText().trim();
+        const refined = voiceInput.getLastRefinement()?.refinedText.trim() ?? '';
+        const nextVoice = refined || submitted;
+        if (!nextVoice) return;
+        persistDetachedVoice(unlandedPreview || submittedAtSwitch, nextVoice);
+      })();
+    }
   }, [editor, storageKey]);
 
   // ── External draft writes for the CURRENT session (e.g. rewind / fork
@@ -4635,7 +4755,7 @@ export function ChatInput({
   );
 
   // ── Send / Stop wiring ─────────────────────────────────────────────
-  const dispatchSendInFlightRef = useRef(false);
+  const dispatchSendInFlightKeysRef = useRef(new Set<string>());
   const dispatchSendRef = useRef<(deliveryMode?: MessageDeliveryMode) => void | Promise<void>>(
     () => {},
   );
@@ -4646,9 +4766,10 @@ export function ChatInput({
       // React 的 disabled 状态可能尚未完成下一帧渲染；同步读协调器兜住点击、快捷键、
       // 语音发送等所有入口，确保 host 已登记切换意图后才允许 maker:send。
       if (sessionId && hasPendingAgentSendDispatch(sessionId)) return;
-      if (dispatchSendInFlightRef.current) return;
       const sourceSessionId = sessionId;
       const sourceStorageKey = storageKey;
+      const sendInFlightKey = sourceStorageKey ?? sourceSessionId ?? '__draft__';
+      if (dispatchSendInFlightKeysRef.current.has(sendInFlightKey)) return;
       const optimisticallyClearRemoteComposer = Boolean(deviceLinkDeviceId && sourceSessionId);
       // Device-link sends freeze the entire composer at click time. Any remote
       // reference hydration happens against this immutable payload after the
@@ -4674,34 +4795,70 @@ export function ChatInput({
         : () => {};
       if (!finishAgentSendDispatch) return;
       draftSaveSchedulerRef.current?.flush();
-      dispatchSendInFlightRef.current = true;
+      dispatchSendInFlightKeysRef.current.add(sendInFlightKey);
       // 发送新消息时立即递增 turnGen，让任何还未落地的旧 turn 预测结果失效。
       // 必须在所有异步操作（resolveSessionMessageReferencesForSend / effort settle）
       // 之前递增，防止旧预测在 reference 解析等异步等待期间落地到输入框。
       turnGenRef.current += 1;
       // Local/SSH sends keep the live composer while references and runtime
       // settings settle; remote sends must stay editable after their
-      // click-time snapshot is cleared.
-      if (!optimisticallyClearRemoteComposer) {
+      // click-time snapshot is cleared. A background source send after a
+      // session switch must not lock the newly restored composer.
+      const lockCurrentComposer =
+        !optimisticallyClearRemoteComposer &&
+        storageKeyForDraftRef.current === sourceStorageKey;
+      if (lockCurrentComposer) {
         captureSendFocusForRestore();
         setSendDispatchInFlight(true);
       }
       try {
         let serializedContent = serializedAtClick;
+        let frozenVoiceSend = frozenVoiceSendRef.current;
         if (!serializedContent) {
-          await resolveSessionMessageReferencesForSend(editor);
-          // Local/SSH keeps the live editor until acceptance. A routed ChatInput
-          // may have switched sessions during hydration; never serialize or
-          // clear the newly hydrated composer with the old send continuation.
           if (sourceSessionId && hasPendingAgentSwitchOperation(sourceSessionId)) return;
-          if (
-            editor.isDestroyed ||
-            latestStorageKeyRef.current !== sourceStorageKey ||
-            storageKeyForDraftRef.current !== sourceStorageKey
-          ) {
-            return;
+          const editorOwnsSource = editorOwnsSourceDraft({
+            editorDestroyed: editor.isDestroyed,
+            editorStorageKey: storageKeyForDraftRef.current,
+            sourceStorageKey,
+          });
+          if (editorOwnsSource) {
+            await resolveSessionMessageReferencesForSend(editor);
+            if (sourceSessionId && hasPendingAgentSwitchOperation(sourceSessionId)) return;
+            if (
+              editorOwnsSourceDraft({
+                editorDestroyed: editor.isDestroyed,
+                editorStorageKey: storageKeyForDraftRef.current,
+                sourceStorageKey,
+              })
+            ) {
+              serializedContent = serializeEditorContent(editor);
+              if (frozenVoiceSendRef.current?.sourceStorageKey === sourceStorageKey) {
+                frozenVoiceSendRef.current = null;
+              }
+            }
           }
-          serializedContent = serializeEditorContent(editor);
+          // Switch during hydration may have just frozen the source send.
+          frozenVoiceSend = frozenVoiceSendRef.current;
+          if (!serializedContent) {
+            if (
+              !frozenVoiceSend ||
+              frozenVoiceSend.kind !== 'send' ||
+              frozenVoiceSend.sourceStorageKey !== sourceStorageKey
+            ) {
+              return;
+            }
+            const submitted = voiceInput.getLastSubmittedText();
+            const refined = voiceInput.getLastRefinement()?.refinedText ?? '';
+            serializedContent = {
+              ...frozenVoiceSend.serialized,
+              text: applyVoiceResultToSerializedText(
+                frozenVoiceSend.serialized.text,
+                submitted,
+                refined,
+              ),
+            };
+            frozenVoiceSendRef.current = null;
+          }
         }
         const {
           text: editorText,
@@ -4713,12 +4870,27 @@ export function ChatInput({
           hostCapability,
         } = serializedContent;
         let agentReferences = serializedAgentReferences;
+        const sourceDraftExtras =
+          sourceStorageKey !== undefined ? getComposerDraft(sourceStorageKey) : undefined;
+        const frozenExtras =
+          frozenVoiceSend?.sourceStorageKey === sourceStorageKey ? frozenVoiceSend : null;
+        const sourceOwnedExtras = resolveSourceOwnedComposerExtras({
+          editorOwnsSource: editorOwnsSourceDraft({
+            editorDestroyed: editor.isDestroyed,
+            editorStorageKey: storageKeyForDraftRef.current,
+            sourceStorageKey,
+          }),
+          liveAttachments: latestAttachmentsRef.current,
+          liveComments: browserCommentsRef.current,
+          sourceAttachments: frozenExtras?.attachments ?? sourceDraftExtras?.attachments,
+          sourceComments: frozenExtras?.comments ?? sourceDraftExtras?.browserComments,
+        });
         const attachmentsForSend = optimisticallyClearRemoteComposer
           ? attachmentsBeforeOptimisticClear
-          : [...latestAttachmentsRef.current];
+          : sourceOwnedExtras.attachments;
         const commentsForSend = optimisticallyClearRemoteComposer
           ? commentsBeforeOptimisticClear
-          : [...browserCommentsRef.current];
+          : sourceOwnedExtras.comments;
         if (
           !hostCapability &&
           isPlanModeComposerCommandText(
@@ -4727,16 +4899,23 @@ export function ChatInput({
             slashCommandsReady ? mergedCommands : null,
           )
         ) {
-          planModeEntry?.onToggle(!planModeEntry.enabled);
-          isRestoringRef.current = true;
-          try {
-            editor.commands.clearContent(true);
-          } finally {
-            isRestoringRef.current = false;
+          const editorOwnsSource = editorOwnsSourceDraft({
+            editorDestroyed: editor.isDestroyed,
+            editorStorageKey: storageKeyForDraftRef.current,
+            sourceStorageKey,
+          });
+          if (editorOwnsSource) {
+            planModeEntry?.onToggle(!planModeEntry.enabled);
+            isRestoringRef.current = true;
+            try {
+              editor.commands.clearContent(true);
+            } finally {
+              isRestoringRef.current = false;
+            }
+            historyIndexRef.current = -1;
+            hydratedHistoryDocumentRef.current = null;
+            draftRef.current = null;
           }
-          historyIndexRef.current = -1;
-          hydratedHistoryDocumentRef.current = null;
-          draftRef.current = null;
           if (sourceStorageKey) {
             if (
               shouldPreservePlanModeComposerDraft(
@@ -4748,7 +4927,7 @@ export function ChatInput({
               saveComposerDraft(
                 sourceStorageKey,
                 {
-                  text: editor.getJSON(),
+                  text: editorOwnsSource ? editor.getJSON() : (existingDraft?.text ?? null),
                   attachments: attachmentsForSend,
                   quotes: existingDraft?.quotes ?? [],
                   browserComments: commentsForSend,
@@ -4906,27 +5085,46 @@ export function ChatInput({
           });
         };
         const clearSentComposer = (options?: { preserveNewerContent?: boolean }) => {
+          const editorOwnsSource = editorOwnsSourceDraft({
+            editorDestroyed: editor.isDestroyed,
+            editorStorageKey: storageKeyForDraftRef.current,
+            sourceStorageKey,
+          });
           const isCurrentComposer =
-            latestStorageKeyRef.current === sourceStorageKey &&
-            storageKeyForDraftRef.current === sourceStorageKey &&
-            !editor.isDestroyed;
+            latestStorageKeyRef.current === sourceStorageKey && editorOwnsSource;
           // Local/SSH sends keep the live composer until onSend is accepted.
-          // If the async send crossed a session/editor switch or the user
-          // changed the snapshot while it was in flight, leave the current
-          // draft untouched rather than clearing newer input.
+          // If the user kept typing on the same session, leave that newer
+          // draft untouched. A route switch is not "newer input": the reused
+          // editor may still hold the source document because restoreNextDraft
+          // was deferred for voice stop/refine/send.
           if (
             !optimisticallyClearRemoteComposer &&
-            (!isCurrentComposer ||
-              !isComposerSendSnapshotCurrent(
-                sendSnapshot,
-                editor.getJSON(),
-                latestAttachmentsRef.current,
-                browserCommentsRef.current,
-              ))
+            isCurrentComposer &&
+            !isComposerSendSnapshotCurrent(
+              sendSnapshot,
+              editor.getJSON(),
+              latestAttachmentsRef.current,
+              browserCommentsRef.current,
+            )
           ) {
             return;
           }
           if (!isCurrentComposer) {
+            if (!optimisticallyClearRemoteComposer) {
+              if (editorOwnsSource) {
+                isRestoringRef.current = true;
+                try {
+                  editor.commands.clearContent(true);
+                } finally {
+                  isRestoringRef.current = false;
+                }
+                historyIndexRef.current = -1;
+                hydratedHistoryDocumentRef.current = null;
+                draftRef.current = null;
+              }
+              if (sourceStorageKey) clearComposerDraft(sourceStorageKey);
+              return;
+            }
             if (!options?.preserveNewerContent || !sourceStorageKey) {
               if (sourceStorageKey) clearComposerDraft(sourceStorageKey);
               return;
@@ -5194,8 +5392,10 @@ export function ChatInput({
             const coordinator = effortChangeCoordinatorRef.current;
             let runtimeSettled = false;
             let timeoutId: ReturnType<typeof setTimeout> | undefined;
-            captureSendFocusForRestore();
-            setSendDispatchInFlight(true);
+            const lockComposerForEffort =
+              !optimisticallyClearRemoteComposer &&
+              storageKeyForDraftRef.current === sourceStorageKey;
+            if (lockComposerForEffort) setSendDispatchInFlight(true);
             try {
               await Promise.race([
                 coordinator.awaitRuntimeSettled(sessionId).then(() => {
@@ -5207,7 +5407,12 @@ export function ChatInput({
               ]);
             } finally {
               if (timeoutId !== undefined) clearTimeout(timeoutId);
-              setSendDispatchInFlight(false);
+              if (
+                lockComposerForEffort &&
+                storageKeyForDraftRef.current === sourceStorageKey
+              ) {
+                setSendDispatchInFlight(false);
+              }
             }
 
             // 不把 timeout 写成全局 dirty：若迟到的是「持久化失败、runtime 尚未触碰」，旧实现
@@ -5217,11 +5422,11 @@ export function ChatInput({
               if (optimisticallyClearRemoteComposer) restoreRemoteComposerAndRelease();
               return;
             }
-            // 路由切换后复用的编辑器不能把 A 会话的内容送进 B，也不能清掉 B 的草稿。
-            if (!isSessionScopeCurrent(sessionId, currentSessionIdRef.current)) {
-              if (optimisticallyClearRemoteComposer) restoreRemoteComposerAndRelease();
-              return;
-            }
+            // onSend is the click-time closure and still targets the source
+            // session. A route change while effort settles (or while voice
+            // refine was deferred) must not cancel that pinned send; clearing
+            // the live composer is gated separately so session B's draft is
+            // never wiped.
             if (coordinator.isRuntimeDirty(sessionId)) {
               toast.error(t('newChat.chatInput.effortRuntimeDirty'));
               if (optimisticallyClearRemoteComposer) restoreRemoteComposerAndRelease();
@@ -5263,8 +5468,13 @@ export function ChatInput({
         markRecentPluginUsage();
         if (!optimisticallyClearRemoteComposer) clearSentComposer();
       } finally {
-        dispatchSendInFlightRef.current = false;
-        setSendDispatchInFlight(false);
+        dispatchSendInFlightKeysRef.current.delete(sendInFlightKey);
+        if (
+          lockCurrentComposer &&
+          storageKeyForDraftRef.current === sourceStorageKey
+        ) {
+          setSendDispatchInFlight(false);
+        }
         finishAgentSendDispatch();
       }
     },
@@ -5314,7 +5524,7 @@ export function ChatInput({
 
   const handleClickSend = useCallback(
     async (deliveryMode: MessageDeliveryMode = 'queue') => {
-      if (voiceInput.isBusy) {
+      if (voiceBusyOnCurrentComposer) {
         const currentCanSend = !isEditorEmpty(editor) || hasAttachments;
         if (!voiceInput.isListening && !currentCanSend && voiceInput.draftText.trim().length === 0)
           return;
@@ -5348,6 +5558,7 @@ export function ChatInput({
       editor,
       handleVoiceInputStop,
       hasAttachments,
+      voiceBusyOnCurrentComposer,
       voiceInput.draftText,
       voiceInput.isBusy,
       voiceInput.isListening,
@@ -6742,9 +6953,10 @@ export function ChatInput({
   const hasMessage = !isEditorEmpty(editor);
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
-  const hasVoiceDraftText = voiceInput.draftText.trim().length > 0;
+  const hasVoiceDraftText =
+    voiceBusyOnCurrentComposer && voiceInput.draftText.trim().length > 0;
   // 推荐 overlay 的可见判据:开关开启 + 有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 输入框未锁定。
-  // composerMutationLocked 涵盖 disabled、sendDispatchInFlight、voiceInput.isBusy 及远程只读/锁定状态。
+  // composerMutationLocked 涵盖 disabled、sendDispatchInFlight、当前输入框所属语音及远程只读/锁定状态。
   const showRecommendationOverlay =
     recommendationEnabled &&
     !!recommendedPrompt &&
@@ -6766,9 +6978,9 @@ export function ChatInput({
     // host 尚未完成切换意图登记时不能发送，否则 maker:send 可能先被旧引擎消费。
     agentSwitchInFlight ||
     sendDispatchInFlight ||
-    (!voiceInput.isListening && !canSend && !hasVoiceDraftText) ||
-    voiceInput.state === 'submitting' ||
-    voiceInput.state === 'refining',
+    (!voiceBusyOnCurrentComposer && !canSend && !hasVoiceDraftText) ||
+    (voiceBusyOnCurrentComposer &&
+      (voiceInput.state === 'submitting' || voiceInput.state === 'refining')),
   );
   // Send / Stop 双槽语义 (voice busy = voiceInput.isBusy = listening|submitting|refining,
   // 判定为何用 isBusy 而不是 isListening 见下方第三段):
@@ -6795,9 +7007,9 @@ export function ChatInput({
   // (listening + submitting + refining), 让槽位从开录到润色结束保持不变; 润色期间主槽是
   // 禁用态 Send (见 sendButtonDisabled), 停止任务的能力由次槽 Stop 承担.
   const mainSlotIsStop =
-    showStopButton && (sendDispatchInFlight || (!canSend && !voiceInput.isBusy));
+    showStopButton && (sendDispatchInFlight || (!canSend && !voiceBusyOnCurrentComposer));
   const showSecondaryStop =
-    showStopButton && (canSend || voiceInput.isBusy) && !sendDispatchInFlight;
+    showStopButton && (canSend || voiceBusyOnCurrentComposer) && !sendDispatchInFlight;
   useEffect(() => {
     voiceInputCanStopAndSendRef.current = !sendButtonDisabled;
     composerCanSubmitRef.current = !sendButtonDisabled;
@@ -7188,7 +7400,7 @@ export function ChatInput({
             {/* Editor — 用负 margin 向右破出容器的 px-[11px],让 scrollbar 贴到圆角边;
              内层 ProseMirror 加 pr-[11px] 作为文字 gutter,视觉上文字宽度与原先一致。 */}
             <VoiceInputPointerHintLayer
-              active={voiceInput.isBusy}
+              active={voiceBusyOnCurrentComposer}
               state={voiceInput.state}
               className="w-full"
             >
@@ -7203,9 +7415,11 @@ export function ChatInput({
                     'w-[calc(100%+11px)] -mr-[11px]',
                     // Disabled gets the same visual cue as the old textarea
                     composerMutationLocked && 'cursor-not-allowed opacity-60',
-                    voiceInput.isBusy && 'cursor-default',
+                    voiceBusyOnCurrentComposer && 'cursor-default',
                   )}
-                  data-voice-draft-active={voiceInput.draftText ? 'true' : undefined}
+                  data-voice-draft-active={
+                    voiceBusyOnCurrentComposer && voiceInput.draftText ? 'true' : undefined
+                  }
                 />
                 {/* 字号 / 行高 / 颜色与原生 placeholder 对齐,单行截断防止长句撑高输入框。
                     py-[3px] 是镜像 .ProseMirror 的 py-[3px]:它的 -my-[3px] 会穿过这里
@@ -7445,10 +7659,14 @@ export function ChatInput({
                     />
                   )}
                   <VoiceInputButton
-                    state={voiceInput.state}
+                    state={voiceBusyOnCurrentComposer ? voiceInput.state : 'idle'}
                     // The surrounding controls stay locked during voice input, but
                     // this control must remain enabled so the recording can stop.
-                    disabled={composerEditorLocked || !editor}
+                    disabled={
+                      composerEditorLocked ||
+                      !editor ||
+                      (voiceInput.isBusy && !voiceBusyOnCurrentComposer)
+                    }
                     shortcutLabel={voiceInputShortcutLabel}
                     onStart={handleVoiceInputStart}
                     onStop={handleVoiceInputPlainStop}

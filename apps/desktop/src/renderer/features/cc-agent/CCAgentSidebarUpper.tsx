@@ -169,9 +169,11 @@ import type {
 } from './lib/automationSidebarGrouping';
 import { getSessionDeviceId } from '@/features/device-link/remoteProjectsStore';
 import {
+  getRemoteSessionActivity,
   useRemoteSessionActivity,
   useRemoteSessionActivityRevision,
 } from '@/features/device-link/remoteSessionActivityStore';
+import { resolveCollapsedProjectAttentionTone } from './sidebar/projectCollapsedAttention';
 import { WorkdirBrowseSidebar } from './workdir-browse/WorkdirBrowseSidebar';
 import {
   buildDocModeSwitchProjects,
@@ -1073,6 +1075,7 @@ function ExpandedView({
     if (unreadScheduleSessionIds.size === 0) return notifications;
     return new Set([...notifications, ...unreadScheduleSessionIds]);
   }, [notifications, unreadScheduleSessionIds]);
+  const remoteActivityRevision = useRemoteSessionActivityRevision();
 
   const markAutomationSessionRunsRead = useCallback(
     (sessionId: string) => {
@@ -1118,6 +1121,25 @@ function ExpandedView({
     }
     return next;
   }, [effectiveRunningSessionIds, backgroundActivitySessionIds, orcaLeadWorkerMap]);
+  const collapsedAttentionToneFor = useCallback(
+    (sessions: readonly Session[]) =>
+      resolveCollapsedProjectAttentionTone({
+        sessions,
+        runningSessionIds: displayRunningSessionIds,
+        notifications: sidebarNotifications,
+        attentionKinds,
+        urgentSessionIds: urgentSet,
+        remotePhaseOf: (sessionId) => getRemoteSessionActivity(sessionId)?.phase,
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remoteActivityRevision 代表 getRemoteSessionActivity 读到的整表内容
+    [
+      displayRunningSessionIds,
+      sidebarNotifications,
+      attentionKinds,
+      urgentSet,
+      remoteActivityRevision,
+    ],
+  );
 
   // 本地会话用 effectiveIncludeArchived（snapshot 实际所属桶）避免切桶时先闪空；
   // device-link 远程镜像同时持有 active / archived 两桶，必须独立按 filter.status 筛选，
@@ -3346,6 +3368,11 @@ function ExpandedView({
                     sessionVariant={sessionVariant}
                     statusFilter={filter.status}
                     isCollapsed={collapse.collapsed.has(project.projectKey)}
+                    collapsedAttentionTone={
+                      collapse.collapsed.has(project.projectKey)
+                        ? collapsedAttentionToneFor(displaySessions ?? project.sessions)
+                        : null
+                    }
                     parentSectionCollapsed={parentSectionCollapsed}
                     activeSessionId={activeSessionId}
                     runningSessionIds={displayRunningSessionIds}

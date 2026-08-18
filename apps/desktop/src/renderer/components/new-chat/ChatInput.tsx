@@ -287,6 +287,7 @@ import {
   stripHostCapabilityChips,
 } from '@/lib/composerListDocument';
 import { useAgentCapabilities, type AgentKind } from '@/hooks/useAgentCapabilities';
+import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import { useConnectedSource } from '@/hooks/useConnectedSource';
 import { useProviders } from '@/hooks/useProviders';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
@@ -298,12 +299,15 @@ import {
   resolveProviderModelEfforts,
 } from '@/lib/providerModels';
 import {
+  clearProviderModelEffort,
+  clearProviderModelFast,
   getProviderModelEffort,
   setProviderModelChoice,
   setProviderModelEffort,
   getProviderModelFast,
   setProviderModelFast,
 } from '@/state/providerModelMemory';
+import { useModelPickerLayout } from '@/state/modelPickerLayout';
 import {
   getDraft,
   patchVendorPrefs,
@@ -714,6 +718,42 @@ interface ChatInputProps {
    * 状态完全由 parent 持有 (controlled);ChatInput 只做展示与事件转发。
    */
   collaboration?: CollaborationMenuConfig;
+  /**
+   * 新会话统一模型选择器(model-selector-unified M5)的**选中直通**。
+   *
+   * 传入 = 这条 composer 的模型 pill 用统一面板,而且它是**草稿**:面板里的一行自带引擎
+   * (推荐 ⊕ 用户 override ⊕ 收藏副本),所以选中要连引擎一起落 —— ChatInput 把
+   * (vendor, providerId, modelId, effort, fast, 收藏锚点) 一次交给草稿层写 newMakerDraft,
+   * 不走 onProviderDidChange / onModelDidChange 那条按「当前引擎」二次解析的链路(它在
+   * 跨引擎行上会拿旧引擎的档位表把档清空)。
+   *
+   * 已建会话不传:那边换引擎有损,跨引擎行走 performAgentSwitch 事务(M6)。
+   *
+   * `modelId` 是**选中引擎的 wire model id**(不是面板行的归一化 id):它会直接落进
+   * `lastByVendor.model` 并原样进 createSession,写错就是首条请求路由到一个不存在的模型。
+   */
+  onUnifiedDraftSelect?: (selection: {
+    vendor: 'cc' | 'codex' | 'pi';
+    providerId: string;
+    /** 选中引擎的 **wire model id**。 */
+    modelId: string;
+    effort?: Effort;
+    fast: boolean;
+    favoriteUid: string | null;
+  }) => void;
+  /**
+   * 统一面板里被选中的收藏锚点 uid(与 onUnifiedDraftSelect 成对,由草稿层持有)。
+   * 语义见 ModelSelectorProps.selectedFavoriteUid。
+   */
+  selectedFavoriteUid?: string | null;
+}
+
+/** 统一模型选择器联合列表的候选引擎全集(与 SELECTABLE_VENDORS 同一顺序)。 */
+const UNIFIED_AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
+
+/** AgentKind → NewMaker vendor(useAvailableAgents 用 vendor 口径)。 */
+function agentKindToVendor(kind: AgentKind): 'cc' | 'codex' | 'pi' {
+  return kind === 'codex' ? 'codex' : kind === 'pi' ? 'pi' : 'cc';
 }
 
 function vendorKeyToAgentKind(v?: 'cc' | 'codex' | 'pi'): AgentKind | null {
@@ -1025,6 +1065,8 @@ export function ChatInput({
   compactMiddleToolbarSlot,
   topSlot,
   collaboration,
+  onUnifiedDraftSelect,
+  selectedFavoriteUid = null,
 }: ChatInputProps) {
   // device-link 远程会话:null = 已确认本地会话,undefined = 所有权尚未解析,string = 远程会话。
   // 预测守卫用原始值区分 null vs undefined,下游通路继续用 ?? undefined 归一化。
@@ -1615,6 +1657,33 @@ export function ChatInput({
   // 「目标 Agent + 目标模型 + 旧来源」的混合状态；null 仍表示跟随目标引擎默认路由。
   const activeProviderId = agentSwitchIntent ? agentSwitchIntent.providerId : selectedProviderId;
 
+  /**
+   * 会话内经统一面板选中的**收藏锚点**(model-selector-unified §1.5,2026-08-17 review 第三轮 G4)。
+   *
+   * ★ 刻意只是**渲染进程内存态**:重启 / 刷新 / 换个窗口即忘。它是「面板上哪一行该打勾」的
+   * UI 选中提示,**不是用户数据** —— 本轮非目标明确写了不动 sessions 表 schema、不回填存量,
+   * 所以它既不落库,也不进 device-link payload。忘掉的代价只是重开面板时选中态落回模型行,
+   * 与「从没选过收藏」等价,不会让任何配置出错。
+   *
+   * 草稿的同名状态在 NewMakerDraftRoute(经 `selectedFavoriteUid` prop 传进来),两者不共用:
+   * 草稿的锚点跟着草稿走,会话的锚点跟着会话走。
+   */
+  const [sessionFavoriteAnchor, setSessionFavoriteAnchor] = useState<{
+    uid: string;
+    /** 选中时会话落下的 wire model id(≠ 收藏条目里的归一化行 id,见草稿侧同名快照的说明)。 */
+    wireModelId: string;
+    engine: 'cc' | 'codex' | 'pi';
+    /** 选中时的显式来源 —— 来源也是锚点身份的一部分:同 wire id 同引擎、仅来源不同是两份
+     *  配置。别的窗口 / 外部 patch 把会话来源从 A 切到 B 后,缺这一维会让面板继续在 A 的
+     *  收藏上打勾,编辑/删除它还会误回落到 A 的默认(2026-08-17 review)。 */
+    providerId: string;
+  } | null>(null);
+  // 换会话 = 换一份「当前选了什么」:上一条会话的锚点绝不能跟过去(新会话恰好同模型同引擎时
+  // 会在一条不相干的收藏上打勾)。
+  useEffect(() => {
+    setSessionFavoriteAnchor(null);
+  }, [sessionId]);
+
   // 乐观切换解除:props(被控端 echo 回流的 mirror)追上目标三元组即交回 props;否则 5s 兜底解除
   // (被控端把 effort 降级等导致永不相等时,避免 selector 永久置灰)。
   useEffect(() => {
@@ -1786,6 +1855,30 @@ export function ChatInput({
   const providersLoading = deviceLinkDeviceId
     ? remoteModelListStatus === 'loading'
     : localProvidersLoading;
+  // 统一模型选择器(model-selector-unified M5 / M6)在 composer 上的开关 —— **能力级**那一半
+  // (下面还要叠形态偏好才是真正启用,见 unifiedPanelCapable / unifiedPanelActive;
+  // NewMakerDraftRoute 的 unifiedModelPanelEnabled / unifiedModelPanelActive 与这两级逐字对应)。
+  //
+  // 这一级唯一的降级条件是**没有供应商目录可用**:联合列表(unifiedModelEntries)只认目录里的
+  // (provider, agent) 条目,而老被控端不支持 provider:list 时控制端只有一份拍平的
+  // capabilities —— 那种情况下开了统一面板就是一张空列表(见 ModelSelector.unifiedPanel
+  // 的「已知边界」)。unsupported 是**结构化**判定(isDeviceProvidersUnsupportedError),
+  // 不是 providers.length===0:后者在首帧加载中恒成立,拿它当条件会让面板每次打开先闪
+  // 一下旧版布局。
+  const unifiedModelPanelEnabled = !deviceLinkDeviceId || !remoteProviders.unsupported;
+  // 联合列表参与哪些引擎 —— 以**运行时注册结果**为准(device-link 取被控端的)。
+  // 撤掉新会话工具条的 AgentSelect 后,它的 hiddenVendors 门禁就落到这里:Pi 二进制缺失
+  // 时模型目录照样投影 Pi 模型,只看目录会让用户一路选到 requireAgent 的 not-registered。
+  // 未加载完成 → 传 undefined(fail-open,不隐藏任何引擎);当前引擎恒在列。
+  const { availableVendors: runtimeAvailableVendors, loaded: runtimeAgentsLoaded } =
+    useAvailableAgents(deviceLinkDeviceId);
+  const unifiedAgents = useMemo<readonly AgentKind[] | undefined>(() => {
+    if (!runtimeAgentsLoaded) return undefined;
+    const kinds = UNIFIED_AGENT_KINDS.filter(
+      (kind) => kind === agentKind || runtimeAvailableVendors.has(agentKindToVendor(kind)),
+    );
+    return kinds.length > 0 ? kinds : undefined;
+  }, [runtimeAgentsLoaded, runtimeAvailableVendors, agentKind]);
   // 已有 device-link 任务在断链时仍有 pinned deviceId + renderer outbox 可接住发送，
   // 不能因为被控端 provider 目录暂时拉不到就禁用 composer。远程草稿没有既有 session
   // 可以排队，仍与本地任务一样保留来源门禁。
@@ -1871,6 +1964,10 @@ export function ChatInput({
       setChoice: setProviderModelChoice,
       getFast: getProviderModelFast,
       setFast: setProviderModelFast,
+      // 「恢复推荐」= 删记忆键(跟随目录新默认),不是把这一版的默认快照写回去。
+      // device-link 镜像没有这两个入口(隧道协议没有删除那一笔),按各自能力退化。
+      clearEffort: clearProviderModelEffort,
+      clearFast: clearProviderModelFast,
     };
   }, [deviceLinkDeviceId, modelMemoryOverride]);
 
@@ -5789,6 +5886,11 @@ export function ChatInput({
     [onFastModeChange, t],
   );
 
+  /**
+   * 返回值 = **这次 Fast 写入真的落下去了没有**(2026-08-17 review 第三轮 G2)。统一面板的
+   * 三个「先应用、后清存储」入口(恢复推荐 / 删选中收藏 / 编辑选中收藏)按它决定要不要收尾:
+   * 报假成功会让 override / 记忆 / 收藏被清掉,而任务还在旧配置上跑。其余调用方无视返回值。
+   */
   const handleFastModeChange = useCallback(
     async (
       enabled: boolean,
@@ -5796,18 +5898,20 @@ export function ChatInput({
       effort = activeEffort,
       syncDraft = true,
       memoryProviderId = effectiveSourceId,
-    ) => {
-      if (settingsLocked) return;
+    ): Promise<boolean> => {
+      if (settingsLocked) return false;
       // 切换意图期:Fast 改动是"更新意图"而不是改当前会话实时状态(否则普通
       // SET_FAST 链路会让 main 清意图、renderer 乐观态失配)。经 ref 调用——
       // performAgentSwitch 声明在本回调之后(TDZ)。
       if (sessionId && makerChatStore.getAgentSwitchIntent(sessionId)) {
         const intent = makerChatStore.getAgentSwitchIntent(sessionId)!;
-        void performAgentSwitchRef.current(intent.target, intent.model, intent.providerId, {
-          fastMode: enabled,
-          effort: intent.effort as Effort | undefined,
-        });
-        return;
+        // await 而非 fire-and-forget:意图重登记是不是真的成功,是这次 Fast 写入的唯一结果。
+        return (
+          (await performAgentSwitchRef.current(intent.target, intent.model, intent.providerId, {
+            fastMode: enabled,
+            effort: intent.effort as Effort | undefined,
+          })) !== false
+        );
       }
       const sourceRemoteDeviceId = (sessionId
         ? (deviceLinkDeviceId ?? getSessionDeviceId(sessionId))
@@ -5815,7 +5919,7 @@ export function ChatInput({
       const persisted = await persistFastModeChange(enabled, {
         remoteDeviceId: sourceRemoteDeviceId,
       });
-      if (!persisted) return;
+      if (!persisted) return false;
       if (modelId && currentModelAgentKind && memoryProviderId) {
         modelMemory?.setFast(currentModelAgentKind, memoryProviderId, modelId, enabled);
       }
@@ -5826,6 +5930,7 @@ export function ChatInput({
           { remoteDeviceId: sourceRemoteDeviceId },
         );
       }
+      return true;
     },
     [
       sessionId,
@@ -5942,11 +6047,16 @@ export function ChatInput({
         effort?: Effort;
         fastMode?: boolean;
       },
-    ) => {
-      if (!sessionId) return;
+    ): Promise<boolean> => {
+      // ★ 返回值 = **这次切换到底登记成功了没有**(2026-08-17 review)。此前本函数只返回
+      // void,调用方(统一面板的跨引擎链路)拿不到结果,只能在「确认框过了」这一刻就返回
+      // true —— 面板据此做的清理动作(恢复推荐清 override / 删收藏)会在事务其实失败或
+      // 被拒时照样执行,把用户原来的配置抹掉。凡是「没把这次选择落到会话上」的出口一律
+      // 返 false,只有真正登记 / 应用了才返 true。
+      if (!sessionId) return false;
       // 发送的引用水合 / 预检也可能 await。以同步登记的 session 级发送 token 为准，
       // 防止「先点发送、后选引擎」被异步准备反转成先登记切换再 maker:send。
-      if (hasPendingAgentSendDispatch(sessionId)) return;
+      if (hasPendingAgentSendDispatch(sessionId)) return false;
       // 本次点选无论落到哪个分支(登记意图 / 撤销意图 / 立即切换),都算一次本端写入:
       // 在途的远程意图读回据此作废,不会用旧快照盖掉用户刚做的选择。
       const sourceSessionId = sessionId;
@@ -6020,7 +6130,7 @@ export function ChatInput({
         // device-link 往返期间可以切到另一个任务:同一路由下 ChatInput 会带着新
         // sessionId 继续渲染,sameEngineReselectRef 等闭包也已指向新会话。旧会话的
         // 响应绝不能借最新的 ref 把模型/来源写进当前会话。
-        if (!isSessionScopeCurrent(sourceSessionId, currentSessionIdRef.current)) return;
+        if (!isSessionScopeCurrent(sourceSessionId, currentSessionIdRef.current)) return false;
         // 远程往返期间状态可能已被更新的选择超车:用户又点了一次(写序号变),或另一个
         // 控制端 / 被控端的权威 sessions:patched 先到(修订号变)。此时这次 ack 携带的是
         // **旧**选择,落下去会让选择器显示过期引擎,而被控端按新意图执行下一条消息。
@@ -6040,7 +6150,9 @@ export function ChatInput({
             intentRevNow: makerChatStore.getAgentSwitchIntentRev(sourceSessionId),
           },
         });
-        if (ackAction === 'discard') return;
+        // 被更新的选择超车 → 这次点选没有落地(权威值属于后来那次),按「没切」上报:
+        // 调用方的清理若按成功走,清掉的是**用户最新那次选择**对应的配置。
+        if (ackAction === 'discard') return false;
         if (ackAction === 'apply-intent') {
           // 意图已登记:乐观呈现目标引擎/模型/档位(独立 intent 覆盖
           // model/effort/provider/fast 显示,不改真实 reducer agentKind)。真切换
@@ -6078,7 +6190,8 @@ export function ChatInput({
               { duration: 4000 },
             );
           }
-          return;
+          // 意图已登记 = 这次选择真的落到会话上了(真切换在下一条消息执行)。
+          return true;
         }
         if (ackAction === 'same-engine-reselect') {
           // 同引擎 no-op = 用户选回当前引擎:撤销展示意图(幂等,被控端可能已清并回流),
@@ -6096,9 +6209,10 @@ export function ChatInput({
                 result.sameEngineRevision,
               )
             : await sameEngineReselectRef.current.byModel(newModelId, result.sameEngineRevision);
-          if (applied === false) return;
+          // 被更新的选择超车(byProvider / byModel 自带修订号守卫)→ 同样按「没切」上报。
+          if (applied === false) return false;
           makerChatStore.clearAgentSwitchIntent(sourceSessionId);
-          return;
+          return true;
         }
         // 立即切换路径(harness / registry 缺省兜底,生产不走):维持旧收敛语义。
         makerChatStore.noteAgentSwitched(sourceSessionId, targetAgentKind);
@@ -6116,10 +6230,15 @@ export function ChatInput({
         if (!result.engineReady) {
           toast.error(t('newChat.chatInput.agentSwitch.engineNotReady'), { duration: 4000 });
         }
+        // 立即切换已经落库(noteAgentSwitched + 草稿同步):engineReady 只影响提示,
+        // 不改变「这次选择已应用」这一事实。
+        return true;
       } catch (err) {
         toast.error(
           t(mapIpcErrorToI18nKey(err, { fallback: 'newChat.chatInput.agentSwitch.failed' })),
         );
+        // 切换事务抛错 = 没切成:调用方不得在此之上做「成功才做」的清理。
+        return false;
       } finally {
         exclusiveTurn.release();
         finishAgentSwitchOperation();
@@ -6146,6 +6265,230 @@ export function ChatInput({
   // 调用,避免 TDZ;每次渲染刷新指向最新闭包。
   const performAgentSwitchRef = useRef(performAgentSwitch);
   performAgentSwitchRef.current = performAgentSwitch;
+
+  // ── 统一模型选择器 · 会话内形态(model-selector-unified M6)────────────────────
+  // 旧的两步分段(先切引擎 tab、再选模型)在统一面板下不渲染,取而代之的是
+  // 「同引擎视图默认 + 显式跨引擎入口 + 行浮层引擎胶囊」。**执行链路一个字没变**:
+  // 跨引擎选中仍然是 confirmAgentBrowseSwitch(同一份确认与「不再提示」偏好)
+  // → performAgentSwitch(意图登记与上下文容量护栏全在那边)。
+  //
+  // Fast 与 effort 同规则:面板交出来的 `fast` 是按**目标引擎**解析并过完能力门控的值
+  // (行记忆 / 收藏副本 / 恢复推荐的显式关),那是用户看着点下去的配置,显式传进
+  // overrides.fastMode(2026-08-17 review:留给事务按目标记忆重解析,收藏 Fast 与记忆值
+  // 不同、或恢复推荐要明确关 Fast 时,界面配置与运行态分离)。**旧引擎的实时 fastMode
+  // 仍然绝不进这条链路**——缺省(面板拿不到目标配置的入口)时由 performAgentSwitch 按
+  // 目标重解析,两条路都不读旧引擎的值。
+  // effort 同样显式传:面板行(以及收藏副本)已经按目标引擎解析好档位。
+  //
+  // `modelId` 在契约上**已经是目标引擎的 wire model id**(面板按
+  // `capabilities[targetAgent].wireModelId` 交出来)。这里对它零加工直接进切换事务 ——
+  // 任何"顺手归一化 / 加前缀"都会让 SET_MODEL 落一个目标引擎目录里不存在的 id。
+  //
+  // `currentAgent` = **待切换意图目标优先**(2026-08-17 review):跨引擎意图登记后、真切换
+  // 落地前,activeModel / activeEffort / fastMode / activeProviderId 展示的全是意图目标值,
+  // 面板的 live / keep / pinned 引擎必须用同一口径 —— 仍取旧 vendorKey 会把意图中的目标
+  // 模型画成旧引擎:浮层摆出旧引擎的档位集合,而意图期的深度 / Fast 回调
+  // (performAgentSwitch(intent.target, …))按**目标**能力校验,用户选的旧引擎档位被静默
+  // 回落。写侧本就全部落在意图目标上(performModelChange / performProviderChange /
+  // handleEffortChange / handleFastModeChange 的意图分支),这里只是让显示端对齐;
+  // composerEngineMarkVendor / 锚点派生校验早已同口径。意图清除(发送后 patched 回流)时
+  // vendorKey 收敛成同一个值,口径无缝交回。
+  const intentTargetAgent = agentSwitchIntent?.target ?? null;
+  const sessionEngineFilter = useMemo(() => {
+    if (!unifiedModelPanelEnabled) return undefined;
+    if (!sessionId || !vendorKey || remoteHostId || !sessionAgentSwitchSupported) return undefined;
+    const currentAgent = intentTargetAgent ?? vendorKeyToAgentKind(vendorKey);
+    if (!currentAgent) return undefined;
+    return {
+      currentAgent,
+      onCrossEngineSelect: async ({
+        providerId,
+        modelId,
+        targetAgent,
+        effort,
+        fast,
+        favoriteUid = null,
+      }: {
+        providerId: string;
+        modelId: string;
+        targetAgent: AgentKind;
+        effort: Effort | '';
+        fast?: boolean;
+        favoriteUid?: string | null;
+      }): Promise<boolean> => {
+        // 取消 = 什么都不改;返回 false 让选择器留在原地(用户还能挑别的行)。
+        if (!(await confirmAgentBrowseSwitch())) return false;
+        // ★ 必须 await 并**透传事务的真实结果**(2026-08-17 review)。此前这里 fire-and-forget
+        // 之后立即 return true —— 那个 true 只表示「确认框过了」,不表示切换登记成功。
+        // 面板侧把「成功才做」的清理(恢复推荐清 override / 删除选中收藏)挂在这个提前
+        // 布尔上,于是 switchSessionAgent 抛错、或 pending send 把切换挡掉时,用户的
+        // override / 收藏已经被清掉,原配置无从恢复。
+        //
+        // 代价是面板会在事务在途期间多停留一会儿:这段时间由 ModelSelector 的
+        // keepOpenForAgentConfirmation 保命锁按住(它已经覆盖整个 await 期),面板本身在
+        // 切换 in-flight 期间是置灰的,不会出现「面板可点却在切换中」的中间态。
+        const applied = await performAgentSwitchRef.current(
+          targetAgent,
+          modelId,
+          providerId,
+          // fast 只认**面板显式给的目标值**;缺省时不传,由 performAgentSwitch 按目标
+          // 重解析。旧引擎的实时 Fast(本组件同名 state)不进这条链路。
+          effort || fast !== undefined
+            ? {
+                ...(effort ? { effort } : {}),
+                ...(fast !== undefined ? { fastMode: fast } : {}),
+              }
+            : undefined,
+        );
+        // 收藏锚点只在事务**真成功**后才记(G4):确认框被取消 / 登记失败时这次选择根本没
+        // 发生,记下来会让面板在一条没被采用的收藏上打勾。选普通模型行 → favoriteUid 为
+        // null → 顺带把上一条锚点清掉。
+        if (applied) {
+          setSessionFavoriteAnchor(
+            favoriteUid
+              ? {
+                  uid: favoriteUid,
+                  wireModelId: modelId,
+                  engine: agentKindToVendor(targetAgent),
+                  providerId,
+                }
+              : null,
+          );
+        }
+        return applied;
+      },
+    };
+  }, [
+    unifiedModelPanelEnabled,
+    sessionId,
+    vendorKey,
+    intentTargetAgent,
+    remoteHostId,
+    sessionAgentSwitchSupported,
+    confirmAgentBrowseSwitch,
+  ]);
+
+  // composer pill 尾部引擎小标的取值(model-selector-unified §1.1,Chris 2026-08-12 裁决:
+  // pill 不再写 harness 名字文本)。与 agentIdentity **同一口径**,不另起一套:
+  //   · 已建会话:身份由 session / runtime 确认后才画;切换意图期画目标引擎;
+  //     身份未加载时 resolveModelSelectorAgentIdentity 返回 undefined → 不画
+  //     (绝不拿 vendorKey 的 Claude Code 回退冒充,见 runtimeAgentKind 的 prop 说明);
+  //   · 草稿:没有 session 身份可言,当前引擎就是 vendorKey 本身。
+  const composerEngineMarkVendor = sessionId
+    ? (resolveModelSelectorAgentIdentity(runtimeAgentKind, agentSwitchIntent?.target)?.vendorKey ??
+      null)
+    : (vendorKey ?? null);
+
+  /**
+   * 下发给统一面板的收藏锚点:草稿用调用方(NewMakerDraftRoute)持有的那一份,会话用上面
+   * 那份内存态。
+   *
+   * 会话侧刻意做成**派生校验**而不是「配置一变就 setState 清掉」:同引擎选中一条收藏时,
+   * 模型的持久化是异步的(onProviderChange → IPC),清理式写法会在那个窗口里把刚记下的锚点
+   * 当场抹掉。派生写法在那一帧只是先不打勾,等 activeModel 收敛回来自然对上;而配置真被别的
+   * 路径改走(换模型 / 换引擎)之后,它永远对不上,等价于清除。判据与草稿侧同名兜底逐字同构:
+   * 比的是**快照里的 wire id** 与当前会话的 wire id(收藏条目按归一化行 id 存,两者天生可能不等)。
+   * 引擎身份未加载时(composerEngineMarkVendor 为 null)不参与判定,免得一帧未就绪就误判。
+   * 锚点指向的收藏被删 / 换账号后查无此条,由面板侧 activeFavoriteUid 兜底。
+   */
+  const effectiveSelectedFavoriteUid = sessionId
+    ? sessionFavoriteAnchor &&
+      sessionFavoriteAnchor.wireModelId === activeModel &&
+      // 来源同为锚点身份(2026-08-17 review):仅来源被切走(跨窗口 / 外部 patch,wire id
+      // 与引擎都没变)时锚点必须失效,否则面板继续勾旧来源的收藏。activeProviderId 为
+      // null = 会话跟随默认路由,与显式来源的锚点永不相等 —— 语义正确:锚点记录的是
+      // 一次显式来源选择。
+      sessionFavoriteAnchor.providerId === activeProviderId &&
+      (composerEngineMarkVendor === null || sessionFavoriteAnchor.engine === composerEngineMarkVendor)
+      ? sessionFavoriteAnchor.uid
+      : null
+    : selectedFavoriteUid;
+
+  // 会话内拿不到跨引擎切换事务(SSH 远程会话 / 被控端不支持 session-agent-switch /
+  // Orca 会话)时,统一面板**不能**摆出其它引擎的行:useUnifiedRowActions.selectRow 只有在
+  // 传了 sessionEngineFilter 时才把跨引擎行改道给切换事务,没有它时跨引擎行会被当普通选中
+  // 交给单引擎链路(onProviderChange 只换 model / provider),等于把另一个引擎的模型
+  // 直接塞进当前会话。与旧面板同待遇:这类会话把联合列表锁定在当前引擎(旧版本来就是
+  // 单引擎列表)。
+  //
+  // 锁定用的必须是**已确认**的会话引擎,不能用 vendorKey 派生的 agentKind:
+  // CCAgentSessionView 的 vendorKey 走 dbToMakerAgentKind(session?.agentKind),元数据到达
+  // 前回退成 'cc'。而 sessionOrcaRole 在同一窗口里是 undefined(≠ null)→
+  // sessionAgentSwitchSupported=false → 没有 sessionEngineFilter → 走到这条锁定分支。
+  // 两件事撞在一起的后果不是"闪一下":Codex 会话会摆出一张**纯 Claude** 的列表,而且此时
+  // 没有跨引擎兜底,点任意一行都会把 Claude 模型经 onProviderChange 塞进 Codex 会话
+  // (bug4)。所以身份未确认时不锁 —— 回落旧面板一帧,等 runtimeAgentKind 落地再进统一面板。
+  const sessionEngineConfirmed = !sessionId || runtimeAgentKind != null;
+  const inSessionEngineLocked = Boolean(sessionId) && !sessionEngineFilter;
+  const lockedSessionAgentKind =
+    inSessionEngineLocked && sessionEngineConfirmed ? (runtimeAgentKind ?? agentKind) : null;
+  // 形态偏好(三档并存,Chris 2026-08-17):'original' = 最原始选择器(含旧 harness
+  // 分段切换,agentSwitch 因 unifiedPanelActive=false 自动回来);'classic'/'badge' =
+  // 新选择器 A/B 版。capable 表示统一面板**可用**(老面板 footer 据此摆「尝试新
+  // 选择器」入口),active 才真正启用。
+  const modelPickerLayoutPref = useModelPickerLayout();
+  const unifiedPanelCapable =
+    unifiedModelPanelEnabled && (!inSessionEngineLocked || lockedSessionAgentKind !== null);
+  const unifiedPanelActive = unifiedPanelCapable && modelPickerLayoutPref !== 'original';
+  const effectiveUnifiedAgents = useMemo<readonly AgentKind[] | undefined>(
+    () => (lockedSessionAgentKind ? [lockedSessionAgentKind] : unifiedAgents),
+    [lockedSessionAgentKind, unifiedAgents],
+  );
+
+  // ── 统一模型选择器 · 新会话形态(model-selector-unified M5)────────────────────
+  // 草稿里换引擎是无损的(会话还没建),所以选中一行 = 直接把它整份配置写下去。
+  // 深度 / Fast 记忆按**目标引擎**槽写:草稿的生效 Fast 是从这份记忆派生的
+  // (NewMakerDraftRoute.resolveDraftFast),收藏副本带来的 Fast 只有落进这里才真生效;
+  // 不写就会出现「选了收藏的 Opus·Fast,pill 上却没有闪电」。
+  //
+  // ── id 口径(数据层把同一模型的多引擎条目合并成一行之后)────────────────────
+  // 面板的行身份是**归一化 id**(`rowModelId`),而每个引擎真正能发出去的是各自的
+  // **wire id**(`capabilities[engine].wireModelId`,如 cc 侧的 `chatgpt/gpt-5.6-luna`
+  // 对 codex 侧的 `gpt-5.6-luna`)。`selection.modelId` 在契约上**已经是选中引擎的
+  // wire id**,本函数因此对它零加工:
+  //   · 写 providerModelMemory —— 键必须是 wire id(记忆表的既有消费方全按 wire id 存取,
+  //     混进归一化 id 会读不回来,表现为"设过的档下次不认");
+  //   · 交给草稿层 —— 它会落进 lastByVendor.model,并原样进 createSession。
+  // `rowModelId` 只在需要指回"面板上那一行"时有用(收藏锚点等),**绝不能当发送 id**,
+  // 所以这里只接收、不消费,也不往下游传。
+  const handleUnifiedDraftSelect = useCallback(
+    (selection: {
+      providerId: string;
+      /** 选中引擎的 **wire model id** —— 唯一可发送、可当记忆键的那个 id。 */
+      modelId: string;
+      effort?: Effort;
+      engine: 'cc' | 'codex' | 'pi';
+      fast: boolean;
+      favoriteUid: string | null;
+      /** 行的归一化 id(面板行身份)。草稿层不消费,更不作为发送 id。 */
+      rowModelId?: string;
+    }) => {
+      if (sessionId || settingsLocked) return;
+      const targetKind = vendorKeyToAgentKind(selection.engine);
+      if (targetKind && selection.providerId) {
+        if (selection.effort) {
+          modelMemory?.setEffort(
+            targetKind,
+            selection.providerId,
+            selection.modelId,
+            selection.effort,
+          );
+        }
+        modelMemory?.setFast(targetKind, selection.providerId, selection.modelId, selection.fast);
+      }
+      // 乐观来源:草稿没有 SSoT 回流,pill 的来源图标靠这份本地态即时跟上。
+      setSelectedProviderId(selection.providerId);
+      onUnifiedDraftSelect?.({
+        vendor: selection.engine,
+        providerId: selection.providerId,
+        modelId: selection.modelId,
+        ...(selection.effort ? { effort: selection.effort } : {}),
+        fast: selection.fast,
+        favoriteUid: selection.favoriteUid,
+      });
+    },
+    [sessionId, settingsLocked, modelMemory, onUnifiedDraftSelect],
+  );
 
   const performModelChange = useCallback(
     async (newModelId: string, expectedAgentSwitchRevision?: number) => {
@@ -6401,17 +6744,23 @@ export function ChatInput({
     [deviceLinkDeviceId, performModelChange, sessionId],
   );
 
+  /**
+   * 返回值 = **这次深度写入真的落下去了没有**(2026-08-17 review 第三轮 G2,口径同
+   * handleFastModeChange)。统一面板的「先应用、后清存储」入口按它决定要不要收尾。
+   */
   const handleEffortChange = useCallback(
-    async (newEffort: Effort) => {
-      if (settingsLocked) return;
+    async (newEffort: Effort): Promise<boolean> => {
+      if (settingsLocked) return false;
       // 切换意图期:effort 改动 = 更新意图(重登记),不走普通 setEffort 链路。
       if (sessionId && makerChatStore.getAgentSwitchIntent(sessionId)) {
         const intent = makerChatStore.getAgentSwitchIntent(sessionId)!;
-        void performAgentSwitch(intent.target, intent.model, intent.providerId, {
-          effort: newEffort,
-          fastMode: intent.fastMode,
-        });
-        return;
+        // await 而非 fire-and-forget:意图重登记成功与否就是这次深度写入的结果。
+        return (
+          (await performAgentSwitch(intent.target, intent.model, intent.providerId, {
+            effort: newEffort,
+            fastMode: intent.fastMode,
+          })) !== false
+        );
       }
       // 用户在当前模型上显式选了 effort → 记下来, 切走再切回来时能恢复
       if (activeModel) {
@@ -6442,7 +6791,7 @@ export function ChatInput({
                   ),
                 );
               }
-              return;
+              return false;
             } finally {
               if (isSessionScopeCurrent(sessionId, currentSessionIdRef.current))
                 setRemoteSwitchInFlight(false);
@@ -6471,13 +6820,13 @@ export function ChatInput({
                 if (activeModel) rememberProviderChoice(activeModel, effort);
               },
             });
-            return;
+            return true;
           }
           // 远程会话由被控端 patch 回流；把稳定 device scope 一并传给父级，避免 relay
           // origin 短暂缺失时被误当成本地 session patch。
           onEffortDidChange?.(newEffort, sessionId, remoteDeviceId);
           if (activeModel) rememberProviderChoice(activeModel, newEffort);
-          return;
+          return true;
         }
 
         // 草稿态:全本地生效(同 handleModelChange 草稿分支)。onEffortDidChange → 父级
@@ -6485,8 +6834,10 @@ export function ChatInput({
         // 不再写服务端默认偏好——此前 await 服务端成功才刷 UI,token 失效时表现为"档位点不动"。
         onEffortDidChange?.(newEffort);
         if (activeModel) rememberProviderChoice(activeModel, newEffort);
+        return true;
       } catch (err) {
         log.warn('effort change failed:', err);
+        return false;
       }
     },
     [
@@ -7577,6 +7928,10 @@ export function ChatInput({
                   ))}
                 <div className={useNarrowToolbar ? 'min-w-0 shrink' : undefined}>
                   <ModelSelector
+                    // 选中态一律是会话 / 草稿持有的 **wire model id**(sessions.model 或
+                    // lastByVendor.model)。面板行的归一化 id 只活在面板内部 —— 从这里递进去
+                    // 会让"当前选中的那一行"在合并行上错位,也会把归一化 id 顺着
+                    // onProviderChange 漏回会话。
                     modelId={activeModel}
                     effort={activeEffort}
                     onModelChange={handleModelChange}
@@ -7597,12 +7952,53 @@ export function ChatInput({
                           )
                         : undefined
                     }
+                    // 统一模型选择器(M5 新会话 / M6 会话内)。composer 是它的两个真实入口;
+                    // 其余 7 个消费者(scheduler / IM / Hook / Subagent / Worker /
+                    // GhostErrand / 设置)本版一律不开。
+                    // pill 形态(model-selector-unified §1.1):不写 harness 名字,改成
+                    // 「模型名 + 引擎小标 + 思考深度」。会话内取已确认 / 意图中的引擎
+                    // (agentIdentity 同一口径:身份没加载完就不画,不拿 vendorKey 的
+                    // Claude Code 回退冒充);草稿直接取当前引擎。
+                    // original 形态不传:老 pill 仍写 harness 名字文本(agentIdentity),
+                    // 引擎小标是统一面板时代的形态,别把两代形态混在一颗 pill 上。
+                    engineMarkVendor={unifiedPanelActive ? composerEngineMarkVendor : null}
+                    unifiedPanel={unifiedPanelActive}
+                    // 统一面板「可用但未启用」(original 形态)时,老面板 footer 摆
+                    // 「尝试新选择器」入口 —— 可用性与启用态分开传,设置类入口两者皆无。
+                    unifiedPanelAvailable={unifiedPanelCapable}
+                    // 联合列表只列**运行时已注册**的引擎(撤掉 AgentSelect 后接住它的
+                    // hiddenVendors 门禁);未加载时不传 = 不隐藏任何引擎。会话内没有
+                    // 跨引擎切换事务可走时锁定当前引擎(见 inSessionEngineLocked)。
+                    unifiedAgents={effectiveUnifiedAgents}
+                    // 会话内:同引擎过滤 + 跨引擎走 performAgentSwitch(见 sessionEngineFilter)。
+                    sessionEngineFilter={sessionEngineFilter}
+                    // 新会话:选中直通,引擎跟着模型一起落进草稿(见 handleUnifiedDraftSelect)。
+                    onUnifiedSelect={
+                      !sessionId && unifiedPanelActive && onUnifiedDraftSelect
+                        ? handleUnifiedDraftSelect
+                        : undefined
+                    }
+                    // 草稿取调用方持有的锚点,会话取本组件的内存态(见 effectiveSelectedFavoriteUid)。
+                    selectedFavoriteUid={effectiveSelectedFavoriteUid}
+                    // 会话内同引擎选中一行后回传该行的收藏锚点(跨引擎那一路在
+                    // sessionEngineFilter.onCrossEngineSelect 里按事务真实结果自行记录)。
+                    onSessionFavoriteAnchorChange={
+                      sessionId && unifiedPanelActive ? setSessionFavoriteAnchor : undefined
+                    }
                     // session-agent-switch:已建会话提供显式两步引擎切换(列表顶部
                     // Claude/Codex 分段,先选 Agent 再选模型)。device-link 远程会话同样
                     // 支持(隧道到被控端执行,与手机端同一套 channel),入口按被控端能力位
                     // 门控。草稿(无 sessionId)与 SSH 远程会话仍不传。
+                    //
+                    // 统一面板下**刻意不传**:那两步分段已被「同引擎默认 + 显式跨引擎入口 +
+                    // 行浮层引擎胶囊」完整取代(见 ModelSelectorContentProps.sessionEngineFilter
+                    // 的 prop 说明),两者同时传会得到一个永远不渲染的分段。
                     agentSwitch={
-                      sessionId && vendorKey && !remoteHostId && sessionAgentSwitchSupported
+                      !unifiedPanelActive &&
+                      sessionId &&
+                      vendorKey &&
+                      !remoteHostId &&
+                      sessionAgentSwitchSupported
                         ? {
                             currentVendor: vendorKey,
                             confirmBrowseSwitch: confirmAgentBrowseSwitch,

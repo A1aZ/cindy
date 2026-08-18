@@ -280,14 +280,19 @@ async function runControllerDisplayNamesFromDirectory(
     // 目录补齐展示名的同时,给这些手机补一次只读词典投影。
     for (const device of result.devices ?? []) {
       const deviceId = typeof device.deviceId === 'string' ? device.deviceId : '';
+      const platform = typeof device.platform === 'string' ? device.platform : '';
       if (
         !deviceId
         || device.online !== true
-        || !isMobilePlatform(typeof device.platform === 'string' ? device.platform : null)
+        || !isMobilePlatform(platform)
         || isDeviceRevoked(deviceId)
       ) {
         continue;
       }
+      // 目录发现也要写回后续广播读的那份在线集合,否则只补发一次,
+      // 词典变更 / 开关切换时 listOnlineMobileDevices 仍是空的。
+      presenceOnlineByDevice.set(deviceId, true);
+      setControllerPlatform(deviceId, platform);
       handleMobilePeerOnline(deviceId);
     }
   } catch (err) {

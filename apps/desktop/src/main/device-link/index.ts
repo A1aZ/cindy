@@ -158,7 +158,12 @@ export function deviceLinkApiBase(): string {
 }
 
 type DeviceDirectoryResponse = {
-  devices?: Array<{ deviceId?: unknown; name?: unknown }>;
+  devices?: Array<{
+    deviceId?: unknown;
+    name?: unknown;
+    online?: unknown;
+    platform?: unknown;
+  }>;
 };
 let controllerDisplayNameRefreshGeneration = 0;
 const controllerDisplayNameFreshness = createControllerDisplayNameFreshnessTracker();
@@ -271,6 +276,20 @@ async function runControllerDisplayNamesFromDirectory(
         void forgetLastKnownDeviceName(deviceId);
       },
     });
+    // presence 是增量:桌面刚连上 relay 时,已在线手机不会再发一帧上线。
+    // 目录补齐展示名的同时,给这些手机补一次只读词典投影。
+    for (const device of result.devices ?? []) {
+      const deviceId = typeof device.deviceId === 'string' ? device.deviceId : '';
+      if (
+        !deviceId
+        || device.online !== true
+        || !isMobilePlatform(typeof device.platform === 'string' ? device.platform : null)
+        || isDeviceRevoked(deviceId)
+      ) {
+        continue;
+      }
+      handleMobilePeerOnline(deviceId);
+    }
   } catch (err) {
     // 目录补齐是展示层 best-effort；失败时保留控制帧自报名 / 短 ID 回退，不影响建链。
     log.warn(`device directory display-name refresh failed (non-fatal): ${String(err)}`);

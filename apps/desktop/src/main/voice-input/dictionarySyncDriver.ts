@@ -73,6 +73,8 @@ export interface DictionarySyncTransport {
 let transport: DictionarySyncTransport | null = null;
 let debounceTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
+/** 同进程内快照发出序号:取墙上时间与上一发+1 的较大值,时钟回拨也不会倒序。 */
+let lastEmittedAt = 0;
 
 export function isDesktopPlatform(platform: string | undefined | null): boolean {
   return typeof platform === 'string' && DESKTOP_PLATFORMS.has(platform);
@@ -112,6 +114,7 @@ export function stopVoiceDictionarySync(): void {
   if (intervalTimer) clearInterval(intervalTimer);
   debounceTimer = null;
   intervalTimer = null;
+  lastEmittedAt = 0;
 }
 
 /** 对端桌面上线:立刻单发一次,让它尽快拿到本机状态(它也会回发自己的)。 */
@@ -246,9 +249,10 @@ function sendMobileSnapshotTo(
 
 /** push 与主动 GET 共用：同一份投影必须带上发出时间，否则同代向量的兜底拉取盖不掉已有 push。 */
 export function buildMobileDictionarySnapshot(): MobileVoiceDictionarySnapshotResult {
+  lastEmittedAt = Math.max(Date.now(), lastEmittedAt + 1);
   return {
     ok: true,
-    emittedAt: Date.now(),
+    emittedAt: lastEmittedAt,
     ...readDictionaryProjectionForMobile(),
   };
 }

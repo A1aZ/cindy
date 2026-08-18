@@ -335,4 +335,17 @@ describe('手机只读投影', () => {
     expect(snapshot.ok).toBe(true);
     if (snapshot.ok) expect(snapshot.emittedAt).toEqual(expect.any(Number));
   });
+
+  it('时钟回拨后同主机发出序号仍单调', () => {
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(5_000);
+    const first = buildMobileDictionarySnapshot();
+    now.mockReturnValue(1_000);
+    const second = buildMobileDictionarySnapshot();
+    now.mockRestore();
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) {
+      expect(second.emittedAt).toBeGreaterThan(first.emittedAt ?? 0);
+    }
+  });
 });

@@ -245,27 +245,7 @@ async function storeSnapshot(
       // 订阅者抛错不能打断落盘 / 索引登记,也不能变成未处理 rejection。
     }
   }
-  // 顺序很关键:**先登记索引,再写快照**。两个写不是原子的,进程随时可能死在
-  // 中间 —— 索引里多一条(快照还没写)只是清理时删一个不存在的 key,无害;
-  // 反过来快照落了盘而索引没登记,登出就枚举不到它,下个账号用同一台电脑会
-  // hydrate 到上个账号的词典。宁可多登记,不可漏登记。
-  // 索引登记失败就不要写快照:写了也是枚举不到的孤儿,登出删不掉,下个账号
-  // 用同一台电脑会 hydrate 到上个账号的词典。缓存只在内存里有效即可。
-  try {
-    await addHostToIndex(host);
-  } catch {
-    return;
-  }
-  await AsyncStorage.setItem(storageKeyForHost(host, scope), JSON.stringify(next)).catch(
-    () => undefined,
-  );
-  // 落盘与索引写入都是异步的,清理完全可能发生在这中间 —— 那样这份属于上个
-  // 账号的快照会在删除之后重新出现在盘上。写完再确认一次代际,过期就自己清掉。
-  if (epoch !== cacheEpoch) {
-    memoryCache.delete(host);
-    // 只删自己刚写的那一份(按入口锁定的分区),不碰新账号已经提交的快照。
-    await AsyncStorage.removeItem(storageKeyForHost(host, scope)).catch(() => undefined);
-  }
+  await persistAcceptedSnapshot(host, next, epoch, scope);
 }
 
 function shouldAcceptIncomingSnapshot(
@@ -349,6 +329,40 @@ async function readHostIndex(): Promise<{ hosts: string[]; readable: boolean }> 
  */
 let hostIndexQueue: Promise<void> = Promise.resolve();
 
+let persistQueue: Promise<void> = Promise.resolve();
+
+function persistAcceptedSnapshot(
+  host: string,
+  next: CachedDictionary,
+  epoch: number,
+  scope: string,
+): Promise<void> {
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      // 内存里已经换成更新的对象,这份就不要再落盘。
+      if (epoch !== cacheEpoch || memoryCache.get(host) !== next) return;
+      // 顺序很关键:**先登记索引,再写快照**。两个写不是原子的,进程随时可能死在
+      // 中间 —— 索引里多一条(快照还没写)只是清理时删一个不存在的 key,无害;
+      // 反过来快照落了盘而索引没登记,登出就枚举不到它,下个账号用同一台电脑会
+      // hydrate 到上个账号的词典。宁可多登记,不可漏登记。
+      try {
+        await addHostToIndex(host);
+      } catch {
+        return;
+      }
+      if (epoch !== cacheEpoch || memoryCache.get(host) !== next) return;
+      await AsyncStorage.setItem(storageKeyForHost(host, scope), JSON.stringify(next)).catch(
+        () => undefined,
+      );
+      if (epoch !== cacheEpoch) {
+        memoryCache.delete(host);
+        await AsyncStorage.removeItem(storageKeyForHost(host, scope)).catch(() => undefined);
+      }
+    });
+  return persistQueue;
+}
+
 function addHostToIndex(hostDeviceId: string): Promise<void> {
   hostIndexQueue = hostIndexQueue
     .catch(() => undefined)
@@ -365,6 +379,7 @@ export function __resetMobileVoiceDictionaryCacheForTests(): void {
   memoryCache.clear();
   inFlight.clear();
   cacheListeners.clear();
+  persistQueue = Promise.resolve();
 }
 
 function normalizeEntries(raw: unknown): MobileVoiceCredentialSyncDictionaryEntry[] {

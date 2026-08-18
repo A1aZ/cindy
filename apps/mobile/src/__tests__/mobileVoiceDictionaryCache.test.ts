@@ -10,10 +10,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MobileVoiceDictionarySnapshotResult } from '@cindy/maker-shared/device-link-contract';
 
 const storage = new Map<string, string>();
+const persistGate = {
+  delaySnapshotWrites: false,
+  waiters: [] as Array<() => void>,
+};
+
+function releaseSnapshotWrites(): void {
+  const waiters = persistGate.waiters.splice(0);
+  for (const release of waiters) release();
+}
+
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
     getItem: async (key: string) => storage.get(key) ?? null,
     setItem: async (key: string, value: string) => {
+      if (
+        persistGate.delaySnapshotWrites
+        && key.includes('mobileVoiceDictionary.v2.')
+        && !key.endsWith('.hosts')
+      ) {
+        await new Promise<void>((resolve) => {
+          persistGate.waiters.push(resolve);
+        });
+      }
       storage.set(key, value);
     },
     removeItem: async (key: string) => {
@@ -42,6 +61,8 @@ const HOST = 'desktop-1';
 
 beforeEach(() => {
   storage.clear();
+  persistGate.delaySnapshotWrites = false;
+  releaseSnapshotWrites();
   __resetMobileVoiceDictionaryCacheForTests();
   setMobileVoiceDictionaryAccountScope('');
 });
@@ -441,6 +462,31 @@ describe('版本向量的入站校验', () => {
       emittedAt: 2_000,
     });
     expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+  });
+
+  it('并发落盘时较旧写入不能覆盖磁盘上的新快照', async () => {
+    persistGate.delaySnapshotWrites = true;
+    const older = applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '旧词' }],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 1_000,
+    });
+    await Promise.resolve();
+    const newer = applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '新词' }],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 2_000,
+    });
+    await Promise.resolve();
+    persistGate.delaySnapshotWrites = false;
+    releaseSnapshotWrites();
+    await Promise.all([older, newer]);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
+    __resetMobileVoiceDictionaryCacheForTests();
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
   });
 
   it('更早发出的词表不能盖掉已清空的同一代投影', async () => {

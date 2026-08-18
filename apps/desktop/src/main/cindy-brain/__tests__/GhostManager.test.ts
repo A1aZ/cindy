@@ -4718,10 +4718,11 @@ describe('GhostManager · Unix file permissions', () => {
     }
   });
 
-  it('signed packages do not restore archive modes the signature never covered', async () => {
-    // 签名 statement 只覆盖 (path, sha256, bytes);mode 不在其中。若照旧恢复,
-    // 能篡改包字节的人就能在验签仍然通过的前提下翻转执行位。所以已签名包一律
-    // 不采纳归档 mode —— 等 statement 升 v2 把归一化 mode 签进去再放开。
+  it('signed packages restore declared modes too, with special bits stripped', async () => {
+    // 有意如此:statement 只覆盖 (path, sha256, bytes),mode 属未认证元数据,但
+    // 钳位后攻击者只剩「翻转 r / x 位」,拿不到代码执行(详见 extractToStaging
+    // 的注释)。若哪天决定改成「签名包不采纳 mode」,这条用例会红 —— 那正是
+    // 我们要的:这是个产品/安全决定,不该被静默改掉。
     const unsigned = await makeUnixModeCindy('signed-modes.cindy', goodManifest(), 'v1');
     const publisher = crypto.generateKeyPairSync('ed25519');
     const signed = await signGhostPackage(await fs.promises.readFile(unsigned), {
@@ -4735,22 +4736,22 @@ describe('GhostManager · Unix file permissions', () => {
     const loaded = await JSZip.loadAsync(signed);
     expect(Number(loaded.files['bin/tool'].unixPermissions) & 0o777).toBe(0o755);
 
-    const chmodSpy = vi.spyOn(fs.promises, 'chmod');
-    try {
-      const installed = await manager.install(signedPath);
-      expect(installed).toHaveProperty('ghost');
-      expect((installed as { ghost: InstalledGhost }).ghost.trust?.publisherSigned).toBe(true);
-      expect(chmodSpy).not.toHaveBeenCalled();
-    } finally {
-      chmodSpy.mockRestore();
-    }
-    // 内容照常落盘，只是执行位不恢复(留在文件系统缺省)。
+    const installed = await manager.install(signedPath);
+    expect(installed).toHaveProperty('ghost');
+    expect((installed as { ghost: InstalledGhost }).ghost.trust?.publisherSigned).toBe(true);
+
     expect(
       await fs.promises.readFile(path.join(rootDir, 'hello', 'bin', 'tool'), 'utf8'),
     ).toContain('v1');
     if (process.platform !== 'win32') {
-      expect((await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'tool'))).mode & 0o111)
-        .toBe(0);
+      // 签名包与未签名包走同一条恢复路径:0755 保留、0644 保留、特殊位剥除。
+      expect((await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'tool'))).mode & 0o777)
+        .toBe(0o755);
+      expect((await fs.promises.stat(path.join(rootDir, 'hello', 'config.txt'))).mode & 0o777)
+        .toBe(0o644);
+      const special = await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'special'));
+      expect(special.mode & 0o777).toBe(0o755);
+      expect(special.mode & 0o4000).toBe(0);
     }
   });
 

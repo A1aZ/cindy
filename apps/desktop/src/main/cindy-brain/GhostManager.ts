@@ -3756,13 +3756,6 @@ export class GhostManager {
     },
   ): Promise<void> {
     await fs.promises.mkdir(stagingDir, { recursive: true });
-    // 已签名 / 已审核包**不**采纳归档声明的 mode:签名 statement 只覆盖
-    // (path, sha256, bytes),mode 不在其中(`buildStatement`)。恢复一个签名没
-    // 覆盖的 mode,等于把未认证的 central-directory 元数据当成已签名事实 ——
-    // 能篡改包字节的人可以在验签仍然通过的前提下翻转执行位。未签名包不存在
-    // 越过签名边界的问题,照常按声明恢复。待 statement 升 v2 把归一化后的 mode
-    // 签进去,这里再对签名包放开。
-    const honorArchivedModes = !opts.trust.publisherSigned && !opts.trust.reviewed;
     let totalBytes = 0;
     for (const entry of allEntries) {
       const relName = entry.name.slice(prefix.length);
@@ -3780,10 +3773,17 @@ export class GhostManager {
       }
       await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       await fs.promises.writeFile(dest, data);
-      if (honorArchivedModes) {
-        const mode = installedFileModeFromZip(entry.unixPermissions);
-        if (mode !== null) await fs.promises.chmod(dest, mode);
-      }
+      // 签名与 mode 的关系是**有意如此**,别当成漏改:statement 只覆盖
+      // (path, sha256, bytes),mode 不在其中,所以归档 mode 属未认证元数据。
+      // 仍然采纳它,是因为在 `installedFileModeFromZip` 的钳位之后,能篡改包
+      // 字节的攻击者只剩下「翻转 r / x 位」:内容改不了、文件增删不了(白名单
+      // + 逐文件哈希)、特殊位剥掉、group/other 写位钳掉、owner 读写强制保留。
+      // 去掉 +x 只是他本来就能造成的可用性破坏(改坏一字节即验签失败);加上
+      // +x 作用在他无法选择内容的文件上,而执行流指向哪个文件由签名覆盖的
+      // manifest 与插件自身代码决定 —— 拿不到代码执行。若日后有任何逻辑开始
+      // 依赖 mode 做安全判断,这个前提就失效,届时须把归一化 mode 签进 statement。
+      const mode = installedFileModeFromZip(entry.unixPermissions);
+      if (mode !== null) await fs.promises.chmod(dest, mode);
     }
     if (opts.disabled) {
       await fs.promises.writeFile(path.join(stagingDir, DISABLED_MARKER_FILE), '');

@@ -250,6 +250,40 @@ export class PluginMarketLedger {
     this.write(data);
   }
 
+  /**
+   * Reconnect an unchanged historical server record after the approved receipt
+   * proves the original package hash. The compare-and-write prevents a
+   * concurrent uninstall or source replacement from being overwritten by a
+   * stale recovery snapshot.
+   */
+  restoreDisconnectedInstallation(
+    expected: PluginMarketInstallationRecord,
+    userId: string,
+  ): boolean {
+    const data = this.read();
+    const current = data.installations[expected.ghostId];
+    if (
+      !current
+      || current.installed
+      || (current.source !== 'market' && current.source !== 'legacy-adopted')
+      || canonicalJson(current) !== canonicalJson(expected)
+    ) {
+      return false;
+    }
+    data.installations[current.ghostId] = {
+      ...current,
+      installed: true,
+      updatedAt: new Date().toISOString(),
+    };
+    const remainingOptOuts = (data.defaultInstallOptOuts[userId] ?? []).filter(
+      (pluginId) => pluginId !== current.pluginId,
+    );
+    if (remainingOptOuts.length > 0) data.defaultInstallOptOuts[userId] = remainingOptOuts;
+    else delete data.defaultInstallOptOuts[userId];
+    this.write(data);
+    return true;
+  }
+
   markRemoved(ghostId: string, userId: string | null): void {
     const data = this.read();
     const record = data.installations[ghostId];

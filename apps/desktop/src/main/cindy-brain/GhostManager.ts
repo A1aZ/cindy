@@ -56,6 +56,7 @@ import {
   decodeGhostManualMarkdown,
   ghostManualLogicalPathForEntry,
 } from './ghostManualValidation.js';
+import { installedFileModeFromZip, isZipSymbolicLinkMode } from './ghostZipPermissions.js';
 
 /** 普通沙箱插件维持小包上限；随包 Node/CLI 允许更大的预打包产物。 */
 export const MAX_BASIC_CINDY_FILE_BYTES = 8 * 1024 * 1024;
@@ -112,9 +113,7 @@ const DISABLED_MARKER_FILE = '.disabled';
 export const TRUST_METADATA_FILE = '.cindy-trust.json';
 
 function isZipSymbolicLink(entry: JSZip.JSZipObject): boolean {
-  return (
-    typeof entry.unixPermissions === 'number' && (entry.unixPermissions & 0o170000) === 0o120000
-  );
+  return isZipSymbolicLinkMode(entry.unixPermissions);
 }
 
 /** 只有宿主安装/播种路径可以写入的 Cindy 官方身份。 */
@@ -3774,6 +3773,8 @@ export class GhostManager {
       }
       await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       await fs.promises.writeFile(dest, data);
+      const mode = installedFileModeFromZip(entry.unixPermissions);
+      if (mode !== null) await fs.promises.chmod(dest, mode);
     }
     if (opts.disabled) {
       await fs.promises.writeFile(path.join(stagingDir, DISABLED_MARKER_FILE), '');

@@ -137,6 +137,19 @@ function makeDeps(overrides: Partial<Parameters<typeof exportGhostPackage>[1]> =
 }
 
 describe('exportGhostPackage', () => {
+  it.skipIf(process.platform === 'win32')(
+    'round-trips installed Unix execute bits while stripping special bits',
+    async () => {
+      await fs.promises.chmod(path.join(ghostDir, 'main.js'), 0o4755);
+      const result = await exportGhostPackage('hello', makeDeps());
+      expect(result.status).toBe('saved');
+      if (result.status !== 'saved') return;
+
+      const zip = await JSZip.loadAsync(await fs.promises.readFile(result.savedPath));
+      expect(Number(zip.files['main.js'].unixPermissions) & 0o7777).toBe(0o755);
+    },
+  );
+
   it('打包安装目录为可重新装入的 .cindy(跳过主机点文件)', async () => {
     const deps = makeDeps();
     const result = await exportGhostPackage('hello', deps);

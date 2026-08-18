@@ -47,6 +47,9 @@ import {
   MAX_NODE_ZIP_ENTRIES,
 } from './GhostManager.js';
 import { GHOST_SIGNATURE_FILE, MAX_SIGNATURE_FILE_BYTES } from './ghostSignature.js';
+import {
+  unixRegularFilePermissionsForArchive,
+} from './ghostZipPermissions.js';
 
 export type ExportGhostPackageResult =
   | { status: 'saved'; savedPath: string }
@@ -130,6 +133,7 @@ const MAX_EXPORT_BASENAME_BYTES = 249;
 interface PackageEntry {
   rel: string;
   data: Buffer;
+  unixPermissions: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +143,7 @@ interface PackageEntry {
 interface SignedDoc {
   /** 签名文件原始字节(原样进入导出包)。 */
   raw: Buffer;
+  unixPermissions: number;
   files: Array<{ path: string; sha256: string; bytes: number }>;
 }
 
@@ -180,7 +185,11 @@ async function readSignedDoc(dir: string): Promise<SignedDoc | null> {
     }
     parsed.push({ path: item.path, sha256: item.sha256, bytes: item.bytes });
   }
-  return { raw, files: parsed };
+  return {
+    raw,
+    unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
+    files: parsed,
+  };
 }
 
 /** statement 路径必须相对且不逃逸——装入侧已校验,这里防一手目录被改。 */
@@ -195,14 +204,17 @@ function isSafeStatementPath(p: string): boolean {
  * 通过即导出包内容——不多不少,可证可重装。
  */
 async function readSignedEntries(dir: string, doc: SignedDoc): Promise<PackageEntry[] | null> {
-  const out: PackageEntry[] = [{ rel: GHOST_SIGNATURE_FILE, data: doc.raw }];
+  const out: PackageEntry[] = [
+    { rel: GHOST_SIGNATURE_FILE, data: doc.raw, unixPermissions: doc.unixPermissions },
+  ];
   for (const item of doc.files) {
     if (!isSafeStatementPath(item.path)) return null;
     // 先 stat 对尺寸:与 statement 不符必然哈希也不符,不必把可能超限
     // 的文件读进内存(评审 P1:巨型缓存文件要先挡在分配之前)。
     let data: Buffer;
+    let stat: fs.Stats;
     try {
-      const stat = await fs.promises.stat(path.join(dir, ...item.path.split('/')));
+      stat = await fs.promises.stat(path.join(dir, ...item.path.split('/')));
       if (stat.size !== item.bytes) return null;
       data = await fs.promises.readFile(path.join(dir, ...item.path.split('/')));
     } catch {
@@ -210,7 +222,11 @@ async function readSignedEntries(dir: string, doc: SignedDoc): Promise<PackageEn
     }
     if (data.byteLength !== item.bytes) return null;
     if (crypto.createHash('sha256').update(data).digest('hex') !== item.sha256) return null;
-    out.push({ rel: item.path, data });
+    out.push({
+      rel: item.path,
+      data,
+      unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
+    });
   }
   return out;
 }
@@ -301,7 +317,12 @@ async function walkTree(
           if (budget.entriesLeft < 0 || budget.bytesLeft < 0) {
             throw new ExportTooLargeError();
           }
-          items.push({ rel, data, sha256: sha256hex(data) });
+          items.push({
+            rel,
+            data,
+            sha256: sha256hex(data),
+            unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
+          });
         } else {
           const expect = limit as Map<string, number>;
           const expectedSize = expect.get(rel);
@@ -309,11 +330,16 @@ async function walkTree(
             expectedSize !== undefined ? await fs.promises.stat(abs) : null;
           if (expectedSize === undefined || stat!.size !== expectedSize) {
             // 第一遍没有的新文件/尺寸被换:与第一遍必然不一致,
-            // 不读内容(校验遍读取量由第一遍锚住)。
-            items.push({ rel, sha256: '' });
+            // 不读内容(校验遍读取量由第一遍锚住)。空 sha256 已足够让一致性
+            // 比对失败,mode 只需占位——0 在这里不代表"权限 0",不会入包。
+            items.push({ rel, sha256: '', unixPermissions: 0 });
           } else {
             const data = await fs.promises.readFile(abs);
-            items.push({ rel, sha256: sha256hex(data) });
+            items.push({
+              rel,
+              sha256: sha256hex(data),
+              unixPermissions: unixRegularFilePermissionsForArchive(stat!.mode),
+            });
           }
         }
         hasContent = true;
@@ -344,7 +370,9 @@ async function snapshotUnsignedTree(
     first.items.length === verify.items.length &&
     first.items.every(
       (file, i) =>
-        file.rel === verify.items[i]!.rel && file.sha256 === verify.items[i]!.sha256,
+        file.rel === verify.items[i]!.rel &&
+        file.sha256 === verify.items[i]!.sha256 &&
+        file.unixPermissions === verify.items[i]!.unixPermissions,
     );
   const dirsConsistent =
     first.emptyDirs.length === verify.emptyDirs.length &&
@@ -458,7 +486,11 @@ async function snapshotPackage(
         const tree = await snapshotUnsignedTree(dir, budget);
         if (tree) {
           return {
-            entries: tree.files.map(({ rel, data }) => ({ rel, data })),
+            entries: tree.files.map(({ rel, data, unixPermissions }) => ({
+              rel,
+              data,
+              unixPermissions,
+            })),
             emptyDirs: tree.emptyDirs,
           };
         }
@@ -508,14 +540,18 @@ export async function exportGhostPackage(
     zip.folder(rel);
   }
   for (const file of snapshot.entries) {
-    zip.file(file.rel, file.data);
+    zip.file(file.rel, file.data, { unixPermissions: file.unixPermissions });
   }
   if (Object.keys(zip.files).length > limits.maxEntries) {
     return { status: 'error', code: 'too_large' };
   }
   let buf: Buffer;
   try {
-    buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    buf = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      platform: 'UNIX',
+    });
   } catch {
     // 压缩失败(zlib 等)如实落到结构化结果,不冒成未捕获的 IPC 异常。
     return { status: 'error', code: 'compress_failed' };

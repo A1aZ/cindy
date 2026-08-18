@@ -5142,6 +5142,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         : {
             dataOwnerId: null,
             ownerGeneration: 0,
+            canWriteOwnerScoped: false,
             claimed: false,
             claimedByOtherOwner: false,
             canInitialize: false,

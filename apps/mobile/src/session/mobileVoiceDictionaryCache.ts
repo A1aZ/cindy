@@ -356,7 +356,9 @@ function persistAcceptedSnapshot(
         () => undefined,
       );
       if (epoch !== cacheEpoch) {
-        memoryCache.delete(host);
+        // 只回收自己刚写的那份。内存按 host 不按账号分区,无条件 delete
+        // 会把新账号已经写入的同 host 快照一并抹掉,后续落盘也因身份检查失败而跳过。
+        if (memoryCache.get(host) === next) memoryCache.delete(host);
         await AsyncStorage.removeItem(storageKeyForHost(host, scope)).catch(() => undefined);
       }
     });

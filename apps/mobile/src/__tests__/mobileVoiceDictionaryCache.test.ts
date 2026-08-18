@@ -357,6 +357,31 @@ describe('账号切走之后落地的旧请求', () => {
     await hydrateMobileVoiceDictionary(HOST);
     expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
   });
+
+  it('旧账号落盘补偿不删新账号已接收的同 host 快照', async () => {
+    persistGate.delaySnapshotWrites = true;
+    setMobileVoiceDictionaryAccountScope('user-a');
+    const older = applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '账号A的词' }],
+      emittedAt: 1_000,
+    });
+    await Promise.resolve();
+    setMobileVoiceDictionaryAccountScope('user-b');
+    persistGate.delaySnapshotWrites = false;
+    const newer = applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '账号B的词' }],
+      emittedAt: 2_000,
+    });
+    releaseSnapshotWrites();
+    await Promise.all([older, newer]);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+    __resetMobileVoiceDictionaryCacheForTests();
+    setMobileVoiceDictionaryAccountScope('user-b');
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+  });
 });
 
 describe('在途请求的去重范围', () => {

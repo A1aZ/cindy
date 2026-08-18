@@ -3756,6 +3756,13 @@ export class GhostManager {
     },
   ): Promise<void> {
     await fs.promises.mkdir(stagingDir, { recursive: true });
+    // 已签名 / 已审核包**不**采纳归档声明的 mode:签名 statement 只覆盖
+    // (path, sha256, bytes),mode 不在其中(`buildStatement`)。恢复一个签名没
+    // 覆盖的 mode,等于把未认证的 central-directory 元数据当成已签名事实 ——
+    // 能篡改包字节的人可以在验签仍然通过的前提下翻转执行位。未签名包不存在
+    // 越过签名边界的问题,照常按声明恢复。待 statement 升 v2 把归一化后的 mode
+    // 签进去,这里再对签名包放开。
+    const honorArchivedModes = !opts.trust.publisherSigned && !opts.trust.reviewed;
     let totalBytes = 0;
     for (const entry of allEntries) {
       const relName = entry.name.slice(prefix.length);
@@ -3773,8 +3780,10 @@ export class GhostManager {
       }
       await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       await fs.promises.writeFile(dest, data);
-      const mode = installedFileModeFromZip(entry.unixPermissions);
-      if (mode !== null) await fs.promises.chmod(dest, mode);
+      if (honorArchivedModes) {
+        const mode = installedFileModeFromZip(entry.unixPermissions);
+        if (mode !== null) await fs.promises.chmod(dest, mode);
+      }
     }
     if (opts.disabled) {
       await fs.promises.writeFile(path.join(stagingDir, DISABLED_MARKER_FILE), '');

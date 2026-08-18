@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,7 @@ import {
   installedFileModeFromZip,
   unixPermissionsForRepackedEntry,
 } from '../ghostZipPermissions';
+import { signGhostPackage } from '../ghostSignature';
 import { hashApprovedSkillContent } from '../ghostInstallReceipt';
 import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess';
 
@@ -4674,7 +4676,20 @@ describe('GhostManager · author / icon(身份卡展示字段)', () => {
 describe('GhostManager · Unix file permissions', () => {
   it('fresh install and overwrite update preserve declared modes and strip setuid', async () => {
     const v1 = await makeUnixModeCindy('modes-v1.cindy', goodManifest(), 'v1');
-    expect(await manager.install(v1)).toHaveProperty('ghost');
+    const chmodSpy = vi.spyOn(fs.promises, 'chmod');
+    try {
+      expect(await manager.install(v1)).toHaveProperty('ghost');
+      // Windows 不做正面 mode 断言(chmod 在那里只切只读位),但必须断言我们**确实
+      // 没调 chmod**;非 win32 反过来断言确实调过,否则这条路径以后静默退化成
+      // 「什么都没做」也会绿。
+      if (process.platform === 'win32') {
+        expect(chmodSpy).not.toHaveBeenCalled();
+      } else {
+        expect(chmodSpy).toHaveBeenCalled();
+      }
+    } finally {
+      chmodSpy.mockRestore();
+    }
 
     if (process.platform !== 'win32') {
       expect((await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'tool'))).mode & 0o777)
@@ -4700,6 +4715,42 @@ describe('GhostManager · Unix file permissions', () => {
         .toBe(0o644);
       expect((await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'special'))).mode & 0o777)
         .toBe(0o755);
+    }
+  });
+
+  it('signed packages do not restore archive modes the signature never covered', async () => {
+    // 签名 statement 只覆盖 (path, sha256, bytes);mode 不在其中。若照旧恢复,
+    // 能篡改包字节的人就能在验签仍然通过的前提下翻转执行位。所以已签名包一律
+    // 不采纳归档 mode —— 等 statement 升 v2 把归一化 mode 签进去再放开。
+    const unsigned = await makeUnixModeCindy('signed-modes.cindy', goodManifest(), 'v1');
+    const publisher = crypto.generateKeyPairSync('ed25519');
+    const signed = await signGhostPackage(await fs.promises.readFile(unsigned), {
+      publisherName: 'Publisher',
+      privateKey: publisher.privateKey,
+    });
+    const signedPath = path.join(workDir, 'signed-modes-out.cindy');
+    await fs.promises.writeFile(signedPath, signed);
+
+    // 前提自检:包里确实带着 0755，否则这条用例证明不了任何事。
+    const loaded = await JSZip.loadAsync(signed);
+    expect(Number(loaded.files['bin/tool'].unixPermissions) & 0o777).toBe(0o755);
+
+    const chmodSpy = vi.spyOn(fs.promises, 'chmod');
+    try {
+      const installed = await manager.install(signedPath);
+      expect(installed).toHaveProperty('ghost');
+      expect((installed as { ghost: InstalledGhost }).ghost.trust?.publisherSigned).toBe(true);
+      expect(chmodSpy).not.toHaveBeenCalled();
+    } finally {
+      chmodSpy.mockRestore();
+    }
+    // 内容照常落盘，只是执行位不恢复(留在文件系统缺省)。
+    expect(
+      await fs.promises.readFile(path.join(rootDir, 'hello', 'bin', 'tool'), 'utf8'),
+    ).toContain('v1');
+    if (process.platform !== 'win32') {
+      expect((await fs.promises.stat(path.join(rootDir, 'hello', 'bin', 'tool'))).mode & 0o111)
+        .toBe(0);
     }
   });
 

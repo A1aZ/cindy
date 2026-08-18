@@ -46,10 +46,9 @@ import {
   MAX_NODE_UNCOMPRESSED_BYTES,
   MAX_NODE_ZIP_ENTRIES,
 } from './GhostManager.js';
+import { sameStableFileState } from './ghostContentTree.js';
 import { GHOST_SIGNATURE_FILE, MAX_SIGNATURE_FILE_BYTES } from './ghostSignature.js';
-import {
-  unixRegularFilePermissionsForArchive,
-} from './ghostZipPermissions.js';
+import { unixRegularFilePermissionsForArchive } from './ghostZipPermissions.js';
 
 export type ExportGhostPackageResult =
   | { status: 'saved'; savedPath: string }
@@ -165,11 +164,19 @@ async function readSignedDoc(dir: string): Promise<SignedDoc | null> {
     throw err;
   }
   try {
-    const stat = await fileHandle.stat();
-    if (stat.size > MAX_SIGNATURE_FILE_BYTES) throw new Error('signature file too large');
+    const stat = await fileHandle.stat({ bigint: true });
+    if (stat.size > BigInt(MAX_SIGNATURE_FILE_BYTES)) {
+      throw new Error('signature file too large');
+    }
     const raw = await fileHandle.readFile();
     if (raw.byteLength > MAX_SIGNATURE_FILE_BYTES) {
       throw new Error('signature file too large');
+    }
+    // 同一句柄只挡住 open 与 stat 之间的窗口:chmod 落在读取过程中,仍能造出
+    // 「读前的 mode + 读后的字节」。读后复验身份与稳定态(含 ctime,故覆盖 chmod),
+    // 变了就如实失败,不把不同时刻的权限和内容拼成一个条目。
+    if (!sameStableFileState(stat, await fileHandle.stat({ bigint: true }))) {
+      throw new Error('signature file changed while reading');
     }
     const doc = JSON.parse(raw.toString('utf8')) as {
       statement?: { files?: Array<{ path?: unknown; sha256?: unknown; bytes?: unknown }> };
@@ -221,9 +228,12 @@ async function readSignedEntries(dir: string, doc: SignedDoc): Promise<PackageEn
     try {
       const fileHandle = await fs.promises.open(path.join(dir, ...item.path.split('/')), 'r');
       try {
-        const stat = await fileHandle.stat();
-        if (stat.size !== item.bytes) return null;
+        const stat = await fileHandle.stat({ bigint: true });
+        if (stat.size !== BigInt(item.bytes)) return null;
         data = await fileHandle.readFile();
+        // 读后复验:同一句柄挡不住读取期间的 chmod,而 mode 与字节必须同时刻。
+        // 稳定态判据含 ctime,权限变化也算失效;返回 null 交给调用方整体重试。
+        if (!sameStableFileState(stat, await fileHandle.stat({ bigint: true }))) return null;
         unixPermissions = unixRegularFilePermissionsForArchive(stat.mode);
       } finally {
         await fileHandle.close();

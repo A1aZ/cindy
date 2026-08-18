@@ -256,14 +256,21 @@ describe('exportGhostPackage', () => {
     await writeStatement(['ghost.json', 'locales/en.json', 'main.js']);
     // 第一次读 main.js 返回陈旧字节(模拟并发更新读到旧目录):
     // 哈希与 statement 不符,必须整体重读,最终包内容应为真实字节。
-    const realReadFile = fs.promises.readFile;
+    const realOpen = fs.promises.open;
     let staleServed = false;
-    const spy = vi.spyOn(fs.promises, 'readFile').mockImplementation(async (p: any, opts: any) => {
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(async (p: any, flags: any) => {
+      const fileHandle = await realOpen(p, flags);
       if (String(p).endsWith('main.js') && !staleServed) {
-        staleServed = true;
-        return Buffer.from('stale-bytes');
+        const realHandleReadFile = fileHandle.readFile.bind(fileHandle);
+        fileHandle.readFile = vi.fn(async (...args: any[]) => {
+          if (!staleServed) {
+            staleServed = true;
+            return Buffer.from('stale-bytes');
+          }
+          return realHandleReadFile(...args);
+        }) as unknown as typeof fileHandle.readFile;
       }
-      return realReadFile(p, opts) as any;
+      return fileHandle;
     });
     try {
       const result = await exportGhostPackage('hello', makeDeps());

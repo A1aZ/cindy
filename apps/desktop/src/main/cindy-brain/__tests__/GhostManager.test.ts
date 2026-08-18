@@ -79,7 +79,11 @@ function goodManifest(id = 'hello'): Record<string, unknown> {
 describe('installedFileModeFromZip', () => {
   it('normalizes strings, strips special bits, and skips Windows or missing metadata', () => {
     expect(installedFileModeFromZip('755', 'linux')).toBe(0o755);
+    expect(installedFileModeFromZip(0o644, 'linux')).toBe(0o644);
     expect(installedFileModeFromZip(0o4755, 'darwin')).toBe(0o755);
+    expect(installedFileModeFromZip(0o777, 'linux')).toBe(0o755);
+    expect(installedFileModeFromZip(0o666, 'linux')).toBe(0o644);
+    expect(installedFileModeFromZip(0o700, 'linux')).toBe(0o700);
     expect(installedFileModeFromZip(0o000, 'linux')).toBe(0o600);
     expect(installedFileModeFromZip(0o120777, 'linux')).toBeNull();
     expect(installedFileModeFromZip(null, 'linux')).toBeNull();

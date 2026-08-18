@@ -157,39 +157,44 @@ async function readSignedDoc(dir: string): Promise<SignedDoc | null> {
   const sigPath = path.join(dir, GHOST_SIGNATURE_FILE);
   // 先 stat 再读(评审 P1):超上限的签名文件反正过不了装入,不把它
   // 完整读进内存;读后再查一次字节数,挡住 stat 后被改大的窗口。
-  let stat: fs.Stats;
+  let fileHandle: fs.promises.FileHandle;
   try {
-    stat = await fs.promises.stat(sigPath);
+    fileHandle = await fs.promises.open(sigPath, 'r');
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
     throw err;
   }
-  if (stat.size > MAX_SIGNATURE_FILE_BYTES) throw new Error('signature file too large');
-  const raw = await fs.promises.readFile(sigPath);
-  if (raw.byteLength > MAX_SIGNATURE_FILE_BYTES) {
-    throw new Error('signature file too large');
-  }
-  const doc = JSON.parse(raw.toString('utf8')) as {
-    statement?: { files?: Array<{ path?: unknown; sha256?: unknown; bytes?: unknown }> };
-  };
-  const files = doc?.statement?.files;
-  if (!Array.isArray(files)) throw new Error('invalid signature statement');
-  const parsed: SignedDoc['files'] = [];
-  for (const item of files) {
-    if (
-      typeof item?.path !== 'string' ||
-      typeof item?.sha256 !== 'string' ||
-      typeof item?.bytes !== 'number'
-    ) {
-      throw new Error('invalid signature statement entry');
+  try {
+    const stat = await fileHandle.stat();
+    if (stat.size > MAX_SIGNATURE_FILE_BYTES) throw new Error('signature file too large');
+    const raw = await fileHandle.readFile();
+    if (raw.byteLength > MAX_SIGNATURE_FILE_BYTES) {
+      throw new Error('signature file too large');
     }
-    parsed.push({ path: item.path, sha256: item.sha256, bytes: item.bytes });
+    const doc = JSON.parse(raw.toString('utf8')) as {
+      statement?: { files?: Array<{ path?: unknown; sha256?: unknown; bytes?: unknown }> };
+    };
+    const files = doc?.statement?.files;
+    if (!Array.isArray(files)) throw new Error('invalid signature statement');
+    const parsed: SignedDoc['files'] = [];
+    for (const item of files) {
+      if (
+        typeof item?.path !== 'string' ||
+        typeof item?.sha256 !== 'string' ||
+        typeof item?.bytes !== 'number'
+      ) {
+        throw new Error('invalid signature statement entry');
+      }
+      parsed.push({ path: item.path, sha256: item.sha256, bytes: item.bytes });
+    }
+    return {
+      raw,
+      unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
+      files: parsed,
+    };
+  } finally {
+    await fileHandle.close();
   }
-  return {
-    raw,
-    unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
-    files: parsed,
-  };
 }
 
 /** statement 路径必须相对且不逃逸——装入侧已校验,这里防一手目录被改。 */
@@ -212,11 +217,17 @@ async function readSignedEntries(dir: string, doc: SignedDoc): Promise<PackageEn
     // 先 stat 对尺寸:与 statement 不符必然哈希也不符,不必把可能超限
     // 的文件读进内存(评审 P1:巨型缓存文件要先挡在分配之前)。
     let data: Buffer;
-    let stat: fs.Stats;
+    let unixPermissions: number;
     try {
-      stat = await fs.promises.stat(path.join(dir, ...item.path.split('/')));
-      if (stat.size !== item.bytes) return null;
-      data = await fs.promises.readFile(path.join(dir, ...item.path.split('/')));
+      const fileHandle = await fs.promises.open(path.join(dir, ...item.path.split('/')), 'r');
+      try {
+        const stat = await fileHandle.stat();
+        if (stat.size !== item.bytes) return null;
+        data = await fileHandle.readFile();
+        unixPermissions = unixRegularFilePermissionsForArchive(stat.mode);
+      } finally {
+        await fileHandle.close();
+      }
     } catch {
       return null;
     }
@@ -225,7 +236,7 @@ async function readSignedEntries(dir: string, doc: SignedDoc): Promise<PackageEn
     out.push({
       rel: item.path,
       data,
-      unixPermissions: unixRegularFilePermissionsForArchive(stat.mode),
+      unixPermissions,
     });
   }
   return out;

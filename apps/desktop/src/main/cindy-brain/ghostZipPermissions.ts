@@ -80,7 +80,9 @@ export function installedFileModeFromZip(
   if (platform === 'win32') return null;
   const parsed = parseZipUnixPermissions(unixPermissions);
   if (parsed === null || !declaresType(parsed, S_IFREG)) return null;
-  return (parsed & PERMISSION_BITS) | 0o600;
+  // 篡改包或权限设置粗心的包不得把 group/world 可写文件装进插件内容目录，
+  // 否则同机其它账号可改写受害用户之后会执行的插件代码。
+  return (parsed & PERMISSION_BITS & ~0o022) | 0o600;
 }
 
 /**

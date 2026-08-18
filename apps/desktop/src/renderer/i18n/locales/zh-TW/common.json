@@ -9,6 +9,7 @@
     "REMOTE_PROVIDER_UNSUPPORTED": "該供應商不支援 SSH 遠端會話，請更換來源",
     "REMOTE_NATIVE_OAUTH_UNAVAILABLE": "未連線 Claude.ai 訂閱，請先連線或選擇閘道器模型",
     "DEVICE_LINK_DEVICE_UNRESPONSIVE": "目標裝置長時間無響應，請檢查遠端裝置後重試",
+    "INTERNAL": "操作失敗，請稍後重試。",
     "REMOTE_WORKDIR_INVALID": "遠端專案目錄無效，請重新選擇專案目錄。",
     "REMOTE_WORKDIR_NOT_FOUND": "遠端專案目錄不存在，請重新選擇專案目錄。",
     "REMOTE_WORKDIR_NOT_DIRECTORY": "遠端專案路徑不是資料夾，請重新選擇專案目錄。",

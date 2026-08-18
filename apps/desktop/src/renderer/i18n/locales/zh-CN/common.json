@@ -474,6 +474,13 @@
         "hint": "侧边栏主列表（置顶以外）的显示形态：文字为紧凑单行，列表为带预览的两行。",
         "aria": "切换任务列表显示方式"
       },
+      "ghostPanelRestore": {
+        "label": "插件面板恢复入口",
+        "hint": "选择最小化插件面板后从哪里恢复。",
+        "aria": "选择插件面板恢复入口",
+        "bubble": "浮动气泡",
+        "sidebar": "侧边栏"
+      },
       "layout": {
         "label": "面板布局",
         "hint": "面板位置和宽度会保留到下次启动。如果布局变得难以使用，可以恢复默认排列。",
@@ -4568,7 +4575,7 @@
     "maximizeAria": "撑满内容区",
     "restoreAria": "还原面板大小",
     "detachAria": "在独立窗口中打开",
-    "minimizeAria": "最小化为浮动气泡",
+    "minimizeAria": "最小化面板",
     "closeAria": "关闭面板并停用插件"
   },
   "ghostPanel": {
@@ -4586,6 +4593,11 @@
     "restoreAria": "恢复 {{name}} 面板",
     "stackExpandAria": "已收起 {{count}} 个插件面板，点击展开",
     "stackCollapseAria": "收拢插件面板列表"
+  },
+  "ghostPanelRestore": {
+    "single": "恢复 {{name}}",
+    "multiple": "已收起的插件面板",
+    "multipleAria": "已收起 {{count}} 个插件面板，点击选择要恢复的面板"
   },
   "rightSidebar": {
     "ariaLabel": "右侧边栏",

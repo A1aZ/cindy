@@ -474,6 +474,13 @@
         "hint": "Display style for the main sidebar list (below Pinned): Text is a compact single row; List is a two-line row with a preview.",
         "aria": "Switch session list style"
       },
+      "ghostPanelRestore": {
+        "label": "Plugin panel restore entry",
+        "hint": "Choose where minimized plugin panels can be restored.",
+        "aria": "Choose the plugin panel restore entry",
+        "bubble": "Floating bubble",
+        "sidebar": "Sidebar"
+      },
       "layout": {
         "label": "Panel layout",
         "hint": "Panel positions and widths persist across restarts. Restore the default arrangement if the layout becomes difficult to use.",
@@ -4570,7 +4577,7 @@
     "maximizeAria": "Maximize panel",
     "restoreAria": "Restore panel size",
     "detachAria": "Open in a new window",
-    "minimizeAria": "Minimize to floating bubble",
+    "minimizeAria": "Minimize panel",
     "closeAria": "Close panel and disable plugin"
   },
   "ghostPanel": {
@@ -4588,6 +4595,11 @@
     "restoreAria": "Restore {{name}} panel",
     "stackExpandAria": "{{count}} plugin panels minimized. Click to expand",
     "stackCollapseAria": "Collapse the plugin panel list"
+  },
+  "ghostPanelRestore": {
+    "single": "Restore {{name}}",
+    "multiple": "Minimized plugin panels",
+    "multipleAria": "{{count}} plugin panels minimized. Choose a panel to restore"
   },
   "rightSidebar": {
     "ariaLabel": "Right sidebar",

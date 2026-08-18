@@ -474,6 +474,13 @@
         "hint": "側邊欄主列表（置頂以外）的顯示形態：文字為緊湊單行，列表為帶預覽的兩行。",
         "aria": "切換任務列表顯示方式"
       },
+      "ghostPanelRestore": {
+        "label": "插件面板恢復入口",
+        "hint": "選擇最小化插件面板後從哪裡恢復。",
+        "aria": "選擇插件面板恢復入口",
+        "bubble": "浮動氣泡",
+        "sidebar": "側邊欄"
+      },
       "layout": {
         "label": "面板佈局",
         "hint": "面板位置和寬度會保留到下次啟動。如果佈局變得難以使用，可以恢復預設排列。",
@@ -4568,7 +4575,7 @@
     "maximizeAria": "撐滿內容區",
     "restoreAria": "還原面板大小",
     "detachAria": "在獨立視窗中開啟",
-    "minimizeAria": "最小化為浮動氣泡",
+    "minimizeAria": "最小化面板",
     "closeAria": "關閉面板並停用插件"
   },
   "ghostPanel": {
@@ -4586,6 +4593,11 @@
     "restoreAria": "恢復 {{name}} 面板",
     "stackExpandAria": "已收起 {{count}} 個插件面板，點選展開",
     "stackCollapseAria": "收攏插件面板列表"
+  },
+  "ghostPanelRestore": {
+    "single": "恢復 {{name}}",
+    "multiple": "已收起的插件面板",
+    "multipleAria": "已收起 {{count}} 個插件面板，點擊選擇要恢復的面板"
   },
   "rightSidebar": {
     "ariaLabel": "右側邊欄",

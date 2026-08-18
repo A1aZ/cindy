@@ -474,6 +474,13 @@
         "hint": "サイドバーのメインリスト（ピン留め以外）の表示形式。テキストはコンパクトな 1 行、リストはプレビュー付きの 2 行です。",
         "aria": "セッションリストの表示を切り替える"
       },
+      "ghostPanelRestore": {
+        "label": "プラグインパネルの復元場所",
+        "hint": "最小化したプラグインパネルを復元する場所を選択します。",
+        "aria": "プラグインパネルの復元場所を選択",
+        "bubble": "フローティングバブル",
+        "sidebar": "サイドバー"
+      },
       "layout": {
         "label": "パネルレイアウト",
         "hint": "パネルの位置と幅は次回起動時も保持されます。使いにくい配置になった場合は、初期レイアウトに戻せます。",
@@ -4568,7 +4575,7 @@
     "maximizeAria": "パネルを最大化",
     "restoreAria": "パネルのサイズを元に戻す",
     "detachAria": "新しいウィンドウで開く",
-    "minimizeAria": "フローティングバブルに最小化",
+    "minimizeAria": "パネルを最小化",
     "closeAria": "パネルを閉じてプラグインを無効化"
   },
   "ghostPanel": {
@@ -4586,6 +4593,11 @@
     "restoreAria": "{{name}} パネルを元に戻す",
     "stackExpandAria": "{{count}} 個のプラグインパネルを最小化中。クリックで展開",
     "stackCollapseAria": "プラグインパネルの一覧を畳む"
+  },
+  "ghostPanelRestore": {
+    "single": "{{name}}を復元",
+    "multiple": "最小化したプラグインパネル",
+    "multipleAria": "{{count}}個のプラグインパネルが最小化されています。復元するパネルを選択"
   },
   "rightSidebar": {
     "ariaLabel": "右サイドバー",

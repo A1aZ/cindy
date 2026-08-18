@@ -152,6 +152,18 @@ describe('sessionMessageLifecycle', () => {
     expect(lifecycle.canCommit(afterForget)).toBe(false);
   });
 
+  it('reset 会永久撤销此前未进入详情读取的 authority', () => {
+    const lifecycle = createSessionMessageLifecycleController();
+    const beforeReset = lifecycle.captureUnentered('s1');
+    expect(lifecycle.canCommitUnentered(beforeReset)).toBe(true);
+
+    lifecycle.reset();
+    expect(lifecycle.canCommitUnentered(beforeReset)).toBe(false);
+
+    const afterReset = lifecycle.captureUnentered('s1');
+    expect(lifecycle.canCommitUnentered(afterReset)).toBe(true);
+  });
+
   it('forget/reset 后旧 work lease 不能污染同 ID 的新生命周期', () => {
     const lifecycle = createSessionMessageLifecycleController();
     const beforeForget = lifecycle.acquireWork('s1', true);

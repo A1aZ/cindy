@@ -3197,16 +3197,17 @@ describe('任务消息内存治理', () => {
 
   it('从未打开的 regular 可更新全局镜像，首次进入或离场后不再接受无 authority 补读', () => {
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    const unenteredAuthority = remoteSessionStore.captureUnenteredSessionMessageAuthority('s1');
     expect(remoteSessionStore.hasSessionMessageDetailEntered('s1')).toBe(false);
-    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow('s1', 'dev-1')).toBe(true);
-    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow('s1', 'dev-2')).toBe(false);
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(unenteredAuthority, 'dev-1')).toBe(true);
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(unenteredAuthority, 'dev-2')).toBe(false);
 
     remoteSessionStore.setLatestMessageWindow('s1', [message('global-mirror', 's1')]);
     expect(remoteSessionStore.getMessages('s1').map((row) => row.id)).toEqual(['global-mirror']);
 
     const authority = remoteSessionStore.enterSessionMessageDetail('s1');
     expect(remoteSessionStore.hasSessionMessageDetailEntered('s1')).toBe(true);
-    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow('s1', 'dev-1')).toBe(false);
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(unenteredAuthority, 'dev-1')).toBe(false);
     remoteSessionStore.leaveSessionMessageDetail('s1', 'detail-blur', authority);
     remoteSessionStore.setLatestMessageWindow('s1', [message('stale-reconnect', 's1')]);
 
@@ -3218,10 +3219,23 @@ describe('任务消息内存治理', () => {
       session('s1', { source: 'scheduler' }),
     ]);
 
+    const unenteredAuthority = remoteSessionStore.captureUnenteredSessionMessageAuthority('s1');
     expect(remoteSessionStore.hasSessionMessageDetailEntered('s1')).toBe(false);
-    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow('s1', 'dev-1')).toBe(false);
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(unenteredAuthority, 'dev-1')).toBe(false);
     remoteSessionStore.setLatestMessageWindow('s1', [message('schedule-reconnect', 's1')]);
     expect(remoteSessionStore.getMessages('s1')).toEqual([]);
+  });
+
+  it('clear 后同设备同任务重建也拒绝 reset 前的未进入详情读取', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    const beforeReset = remoteSessionStore.captureUnenteredSessionMessageAuthority('s1');
+
+    remoteSessionStore.clear();
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(beforeReset, 'dev-1')).toBe(false);
+    const afterReset = remoteSessionStore.captureUnenteredSessionMessageAuthority('s1');
+    expect(remoteSessionStore.canCommitUnenteredSessionMessageWindow(afterReset, 'dev-1')).toBe(true);
   });
 
   it('schedule 失焦后回收到 0，后续 push 不会复活完整正文', async () => {

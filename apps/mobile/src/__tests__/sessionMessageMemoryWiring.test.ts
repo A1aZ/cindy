@@ -20,6 +20,9 @@ describe('任务消息内存治理页面接线', () => {
     expect(screen).toContain('setMessageReloadRevision((value) => value + 1);');
     expect(screen).toContain('handledMessageReloadRevisionRef.current === messageReloadRevision');
     expect(screen).toContain('handledMessageReloadRevisionRef.current = messageReloadRevision;');
+    expect(screen).toContain('const releasePendingRouteFocusLookup = () => {');
+    expect(screen).toContain('releasePendingRouteFocusLookup();');
+    expect(screen).toContain('[deviceId, maker, messageReloadRevision, renderItems, routeFocusClientId, routeFocusKey, sessionId]');
   });
 
   it('首次进入详情在取得 authority 后触发同步，不依赖更早的 mount load', () => {
@@ -80,8 +83,9 @@ describe('任务消息内存治理页面接线', () => {
   it('断线补读区分已进入详情与从未打开的 regular，跨代 rewind 不再无条件写正文', () => {
     expect(deviceLink).toContain('remoteSessionStore.hasSessionMessageDetailEntered(sessionId)');
     expect(deviceLink).toContain('? remoteSessionStore.captureSessionMessageAuthority(sessionId)');
+    expect(deviceLink).toContain('remoteSessionStore.captureUnenteredSessionMessageAuthority(sessionId)');
     expect(deviceLink).toContain('authority: messageAuthorityAtRequestStart');
-    expect(deviceLink).toContain('remoteSessionStore.canCommitUnenteredSessionMessageWindow(sessionId, deviceId)');
+    expect(deviceLink).toContain('remoteSessionStore.canCommitUnenteredSessionMessageWindow(\n        unenteredMessageAuthorityAtRequestStart,');
     expect(deviceLink).toContain('remoteSessionStore.setLatestMessageWindow(sessionId, history.value, windowOptions);');
     expect(screen).toContain('remoteSessionStore.invalidateSessionMessageWindow(sessionId, deviceId);');
     expect(screen).not.toContain('remoteSessionStore.setMessages(sessionId, Array.isArray(history.messages)');

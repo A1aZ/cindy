@@ -1207,6 +1207,9 @@ async function rebuildSessionSnapshot(
   const messageAuthorityAtRequestStart = messageDetailEnteredAtRequestStart
     ? remoteSessionStore.captureSessionMessageAuthority(sessionId)
     : null;
+  const unenteredMessageAuthorityAtRequestStart = messageDetailEnteredAtRequestStart
+    ? null
+    : remoteSessionStore.captureUnenteredSessionMessageAuthority(sessionId);
   // 四路快照独立拉取、独立落库:断连补齐窗口本就脆弱,一个子请求失败不应拖垮
   // 其余(旧实现共用一个 catch,任一失败三份快照全丢)。goal 覆盖断连窗口内
   // 丢失的 maker:goal:status-changed push;model-pref / turn-cost 无对应查询通道,
@@ -1250,10 +1253,17 @@ async function rebuildSessionSnapshot(
         ...windowOptions,
         authority: messageAuthorityAtRequestStart,
       });
-    } else if (remoteSessionStore.canCommitUnenteredSessionMessageWindow(sessionId, deviceId)) {
+    } else if (
+      unenteredMessageAuthorityAtRequestStart
+      && remoteSessionStore.canCommitUnenteredSessionMessageWindow(
+        unenteredMessageAuthorityAtRequestStart,
+        deviceId,
+      )
+    ) {
       // 从未打开过的 regular 仍承担首页/全局消息镜像；但请求飞行期间只要发生过
-      // enter / leave / forget，hasEntered 就会变为 true，旧重连响应不得越过新生命周期。
-      // Store 同时校验 regular retention 与物理设备归属，避免旧设备响应写回新 shard。
+      // enter / leave / forget / clear，生命周期 fence 就会失效，旧重连响应不得越过
+      // 新生命周期。Store 同时校验 regular retention 与物理设备归属，避免旧设备响应
+      // 写回新 shard。
       remoteSessionStore.setLatestMessageWindow(sessionId, history.value, windowOptions);
     }
   }

@@ -8,6 +8,10 @@ export interface SessionMessageAuthority {
   readonly generation: number;
 }
 
+export interface SessionMessageUnenteredAuthority extends SessionMessageAuthority {
+  readonly resetEpoch: number;
+}
+
 export interface SessionMessageWorkLease {
   /** 更新这份工作租约是否仍持有不可回收的本地状态。 */
   update(active: boolean): void;
@@ -48,6 +52,9 @@ export function createSessionMessageLifecycleController() {
   // 不随 forget/reset 回绕。session 被删除、设备移除或登出后，旧异步请求即使在
   // 同一个 sessionId 重新出现后才返回，也不能撞上复用的 generation。
   let nextGeneration = 0;
+  // states 在全局 store reset 时会清空，未进入过详情的 session 随后会重新从
+  // generation=0 建立。单调 epoch 用于隔离 reset 前后同 ID 的无 authority 读取。
+  let resetEpoch = 0;
 
   const notify = (): void => {
     for (const listener of listeners) listener();
@@ -143,10 +150,25 @@ export function createSessionMessageLifecycleController() {
       return { sessionId, generation: state.generation };
     },
 
+    captureUnentered(sessionId: string): SessionMessageUnenteredAuthority {
+      const state = stateFor(sessionId);
+      return { sessionId, generation: state.generation, resetEpoch };
+    },
+
     canCommit(authority: SessionMessageAuthority | null | undefined): boolean {
       if (!authority) return false;
       const state = stateFor(authority.sessionId);
       return state.visible && state.generation === authority.generation;
+    },
+
+    canCommitUnentered(
+      authority: SessionMessageUnenteredAuthority | null | undefined,
+    ): boolean {
+      if (!authority || authority.resetEpoch !== resetEpoch) return false;
+      const state = stateFor(authority.sessionId);
+      return !state.visible
+        && state.generation === 0
+        && state.generation === authority.generation;
     },
 
     isVisible(sessionId: string): boolean {
@@ -216,6 +238,7 @@ export function createSessionMessageLifecycleController() {
     },
 
     reset(): void {
+      resetEpoch += 1;
       states.clear();
       notify();
     },

@@ -41,6 +41,7 @@ import {
   sessionMessageLifecycle,
   type SessionMessageAuthority,
   type SessionMessageReclaimReason,
+  type SessionMessageUnenteredAuthority,
   type SessionMessageWorkLease,
 } from '@/session/sessionMessageLifecycle';
 import { classifySessionRetention, type SessionRetentionKind } from '@/session/sessionRetention';
@@ -1598,10 +1599,17 @@ export const remoteSessionStore = {
     return sessionMessageLifecycle.hasEntered(sessionId);
   },
 
-  canCommitUnenteredSessionMessageWindow(sessionId: string, deviceId: string): boolean {
-    return retentionForSession(sessionId) === 'regular'
-      && sessionDeviceIndex.get(sessionId) === deviceId
-      && !sessionMessageLifecycle.hasEntered(sessionId);
+  captureUnenteredSessionMessageAuthority(sessionId: string): SessionMessageUnenteredAuthority {
+    return sessionMessageLifecycle.captureUnentered(sessionId);
+  },
+
+  canCommitUnenteredSessionMessageWindow(
+    authority: SessionMessageUnenteredAuthority,
+    deviceId: string,
+  ): boolean {
+    return retentionForSession(authority.sessionId) === 'regular'
+      && sessionDeviceIndex.get(authority.sessionId) === deviceId
+      && sessionMessageLifecycle.canCommitUnentered(authority);
   },
 
   acquireSessionMessageWork(sessionId: string, active = false): SessionMessageWorkLease {

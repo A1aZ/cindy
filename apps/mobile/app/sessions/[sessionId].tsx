@@ -3633,10 +3633,6 @@ export default function SessionScreen() {
       });
     return () => {
       cancelled = true;
-      if (
-        loadedRouteFocusKeyRef.current === routeFocusKey
-        && appliedRouteFocusKeyRef.current !== routeFocusKey
-      ) loadedRouteFocusKeyRef.current = null;
     };
   }, [connectionEpoch, deviceId, lastSyncedAt, maker, openLink, sessionAgentSwitchSupported, sessionId]);
 
@@ -4564,6 +4560,12 @@ export default function SessionScreen() {
     loadedRouteFocusKeyRef.current = routeFocusKey;
 
     let cancelled = false;
+    const releasePendingRouteFocusLookup = () => {
+      if (
+        loadedRouteFocusKeyRef.current === routeFocusKey
+        && appliedRouteFocusKeyRef.current !== routeFocusKey
+      ) loadedRouteFocusKeyRef.current = null;
+    };
     const messageAuthority = remoteSessionStore.captureSessionMessageAuthority(sessionId);
     void withTransientRemoteRetry(() =>
       maker.aroundMessagesByClientId(sessionId, routeFocusClientId, { radius: 60 }),
@@ -4572,7 +4574,10 @@ export default function SessionScreen() {
         if (
           cancelled
           || !remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)
-        ) return;
+        ) {
+          releasePendingRouteFocusLookup();
+          return;
+        }
         remoteSessionStore.mergeMessages(
           sessionId,
           Array.isArray(list) ? list : [],
@@ -4586,16 +4591,19 @@ export default function SessionScreen() {
         setRouteFocusedClientId(routeFocusClientId);
       })
       .catch((err) => {
-        if (
-          !cancelled
-          && remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)
-        ) setError(formatRemoteError(err));
+        if (cancelled) return;
+        if (!remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)) {
+          releasePendingRouteFocusLookup();
+          return;
+        }
+        setError(formatRemoteError(err));
       });
 
     return () => {
       cancelled = true;
+      releasePendingRouteFocusLookup();
     };
-  }, [deviceId, maker, renderItems, routeFocusClientId, routeFocusKey, sessionId]);
+  }, [deviceId, maker, messageReloadRevision, renderItems, routeFocusClientId, routeFocusKey, sessionId]);
 
   useEffect(() => {
     if (!routeFocusedItemKey || !routeFocusKey) return;

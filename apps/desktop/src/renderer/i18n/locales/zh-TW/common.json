@@ -8128,6 +8128,12 @@
       }
     },
     "builtinTemplates": {
+      "schedule": {
+        "daily": "每天 {{time}}",
+        "weekdays": "工作日 {{time}}",
+        "weekly": "{{weekday}} {{time}}",
+        "monthly": "每月 {{day}} 日 {{time}}"
+      },
       "categories": {
         "dev-automation": "開發自動化",
         "info-radar": "資訊雷達",

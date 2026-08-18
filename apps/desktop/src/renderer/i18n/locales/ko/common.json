@@ -8128,6 +8128,12 @@
       }
     },
     "builtinTemplates": {
+      "schedule": {
+        "daily": "매일 {{time}}",
+        "weekdays": "평일 {{time}}",
+        "weekly": "{{weekday}} {{time}}",
+        "monthly": "매월 {{day}}일 {{time}}"
+      },
       "categories": {
         "dev-automation": "개발 자동화",
         "info-radar": "정보 레이더",

@@ -8140,6 +8140,12 @@
       }
     },
     "builtinTemplates": {
+      "schedule": {
+        "daily": "Daily at {{time}}",
+        "weekdays": "Weekdays at {{time}}",
+        "weekly": "{{weekday}} at {{time}}",
+        "monthly": "Monthly on day {{day}} at {{time}}"
+      },
       "categories": {
         "dev-automation": "Development automation",
         "info-radar": "Information radar",

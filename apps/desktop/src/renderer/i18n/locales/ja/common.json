@@ -8128,6 +8128,12 @@
       }
     },
     "builtinTemplates": {
+      "schedule": {
+        "daily": "毎日 {{time}}",
+        "weekdays": "平日 {{time}}",
+        "weekly": "{{weekday}} {{time}}",
+        "monthly": "毎月{{day}}日 {{time}}"
+      },
       "categories": {
         "dev-automation": "開発自動化",
         "info-radar": "情報レーダー",

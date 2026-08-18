@@ -563,6 +563,57 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(runtime.install).not.toHaveBeenCalled();
   });
 
+  it('restores an organization update route without restoring market-only authorization', async () => {
+    const canonicalManifest = normalizedManifest(manifest());
+    const item = summary({
+      scope: 'organization',
+      organizationId: 'org-1',
+      currentRelease: {
+        ...summary().currentRelease,
+        id: RELEASE_ID,
+      },
+    });
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-org-recovery-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(canonicalManifest));
+    runtime.ghosts = [{
+      manifest: canonicalManifest as unknown as Record<string, unknown>,
+      dir: installDir,
+      enabled: true,
+    }];
+    runtime.approvedInstallEvidence.mockReturnValue({
+      packageSha256: item.currentRelease.sha256,
+      approvedManifest: canonicalManifest,
+      legacyMigrated: false,
+    });
+    const h = harness([item]);
+    h.ledger.upsertInstallation({
+      pluginId: item.id,
+      ghostId: item.ghostId,
+      releaseId: item.currentRelease.id,
+      version: item.currentRelease.version,
+      sha256: item.currentRelease.sha256,
+      scope: item.scope,
+      organizationId: item.organizationId,
+      source: 'market',
+      installed: true,
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      manifestDigest: ghostManifestDigest(canonicalManifest),
+    });
+    h.ledger.markRemoved(item.ghostId, 'user-1');
+
+    const snapshot = await h.service.snapshot();
+
+    expect(snapshot.items[0]).toMatchObject({ installState: 'installed', enabled: true });
+    expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({
+      installed: true,
+      source: 'legacy-adopted',
+      releaseId: RELEASE_ID,
+    });
+    expect(h.api.download).not.toHaveBeenCalled();
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
   it.each([
     { receiptCase: 'missing', receiptSha: null },
     { receiptCase: 'different', receiptSha: 'f'.repeat(64) },

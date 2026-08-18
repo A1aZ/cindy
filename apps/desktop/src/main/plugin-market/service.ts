@@ -2027,6 +2027,9 @@ export class PluginMarketService {
    * package hash. Legacy receipts intentionally omitted that audit-only hash, so
    * they additionally require the completed one-time migration to name this id
    * and the raw installed manifest to equal the manifest frozen in that receipt.
+   * This evidence reconnects the server update route, not current code bytes;
+   * the ledger therefore demotes recovered organization records to
+   * legacy-adopted until a verified market update restores stronger trust.
    */
   private async recoverDisconnectedMarketInstallations(
     plugins: readonly VisiblePluginSummary[],

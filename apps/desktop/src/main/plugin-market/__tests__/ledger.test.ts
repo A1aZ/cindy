@@ -85,6 +85,25 @@ describe('PluginMarketLedger', () => {
     ).toBe(false);
   });
 
+  it('keeps a recovered organization route out of market-only authorization', () => {
+    const { ledger } = harness();
+    ledger.upsertInstallation(record({
+      scope: 'organization',
+      organizationId: 'org-a',
+    }));
+    ledger.markRemoved('cindy-test', 'user-a');
+    const disconnected = ledger.installationForGhost('cindy-test');
+    expect(disconnected).not.toBeNull();
+    if (!disconnected) return;
+
+    expect(ledger.restoreDisconnectedInstallation(disconnected, 'user-a')).toBe(true);
+    expect(ledger.installationForGhost('cindy-test')).toMatchObject({
+      installed: true,
+      source: 'legacy-adopted',
+      scope: 'organization',
+    });
+  });
+
   it('does not overwrite a disconnected record that changed after recovery captured it', () => {
     const { ledger } = harness();
     const disconnected = record({ installed: false });

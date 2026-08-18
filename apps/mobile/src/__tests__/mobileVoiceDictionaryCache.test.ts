@@ -435,6 +435,21 @@ describe('版本向量的入站校验', () => {
     expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('新词');
   });
 
+  it('不带 emittedAt 的同代拉取不能盖掉已有 push', async () => {
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '推送词' }],
+      stateVector: { 'node-a': STAMP_A },
+      emittedAt: 1_000,
+    });
+    await applyMobileVoiceDictionarySnapshot(HOST, {
+      ok: true,
+      entries: [{ text: '拉取词' }],
+      stateVector: { 'node-a': STAMP_A },
+    });
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('推送词');
+  });
+
   it('后到的无向量空投影不能清掉已有的更新快照', async () => {
     await applyMobileVoiceDictionarySnapshot(HOST, {
       ok: true,

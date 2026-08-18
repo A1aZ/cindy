@@ -244,12 +244,17 @@ function sendMobileSnapshotTo(
   }
 }
 
-function buildMobileSnapshot(): MobileVoiceDictionarySnapshotResult | null {
-  const payload: MobileVoiceDictionarySnapshotResult = {
+/** push 与主动 GET 共用：同一份投影必须带上发出时间，否则同代向量的兜底拉取盖不掉已有 push。 */
+export function buildMobileDictionarySnapshot(): MobileVoiceDictionarySnapshotResult {
+  return {
     ok: true,
     emittedAt: Date.now(),
     ...readDictionaryProjectionForMobile(),
   };
+}
+
+function buildMobileSnapshot(): MobileVoiceDictionarySnapshotResult | null {
+  const payload = buildMobileDictionarySnapshot();
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes <= MAX_STATE_FRAME_BYTES) return payload;
   // 与桌面 CRDT 同一条上限:超限帧会被 relay 拒绝。这里不另造分片协议,

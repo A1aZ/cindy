@@ -64,6 +64,7 @@ const {
   initVoiceDictionarySync,
   isDesktopPlatform,
   notifyLocalDictionaryChanged,
+  buildMobileDictionarySnapshot,
   readDictionaryProjectionForMobile,
   shouldExchangeDictionaryWith,
   stopVoiceDictionarySync,
@@ -327,5 +328,11 @@ describe('手机只读投影', () => {
     const projection = readDictionaryProjectionForMobile();
     expect(projection.entries).toEqual([]);
     expect(projection.stateVector && Object.keys(projection.stateVector)).toEqual(['node-a']);
+  });
+
+  it('主动 GET 与 push 共用带 emittedAt 的投影', () => {
+    const snapshot = buildMobileDictionarySnapshot();
+    expect(snapshot.ok).toBe(true);
+    if (snapshot.ok) expect(snapshot.emittedAt).toEqual(expect.any(Number));
   });
 });

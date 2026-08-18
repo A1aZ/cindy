@@ -1414,6 +1414,16 @@
           "piChatHelp": "Pi 直接连接供应商的 OpenAI 兼容 Chat Completions API。",
           "piAnthropicHelp": "Pi 直接连接供应商的 Anthropic Messages API。"
         },
+        "modelProtocol": {
+          "label": "模型协议",
+          "inherit": "继承默认",
+          "messages": "Messages",
+          "chat": "Chat",
+          "responses": "Responses",
+          "google": "Google Generative AI",
+          "help": "继承默认会使用上方供应商协议；仅在该模型需要不同协议时覆盖。",
+          "ariaLabel": "{{model}} 的模型协议"
+        },
         "protocol": {
           "claude": "Claude Code",
           "claudeDesc": "Claude Code 遵循 Anthropic 协议(用 x-api-key 鉴权)。填该来源用于 Claude Code 的 baseURL、密钥与模型，留空则此来源不提供 Claude Code。",
@@ -1452,7 +1462,8 @@
           "button": "测试连接",
           "testing": "测试中…",
           "ok": "连接成功（{{ms}}ms）",
-          "needFields": "请先填写基础 URL 和至少一个模型 ID"
+          "needFields": "请先填写基础 URL 和至少一个模型 ID",
+          "unsupportedProtocol": "测试连接暂不支持该模型协议"
         },
         "fetch": {
           "button": "获取模型列表",

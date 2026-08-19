@@ -38,6 +38,7 @@ import { isSidebarWindow } from '@/lib/sidebarWindow';
 import { isGhostPanelWindow } from '@/lib/ghostPanelWindow';
 import { setModelEnginePrefsOwner } from '@/state/modelEnginePrefs';
 import { setModelFavoritesOwner } from '@/state/modelFavorites';
+import { setFavoriteAnchorMemoryOwner } from '@/state/favoriteAnchorMemory';
 import { setNewMakerDraftOwner } from '@/state/newMakerDraft';
 import { setModelVisibilityOwner } from '@/state/modelVisibilityPrefs';
 import { setComposerDraftOwner } from '@/lib/composerDraftStore';
@@ -190,6 +191,8 @@ export function AuthProvider({
       // 无后缀的默认槽)。漏接 = 多账号串号(providerModelMemory 的旧教训)。
       setModelEnginePrefsOwner(state.dataOwnerId);
       setModelFavoritesOwner(state.dataOwnerId);
+      // 收藏**锚点**记忆(面板上哪一行打勾)与收藏本体同分区:漏接同样是多账号串号。
+      setFavoriteAnchorMemoryOwner(state.dataOwnerId);
       setComposerDraftOwner(state.dataOwnerId);
       setPendingHandoffOwner(state.dataOwnerId);
       setDeferredUiAssignmentOwner(state.dataOwnerId);
@@ -397,6 +400,8 @@ export function AuthProvider({
     // 继续读写**上一个身份**的分区 —— 跨身份可见,还会把改动写进别人的账号。
     setModelEnginePrefsOwner(state.dataOwnerId);
     setModelFavoritesOwner(state.dataOwnerId);
+    // 收藏**锚点**记忆(面板上哪一行打勾)与收藏本体同分区:漏接同样是多账号串号。
+    setFavoriteAnchorMemoryOwner(state.dataOwnerId);
     setComposerDraftOwner(state.dataOwnerId);
     setPendingHandoffOwner(state.dataOwnerId);
     setDeferredUiAssignmentOwner(state.dataOwnerId);
@@ -415,6 +420,8 @@ export function AuthProvider({
     // 退出本地模式同样是一次 owner 切换:两根轴必须一起跟过去(见 enterLocalMode 的注释)。
     setModelEnginePrefsOwner(state.dataOwnerId);
     setModelFavoritesOwner(state.dataOwnerId);
+    // 收藏**锚点**记忆(面板上哪一行打勾)与收藏本体同分区:漏接同样是多账号串号。
+    setFavoriteAnchorMemoryOwner(state.dataOwnerId);
     setComposerDraftOwner(state.dataOwnerId);
     setPendingHandoffOwner(state.dataOwnerId);
     setDeferredUiAssignmentOwner(state.dataOwnerId);

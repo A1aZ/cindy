@@ -7634,6 +7634,15 @@
       "filterLastActivityHeading": "Last activity",
       "filterGroupByHeading": "Group by",
       "filterSortByHeading": "Sort by",
+      "filterTaskSortHeading": "Session sort",
+      "filterProjectOrderHeading": "Project order",
+      "filterProjectOrder": {
+        "activity": "By recent activity",
+        "custom": "Manual"
+      },
+      "filterProjectOrderTip": {
+        "custom": "Drag project rows with the mouse to reorder. Sessions inside still follow the sort above."
+      },
       "filterProjectsHeading": "Projects",
       "filterAllProjects": "All projects",
       "filterHeading": "Filters",

@@ -4733,6 +4733,13 @@
       "cn": "CN",
       "dev": "Dev"
     },
+    "captcha": {
+      "title": "安全驗證",
+      "loading": "正在載入安全驗證…",
+      "failed": "安全驗證載入失敗",
+      "retry": "重試",
+      "cancel": "取消"
+    },
     "errors": {
       "fallback": "登入失敗，請稍後重試",
       "AUTH_SERVICE_UNAVAILABLE": "登入服務暫不可用",
@@ -4743,6 +4750,9 @@
       "INVALID_CODE": "驗證碼錯誤或已過期",
       "CODE_ATTEMPTS_EXCEEDED": "驗證碼錯誤次數過多，請重新獲取",
       "RATE_LIMITED": "操作過於頻繁，請稍後再試",
+      "CAPTCHA_REQUIRED": "請先完成安全驗證",
+      "CAPTCHA_INVALID": "安全驗證未通過，請重試",
+      "CAPTCHA_UNAVAILABLE": "安全驗證服務暫時無法使用，請稍後再試",
       "SSO_LOGIN_REQUIRED": "該電子郵件所屬企業要求透過 SSO 登入",
       "ORG_SSO_NOT_FOUND": "未找到該企業，或該企業未啟用 SSO 登入",
       "ORG_REALM_AMBIGUOUS": "該企業標識同時存在於兩個區域，請聯絡企業管理員處理",

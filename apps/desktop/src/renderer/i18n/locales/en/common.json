@@ -4708,6 +4708,13 @@
       "cn": "CN",
       "dev": "Dev"
     },
+    "captcha": {
+      "title": "Security check",
+      "loading": "Loading security check…",
+      "failed": "Failed to load the security check.",
+      "retry": "Retry",
+      "cancel": "Cancel"
+    },
     "errors": {
       "fallback": "Sign-in failed. Please try again.",
       "AUTH_SERVICE_UNAVAILABLE": "The sign-in service is temporarily unavailable.",
@@ -4718,6 +4725,9 @@
       "INVALID_CODE": "The verification code is incorrect or expired.",
       "CODE_ATTEMPTS_EXCEEDED": "Too many incorrect attempts. Request a new code.",
       "RATE_LIMITED": "Too many attempts. Please wait and try again.",
+      "CAPTCHA_REQUIRED": "Please complete the security check first.",
+      "CAPTCHA_INVALID": "Security check failed. Please try again.",
+      "CAPTCHA_UNAVAILABLE": "The security check is temporarily unavailable. Please try again later.",
       "SSO_LOGIN_REQUIRED": "This organization requires SSO sign-in.",
       "ORG_SSO_NOT_FOUND": "Company not found, or it has no SSO connection enabled",
       "ORG_REALM_AMBIGUOUS": "This enterprise identifier exists in both regions. Contact your administrator.",

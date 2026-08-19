@@ -15,6 +15,7 @@ import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { clearWorkersCache } from '@/features/cc-agent/hooks/useWorkers';
 import { setSelectedMachineOwner } from '@/features/device-link/selectedMachineStore';
 import { createLogger } from '@/lib/logger';
+import { getLoginEmailCaptchaGate } from '@/lib/loginCaptchaGate';
 import { toast } from '@/lib/toast';
 import {
   createAuthService,
@@ -356,10 +357,21 @@ export function AuthProvider({
           });
         }
         if (sole?.type === 'email_code' && result.state.email) {
+          // 自动发码同样要先过人机验证闸（LoginPage 注册的挑战 overlay）：
+          // 这条快捷链不经过 LoginPage 的 dispatchRequestCode，不过闸会在
+          // global 开启 captcha 后不带 token 发码直接吃 400。
+          const captchaGate = getLoginEmailCaptchaGate();
+          const captchaToken = captchaGate ? await captchaGate() : undefined;
+          if (captchaToken === null) {
+            // 用户取消挑战：停在 method-choice，个人行可再次发起（会重新过闸）
+            setLoginState(result.state);
+            return result;
+          }
           return dispatchLoginAction({
             type: 'request-code',
             kind: 'email',
             identifier: result.state.email,
+            captchaToken,
           });
         }
       }

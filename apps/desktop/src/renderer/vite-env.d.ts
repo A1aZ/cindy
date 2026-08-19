@@ -2001,6 +2001,8 @@ interface ElectronAPI {
   }>;
   authGetLoginState: () => Promise<DesktopLoginActionResult>;
   authDispatchLoginAction: (action: DesktopLoginAction) => Promise<DesktopLoginActionResult>;
+  /** 登录 captcha 托管挑战页地址(不含 query);LoginCaptchaOverlay 装载 webview 用。 */
+  authGetCaptchaChallengeUrl: () => Promise<string>;
   authLogout: () => Promise<void>;
   authEnterLocal: () => Promise<AuthStateChangePayload>;
   authExitLocal: () => Promise<AuthStateChangePayload>;

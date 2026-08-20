@@ -18,7 +18,7 @@ import {
   ghostLocalePathFor,
   ghostInstallApprovalToken,
   ghostIconMimeType,
-  isOfficialGhostId,
+  isBrokerEligibleGhostId,
   isValidGhostId,
   resolveGhostManifestLocale,
   validateGhostManifest,
@@ -1857,7 +1857,7 @@ export class GhostManager {
     // tokenBroker 门控与装入侧同一条规则(XDT 授权 broker 仅第一方官方插件可用,
     // 不区分 dev/packaged):走已装目录重新确认的都不是随包插件,声明即拒。
     if (
-      !isOfficialGhostId(id) &&
+      !isBrokerEligibleGhostId(id) &&
       (validated.manifest.network?.secrets ?? []).some((s) => s.oauth?.tokenBroker !== undefined)
     ) {
       return {

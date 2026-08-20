@@ -26,6 +26,9 @@ import {
   isGhostCallToolName,
   isValidGhostId,
   isOfficialGhostId,
+  isUserInstallReservedGhostId,
+  isBrokerEligibleGhostId,
+  isFirstPartyHostPrivilegeGhostId,
   isValidGhostNetworkHostPattern,
   layoutWithGhostPanel,
   parseGhostPartition,
@@ -2663,6 +2666,31 @@ describe('ghost · 官方保留 id 前缀(cindy-)', () => {
     expect(isOfficialGhostId('cindyart')).toBe(false);
     expect(isOfficialGhostId('my-cindy-tool')).toBe(false);
     expect(isOfficialGhostId('web-search')).toBe(false);
+  });
+
+  it('四个官方 id 谓词对本阶段同一组输入返回完全相同的结果', () => {
+    const ids = [
+      'cindy-art',
+      'filo-google',
+      'xd-mivo',
+      'acme-feishu',
+      'my-plugin',
+      'cindyart',
+      'my-cindy-tool',
+      '',
+    ];
+    const predicates = [
+      isOfficialGhostId,
+      isUserInstallReservedGhostId,
+      isBrokerEligibleGhostId,
+      isFirstPartyHostPrivilegeGhostId,
+    ];
+    for (const id of ids) {
+      const expected = isOfficialGhostId(id);
+      for (const predicate of predicates) {
+        expect(predicate(id), `${predicate.name}(${JSON.stringify(id)})`).toBe(expected);
+      }
+    }
   });
 });
 

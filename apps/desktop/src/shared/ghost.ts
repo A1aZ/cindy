@@ -1636,9 +1636,33 @@ export const GHOST_OFFICIAL_ID_PREFIXES: readonly string[] = [
   'xd-',
 ];
 
-/** id 是否属于官方保留命名空间。 */
+/** id 是否属于官方保留命名空间。静态命名空间与不可逆恢复能力继续用这个。 */
 export function isOfficialGhostId(id: string): boolean {
   return GHOST_OFFICIAL_ID_PREFIXES.some((prefix) => id.startsWith(prefix));
+}
+
+/**
+ * 用户装入通道（拖入 / 选文件 / forge 转交）是否拒装该 id。
+ * 本阶段与 `isOfficialGhostId` 等价；后续会放宽，让本组织前缀通过。
+ */
+export function isUserInstallReservedGhostId(id: string): boolean {
+  return isOfficialGhostId(id);
+}
+
+/**
+ * 该 id 能否声明 `oauth.tokenBroker`（装入闸与连接闸）。
+ * 本阶段与 `isOfficialGhostId` 等价；后续会既放宽又收紧。
+ */
+export function isBrokerEligibleGhostId(id: string): boolean {
+  return isOfficialGhostId(id);
+}
+
+/**
+ * 该 id 能否拿宿主原语：OAuth 端口回收、身份头像代下载。
+ * 本阶段与 `isOfficialGhostId` 等价；后续会收紧。
+ */
+export function isFirstPartyHostPrivilegeGhostId(id: string): boolean {
+  return isOfficialGhostId(id);
 }
 
 /**

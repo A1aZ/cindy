@@ -1807,21 +1807,34 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
   });
 
   it('P1-6:声明 tokenBroker 的目录拒走已装目录重新确认', async () => {
+    const brokerNetwork = {
+      hosts: ['api.example.com', 'accounts.example.com'],
+      secrets: [
+        {
+          key: 'token',
+          label: 'Account',
+          source: 'oauth' as const,
+          inject: { header: 'Authorization', format: 'Bearer {value}' },
+          oauth: {
+            authorizeUrl: 'https://accounts.example.com/authorize',
+            tokenUrl: 'https://accounts.example.com/token',
+            clientId: 'broker-client',
+            tokenBroker: 'github',
+          },
+        },
+      ],
+    };
     await writeLegacyInstall('brokered', {
       ...goodManifest('brokered'),
-      network: {
-        hosts: ['api.example.com'],
-        secrets: [
-          {
-            key: 'token',
-            source: 'oauth',
-            oauth: { tokenBroker: 'github' },
-          },
-        ],
-      },
+      slots: ['tool', 'network'],
+      settingsHtml: 'settings.html',
+      network: brokerNetwork,
     });
     const inspected = await manager.inspectInstalledReapproval('brokered');
     expect('rejection' in inspected && inspected.rejection.code).toBe('file-invalid');
+    if ('rejection' in inspected) {
+      expect(inspected.rejection.reason).toMatch(/tokenBroker/);
+    }
   });
 
   it('P1-7:重新确认的启停默认值取镜像读数,不重置用户停用偏好', async () => {

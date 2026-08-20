@@ -46,7 +46,7 @@ import {
 } from './ghostOauthFlow.js';
 import {
   changedBuiltinOauthClientSecretKeys,
-  isOfficialGhostId,
+  isFirstPartyHostPrivilegeGhostId,
   type GhostManifest,
   type GhostSecretOauthDecl,
 } from '../../shared/ghost.js';
@@ -899,7 +899,7 @@ export class GhostOauthAccountManager {
       // 回收 = 强杀占用进程,而"杀谁"由 redirectPort 决定——第三方 manifest
       // 可声明任意端口(如 5432),放开等于让任意意识借「连接账号」之手
       // 强杀用户本地服务(Postgres 等),故第三方一律回落"占用即报错"。
-      reclaimPort: isOfficialGhostId(ghostId) ? this.deps.reclaimPort : undefined,
+      reclaimPort: isFirstPartyHostPrivilegeGhostId(ghostId) ? this.deps.reclaimPort : undefined,
     });
     if (!flow.ok) return { ok: false, error: flow.error, detail: flow.detail };
     if (this.deps.isConnectTargetCurrent?.(ghostId, secretKey, decl) === false) {
@@ -933,7 +933,7 @@ export class GhostOauthAccountManager {
       // 头像地址是身份端点响应里的任意 https,不受 hosts 白名单约束——放开
       // 等于给第三方意识一个"主机代发 GET + 小图字节回沙箱"的 SSRF 读原语。
       // 下载本身不带任何凭证(CDN 域名不在注入白名单);失败降级无头像。
-      if (identity.avatarUrl !== null && isOfficialGhostId(ghostId)) {
+      if (identity.avatarUrl !== null && isFirstPartyHostPrivilegeGhostId(ghostId)) {
         avatar = await fetchGhostOauthAvatar({
           url: identity.avatarUrl,
           fetchImpl: this.deps.fetchImpl,
@@ -1329,7 +1329,7 @@ export class GhostOauthAccountManager {
       // 头像回填同样只对第一方官方意识放行(connectAccount 处的 SSRF 口径)。
       const needAvatar =
         decl.identity.avatarPath !== undefined &&
-        isOfficialGhostId(ghostId) &&
+        isFirstPartyHostPrivilegeGhostId(ghostId) &&
         this.readAvatar(ghostId, secretKey, accountId) === null;
       if (!needDisplay && !needAvatar) return;
       const identity = await fetchGhostOauthIdentity({

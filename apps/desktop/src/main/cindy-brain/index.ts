@@ -32,7 +32,9 @@ import {
   unreviewedGhostPermissionItems,
   ghostWebviewEntryPaths,
   isCindyAccountGhostId,
+  isBrokerEligibleGhostId,
   isOfficialGhostId,
+  isUserInstallReservedGhostId,
   ghostPermissionItems,
   ghostPermissionProjectionFingerprint,
   isValidGhostId,
@@ -5133,7 +5135,7 @@ function rejectReservedGhostId(id: string): void {
   // packaged-only so first-party iteration can still reload cindy-/xd- plugins.
   rejectReservedPublisherSlug(id);
   if (!app.isPackaged) return;
-  if (!isOfficialGhostId(id)) return;
+  if (!isUserInstallReservedGhostId(id)) return;
   throwIpcError(
     'GHOST_ID_RESERVED',
     `id "${id}" 使用了官方保留前缀(cindy- / filo- / xd-),用户通道不可装入`,
@@ -5155,7 +5157,7 @@ export function rejectReservedGhostIdForCustomMarket(id: string): void {
  * dev/packaged:broker 是服务端资产,dev 也不豁免。
  */
 function rejectUnauthorizedTokenBroker(manifest: GhostManifest): void {
-  if (isOfficialGhostId(manifest.id)) return;
+  if (isBrokerEligibleGhostId(manifest.id)) return;
   const brokered = (manifest.network?.secrets ?? []).some(
     (s) => s.oauth?.tokenBroker !== undefined,
   );
@@ -7245,7 +7247,7 @@ export function registerGhostIpc(): void {
         const brokered = (probe.manifest.network?.secrets ?? []).some(
           (s) => s.oauth?.tokenBroker !== undefined,
         );
-        if (brokered && !isOfficialGhostId(probe.manifest.id)) return false;
+        if (brokered && !isBrokerEligibleGhostId(probe.manifest.id)) return false;
         // 指令查重(同 install/update):与当前已装撞名即拒,排除自身。
         const commandFold = probe.manifest.command?.toLowerCase();
         if (commandFold === undefined) return true;

@@ -28,7 +28,7 @@
  * 产生的全部令牌只存在主机保险库与内存缓存,本端点没有任何读回动作。
  */
 
-import { isOfficialGhostId } from '../../../shared/ghost.js';
+import { isBrokerEligibleGhostId } from '../../../shared/ghost.js';
 import { GhostKvError } from '../ghostKvStore.js';
 import { GHOST_SECRET_VALUE_MAX_CHARS } from './ghostSecretsEndpoint.js';
 import type {
@@ -207,7 +207,7 @@ export async function handleGhostOauthRequest(args: {
     if (method !== 'POST') return { status: 405 };
     // tokenBroker 第一方门控·连接闸(装入闸的运行时兜底,覆盖 dev 装入等
     // 旁路):XDT 授权 broker 只对官方前缀意识开放。
-    if (decl.tokenBroker !== undefined && !isOfficialGhostId(ghostId)) {
+    if (decl.tokenBroker !== undefined && !isBrokerEligibleGhostId(ghostId)) {
       return {
         status: 200,
         body: JSON.stringify({

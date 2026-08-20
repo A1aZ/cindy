@@ -3349,8 +3349,8 @@ function resolveMediaPreferenceOrDefault(
 
 /**
  * Art 1.12.5–1.13.2 已经走 Core media，但还不会在 prepare 时传
- * providerId。这段兼容窗口只能稳定表达 Cindy AI 来源；1.13.3 起
- * 插件会传完整来源，恢复全部 Provider 选择。
+ * providerId。这段兼容窗口对同名模型选择一个可用来源并优先 Cindy AI；
+ * 1.13.3 起插件会传完整来源，恢复全部 Provider 选择。
  */
 function isProviderBlindCoreArt(ghost: InstalledGhost): boolean {
   return (
@@ -3360,6 +3360,26 @@ function isProviderBlindCoreArt(ghost: InstalledGhost): boolean {
   );
 }
 
+/** 旧插件无法区分同 modelId 的来源：冲突时优先 XD，否则保留第一个可用来源。 */
+function collapseProviderBlindMediaModels<T extends { providerId: string }>(
+  models: readonly T[],
+  modelId: (model: T) => string,
+): T[] {
+  const grouped = new Map<string, T[]>();
+  for (const model of models) {
+    const id = modelId(model);
+    const group = grouped.get(id) ?? [];
+    group.push(model);
+    grouped.set(id, group);
+  }
+  const selected: T[] = [];
+  for (const group of grouped.values()) {
+    const xd = group.find((model) => model.providerId === 'xd');
+    selected.push(xd ?? group[0]!);
+  }
+  return selected;
+}
+
 function getGhostMediaPreferenceConfig(
   ghostId: string,
   capability: GhostMediaCapability,
@@ -3367,7 +3387,7 @@ function getGhostMediaPreferenceConfig(
   const config = getMediaPreferenceConfig(capability);
   const ghost = getGhostManager().list().find((candidate) => candidate.manifest.id === ghostId);
   if (!ghost || !isProviderBlindCoreArt(ghost)) return config;
-  const models = config.models.filter((model) => model.providerId === 'xd');
+  const models = collapseProviderBlindMediaModels(config.models, (model) => model.modelId);
   const standard = models[0]?.id;
   return {
     models,
@@ -3420,10 +3440,10 @@ async function getGhostConfigurableMediaModels(
     // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
     const availability = await listExecutableMediaModels();
     const mode = type === 'image' ? 'image_generation' : 'video_generation';
-    const models = availability.models.filter(
-      (model) =>
-        model.mode === mode && (!isProviderBlindCoreArt(ghost) || model.providerId === 'xd'),
-    );
+    const candidates = availability.models.filter((model) => model.mode === mode);
+    const models = isProviderBlindCoreArt(ghost)
+      ? collapseProviderBlindMediaModels(candidates, (model) => model.id)
+      : candidates;
     if (
       models.length === 0 &&
       availability.unavailable.some((model) => model.retryable)

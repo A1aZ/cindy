@@ -1,5 +1,5 @@
 import {
-  isModelDisabled,
+  isModelDisabledWithUniqueLegacyBasename,
   isProviderDisabled,
   MODEL_ACCESS_CATALOG_SCHEMA_VERSION,
   MODEL_ACCESS_MODELS_PATH,
@@ -74,6 +74,7 @@ export type ExecutableMediaModel = ModelCatalogEntry & { providerId: string };
 interface ExecutableMediaSnapshot {
   models: ModelCatalogEntry[];
   capabilitiesByModel: Map<string, ReadonlySet<MediaCapability>>;
+  guideIdsByModel: Map<string, string>;
   unavailableByModel: Map<string, UnavailableMediaModel>;
 }
 
@@ -101,6 +102,17 @@ export function isMediaModelExecutable(
   capability: MediaCapability,
 ): boolean {
   return executableMediaSnapshot?.capabilitiesByModel.get(modelId)?.has(capability) === true;
+}
+
+export function isMediaModelExecutableForGuide(
+  modelId: string,
+  guideId: string,
+  capability: MediaCapability,
+): boolean {
+  return (
+    executableMediaSnapshot?.guideIdsByModel.get(modelId) === guideId &&
+    isMediaModelExecutable(modelId, capability)
+  );
 }
 
 export { supportsMediaCapability } from '../cindy-media/mediaCapabilities.js';
@@ -153,8 +165,18 @@ export function filterEnabledGatewayMediaModels<
   access: ModelDisableOverrides | undefined,
 ): T[] {
   if (isProviderDisabled(access, CINDY_AI_PROVIDER_ID)) return [];
+  const candidateModelIds = models.map((model) => model.id);
   return models.filter((model) => {
-    if (isModelDisabled(access, CINDY_AI_PROVIDER_ID, model.id)) return false;
+    if (
+      isModelDisabledWithUniqueLegacyBasename(
+        access,
+        CINDY_AI_PROVIDER_ID,
+        model.id,
+        candidateModelIds,
+      )
+    ) {
+      return false;
+    }
     if (capability?.startsWith('image.') && model.mode !== 'image_generation') return false;
     if (capability?.startsWith('video.') && model.mode !== 'video_generation') return false;
     if (capability !== undefined) return supportsMediaCapability(model.modalities, capability);
@@ -346,6 +368,7 @@ async function buildExecutableMediaSnapshot(): Promise<ExecutableMediaSnapshot> 
   const models = await fetchGatewayMediaModels();
   const batch = await fetchMediaInvocationGuideBatch();
   const capabilitiesByModel = new Map<string, ReadonlySet<MediaCapability>>();
+  const guideIdsByModel = new Map<string, string>();
   const unavailableByModel = new Map<string, UnavailableMediaModel>();
 
   for (const model of models) {
@@ -385,12 +408,13 @@ async function buildExecutableMediaSnapshot(): Promise<ExecutableMediaSnapshot> 
         continue;
       }
       capabilitiesByModel.set(model.id, operations);
+      guideIdsByModel.set(model.id, resolvedGuide.guide.guideId);
     } catch (error) {
       unavailableByModel.set(model.id, unavailableFromGuideError(model.id, error));
     }
   }
 
-  return { models, capabilitiesByModel, unavailableByModel };
+  return { models, capabilitiesByModel, guideIdsByModel, unavailableByModel };
 }
 
 async function getExecutableMediaSnapshot(forceRefresh = false): Promise<ExecutableMediaSnapshot> {

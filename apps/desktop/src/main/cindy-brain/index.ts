@@ -323,6 +323,7 @@ import {
 import { invalidateXaiBridgeAuth } from '../maker-host/xai-auth-invalidation-host.js';
 import {
   isModelDisabled,
+  isModelDisabledWithUniqueLegacyBasename,
   isProviderDisabled,
   type MediaCapability,
 } from '@cindy/model-providers';
@@ -384,6 +385,7 @@ import { isModelAccessReady } from '../model-access/readiness.js';
 import {
   filterEnabledGatewayMediaModels,
   isMediaModelExecutable,
+  isMediaModelExecutableForGuide,
   listExecutableMediaModels,
   supportsMediaCapability,
 } from '../model-access/mediaModels.js';
@@ -3094,15 +3096,25 @@ function isVideoCatalogProviderReady(providerId: string): boolean {
   return false;
 }
 
-/** 旧 cindy-request 类目清单只保留至少有一种当前客户端可执行操作的 XD 模型。 */
+const LEGACY_CINDY_REQUEST_IMAGE_GUIDE_ID = 'openai-images-v1';
+
+/** 旧 cindy-request 类目清单只保留其固定通道真正可执行的 XD 模型。 */
 function isXdMediaModelExecutableForCatalog(
   kind: CindyCapabilityKind,
   modelId: string,
 ): boolean {
   if (kind === 'image') {
     return (
-      isMediaModelExecutable(modelId, 'image.generate') ||
-      isMediaModelExecutable(modelId, 'image.edit')
+      isMediaModelExecutableForGuide(
+        modelId,
+        LEGACY_CINDY_REQUEST_IMAGE_GUIDE_ID,
+        'image.generate',
+      ) ||
+      isMediaModelExecutableForGuide(
+        modelId,
+        LEGACY_CINDY_REQUEST_IMAGE_GUIDE_ID,
+        'image.edit',
+      )
     );
   }
   if (kind === 'video') {
@@ -3132,12 +3144,25 @@ function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConf
     // (与对话模型的准入口径同源,见 model-disable-store)。
     const access = readModelDisableOverrides();
     const catalog = getActiveCatalog();
+    const xdMediaModelIds = getXdGatewayModels()
+      .filter(
+        (model) =>
+          model.mode === 'image_generation' || model.mode === 'video_generation',
+      )
+      .map((model) => model.id);
     return deriveCindyMediaConfig(
       catalog.providers,
       kind,
       (providerId, modelId) =>
         isProviderDisabled(access, providerId) ||
-        isModelDisabled(access, providerId, modelId) ||
+        (providerId === 'xd' && kind !== 'embed'
+          ? isModelDisabledWithUniqueLegacyBasename(
+              access,
+              providerId,
+              modelId,
+              xdMediaModelIds,
+            )
+          : isModelDisabled(access, providerId, modelId)) ||
         // active catalog 保留 Gateway 原始媒体事实源；旧 cindy-request 的同步目录
         // 必须在消费边界复用已缓存的 Guide 预检结果，不能暴露这版客户端不可执行的型号。
         (providerId === 'xd' && !isXdMediaModelExecutableForCatalog(kind, modelId)) ||

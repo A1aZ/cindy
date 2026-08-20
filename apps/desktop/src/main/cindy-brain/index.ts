@@ -3097,13 +3097,22 @@ function isVideoCatalogProviderReady(providerId: string): boolean {
 }
 
 const LEGACY_CINDY_REQUEST_IMAGE_GUIDE_ID = 'openai-images-v1';
+type LegacyCindyMediaAction = 'generate' | 'edit';
 
-/** 旧 cindy-request 类目清单只保留其固定通道真正可执行的 XD 模型。 */
+/** 旧 cindy-request 类目清单只保留其固定通道对当前动作真正可执行的 XD 模型。 */
 function isXdMediaModelExecutableForCatalog(
   kind: CindyCapabilityKind,
   modelId: string,
+  action?: LegacyCindyMediaAction,
 ): boolean {
   if (kind === 'image') {
+    if (action) {
+      return isMediaModelExecutableForGuide(
+        modelId,
+        LEGACY_CINDY_REQUEST_IMAGE_GUIDE_ID,
+        action === 'edit' ? 'image.edit' : 'image.generate',
+      );
+    }
     return (
       isMediaModelExecutableForGuide(
         modelId,
@@ -3118,6 +3127,12 @@ function isXdMediaModelExecutableForCatalog(
     );
   }
   if (kind === 'video') {
+    if (action) {
+      return isMediaModelExecutable(
+        modelId,
+        action === 'edit' ? 'video.image_to_video' : 'video.generate',
+      );
+    }
     return (
       isMediaModelExecutable(modelId, 'video.generate') ||
       isMediaModelExecutable(modelId, 'video.image_to_video')
@@ -3138,7 +3153,10 @@ function isXdMediaModelExecutableForCatalog(
  * (与聊天侧「无可用性证明不展示」同口径)。下游如实降级:详情页那几行显示
  * 灰字而不是下拉,cindySlot 早拒而不是拿不在册的型号下单。
  */
-function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConfig {
+function getCatalogMediaConfig(
+  kind: CindyCapabilityKind,
+  action?: LegacyCindyMediaAction,
+): CindyMediaCatalogConfig {
   try {
     // 停用过滤:用户在 设置 → 模型供应商 停用的媒体模型 / 供应商不进候选清单
     // (与对话模型的准入口径同源,见 model-disable-store)。
@@ -3174,7 +3192,7 @@ function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConf
           : isModelDisabled(access, providerId, modelId)) ||
         // active catalog 保留 Gateway 原始媒体事实源；旧 cindy-request 的同步目录
         // 必须在消费边界复用已缓存的 Guide 预检结果，不能暴露这版客户端不可执行的型号。
-        (providerId === 'xd' && !isXdMediaModelExecutableForCatalog(kind, modelId)) ||
+        (providerId === 'xd' && !isXdMediaModelExecutableForCatalog(kind, modelId, action)) ||
         // 向量:目录是热更的,可能给出客户端还不认识的型号 id(比 EmbeddingModelId
         // 这个静态联合更新)。不在这里滤掉的话,它会照常展示、可被钉选、甚至成为
         // 目录默认 —— 而执行侧 isKnownEmbeddingModel 那道纵深防御会把每一次请求
@@ -3210,10 +3228,12 @@ function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConf
   }
 }
 
-const getCatalogImageConfig = (): ReturnType<typeof getCatalogMediaConfig> =>
-  getCatalogMediaConfig('image');
-const getCatalogVideoConfig = (): ReturnType<typeof getCatalogMediaConfig> =>
-  getCatalogMediaConfig('video');
+const getCatalogImageConfig = (
+  action?: LegacyCindyMediaAction,
+): ReturnType<typeof getCatalogMediaConfig> => getCatalogMediaConfig('image', action);
+const getCatalogVideoConfig = (
+  action?: LegacyCindyMediaAction,
+): ReturnType<typeof getCatalogMediaConfig> => getCatalogMediaConfig('video', action);
 const getCatalogEmbedConfig = (): ReturnType<typeof getCatalogMediaConfig> =>
   getCatalogMediaConfig('embed');
 
@@ -3556,12 +3576,19 @@ function assertMediaModelStillEnabled(
   kind: 'image' | 'video',
   model: string,
   providerId?: string,
+  action: LegacyCindyMediaAction = 'generate',
 ): void {
-  const available = providerId
-    ? getMediaPreferenceConfig(kind === 'image' ? 'image.generate' : 'video.generate').models.some(
-        (candidate) => candidate.providerId === providerId && candidate.modelId === model,
-      )
-    : getCatalogMediaConfig(kind).models.some((candidate) => candidate.id === model);
+  const capability: GhostMediaCapability = `${kind}.${action}`;
+  const available =
+    providerId === 'xd'
+      ? getCatalogMediaConfig(kind, action).models.some(
+          (candidate) => candidate.providerId === providerId && candidate.id === model,
+        )
+      : providerId
+        ? getMediaPreferenceConfig(capability).models.some(
+            (candidate) => candidate.providerId === providerId && candidate.modelId === model,
+          )
+        : getCatalogMediaConfig(kind, action).models.some((candidate) => candidate.id === model);
   if (!available) {
     throw new Error(
       kind === 'image'
@@ -3621,7 +3648,12 @@ async function runGhostVideo(
     throw new Error('视频能力不可用:主机未配置视频通道');
   }
   // 提交紧前重查(第二十一轮):参考图 data URI 准备是 await,窗口内被停用即拒。
-  assertMediaModelStillEnabled('video', params.alias, params.providerId);
+  assertMediaModelStillEnabled(
+    'video',
+    params.alias,
+    params.providerId,
+    params.imageDataUris ? 'edit' : 'generate',
+  );
   const r = await submitAndAwaitVideo(registry, params);
   return {
     buffer: r.buffer,
@@ -3941,7 +3973,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       // 定位,经 imageChannelRegistry 取对应执行通道(2026-07 图像多来源)。
       generateImage: async ({ prompt, model, providerId, aspectRatio }) => {
         try {
-          assertMediaModelStillEnabled('image', model, providerId);
+          assertMediaModelStillEnabled('image', model, providerId, 'generate');
           const channel = resolveImageChannelForModel(model, 'generate', providerId);
           return decodeImageResponse(
             await channel.generateImage({
@@ -3956,7 +3988,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       editImage: async ({ prompt, model, providerId, imagePaths, aspectRatio }) => {
         try {
-          assertMediaModelStillEnabled('image', model, providerId);
+          assertMediaModelStillEnabled('image', model, providerId, 'edit');
           const channel = resolveImageChannelForModel(model, 'edit', providerId);
           return decodeImageResponse(
             await channel.editImage({
@@ -3972,7 +4004,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       generateVideo: async ({ prompt, model, providerId, ...videoParams }) => {
         try {
-          assertMediaModelStillEnabled('video', model, providerId);
+          assertMediaModelStillEnabled('video', model, providerId, 'generate');
           return await runGhostVideo({ alias: model, providerId, prompt, ...videoParams });
         } catch (err) {
           humanizeImageChannelError(err);
@@ -3980,7 +4012,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       editVideo: async ({ prompt, model, providerId, imagePaths, refMode, ...videoParams }) => {
         try {
-          assertMediaModelStillEnabled('video', model, providerId);
+          assertMediaModelStillEnabled('video', model, providerId, 'edit');
           // 先算总量再读(闸按 refMode 分档:存量首尾帧不设闸,原样)。闸与
           // 读取绑在一个入口里,顺序是那边的结构保证、不是这里的约定;结果
           // 保序——顺序即语义:首/尾帧,或提示词里 [Image 1]… 的序号。

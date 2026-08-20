@@ -92,7 +92,7 @@ import type { AgentKind } from '@cindy/model-providers';
  * cindyMediaCatalog.ts 的空清单语义),本模块据此早拒,不拿不在册的型号下单。
  */
 export interface CindyMediaConfig {
-  models: ReadonlyArray<{ id: string; label: string }>;
+  models: ReadonlyArray<{ id: string; label: string; providerId?: string }>;
   defaults: { standard: string; draft: string; best: string } | null;
 }
 
@@ -227,9 +227,9 @@ export interface CindySlotDeps {
    * 默认/档位选型(同样来自目录,代码零模型字面量);清单空 / defaults null
    * = 目录没给,能力暂不可用。
    */
-  getImageConfig(): CindyMediaConfig;
+  getImageConfig(action?: 'generate' | 'edit'): CindyMediaConfig;
   /** 当前视频能力配置(同 getImageConfig 语义;白名单 id = 视频 provider 层 alias)。 */
-  getVideoConfig(): CindyMediaConfig;
+  getVideoConfig(action?: 'generate' | 'edit'): CindyMediaConfig;
   /**
    * 当前向量能力配置(同 getImageConfig 语义;白名单 id = embedding catalog 的
    * model id)。可选依赖:不注入 = 该能力未接线,代办按 INTERNAL 明拒。
@@ -831,9 +831,12 @@ export class GhostCindySlot {
     // 选型优先级(低 → 高逐层覆盖):出厂默认 → 档位(意识意图,主机翻译)
     // → 意识专属覆盖(用户在详情页钉的)→ 调用显式点名(用户当场说的)。
     // 旧插件报的裸 ID 会在唯一时升级为完整 ID；已失效或歧义值保留前面
-    // 已解析的用户配置/当前默认。配置按类目取(图像/视频
-    // 各一份白名单与默认,同来自 providers.json 目录)。
-    const cfg = info.category === 'image' ? this.deps.getImageConfig() : this.deps.getVideoConfig();
+    // 已解析的用户配置/当前默认。配置从图像/视频目录按当前动作筛选，默认值失效时
+    // 由目录派生层回落到该动作的首个可用模型。
+    const cfg =
+      info.category === 'image'
+        ? this.deps.getImageConfig(info.action)
+        : this.deps.getVideoConfig(info.action);
     // 目录没给该类目任何模型 = 能力暂不可用:早拒并说清原因,不落回任何写死型号
     // (说明见 cindyMediaCatalog.ts;详情页对应的那几行同时显示为灰字不可选)。
     if (cfg.models.length === 0 || cfg.defaults === null) {
@@ -903,6 +906,14 @@ export class GhostCindySlot {
           ...(providerId ? { fallbackProviderId: providerId } : {}),
         });
       }
+    }
+    // 旧插件只传 modelId，不认识 providerId；Host 按当前动作筛完目录后选中的来源
+    // 必须跟到最终派发。否则同一 modelId 多来源时，执行层可能重新 first-wins 到
+    // 另一个不支持当前动作的来源。老注入配置没有 providerId 时保持原行为。
+    if (!providerId) {
+      const catalogSelection = cfg.models.find((candidate) => candidate.id === model);
+      providerId = catalogSelection?.providerId;
+      providerModelLabel = catalogSelection?.label;
     }
 
     // 画面参数按**解析出的型号**二次校验:协议层值域是所有 provider 的

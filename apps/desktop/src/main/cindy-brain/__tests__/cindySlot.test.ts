@@ -832,9 +832,10 @@ describe('视频代办(gen_video / edit_video)', () => {
   const VREQ = { type: 'cindy-request', kind: 'gen_video', prompt: '一只猫奔跑' };
 
   it('gen_video happy path:走视频白名单默认款,产物同一条落仓链路', async () => {
-    const { slot, generateVideo, saveGhostMedia } = makeSlot();
+    const { slot, generateVideo, getVideoConfig, saveGhostMedia } = makeSlot();
     const r = await slot.handleModelRequest('art', VREQ);
     expect(r).toMatchObject({ ok: true, model: 'seedance-fast', modelLabel: 'Seedance 快速' });
+    expect(getVideoConfig).toHaveBeenCalledWith('generate');
     expect(generateVideo).toHaveBeenCalledWith({ prompt: '一只猫奔跑', model: 'seedance-fast' });
     expect(saveGhostMedia).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'video/mp4' }));
   });
@@ -852,7 +853,7 @@ describe('视频代办(gen_video / edit_video)', () => {
   });
 
   it('edit_video:参考图归属校验后按路径注入;上限 2 张,超限拒', async () => {
-    const { slot, editVideo, resolveOwnedMedia } = makeSlot();
+    const { slot, editVideo, getVideoConfig, resolveOwnedMedia } = makeSlot();
     const r = await slot.handleModelRequest('art', {
       type: 'cindy-request',
       kind: 'edit_video',
@@ -860,6 +861,7 @@ describe('视频代办(gen_video / edit_video)', () => {
       hashes: [HASH_S],
     });
     expect(r).toMatchObject({ ok: true });
+    expect(getVideoConfig).toHaveBeenCalledWith('edit');
     expect(resolveOwnedMedia).toHaveBeenCalledWith('art', HASH_S, 'cloud:test-owner:1');
     expect(editVideo).toHaveBeenCalledWith({
       prompt: '让它动起来',

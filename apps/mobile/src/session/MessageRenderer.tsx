@@ -237,6 +237,7 @@ import {
   PendingSendBubble,
   type PendingSendBubbleActions,
 } from '@/session/PendingSendBubble';
+import { buildMobileMessageListExtraData } from '@/session/pendingSendItems';
 import { dedupeToolMediaByUrl } from '@cindy/maker-shared/message-render';
 import { tokenizeThinkingText } from '@cindy/maker-shared/thinking-text';
 import {
@@ -1385,10 +1386,13 @@ export function MessageRenderer({
   // pending_send 的展开态不改变 listData；LegendList 会复用现有行，单靠 renderItem
   // 闭包更新不足以保证可见行重绘。把选中项显式纳入 extraData，确保轻点气泡后
   // 「取消 / 编辑 / 插话」操作行立即出现，不依赖滚动触发回收重渲染。
-  const messageListExtraData = useMemo(() => ({
-    pendingSendSelectedClientId: pendingSend?.selectedClientId ?? null,
-    shareSelectionActive,
-  }), [pendingSend?.selectedClientId, shareSelectionActive]);
+  const messageListExtraData = useMemo(
+    () => buildMobileMessageListExtraData(
+      pendingSend?.selectedClientId ?? null,
+      shareSelectionActive === true,
+    ),
+    [pendingSend?.selectedClientId, shareSelectionActive],
+  );
 
   return (
     // chat-text-quote:Provider 恒挂载(值可为 null),避免启用态翻转时整棵消息树

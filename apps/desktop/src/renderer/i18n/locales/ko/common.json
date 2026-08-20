@@ -4277,7 +4277,6 @@
       "toast": {
         "installed": "\"{{name}}\" 설치됨",
         "uninstalled": "\"{{name}}\" 제거됨",
-        "installedAsleep": "\"{{name}}\" 설치 완료 (비활성 상태이며 여기에서 언제든 활성화할 수 있습니다)",
         "updated": "\"{{name}}\"이(가) v{{version}}(으)로 업데이트되었습니다",
         "reapproved": "\"{{name}}\"이(가) 복원되었습니다",
         "exported": "\"{{name}}\"의 .cindy 파일을 내보냈습니다",
@@ -4297,11 +4296,22 @@
         "cancel": "취소",
         "meta": "버전 {{version}}. 로컬에 설치되며 언제든 제거할 수 있습니다.",
         "metaWithAuthor": "제작자 {{author}} · 버전 {{version}}. 로컬에 설치되며 언제든 제거할 수 있습니다.",
-        "enableNow": "설치 후 바로 활성화",
-        "enableNowOpenPanel": "설치 후 바로 활성화하고 패널 열기",
         "manualCount": "번들 매뉴얼 {{count}}개",
         "expandDescription": "전체 소개 보기",
-        "collapseDescription": "소개 접기"
+        "collapseDescription": "소개 접기",
+        "typedIdLabel": "플러그인 id \"{{id}}\"을(를) 입력하여 설치를 확인하세요",
+        "agentBanner": {
+          "title": "이 설치는 Agent가 시작한 것입니다 — 당신이 누른 것이 아닙니다.",
+          "context": "작업 \"{{title}}\"을(를) 진행하던 중 {{path}} 아래의 플러그인 소스를 패키징했습니다.",
+          "contextNoPath": "작업 \"{{title}}\"을(를) 진행하던 중 플러그인 소스 디렉터리를 패키징했습니다.",
+          "contextNoTitle": "{{path}} 아래의 플러그인 소스를 패키징했습니다.",
+          "contextBare": "플러그인 소스 디렉터리를 패키징했습니다.",
+          "advice": "이 작업에서 플러그인 제작을 요청하지 않았다면 취소하세요 —— 그리고 이 작업이 방금 읽은 외부 콘텐츠를 다시 살펴보세요.",
+          "firstInstall": "이 플러그인 id는 이전에 설치된 적이 없습니다.",
+          "hazardSkill": "스킬 지시가 포함되어 있습니다. AI는 이를 당신의 모든 권한으로, 플러그인 샌드박스 밖에서, 모든 프로젝트에 대해 실행합니다.",
+          "hazardNode": "브라우저 샌드박스 밖에서 당신의 컴퓨터에서 프로그램을 실행할 수 있습니다.",
+          "hazardCredential": "설정 페이지에 입력한 자격 증명을 {{hosts}}(으)로 보냅니다."
+        }
       },
       "trust": {
         "official": "Cindy 공식 플러그인",
@@ -4591,7 +4601,9 @@
       "reapproveConfirm": {
         "title": "\"{{name}}\" 권한을 다시 확인할까요?",
         "body": "아래 권한을 확인하면 설치된 플러그인이 다시 승인됩니다. 설치 파일은 필요하지 않습니다.",
-        "confirm": "확인 후 복원"
+        "confirm": "확인 후 복원",
+        "enableNoticeEnabled": "확인 후 현재 활성화 상태를 유지합니다.",
+        "enableNoticeAsleep": "확인 후 휴면 상태를 유지합니다(자동으로 활성화되지 않음). 나중에 여기에서 수동으로 활성화할 수 있습니다."
       },
       "pick": {
         "dialogTitle": "폴더 선택",

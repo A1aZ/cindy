@@ -116,6 +116,7 @@ import {
   type GhostRepoRootCacheEntry,
 } from './repoRoot.js';
 import { takePendingCindyInstall } from './openFileInstall.js';
+import { MANUAL_GHOST_INSTALL_ORIGIN } from '../../shared/ghostInstallOrigin.js';
 import { GhostRuntime } from './runtime/GhostRuntime.js';
 import {
   electronSandboxAdapter,
@@ -7059,7 +7060,13 @@ export function registerGhostIpc(): void {
   // 取走(取即清空),随后走与按钮/拖入完全相同的确认装入编排。
   ipcMain.handle('ghosts:take-pending-install', (event) => {
     assertTrustedAppRendererEvent(event);
-    return { filePath: takePendingCindyInstall() };
+    // 路径与来源一起返回:来源是确认框加重展示的依据,不能走比路径更易失的
+    // 通道(理由见 openFileInstall.ts 头注释)。
+    const pending = takePendingCindyInstall();
+    return {
+      filePath: pending?.filePath ?? null,
+      origin: pending?.origin ?? MANUAL_GHOST_INSTALL_ORIGIN,
+    };
   });
 
   // 本地包第三条恢复路径第一步:从**已装目录**读出确认卡事实,零副作用。

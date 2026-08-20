@@ -1355,8 +1355,14 @@ interface ElectronAPI {
       id: string,
       disabled: boolean,
     ) => Promise<{ disabled: string[] }>;
-    /** 双击 .cindy 的待装路径,原子取走(取即清空;无则 null)。 */
-    takePendingInstall: () => Promise<{ filePath: string | null }>;
+    /**
+     * 双击 .cindy / forge 转交的待装路径与来源,原子取走(取即清空;无则 null)。
+     * 来源由主机填写、与路径同存同取,agent 不可伪造;没有待装项时返回 manual。
+     */
+    takePendingInstall: () => Promise<{
+      filePath: string | null;
+      origin: import('../shared/ghostInstallOrigin').GhostInstallOrigin;
+    }>;
     onChanged: (
       callback: (payload: { ghosts: import('../shared/ghost').InstalledGhost[] }) => void,
     ) => () => void;
@@ -1368,7 +1374,11 @@ interface ElectronAPI {
           | { sessionId: string; target: 'client_settings' },
       ) => void,
     ) => () => void;
-    /** 双击 .cindy 转交信号:收到后调 takePendingInstall 取路径走确认装入流程。 */
+    /**
+     * 双击 .cindy / forge 转交的"来取货"通知,**不携带任何事实**:收到后调
+     * takePendingInstall 取路径与来源。事实只放在 main 的 pending 缓冲里,
+     * 没有窗口时(冷启动 / macOS 关窗后应用仍在跑)本通知丢掉也不影响正确性。
+     */
     onInstallRequested: (callback: () => void) => () => void;
     /** 运行时状态广播:crashed / fused 时面板原地显示错误接管态。 */
     onRuntimeChanged: (

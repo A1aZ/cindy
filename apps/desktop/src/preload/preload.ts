@@ -14,6 +14,7 @@ import {
   SIDEBAR_PROJECT_ORDER_CHANGED_CHANNEL,
   type SyncedProjectOrderSnapshot,
 } from '../shared/projectOrderSettings';
+import type { GhostInstallOrigin } from '../shared/ghostInstallOrigin';
 import type { SessionDragPreviewPalette } from '../shared/sessionDragPreview';
 import {
   AGENT_ISLAND_GET_DISPLAY_OPTIONS_CHANNEL,
@@ -1226,8 +1227,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       disabled: boolean,
     ): Promise<{ disabled: string[] }> =>
       ipcRenderer.invoke('ghosts:workdir-prefs:set', workdir, id, disabled),
-    takePendingInstall: (): Promise<{ filePath: string | null }> =>
-      ipcRenderer.invoke('ghosts:take-pending-install'),
+    takePendingInstall: (): Promise<{
+      filePath: string | null;
+      origin: GhostInstallOrigin;
+    }> => ipcRenderer.invoke('ghosts:take-pending-install'),
     onChanged: fanOutGhostsChanged,
     onSetupNavigate: (
       callback: (
@@ -1326,9 +1329,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ghosts:library-overview', id),
     libraryPickLocation: (
       id: string,
-    ): Promise<{ ok: boolean; cancelled?: boolean; candidate?: string; warnings?: string[]; message?: string }> =>
-      ipcRenderer.invoke('ghosts:library-pick-location', id),
-    libraryBind: (id: string, candidate: string): Promise<{ ok: boolean; message?: string; warnings?: string[] }> =>
+    ): Promise<{
+      ok: boolean;
+      cancelled?: boolean;
+      candidate?: string;
+      warnings?: string[];
+      message?: string;
+    }> => ipcRenderer.invoke('ghosts:library-pick-location', id),
+    libraryBind: (
+      id: string,
+      candidate: string,
+    ): Promise<{ ok: boolean; message?: string; warnings?: string[] }> =>
       ipcRenderer.invoke('ghosts:library-bind', id, candidate),
     libraryRelocate: (id: string, candidate: string): Promise<{ ok: boolean; message?: string }> =>
       ipcRenderer.invoke('ghosts:library-relocate', id, candidate),
@@ -3489,9 +3500,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         // connect 只对 providers 页有意义;主进程已做 id 白名单,这里按纵深防御
         // 原样复用同一规则。字段存在但不合法时丢弃整个 payload,不降级成半执行。
         if (
-          p.connect !== undefined
-          && (p.tab !== 'providers' || !isDeepLinkProviderConnectId(p.connect))
-        ) return;
+          p.connect !== undefined &&
+          (p.tab !== 'providers' || !isDeepLinkProviderConnectId(p.connect))
+        )
+          return;
         callback({
           type: 'settings',
           tab: p.tab,
@@ -4762,11 +4774,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp;
       projectOrder: 'activity' | 'custom';
     }): Promise<SyncedProjectOrderSnapshot> =>
-      parseProjectOrderSnapshot(await ipcRenderer.invoke(SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL, {
-        ...request.ownerStamp,
-        manualProjectOrder: request.manualProjectOrder,
-        projectOrder: request.projectOrder,
-      })),
+      parseProjectOrderSnapshot(
+        await ipcRenderer.invoke(SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL, {
+          ...request.ownerStamp,
+          manualProjectOrder: request.manualProjectOrder,
+          projectOrder: request.projectOrder,
+        }),
+      ),
     onProjectOrderChanged: (
       cb: (
         snapshot: SyncedProjectOrderSnapshot,
@@ -4775,7 +4789,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ): (() => void) =>
       fanOutSidebarProjectOrderChanged((payload, ownerStamp) => {
         if (!isDataOwnerPushStamp(ownerStamp)) return;
-        cb(parseProjectOrderSnapshot({ ...parseProjectOrderSnapshot(payload), ownerStamp }), ownerStamp);
+        cb(
+          parseProjectOrderSnapshot({ ...parseProjectOrderSnapshot(payload), ownerStamp }),
+          ownerStamp,
+        );
       }),
   },
 
@@ -5335,15 +5352,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:local-model:abort', reason, name),
     localModelEnsure: (): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:ensure'),
-    localModelSetInPicker: (name: string, enabled: boolean): Promise<{ ok: true; created: boolean }> =>
+    localModelSetInPicker: (
+      name: string,
+      enabled: boolean,
+    ): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:set-in-picker', name, enabled),
     localModelDelete: (name: string): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:delete', name),
     localModelDiscardPaused: (name: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:local-model:discard-paused', name),
-    localModelInstall: (
-      input: { consent: true },
-    ): Promise<{
+    localModelInstall: (input: {
+      consent: true;
+    }): Promise<{
       ok: true;
       status?: import('../shared/localModelRuntime').LocalRuntimeStatus;
       created?: boolean;

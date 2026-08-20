@@ -327,7 +327,7 @@ export function GhostPluginPage({
   const marketLocale = resolveSystemLocale(i18n.resolvedLanguage ?? i18n.language);
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { confirm, confirmWithCheckbox } = useConfirmDialog();
+  const { confirm } = useConfirmDialog();
   const { user, mode, dataOwnerId } = useAuth();
   const showEnterprise = user?.membershipKind === 'org';
   const ghosts = useInstalledGhosts();
@@ -949,8 +949,8 @@ export function GhostPluginPage({
       await handleMarketUpdate(selectedDetail.id);
       return;
     }
-    await pickAndUpdateGhost(selectedDetail.id, { t, confirm, confirmWithCheckbox });
-  }, [confirm, confirmWithCheckbox, handleMarketUpdate, selectedDetail, selectedMarketUpdate, t]);
+    await pickAndUpdateGhost(selectedDetail.id, { t, confirm });
+  }, [confirm, handleMarketUpdate, selectedDetail, selectedMarketUpdate, t]);
 
   /**
    * 缺少批准状态时的恢复入口。市场自有的包重走市场安装确认(重新下载 + 逐项
@@ -967,15 +967,15 @@ export function GhostPluginPage({
       }
       // 本地包路线:从已装目录读全量权限清单确认后开 receipt,不用用户翻出原始
       // .cindy 文件;目录读不出时该流程内部自动回退到"重新选包"。
-      await reapproveInstalledGhost(ghostId, { t, confirm, confirmWithCheckbox });
+      await reapproveInstalledGhost(ghostId, { t, confirm });
     },
-    [confirm, confirmWithCheckbox, ghosts, handleMarketUpdate, marketByGhostId, t],
+    [confirm, ghosts, handleMarketUpdate, marketByGhostId, t],
   );
 
   const handleUpdateFromFile = useCallback(async () => {
     if (!selectedDetail) return;
-    await pickAndUpdateGhost(selectedDetail.id, { t, confirm, confirmWithCheckbox });
-  }, [confirm, confirmWithCheckbox, selectedDetail, t]);
+    await pickAndUpdateGhost(selectedDetail.id, { t, confirm });
+  }, [confirm, selectedDetail, t]);
 
   // 控制器在挂载期借用本页的市场刷新;卸载后批次继续跑,重新进页全量刷新。
   useEffect(
@@ -1016,17 +1016,17 @@ export function GhostPluginPage({
   const handleInstall = useCallback(async () => {
     const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
     if (!picked || 'canceled' in picked) return;
+    // 设置页选文件是用户亲手操作 → 手动来源(不传 origin),不加横幅、不加重。
     await confirmAndInstallGhost(picked.filePath, {
       t,
       confirm,
-      confirmWithCheckbox,
-      // 已在插件页:tab 型插件勾选「立即开启并打开面板」后原地开面板。
+      // 已在插件页:tab 型插件装入即生效后原地开面板。
       openPluginPanel: (ghostId) => {
         setSelectedId(null);
         setOpenPanelId(ghostId);
       },
     });
-  }, [confirm, confirmWithCheckbox, t]);
+  }, [confirm, t]);
 
   const handleRetryLegacyRecovery = useCallback(async () => {
     legacyRecoveryStatusRequestRef.current += 1;

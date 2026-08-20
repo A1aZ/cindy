@@ -4277,7 +4277,6 @@
       "toast": {
         "installed": "「{{name}}」をインストールしました",
         "uninstalled": "「{{name}}」をアンインストールしました",
-        "installedAsleep": "「{{name}}」をインストールしました(無効状態。ここでいつでも有効化できます)",
         "updated": "「{{name}}」を v{{version}} に更新しました",
         "reapproved": "「{{name}}」を復元しました",
         "exported": "「{{name}}」の .cindy ファイルを書き出しました",
@@ -4297,11 +4296,22 @@
         "cancel": "キャンセル",
         "meta": "バージョン {{version}}。ローカルにインストールされ、いつでもアンインストールできます。",
         "metaWithAuthor": "作者 {{author}} · バージョン {{version}}。ローカルにインストールされ、いつでもアンインストールできます。",
-        "enableNow": "インストール後すぐに有効化",
-        "enableNowOpenPanel": "インストール後すぐに有効化してパネルを開く",
         "manualCount": "同梱マニュアル {{count}} 件",
         "expandDescription": "紹介全文を表示",
-        "collapseDescription": "紹介を折りたたむ"
+        "collapseDescription": "紹介を折りたたむ",
+        "typedIdLabel": "プラグイン id「{{id}}」を入力してインストールを確認",
+        "agentBanner": {
+          "title": "このインストールは Agent が開始しました。あなたが押したものではありません。",
+          "context": "タスク「{{title}}」の作業中に、{{path}} 配下のプラグインソースをパッケージしました。",
+          "contextNoPath": "タスク「{{title}}」の作業中に、プラグインのソースディレクトリをパッケージしました。",
+          "contextNoTitle": "{{path}} 配下のプラグインソースをパッケージしました。",
+          "contextBare": "プラグインのソースディレクトリをパッケージしました。",
+          "advice": "このタスクでプラグイン作成を頼んでいないなら、キャンセルしてください —— そのうえで、このタスクが直前に読み込んだ外部コンテンツを見直してください。",
+          "firstInstall": "このプラグイン id はこれまで一度もインストールされていません。",
+          "hazardSkill": "スキル指示を含みます。AI はそれをあなたの全権限で実行し、プラグインのサンドボックス外で、すべてのプロジェクトに対して有効になります。",
+          "hazardNode": "ブラウザのサンドボックス外で、あなたのコンピュータ上でプログラムを実行できます。",
+          "hazardCredential": "設定ページで入力した認証情報を {{hosts}} に送信します。"
+        }
       },
       "trust": {
         "official": "Cindy 公式プラグイン",
@@ -4591,7 +4601,9 @@
       "reapproveConfirm": {
         "title": "「{{name}}」の権限を再確認しますか?",
         "body": "以下の権限を確認して、このインストール済みプラグインをあらためて許可します。インストールファイルは不要です。",
-        "confirm": "確認して復元"
+        "confirm": "確認して復元",
+        "enableNoticeEnabled": "確認後も現在の有効状態を維持します。",
+        "enableNoticeAsleep": "確認後もスリープ状態のままにします（自動では有効化しません）。あとでここから手動で有効化できます。"
       },
       "pick": {
         "dialogTitle": "フォルダを選択",

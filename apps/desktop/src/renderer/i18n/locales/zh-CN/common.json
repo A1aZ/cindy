@@ -4277,7 +4277,6 @@
       "toast": {
         "installed": "已安装「{{name}}」",
         "uninstalled": "已卸载「{{name}}」",
-        "installedAsleep": "已安装「{{name}}」（已停用，可随时在此启用）",
         "updated": "「{{name}}」已更新到 v{{version}}",
         "reapproved": "已恢复「{{name}}」",
         "exported": "已导出「{{name}}」的 .cindy 文件",
@@ -4297,11 +4296,22 @@
         "cancel": "取消",
         "meta": "版本 {{version}}。将安装到本机，可随时卸载。",
         "metaWithAuthor": "作者 {{author}} · 版本 {{version}}。将安装到本机，可随时卸载。",
-        "enableNow": "安装后立即生效",
-        "enableNowOpenPanel": "安装后立即生效并打开面板",
         "manualCount": "随包手册 {{count}} 篇",
         "expandDescription": "展开完整介绍",
-        "collapseDescription": "收起介绍"
+        "collapseDescription": "收起介绍",
+        "typedIdLabel": "输入插件 id「{{id}}」以确认安装",
+        "agentBanner": {
+          "title": "这次安装是 Agent 发起的，不是你点的。",
+          "context": "它在任务「{{title}}」里打包了 {{path}} 下的插件源码。",
+          "contextNoPath": "它在任务「{{title}}」里打包了一个插件源码目录。",
+          "contextNoTitle": "它打包了 {{path}} 下的插件源码。",
+          "contextBare": "它打包了一个插件源码目录。",
+          "advice": "如果你没在这个任务里要求做插件，请取消 —— 并回头看看这个任务刚才读过哪些外部内容。",
+          "firstInstall": "这个插件 id 此前从未安装过。",
+          "hazardSkill": "它带了技能指令，AI 会以你的全部权限执行，不受插件沙箱限制，而且对你所有项目生效。",
+          "hazardNode": "它可以在你的电脑上运行程序，不受浏览器沙箱限制。",
+          "hazardCredential": "它会把你在它设置页填的凭证发给 {{hosts}}。"
+        }
       },
       "trust": {
         "official": "Cindy 官方插件",
@@ -4591,7 +4601,9 @@
       "reapproveConfirm": {
         "title": "重新确认「{{name}}」的权限？",
         "body": "按下方清单重新授权这个已安装的插件，无需重新提供安装包文件。",
-        "confirm": "确认并恢复"
+        "confirm": "确认并恢复",
+        "enableNoticeEnabled": "确认后保持当前启用状态。",
+        "enableNoticeAsleep": "确认后保持沉睡（不自动启用）；你可以稍后在这里手动启用。"
       },
       "pick": {
         "dialogTitle": "选择文件夹",

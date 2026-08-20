@@ -54,7 +54,7 @@ import {
 } from '../cindy-brain/ghostGrantConfirmBridge.js';
 import { classifyLocalAttachmentPath } from '../cindy-brain/ghostLocalPathGrant.js';
 import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
-import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
+import { getSessionFsSnapshot, getSessionTitle } from '../localDb/ipc/sessions.js';
 import {
   deriveGhostSessionContext,
   type GhostSessionContextInjected,
@@ -86,6 +86,7 @@ import {
 } from '../plugin-publisher/host.js';
 import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import { handleIncomingCindyFile } from '../cindy-brain/openFileInstall.js';
+import type { GhostInstallOrigin } from '../../shared/ghostInstallOrigin.js';
 import * as blobStore from '../cindy-media/blobStore.js';
 import { commitMessageMediaRefs } from '../cindy-media/chatAttachments.js';
 import { callCindyMedia } from '../cindy-media/invocationService.js';
@@ -1756,9 +1757,29 @@ export function getCindyGhostsMcpDeps(
           }
         }
         if (!packed.ok) return packed;
+        // Agent 来源标记:这次装入是 Agent 调 ghost_forge_pack 发起的,不是用户
+        // 亲手点的。标题与源码相对路径都由主机侧算(agent 改不了),供确认框如实
+        // 展示"哪个任务里的 Agent 发起 + 打包了工作目录里的哪个源码目录"。
+        // 相对路径:forge 已强制源码在会话工作目录内,故 path.relative 可靠;
+        // 若源码目录恰是工作目录本身(relative='')回落目录名,不给空串。
+        const forgeSessionId = resolveSessionContext()?.sessionId;
+        const sessionTitle = forgeSessionId
+          ? (await getSessionTitle(forgeSessionId)) ?? undefined
+          : undefined;
+        const relFromWorkdir = path.relative(gate.workingDir, dir);
+        const sourceRelPath =
+          relFromWorkdir && !relFromWorkdir.startsWith('..')
+            ? relFromWorkdir
+            : path.basename(dir);
+        const origin: GhostInstallOrigin = {
+          kind: 'agent-forge',
+          ...(sessionTitle ? { sessionTitle } : {}),
+          ...(sourceRelPath ? { sourceRelPath } : {}),
+        };
         // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
-        // 自动转"更新 vX → vY"),用户点头才真装。lease 持到转交完成。
-        await handleIncomingCindyFile(packed.cindyPath, 'ghost-forge');
+        // 自动转"更新 vX → vY"),用户点头才真装。lease 持到转交完成。带上 agent
+        // 来源,确认框据此展示来源横幅 + 分级加重(高危需手输 id 确认)。
+        await handleIncomingCindyFile(packed.cindyPath, 'ghost-forge', origin);
         log.info('ghost forge packed', { dir, cindyPath: packed.cindyPath, id: packed.manifest.id });
         return {
           ok: true,
@@ -1766,7 +1787,10 @@ export function getCindyGhostsMcpDeps(
           id: packed.manifest.id,
           name: packed.manifest.name,
           version: packed.manifest.version,
-          note: `${iconNote}已打包并弹出装入/更新确认框,请告知用户在应用内确认(装入默认沉睡)。`,
+          // 不在这里说明确认框的加重形式(如"需手输 id"):本 note 会回到 agent,
+          // 被注入的 agent 读到就能照着编引导话术,帮用户"过掉"那一步。
+          // 告知"必须在应用内确认才会安装"已足够让作者知道下一步做什么。
+          note: `${iconNote}已打包并弹出装入/更新确认框,请提示用户:只有在应用内确认后插件才会真正安装。`,
         };
       });
     },

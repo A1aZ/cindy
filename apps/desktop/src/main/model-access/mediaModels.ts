@@ -217,7 +217,8 @@ export async function fetchMediaInvocationGuide(
   modelId: string,
   timeoutMs = MEDIA_MODEL_REQUEST_TIMEOUT_MS,
 ): Promise<ResolvedMediaInvocationGuide> {
-  const query = new URLSearchParams({ modelId });
+  const guideModelId = mediaInvocationGuideModelId(modelId);
+  const query = new URLSearchParams({ modelId: guideModelId });
   const payload = await serverApiFetch<unknown>(
     `${MODEL_ACCESS_INVOCATION_GUIDE_PATH}?${query.toString()}`,
     {
@@ -226,7 +227,12 @@ export async function fetchMediaInvocationGuide(
       logLabel: MODEL_ACCESS_INVOCATION_GUIDE_PATH,
     },
   );
-  return parseResolvedGuidePayload(payload, modelId);
+  return parseResolvedGuidePayload(payload, guideModelId);
+}
+
+/** Guide 只按模型协议名查询；provider/routing namespace 仍保留在真实调用身份中。 */
+export function mediaInvocationGuideModelId(modelId: string): string {
+  return modelId.slice(modelId.lastIndexOf('/') + 1);
 }
 
 function parseResolvedGuidePayload(

@@ -3096,8 +3096,8 @@ function isVideoCatalogProviderReady(providerId: string): boolean {
 
 /**
  * 当前媒体能力配置(图像/视频同一套推导)——与会话模型列表**同一获取
- * 来源**:providers.json 运行时目录(getActiveCatalog,OSS 热更 + 内置兜底),
- * 汇总各供应商的 imageModels/imageDefaults 或 videoModels/videoDefaults。
+ * 来源**:active catalog。XD 媒体由 Gateway `/models` 动态投影，第三方媒体
+ * 保留各 Provider 的 imageModels/imageDefaults 或 videoModels/videoDefaults。
  * 清单与默认/档位选型全部来自目录,主机代码零
  * 模型字面量;派生规则见 cindyMediaCatalog.ts。
  *

@@ -1198,7 +1198,8 @@ async function prepareInvocation(
     const { operations: _operations, ...guideProtocol } = resolvedGuide.guide;
     void _operations;
     preparedGuide = {
-      modelId: resolvedGuide.modelId,
+      // Guide 查询键不参与调用身份；配置、持久化和 Gateway 请求始终使用完整 modelId。
+      modelId,
       ...guideProtocol,
       ...operation,
     };

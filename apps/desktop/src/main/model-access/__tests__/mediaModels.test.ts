@@ -193,6 +193,56 @@ describe('listAvailableMediaModels', () => {
     );
   });
 
+  it('只在 Guide 查询边界移除 modelId namespace', async () => {
+    serverApiFetchMock.mockResolvedValueOnce({
+      modelId: 'gpt-image-2',
+      guide: {
+        schemaVersion: 1,
+        guideId: 'openai-images-v1',
+        revision: '2026-08-20.1',
+        connection: { providerId: 'xd' },
+        operations: [
+          {
+            capability: 'image.generate',
+            request: {
+              method: 'POST',
+              path: '/images/generations',
+              bodyEncoding: 'json',
+              bodyModelPath: ['model'],
+              timeoutMs: 1_000,
+              maxRequestBytes: 1_024,
+              maxResponseBytes: 1_024,
+            },
+            response: {
+              mode: 'sync',
+              media: [
+                {
+                  path: ['data', '*', 'url'],
+                  encoding: 'url',
+                  kind: 'image',
+                  allowedUrlHosts: ['example.com'],
+                },
+              ],
+            },
+            instructions: '按协议组装请求。',
+            exampleBody: { prompt: 'hello' },
+            inputSchema: { type: 'object' },
+            officialDocs: 'https://example.com/images-api',
+          },
+        ],
+      },
+    });
+
+    await expect(fetchMediaInvocationGuide('openai/gpt-image-2')).resolves.toMatchObject({
+      modelId: 'gpt-image-2',
+      guide: { guideId: 'openai-images-v1' },
+    });
+    expect(serverApiFetchMock).toHaveBeenLastCalledWith(
+      '/api/model-access/invocation-guide?modelId=gpt-image-2',
+      expect.any(Object),
+    );
+  });
+
   it('把更高 Guide schemaVersion 分类为客户端需要升级', async () => {
     serverApiFetchMock.mockResolvedValueOnce({
       modelId: 'image-with-guide',

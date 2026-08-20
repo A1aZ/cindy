@@ -3094,6 +3094,26 @@ function isVideoCatalogProviderReady(providerId: string): boolean {
   return false;
 }
 
+/** 旧 cindy-request 类目清单只保留至少有一种当前客户端可执行操作的 XD 模型。 */
+function isXdMediaModelExecutableForCatalog(
+  kind: CindyCapabilityKind,
+  modelId: string,
+): boolean {
+  if (kind === 'image') {
+    return (
+      isMediaModelExecutable(modelId, 'image.generate') ||
+      isMediaModelExecutable(modelId, 'image.edit')
+    );
+  }
+  if (kind === 'video') {
+    return (
+      isMediaModelExecutable(modelId, 'video.generate') ||
+      isMediaModelExecutable(modelId, 'video.image_to_video')
+    );
+  }
+  return true;
+}
+
 /**
  * 当前媒体能力配置(图像/视频同一套推导)——与会话模型列表**同一获取
  * 来源**:active catalog。XD 媒体由 Gateway `/models` 动态投影，第三方媒体
@@ -3118,6 +3138,9 @@ function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConf
       (providerId, modelId) =>
         isProviderDisabled(access, providerId) ||
         isModelDisabled(access, providerId, modelId) ||
+        // active catalog 保留 Gateway 原始媒体事实源；旧 cindy-request 的同步目录
+        // 必须在消费边界复用已缓存的 Guide 预检结果，不能暴露这版客户端不可执行的型号。
+        (providerId === 'xd' && !isXdMediaModelExecutableForCatalog(kind, modelId)) ||
         // 向量:目录是热更的,可能给出客户端还不认识的型号 id(比 EmbeddingModelId
         // 这个静态联合更新)。不在这里滤掉的话,它会照常展示、可被钉选、甚至成为
         // 目录默认 —— 而执行侧 isKnownEmbeddingModel 那道纵深防御会把每一次请求

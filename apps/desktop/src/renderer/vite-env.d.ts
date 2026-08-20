@@ -1561,6 +1561,16 @@ interface ElectronAPI {
     runtimeStates: () => Promise<{ states: Record<string, string> }>;
     /** 面板错误态「重载意识」:清熔断记账 + 重新拉起沙箱。 */
     reload: (id: string) => Promise<{ state: string }>;
+    /** Library(持久作品库)设置面:概览/选位置/绑定/迁移/回默认/解绑/删除。 */
+    libraryOverview: (id: string) => Promise<import('../shared/ghost').GhostLibraryOverview>;
+    libraryPickLocation: (
+      id: string,
+    ) => Promise<{ ok: boolean; cancelled?: boolean; candidate?: string; warnings?: string[]; message?: string }>;
+    libraryBind: (id: string, candidate: string) => Promise<{ ok: boolean; message?: string; warnings?: string[] }>;
+    libraryRelocate: (id: string, candidate: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryRevertDefault: (id: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryUnbind: (id: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryDelete: (id: string) => Promise<{ ok: boolean; cancelled?: boolean; message?: string }>;
     legacyRecoveryStatus: () => Promise<
       import('../shared/legacyGhostRecovery').LegacyGhostRecoveryStatus
     >;

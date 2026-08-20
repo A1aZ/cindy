@@ -3265,10 +3265,28 @@ function resolveMediaPreferenceModel(
   const exact = config.models.find((model) => model.id === preference);
   if (exact) return exact;
   if (decodeMediaPreference(preference)) return null;
+  if (!preference.includes('/')) {
+    const legacyXdMatches = config.models.filter(
+      (model) =>
+        model.providerId === 'xd' &&
+        model.modelId.slice(model.modelId.lastIndexOf('/') + 1) === preference,
+    );
+    if (legacyXdMatches.length === 1) return legacyXdMatches[0]!;
+  }
   return (
     config.models.find((model) => model.providerId === 'xd' && model.modelId === preference) ??
     config.models.find((model) => model.modelId === preference) ??
     null
+  );
+}
+
+function resolveMediaPreferenceOrDefault(
+  config: CindyMediaPreferenceConfig,
+  preference: string | undefined,
+): CindyMediaPreferenceModel | null {
+  return (
+    resolveMediaPreferenceModel(config, preference) ??
+    resolveMediaPreferenceModel(config, config.defaults?.standard)
   );
 }
 
@@ -3349,8 +3367,8 @@ async function getGhostConfigurableMediaModels(
 
 /**
  * 读取插件在 Host「Cindy 能力」中的现有媒体选型。
- * 这里只投影当前有效值，不复制或迁移配置；用户已明确配置的精确来源失效时直接报错，
- * 不能静默回落到另一个 Provider 或默认模型。
+ * 这里只投影当前有效值，不复制或迁移配置；已配置模型失效时，
+ * 统一回落到该能力当前的默认（第一个可用）模型。
  */
 function getGhostConfiguredMediaModel(
   ghostId: string,
@@ -3379,14 +3397,12 @@ function getGhostConfiguredMediaModel(
 
   const config = getMediaPreferenceConfig(mediaCapability);
   const override = readGhostCindyOverrides(ghostId)[mediaCapability];
-  const selected = override
-    ? resolveMediaPreferenceModel(config, override)
-    : resolveMediaPreferenceModel(config, config.defaults?.standard);
+  const selected = resolveMediaPreferenceOrDefault(config, override);
   if (!selected) {
     return {
       ok: false,
       errorCode: 'NOT_AVAILABLE',
-      message: override ? '已配置的媒体模型当前不可用' : '当前没有可用的媒体模型',
+      message: '当前没有可用的媒体模型',
     };
   }
   return {
@@ -3858,16 +3874,17 @@ export function getGhostCindySlot(): GhostCindySlot {
       getMediaOverride: (ghostId, capability) => {
         const value = readGhostCindyOverrides(ghostId)[capability as CindyCapabilityKey] ?? null;
         if (!value) return null;
-        const decoded = decodeMediaPreference(value);
-        if (!decoded) return null;
-        const selected = getMediaPreferenceConfig(capability as GhostMediaCapability).models.find(
-          (candidate) =>
-            candidate.providerId === decoded.providerId && candidate.modelId === decoded.modelId,
+        const selected = resolveMediaPreferenceOrDefault(
+          getMediaPreferenceConfig(capability as GhostMediaCapability),
+          value,
         );
-        return {
-          ...decoded,
-          ...(selected ? { label: selected.label } : {}),
-        };
+        return selected
+          ? {
+              providerId: selected.providerId,
+              modelId: selected.modelId,
+              label: selected.label,
+            }
+          : null;
       },
       getOverride: (ghostId, capability) => {
         const value = readGhostCindyOverrides(ghostId)[capability as CindyCapabilityKey] ?? null;
@@ -6093,7 +6110,18 @@ export function registerGhostIpc(): void {
   // 读走 sendSync:详情页首帧要和其它信息同帧渲染(规则 7 无跳变),
   // 文件读取极小。写走 invoke,白名单在此校验(存储层不感知模型清单)。
   ipcMain.on('ghosts:cindy-prefs', (event, ghostId: unknown) => {
-    const overrides = typeof ghostId === 'string' ? readGhostCindyOverrides(ghostId) : {};
+    const storedOverrides = typeof ghostId === 'string' ? readGhostCindyOverrides(ghostId) : {};
+    const overrides = { ...storedOverrides };
+    for (const capability of GHOST_MEDIA_CAPABILITIES) {
+      const value = storedOverrides[capability];
+      if (!value) continue;
+      const selected = resolveMediaPreferenceOrDefault(
+        getMediaPreferenceConfig(capability),
+        value,
+      );
+      if (selected) overrides[capability] = selected.id;
+      else delete overrides[capability];
+    }
     // 每类目一份 options + defaultModel(当前包含 image/video 两类;下拉按
     // 能力键的类目取对应清单)。defaultModel:目录默认选型的展示信息
     // ("默认(GPT Image 2)"),让用户看得见"跟随"当下跟的是谁;

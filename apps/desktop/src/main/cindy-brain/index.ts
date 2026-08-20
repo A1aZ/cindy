@@ -3156,6 +3156,7 @@ function isXdMediaModelExecutableForCatalog(
 function getCatalogMediaConfig(
   kind: CindyCapabilityKind,
   action?: LegacyCindyMediaAction,
+  selectedProviderId?: string,
 ): CindyMediaCatalogConfig {
   try {
     // 停用过滤:用户在 设置 → 模型供应商 停用的媒体模型 / 供应商不进候选清单
@@ -3170,13 +3171,16 @@ function getCatalogMediaConfig(
       .map((model) => model.id);
     // 旧 cindy-request 偏好不携带 providerId；同一完整 modelId 同时来自 XD 与
     // 第三方时必须让托管默认来源先参与 first-wins，避免静默改用第三方凭证计费。
-    const providers =
+    const orderedProviders =
       kind === 'embed'
         ? catalog.providers
         : [
             ...catalog.providers.filter((provider) => provider.id === 'xd'),
             ...catalog.providers.filter((provider) => provider.id !== 'xd'),
           ];
+    const providers = selectedProviderId
+      ? orderedProviders.filter((provider) => provider.id === selectedProviderId)
+      : orderedProviders;
     return deriveCindyMediaConfig(
       providers,
       kind,
@@ -3584,7 +3588,7 @@ function assertMediaModelStillEnabled(
       ? getMediaPreferenceConfig(capability).models.some(
           (candidate) => candidate.providerId === providerId && candidate.modelId === model,
         )
-      : getCatalogMediaConfig(kind, action).models.some(
+      : getCatalogMediaConfig(kind, action, providerId).models.some(
           (candidate) =>
             candidate.id === model && (!providerId || candidate.providerId === providerId),
         );

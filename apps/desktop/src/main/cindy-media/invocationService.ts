@@ -1127,14 +1127,22 @@ async function prepareInvocation(
   assertAuthScope(scope);
   const models = await listAvailableMediaModels(capability);
   assertAuthScope(scope);
-  const matchingModels = models.filter(
+  let matchingModels = models.filter(
     (candidate) => candidate.id === modelId && (!providerId || candidate.providerId === providerId),
   );
+  if (!providerId && matchingModels.length === 0 && !modelId.includes('/')) {
+    const legacyMatches = models.filter(
+      (candidate) => candidate.id.slice(candidate.id.lastIndexOf('/') + 1) === modelId,
+    );
+    if (new Set(legacyMatches.map((candidate) => candidate.id)).size === 1) {
+      matchingModels = legacyMatches;
+    }
+  }
   const model = providerId
     ? matchingModels[0]
     : (matchingModels.find((candidate) => candidate.providerId === 'xd') ??
       matchingModels[0]);
-  if (!providerId && model && matchingModels.length !== 1) {
+  if (!providerId && model && (model.id !== modelId || matchingModels.length !== 1)) {
     log.warn('legacy media prepare resolved to available model', {
       requestedModelId: modelId,
       resolvedProviderId: model.providerId,

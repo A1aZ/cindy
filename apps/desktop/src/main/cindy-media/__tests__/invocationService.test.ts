@@ -372,7 +372,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
     });
   });
 
-  it('旧调用未传 providerId 时同名来源优先回落 Cindy AI', async () => {
+  it('旧调用未传 providerId 时裸 ID 唯一升级且同名来源优先 Cindy AI', async () => {
     const model = {
       id: 'openai/gpt-image-2',
       name: 'GPT Image 2',
@@ -388,7 +388,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
 
     const prepared = await callCindyMedia({
       action: 'prepare',
-      modelId: model.id,
+      modelId: 'gpt-image-2',
       capability: 'image.generate',
     });
     expect(prepared).toMatchObject({

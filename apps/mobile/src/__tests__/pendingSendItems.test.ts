@@ -200,6 +200,8 @@ describe('pending_send 渲染接线', () => {
     const actionsEnd = source.indexOf('viewportLayout.contentWidth,\n  ]);', actionsStart);
     const actionsBlock = source.slice(actionsStart, actionsEnd);
     expect(actionsBlock).toContain('pendingSend,');
+    expect(source).toContain('pendingSendSelectedClientId: pendingSend?.selectedClientId ?? null');
+    expect(source).toContain('extraData={messageListExtraData}');
     // 渲染分支存在,且 items 的联合类型里有这一支。
     expect(source).toContain("case 'pending_send':");
     expect(source).toContain('actions={actions.pendingSend}');

@@ -21,6 +21,12 @@ import { promisify } from 'node:util';
 import JSZip from 'jszip';
 
 import {
+  PLUGIN_MEMBER_UPLOAD_MAX_ARCHIVE_BYTES,
+  PLUGIN_MEMBER_UPLOAD_MAX_UNCOMPRESSED_BYTES,
+  PLUGIN_MEMBER_UPLOAD_MAX_ZIP_ENTRIES,
+} from '@cindy/plugin-protocol';
+
+import {
   GHOST_ICON_MAX_BYTES,
   GHOST_INSTALL_MANIFEST_MAX_BYTES,
   GHOST_MANUAL_ENTRY_FILE,
@@ -116,13 +122,36 @@ async function pathHasLinkSegment(inputPath: string): Promise<boolean> {
   return false;
 }
 
-/** 与 GhostManager 装入侧同一量级的上限(打包侧提前拦,fail fast)。 */
+/**
+ * 与 GhostManager 装入侧同一量级的上限(打包侧提前拦,fail fast)。
+ *
+ * node 档三个上限**直接引用协议常量**,不再手抄数字:同一份 `.cindy` 之后会被
+ * plugin-server 的成员发布链路按这三个值权威校验(`docs/plugin-server.md`
+ * 「企业成员上传」),打包侧放行、发布侧拒收是最难排查的一类不一致。basic 档
+ * 是 Forge 自己的产品判断(小包更快更稳),与发布上限无关,保持本地常量。
+ *
+ * ZIP 条目口径:协议与服务端数的是**所有 ZIP entry**,Forge 数的是**文件**。
+ * 两者相等的前提是包里不含自动补出的目录 entry —— 见下面 `createFolders: false`。
+ */
 const MAX_BASIC_FILES = 256;
-const MAX_NODE_FILES = 2_048;
+const MAX_NODE_FILES = PLUGIN_MEMBER_UPLOAD_MAX_ZIP_ENTRIES;
 const MAX_BASIC_TOTAL_BYTES = 32 * 1024 * 1024;
-const MAX_NODE_TOTAL_BYTES = 256 * 1024 * 1024;
+const MAX_NODE_TOTAL_BYTES = PLUGIN_MEMBER_UPLOAD_MAX_UNCOMPRESSED_BYTES;
 const MAX_BASIC_CINDY_BYTES = 8 * 1024 * 1024;
-const MAX_NODE_CINDY_BYTES = 128 * 1024 * 1024;
+const MAX_NODE_CINDY_BYTES = PLUGIN_MEMBER_UPLOAD_MAX_ARCHIVE_BYTES;
+
+/**
+ * JSZip 默认 `createFolders: true`,会为 `a/b/c.txt` 自动补出 `a/` 与 `a/b/`
+ * 两个目录 entry。Forge 只数文件,plugin-server 数所有 entry,于是「2 个文件」
+ * 在服务端是「4 个 entry」——带目录层级的包逼近上限时会被发布侧拒掉,而打包侧
+ * 看不出任何问题。
+ *
+ * 关掉它让两侧口径按构造相等,而不是让 Forge 去模仿 JSZip 的补目录算法。
+ * 装入侧不依赖目录 entry:`GhostManager` 解包时对 `entry.dir` 一律 `mkdir` 后
+ * `continue`,而写文件那条分支本来就会 `mkdir(path.dirname(dest))`,目录照样建得出来。
+ * 空目录两种设置下都不进包(Forge 只收集普通文件),所以也不存在丢空目录的问题。
+ */
+const ZIP_FILE_OPTIONS = { createFolders: false } as const;
 const FORGE_AI_ICON_PATH = 'assets/icon.png';
 
 /** 打包时跳过的目录/文件(源码目录里的开发残留,不属于意识本体)。 */
@@ -1179,7 +1208,7 @@ async function buildGhostPackage(
           message: `总体积超上限(${maxTotalBytes} 字节)`,
         };
       }
-      zip.file(f.rel, content, { unixPermissions });
+      zip.file(f.rel, content, { ...ZIP_FILE_OPTIONS, unixPermissions });
     }
     if (iconPng !== undefined && !iconSourceEntry) {
       packedBytes += iconPng.byteLength;
@@ -1190,7 +1219,10 @@ async function buildGhostPackage(
           message: `总体积超上限(${maxTotalBytes} 字节)`,
         };
       }
-      zip.file(FORGE_AI_ICON_PATH, iconPng, { unixPermissions: ARCHIVE_REGULAR_0644 });
+      zip.file(FORGE_AI_ICON_PATH, iconPng, {
+        ...ZIP_FILE_OPTIONS,
+        unixPermissions: ARCHIVE_REGULAR_0644,
+      });
     }
     const buf = await zip.generateAsync({
       type: 'nodebuffer',

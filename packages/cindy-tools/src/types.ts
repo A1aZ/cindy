@@ -245,6 +245,36 @@ export type CindyForgePackResult =
     }
   | { ok: false; errorCode: CindyForgePackErrorCode; message: string };
 
+/** ghost_forge_publish 立即返回时的失败分类。传输开始后的失败走 status.errorCode。 */
+export type CindyForgePublishErrorCode = 'NOT_ORG_MEMBER' | 'INTERNAL';
+
+export type CindyForgePublishResult =
+  | {
+      ok: true;
+      transferId: string;
+      uploadId: string | null;
+      note: string;
+    }
+  | { ok: false; errorCode: CindyForgePublishErrorCode; message: string };
+
+export type CindyForgePublishStatusResult =
+  | {
+      ok: true;
+      transferId: string;
+      uploadId: string | null;
+      stage: string;
+      status?: string | null;
+      reviewStatus?: string | null;
+      ghostId?: string | null;
+      version?: string | null;
+      bytesHashed?: number;
+      bytesSent?: number;
+      totalBytes?: number;
+      errorCode?: string | null;
+      message?: string | null;
+    }
+  | { ok: false; errorCode: 'NOT_FOUND' | 'INTERNAL'; message: string };
+
 /** ghost_forge_scaffold 可生成的四种起步模板。 */
 export type CindyForgeScaffoldTemplate =
   | 'plain'
@@ -403,6 +433,13 @@ export interface CindyGhostsMcpDeps {
      */
     iconSource?: string;
   }): Promise<CindyForgePackResult>;
+  /**
+   * 把一个本机 .cindy 包提交到当前组织发布。立即返回 transferId / uploadId,
+   * 传输在后台跑；用 forgePublishStatus 查进度。
+   */
+  forgePublish(request: { file: string }): Promise<CindyForgePublishResult>;
+  /** 查询一次后台发布传输的当前状态。 */
+  forgePublishStatus(request: { transferId: string }): Promise<CindyForgePublishStatusResult>;
   logger?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;

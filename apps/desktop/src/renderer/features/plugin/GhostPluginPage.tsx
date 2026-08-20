@@ -106,6 +106,7 @@ import {
   sortInstalledForDisplay,
   type GhostPluginListItem,
 } from './lib/ghostPluginViewModel';
+import { MyPublishesSection } from './MyPublishesSection';
 import { ignoredRoundStorageKey, isBatchFinished, updateRoundKey } from './lib/updateAllModel';
 import {
   approveUpdateExpansion,
@@ -997,6 +998,21 @@ export function GhostPluginPage({
     setUpdateDialogOpen(true);
   }, [updatableInstalledItems]);
 
+  const handlePublish = useCallback(async () => {
+    const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
+    if (!picked || 'canceled' in picked) return;
+    try {
+      await window.electronAPI.pluginPublisher.start(picked.filePath);
+    } catch (error) {
+      const decoded = extractIpcError(error);
+      toast.error(
+        decoded?.code === 'PERMISSION_DENIED'
+          ? t('settings.ghosts.publish.disabled')
+          : t('settings.ghosts.publish.startFailed'),
+      );
+    }
+  }, [t]);
+
   const handleInstall = useCallback(async () => {
     const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
     if (!picked || 'canceled' in picked) return;
@@ -1666,6 +1682,8 @@ export function GhostPluginPage({
                 />
               ) : null}
             </section>
+
+            <MyPublishesSection enabled={showEnterprise} onPublish={() => void handlePublish()} />
 
             {availableMarketItems.length > 0 ||
             searchedAvailableMarketItems.length > 0 ||

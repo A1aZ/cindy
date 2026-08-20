@@ -273,6 +273,7 @@ import { GhostNetworkSlot } from './networkSlot.js';
 import {
   type ConnectionAudienceResolution,
   isConnectionSecretReady,
+  isReservedConnectionPluginSlug,
   loadConnectionAudienceResolver,
   type ConnectionAudienceResolver,
 } from './connectionAudienceResolver.js';
@@ -501,11 +502,14 @@ function sendGhostTrustedWindowPush(
   channel: string,
   payload: unknown,
   ownerStamp?: DataOwnerPushStamp,
-): void {
+): number {
+  let sent = 0;
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed() || !isTrustedAppRendererWindow(window)) continue;
     sendGhostWindowPush(window, channel, payload, ownerStamp);
+    sent += 1;
   }
+  return sent;
 }
 
 /**
@@ -2561,7 +2565,7 @@ function resolveConnectionAudienceForGhost(ghostId: string): ConnectionAudienceR
 }
 
 /** Main-memory-only Connection token issuer/cache. */
-function getConnectionTokenProvider(): ConnectionTokenProvider {
+export function getConnectionTokenProvider(): ConnectionTokenProvider {
   if (!connectionTokenProviderSingleton) {
     connectionTokenProviderSingleton = new ConnectionTokenProvider({
       issue: (audience) =>
@@ -2669,8 +2673,8 @@ export const GHOST_UNREAD_SNAPSHOT_CHANNEL = 'ghosts:unread-snapshot';
  * 出站推送与入站 IPC 是同一道授权边界,不能只守一边(codex review)。
  * 判据复用 `isTrustedAppRendererWindow`,与 `ghosts:unread` 同步读那道闸同源。
  */
-export function sendToTrustedAppWindows(channel: string, payload: unknown): void {
-  sendGhostTrustedWindowPush(channel, payload);
+export function sendToTrustedAppWindows(channel: string, payload: unknown): number {
+  return sendGhostTrustedWindowPush(channel, payload);
 }
 
 function broadcastGhostBadge(payload: {
@@ -5115,7 +5119,19 @@ export function getGhostLibraryBindingStore(): LibraryBindingStore {
  * dev 构建豁免:内置意识(cindy-art / cindy-web-search)的开发迭代靠打包重装。
  * 官方预装(builtinGhostProvisioner)走内部安装路径,不经这些 IPC。
  */
+function rejectReservedPublisherSlug(id: string): void {
+  if (!isReservedConnectionPluginSlug(id)) return;
+  throwIpcError(
+    'GHOST_ID_RESERVED',
+    `id "${id}" 是主机保留的发布者身份,不可装入`,
+  );
+}
+
 function rejectReservedGhostId(id: string): void {
+  // Member-publisher identity slugs are never installable, including market
+  // packages and unpackaged dev builds. Official prefix rejection stays
+  // packaged-only so first-party iteration can still reload cindy-/xd- plugins.
+  rejectReservedPublisherSlug(id);
   if (!app.isPackaged) return;
   if (!isOfficialGhostId(id)) return;
   throwIpcError(
@@ -5336,6 +5352,9 @@ async function installOrUpdateMarketGhostPackageLocked(
     const inspected = await manager.inspect(cindyFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
     assertGhostSupportsCurrentCindy(inspected.canonicalManifest);
+    // Publisher identity slugs stay reserved even on the market path.
+    // Official cindy-/xd- prefixes remain exempt here; these two slugs do not.
+    rejectReservedPublisherSlug(inspected.canonicalManifest.id);
     if (
       inspected.canonicalManifest.id !== expected.ghostId ||
       inspected.canonicalManifest.version !== expected.version

@@ -131,6 +131,22 @@ const D_GHOST_FORGE_PACK = [
   "按 message 修正源码后重新打包即可。打包成功 ≠ 已装入:告知用户去点确认框。",
 ].join("\n");
 
+const D_GHOST_FORGE_PUBLISH = [
+  "把一个本机 .cindy 插件包发布到当前登录组织。file 传绝对路径。",
+  "本工具立即返回 transferId(以及稍后才有的 uploadId),传输在后台跑;",
+  "用 ghost_forge_publish_status 查阶段与结果。不要把它和 ghost_forge_pack 混成一次调用:",
+  "打包失败和发布失败语义不同。主机会弹出确认屏(组织 / 插件 id / 版本 / 大小),",
+  "用户确认后才真正开传。立即失败只有 NOT_ORG_MEMBER / INTERNAL；传输开始后的失败看 status 的 message,",
+  "不要按固定枚举分支。",
+].join("\n");
+
+const D_GHOST_FORGE_PUBLISH_STATUS = [
+  "查询一次 ghost_forge_publish 后台传输的当前状态。transferId 来自 publish 的立即返回。",
+  "status 变成 succeeded 之后 reviewStatus 仍可能从 pending 变为 approved / rejected,",
+  "需要继续查到审核终态再向用户收口。errorCode / message 是自由字符串,读 message 向用户说明,",
+  "不要按固定枚举分支。",
+].join("\n");
+
 /**
  * 花名册 recall 召回线索(whenToUse 优先、description 回落)的截断上限,
  * 与 manifest 的 description / whenToUse 校验同源。
@@ -1039,6 +1055,55 @@ export async function handleForgePack(
   }
 }
 
+/** ghost_forge_publish 的 handler 主体(导出供单测)。 */
+export async function handleForgePublish(
+  deps: CindyGhostsMcpDeps,
+  input: { file: string },
+): Promise<McpTextResult> {
+  try {
+    const result = await deps.forgePublish({ file: input.file });
+    if (!result.ok) {
+      deps.logger?.warn("ghost_forge_publish rejected", {
+        errorCode: result.errorCode,
+      });
+      return textResult(result, true);
+    }
+    return textResult(result);
+  } catch (err) {
+    return textResult(
+      {
+        ok: false,
+        errorCode: "INTERNAL",
+        message: err instanceof Error ? err.message : String(err),
+      },
+      true,
+    );
+  }
+}
+
+/** ghost_forge_publish_status 的 handler 主体(导出供单测)。 */
+export async function handleForgePublishStatus(
+  deps: CindyGhostsMcpDeps,
+  input: { transferId: string },
+): Promise<McpTextResult> {
+  try {
+    const result = await deps.forgePublishStatus({ transferId: input.transferId });
+    if (!result.ok) {
+      return textResult(result, true);
+    }
+    return textResult(result);
+  } catch (err) {
+    return textResult(
+      {
+        ok: false,
+        errorCode: "INTERNAL",
+        message: err instanceof Error ? err.message : String(err),
+      },
+      true,
+    );
+  }
+}
+
 /** 构建 cindy_ghosts MCP server(host 在会话装配时按 provider 惯例创建实例)。 */
 export function createCindyGhostsMcpServer(
   deps: CindyGhostsMcpDeps,
@@ -1219,6 +1284,24 @@ export function createCindyGhostsMcpServer(
         ),
     },
     async (input) => handleForgePack(deps, input),
+  );
+
+  server.tool(
+    "ghost_forge_publish",
+    D_GHOST_FORGE_PUBLISH,
+    {
+      file: z.string().describe("要发布的 .cindy 包绝对路径"),
+    },
+    async (input) => handleForgePublish(deps, input),
+  );
+
+  server.tool(
+    "ghost_forge_publish_status",
+    D_GHOST_FORGE_PUBLISH_STATUS,
+    {
+      transferId: z.string().describe("ghost_forge_publish 立即返回的 transferId"),
+    },
+    async (input) => handleForgePublishStatus(deps, input),
   );
 
   return server;

@@ -25,6 +25,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { buildGhostRosterPrompt } from 'cindy-tools';
 import type {
   CindyForgePackResult,
+  CindyForgePublishResult,
+  CindyForgePublishStatusResult,
   CindyForgeScaffoldResult,
   CindyGhostInfo,
   CindyGhostsMcpDeps,
@@ -77,6 +79,11 @@ import { classifyGhostVisibility } from '../cindy-brain/ghostVisibility.js';
 import { readInstalledGhostManual } from '../cindy-brain/ghostManual.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir } from '../cindy-brain/forge.js';
+import {
+  currentPublisherIdentity,
+  getPluginPublisherOrchestrator,
+  startPluginPublish,
+} from '../plugin-publisher/host.js';
 import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import { handleIncomingCindyFile } from '../cindy-brain/openFileInstall.js';
 import * as blobStore from '../cindy-media/blobStore.js';
@@ -1762,6 +1769,52 @@ export function getCindyGhostsMcpDeps(
           note: `${iconNote}已打包并弹出装入/更新确认框,请告知用户在应用内确认(装入默认沉睡)。`,
         };
       });
+    },
+    async forgePublish({ file }): Promise<CindyForgePublishResult> {
+      if (!currentPublisherIdentity()) {
+        return {
+          ok: false,
+          errorCode: 'NOT_ORG_MEMBER',
+          message: '需要组织身份才能发布插件',
+        };
+      }
+      try {
+        const started = startPluginPublish(file);
+        return {
+          ok: true,
+          transferId: started.transferId,
+          uploadId: started.uploadId,
+          note: '已开始发布并弹出确认屏。用 ghost_forge_publish_status 查询进度;用户取消或确认后才会继续传输。',
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          errorCode: 'INTERNAL',
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+    async forgePublishStatus({ transferId }): Promise<CindyForgePublishStatusResult> {
+      const orch = getPluginPublisherOrchestrator();
+      const progress = await orch.refreshReviewStatus(transferId);
+      if (!progress) {
+        return { ok: false, errorCode: 'NOT_FOUND', message: '找不到这次发布传输' };
+      }
+      return {
+        ok: true,
+        transferId: progress.transferId,
+        uploadId: progress.uploadId,
+        stage: progress.stage,
+        status: progress.status ?? null,
+        reviewStatus: progress.reviewStatus ?? null,
+        ghostId: progress.ghostId ?? null,
+        version: progress.version ?? null,
+        bytesHashed: progress.bytesHashed,
+        bytesSent: progress.bytesSent,
+        totalBytes: progress.totalBytes,
+        errorCode: progress.errorCode ?? null,
+        message: progress.message ?? null,
+      };
     },
     logger: log,
   };

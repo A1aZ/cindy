@@ -4627,6 +4627,46 @@
         "reviewOutdated": "Review outdated",
         "approve": "Approve",
         "skip": "Skip"
+      },
+      "publish": {
+        "section": "My publishes",
+        "action": "Publish plugin…",
+        "confirmTitle": "Publish {{name}}",
+        "confirmDescription": "After you confirm, the package is uploaded to the current organization.",
+        "org": "Organization",
+        "pluginId": "Plugin id",
+        "version": "Version",
+        "size": "Size",
+        "confirm": "Publish",
+        "cancel": "Cancel",
+        "disabled": "This organization has not enabled member publishing. Contact an admin.",
+        "loadFailed": "Could not load your publishes",
+        "startFailed": "Could not start publishing",
+        "empty": "No publishes yet",
+        "unknownPlugin": "Plugin",
+        "uploading": "Publishing",
+        "badge": {
+          "validating": "Checking",
+          "processing": "Processing",
+          "pending": "Pending review",
+          "approved": "Published",
+          "rejected": "Rejected",
+          "failed": "Failed",
+          "expired": "Expired"
+        },
+        "stage": {
+          "confirming": "Waiting for confirmation",
+          "hashing": "Checking the file",
+          "preparing": "Creating the upload",
+          "uploading": "Uploading",
+          "committing": "Submitting",
+          "processing": "Processing",
+          "succeeded": "Finished",
+          "failed": "Failed",
+          "expired": "Expired",
+          "cancelled": "Cancelled",
+          "cancelledTracking": "Stopped watching. The server is still processing."
+        }
       }
     },
     "mcp": {

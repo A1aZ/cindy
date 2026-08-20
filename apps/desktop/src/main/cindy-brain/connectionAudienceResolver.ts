@@ -6,6 +6,7 @@
 import { isValidGhostId, isValidGhostNetworkHostPattern } from '../../shared/ghost.js';
 import type { GhostManifest } from '../../shared/ghost.js';
 import type { PluginMarketInstallationRecord } from '../plugin-market/ledger.js';
+import { PLUGIN_MEMBER_PUBLISHER_GHOST_ID } from '../plugin-publisher/types.js';
 
 export interface ConnectionAudienceIdentity {
   membershipId: string;
@@ -30,6 +31,20 @@ export interface ConnectionAudienceResolver {
 
 const ORG_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PLUGIN_SLUG_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * Host-owned Connection audiences that plugins must never mint.
+ * `cindy-publisher` is the member-upload publisher identity; `xd-publisher`
+ * is the retired slug kept as defense in depth after the rename.
+ */
+export const RESERVED_CONNECTION_PLUGIN_SLUGS = Object.freeze([
+  PLUGIN_MEMBER_PUBLISHER_GHOST_ID,
+  'xd-publisher',
+] as const);
+
+export function isReservedConnectionPluginSlug(ghostId: string): boolean {
+  return (RESERVED_CONNECTION_PLUGIN_SLUGS as readonly string[]).includes(ghostId);
+}
 
 /** A managed secret is ready only when its exact injection host is declared. */
 export function isConnectionSecretReady(
@@ -63,6 +78,9 @@ export function loadConnectionAudienceResolver(
       };
       if (!isValidGhostId(ghostId) || !PLUGIN_SLUG_RE.test(ghostId)) {
         return reject('plugin-id-invalid');
+      }
+      if (isReservedConnectionPluginSlug(ghostId)) {
+        return reject('plugin-id-reserved');
       }
       if (identity.membershipKind !== 'org') return reject('membership-not-org');
       if (!identity.membershipId) return reject('membership-id-empty');

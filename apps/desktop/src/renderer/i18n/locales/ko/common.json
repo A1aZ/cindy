@@ -4626,6 +4626,46 @@
         "reviewOutdated": "검토 기간 만료",
         "approve": "승인",
         "skip": "건너뛰기"
+      },
+      "publish": {
+        "section": "내 게시",
+        "action": "플러그인 게시…",
+        "confirmTitle": "{{name}} 게시",
+        "confirmDescription": "확인하면 현재 조직으로 업로드가 시작됩니다.",
+        "org": "조직",
+        "pluginId": "플러그인 id",
+        "version": "버전",
+        "size": "크기",
+        "confirm": "게시",
+        "cancel": "취소",
+        "disabled": "이 조직은 구성원 게시를 켜지 않았습니다. 관리자에게 문의하세요.",
+        "loadFailed": "게시 목록을 불러올 수 없습니다",
+        "startFailed": "게시를 시작할 수 없습니다",
+        "empty": "아직 게시 기록이 없습니다",
+        "unknownPlugin": "플러그인",
+        "uploading": "게시 중",
+        "badge": {
+          "validating": "검사 중",
+          "processing": "처리 중",
+          "pending": "검토 대기",
+          "approved": "게시됨",
+          "rejected": "거절됨",
+          "failed": "실패",
+          "expired": "만료됨"
+        },
+        "stage": {
+          "confirming": "확인 대기",
+          "hashing": "파일 검사 중",
+          "preparing": "업로드 생성 중",
+          "uploading": "업로드 중",
+          "committing": "제출 중",
+          "processing": "처리 중",
+          "succeeded": "완료",
+          "failed": "실패",
+          "expired": "만료됨",
+          "cancelled": "취소됨",
+          "cancelledTracking": "추적을 멈췄습니다. 서버는 계속 처리 중입니다."
+        }
       }
     },
     "mcp": {

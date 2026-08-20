@@ -7,6 +7,8 @@ import {
   ghostSetupPlanInputSchema,
   handleForgeGuide,
   handleForgePack,
+  handleForgePublish,
+  handleForgePublishStatus,
   handleForgeScaffold,
   handleGhostCall,
   handleGhostInfo,
@@ -69,6 +71,18 @@ function fakeDeps(
       name: "X",
       version: "1.0.0",
       note: "pending confirm",
+    }),
+    forgePublish: async () => ({
+      ok: true,
+      transferId: "transfer-1",
+      uploadId: null,
+      note: "started",
+    }),
+    forgePublishStatus: async () => ({
+      ok: true,
+      transferId: "transfer-1",
+      uploadId: "upload-1",
+      stage: "processing",
     }),
     ...overrides,
   };
@@ -1150,7 +1164,7 @@ describe("cindy · media MCP 边界", () => {
 });
 
 describe("cindy_ghosts · server 构建", () => {
-  it("四件插件发现/读取/调用工具、三件锻造工具与 Core media 固定注册", () => {
+  it("四件插件发现/读取/调用工具、锻造工具与 Core media 固定注册", () => {
     const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
       _registeredTools: Record<string, { description?: string } | undefined>;
     };
@@ -1158,6 +1172,8 @@ describe("cindy_ghosts · server 构建", () => {
       "ghost_call",
       "ghost_forge_guide",
       "ghost_forge_pack",
+      "ghost_forge_publish",
+      "ghost_forge_publish_status",
       "ghost_forge_scaffold",
       "ghost_info",
       "ghost_list",
@@ -1481,6 +1497,43 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
       },
       { dir: "/src/default" },
     ]);
+  });
+
+  it("forge_publish 立即透传 transferId;失败标 isError", async () => {
+    const okResult = await handleForgePublish(fakeDeps(), {
+      file: "/tmp/x.cindy",
+    });
+    expect(parsePayload(okResult)).toMatchObject({
+      ok: true,
+      transferId: "transfer-1",
+    });
+
+    const failed = await handleForgePublish(
+      fakeDeps({
+        forgePublish: async () => ({
+          ok: false,
+          errorCode: "NOT_ORG_MEMBER",
+          message: "需要组织身份",
+        }),
+      }),
+      { file: "/tmp/x.cindy" },
+    );
+    expect(failed.isError).toBe(true);
+    expect(parsePayload(failed)).toMatchObject({
+      ok: false,
+      errorCode: "NOT_ORG_MEMBER",
+    });
+  });
+
+  it("forge_publish_status 透传后台阶段", async () => {
+    const result = await handleForgePublishStatus(fakeDeps(), {
+      transferId: "transfer-1",
+    });
+    expect(parsePayload(result)).toMatchObject({
+      ok: true,
+      stage: "processing",
+      uploadId: "upload-1",
+    });
   });
 
   it("forge_pack 描述明确图片工具结果字段", () => {

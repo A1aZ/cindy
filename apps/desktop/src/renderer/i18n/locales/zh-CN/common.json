@@ -4626,6 +4626,46 @@
         "reviewOutdated": "审查过期",
         "approve": "同意",
         "skip": "跳过"
+      },
+      "publish": {
+        "section": "我的发布",
+        "action": "发布插件…",
+        "confirmTitle": "发布 {{name}}",
+        "confirmDescription": "确认后开始上传到当前组织。",
+        "org": "组织",
+        "pluginId": "插件 id",
+        "version": "版本",
+        "size": "大小",
+        "confirm": "发布",
+        "cancel": "取消",
+        "disabled": "本企业未开启成员发布，请联系管理员",
+        "loadFailed": "发布列表暂时不可用",
+        "startFailed": "无法开始发布",
+        "empty": "还没有发布记录",
+        "unknownPlugin": "插件",
+        "uploading": "正在发布",
+        "badge": {
+          "validating": "校验中",
+          "processing": "处理中",
+          "pending": "待审核",
+          "approved": "已上架",
+          "rejected": "被驳回",
+          "failed": "失败",
+          "expired": "已过期"
+        },
+        "stage": {
+          "confirming": "等待确认",
+          "hashing": "正在校验文件",
+          "preparing": "正在创建上传",
+          "uploading": "正在上传",
+          "committing": "正在提交",
+          "processing": "正在处理",
+          "succeeded": "已完成",
+          "failed": "失败",
+          "expired": "已过期",
+          "cancelled": "已取消",
+          "cancelledTracking": "已停止跟踪，服务端仍在处理"
+        }
       }
     },
     "mcp": {

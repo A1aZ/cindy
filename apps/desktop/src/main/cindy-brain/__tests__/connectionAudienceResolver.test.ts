@@ -6,6 +6,7 @@ import {
 } from '../../plugin-market/ledger.js';
 import {
   isConnectionSecretReady,
+  isReservedConnectionPluginSlug,
   loadConnectionAudienceResolver,
 } from '../connectionAudienceResolver.js';
 
@@ -68,6 +69,12 @@ function resolverOptions(
 }
 
 describe('installed Plugin Connection audience resolver', () => {
+  it('names cindy-publisher and xd-publisher as reserved connection slugs', () => {
+    expect(isReservedConnectionPluginSlug('cindy-publisher')).toBe(true);
+    expect(isReservedConnectionPluginSlug('xd-publisher')).toBe(true);
+    expect(isReservedConnectionPluginSlug('cindy-art')).toBe(false);
+  });
+
   it('derives audience and hosts from the installed manifest and current organization', () => {
     const resolver = loadConnectionAudienceResolver({
       ...resolverOptions(),
@@ -112,6 +119,21 @@ describe('installed Plugin Connection audience resolver', () => {
     const changedManifest = { ...manifest, version: '2.0.0' };
     const resolver = loadConnectionAudienceResolver(resolverOptions(changedManifest));
     expect(resolver.resolve('plugin-a', identity)).toBeNull();
+  });
+
+  it('rejects reserved publisher identity slugs even with a matching market install', () => {
+    for (const ghostId of ['cindy-publisher', 'xd-publisher'] as const) {
+      const reservedManifest = { ...manifest, id: ghostId };
+      const reservedInstallation = {
+        ...marketInstallation,
+        ghostId,
+        manifestDigest: ghostManifestDigest(reservedManifest),
+      };
+      const resolver = loadConnectionAudienceResolver(
+        resolverOptions(reservedManifest, reservedInstallation),
+      );
+      expect(resolver.resolve(ghostId, identity)).toBeNull();
+    }
   });
 
   it('requires an organization identity and an installed oidc-token declaration', () => {

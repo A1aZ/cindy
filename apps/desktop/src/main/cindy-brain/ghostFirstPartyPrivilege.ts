@@ -119,7 +119,21 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
   }
 
   const record = facts.marketRecord;
-  if (record?.installed) {
+  if (record !== null) {
+    if (!record.installed) {
+      // A ledger row that exists but is not installed must not fall through to
+      // the local-package tail below. Two reasons, both mattering:
+      //   1. Fail-open direction. `{scope: 'personal', installed: true}` is
+      //      denied here; flipping `installed` to false would have turned that
+      //      same row into an allow via the tail. A security predicate must
+      //      never grant more when one of its fields is false.
+      //   2. It is the impersonation case, not the self-test case. Once an id
+      //      appears in the market ledger, a hand-built local package carrying
+      //      that same id is impersonating it. Author self-test is unaffected:
+      //      a never-published id has no ledger row at all (`marketRecord`
+      //      is null) and still reaches the tail.
+      return deny('denied-unknown-origin');
+    }
     if (record.scope === 'public' && record.source === 'market') {
       return isOfficialGhostId(facts.ghostId)
         ? allow('market-public', true)

@@ -3065,14 +3065,24 @@ export function getGhostScheduleSlot(): GhostScheduleSlot {
 function getVideoProviderRegistry() {
   const registry = getCindyProxyMediaService().backend.videoRegistry;
   if (!registry) return null;
-  const xaiAliases =
-    getActiveCatalog()
-      .providers.find((provider) => provider.id === 'xai')
-      ?.videoModels?.map((model) => model.id) ?? [];
-  if (xaiAliases.some((alias) => !registry.hasAlias(alias))) {
+  const xaiCatalogProvider = getActiveCatalog().providers.find(
+    (provider) => provider.id === 'xai',
+  );
+  const xaiCatalogProviderId = xaiCatalogProvider?.id;
+  const xaiAliases = xaiCatalogProvider?.videoModels?.map((model) => model.id) ?? [];
+  const routableXaiAliases = xaiCatalogProviderId
+    ? xaiAliases.filter(
+        (alias) =>
+          !registry.hasAlias(alias) || registry.hasAlias(alias, xaiCatalogProviderId),
+      )
+    : [];
+  if (
+    xaiCatalogProviderId &&
+    routableXaiAliases.some((alias) => !registry.hasAlias(alias))
+  ) {
     registry.registerOrExtend(
       createXaiVideoProvider({
-        modelAliases: xaiAliases,
+        modelAliases: routableXaiAliases,
         hasOAuthLogin: () => hasGrokOAuthLogin(),
         getAccessToken: () => getGrokAccessToken(),
         getCredentialGeneration: () => getGrokOAuthCredentialGeneration(),
@@ -3082,6 +3092,7 @@ function getVideoProviderRegistry() {
         beforeDispatch: (model) => assertMediaModelStillEnabled('video', model),
         onAuthRejected: (failure) => invalidateXaiBridgeAuth(failure),
       }),
+      xaiCatalogProviderId,
     );
   }
   return registry;
@@ -3181,6 +3192,7 @@ function getCatalogMediaConfig(
     const providers = selectedProviderId
       ? orderedProviders.filter((provider) => provider.id === selectedProviderId)
       : orderedProviders;
+    const videoRegistry = kind === 'video' ? getVideoProviderRegistry() : null;
     return deriveCindyMediaConfig(
       providers,
       kind,
@@ -3207,7 +3219,7 @@ function getCatalogMediaConfig(
         (kind === 'embed' && !isKnownEmbeddingModel(modelId)) ||
         // 视频目录可能比当前客户端通道先热更。执行 registry 不认识的型号
         // 必须先过滤，不能把“目录有”冒充成“这版客户端能下单”。
-        (kind === 'video' && !(getVideoProviderRegistry()?.hasAlias(modelId) ?? false)),
+        (kind === 'video' && !(videoRegistry?.hasAlias(modelId, providerId) ?? false)),
       // 执行通道凭证就绪过滤(未就绪的来源整段不进白名单,见 imageChannelRegistry
       // 头注)。视频按目录 provider 归属分别检查：xd 要求账号网关能力与 endpoint
       // 同时在场，xai 要求 SuperGrok OAuth 已连接；未知来源 fail closed。
@@ -3279,6 +3291,7 @@ function getMediaPreferenceConfig(
   capability: GhostMediaCapability,
 ): CindyMediaPreferenceConfig {
   const kind = capability.startsWith('image.') ? 'image' : 'video';
+  const videoRegistry = kind === 'video' ? getVideoProviderRegistry() : null;
   const coreCapability: MediaCapability =
     capability === 'video.edit' ? 'video.image_to_video' : capability;
   const providers = new Map(
@@ -3288,7 +3301,9 @@ function getMediaPreferenceConfig(
     .filter(
       (model) =>
         model.mode === (kind === 'image' ? 'image_generation' : 'video_generation') &&
-        supportsMediaCapability(model.modalities, coreCapability),
+        supportsMediaCapability(model.modalities, coreCapability) &&
+        (kind !== 'video' ||
+          (videoRegistry?.hasAlias(model.id, model.providerId) ?? false)),
     )
     .map((model) => {
       const provider = providers.get(model.providerId);
@@ -3310,7 +3325,11 @@ function getMediaPreferenceConfig(
     coreCapability,
     readModelDisableOverrides(),
   )
-    .filter((model) => isMediaModelExecutable(model.id, coreCapability))
+    .filter(
+      (model) =>
+        isMediaModelExecutable(model.id, coreCapability) &&
+        (kind !== 'video' || (videoRegistry?.hasAlias(model.id, 'xd') ?? false)),
+    )
     .map((model) => {
       const provider = providers.get('xd');
       const providerName = provider?.name ?? 'Cindy AI';
@@ -3464,7 +3483,13 @@ async function getGhostConfigurableMediaModels(
     // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
     const availability = await listExecutableMediaModels();
     const mode = type === 'image' ? 'image_generation' : 'video_generation';
-    const candidates = availability.models.filter((model) => model.mode === mode);
+    const videoRegistry = type === 'video' ? getVideoProviderRegistry() : null;
+    const candidates = availability.models.filter(
+      (model) =>
+        model.mode === mode &&
+        (type !== 'video' ||
+          (videoRegistry?.hasAlias(model.id, model.providerId) ?? false)),
+    );
     const models = isProviderBlindCoreArt(ghost)
       ? collapseProviderBlindMediaModels(candidates, (model) => model.id)
       : candidates;
@@ -3650,6 +3675,9 @@ async function runGhostVideo(
   if (!registry || !registry.hasAny()) {
     throw new Error('视频能力不可用:主机未配置视频通道');
   }
+  if (params.providerId && !registry.hasAlias(params.alias, params.providerId)) {
+    throw new Error('视频模型与所选来源不匹配,本次生成已取消');
+  }
   // 提交紧前重查(第二十一轮):参考图 data URI 准备是 await,窗口内被停用即拒。
   assertMediaModelStillEnabled(
     'video',
@@ -3691,6 +3719,7 @@ function getGhostVideoCapabilities(
     }
     const registry = getVideoProviderRegistry();
     if (!registry || !registry.hasAny()) return null;
+    if (providerId && !registry.hasAlias(model, providerId)) return null;
     const caps = registry.resolveByAlias(model).provider.capabilities;
     return {
       durations: caps.supportedDurations,

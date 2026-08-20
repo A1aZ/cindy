@@ -3150,8 +3150,17 @@ function getCatalogMediaConfig(kind: CindyCapabilityKind): CindyMediaCatalogConf
           model.mode === 'image_generation' || model.mode === 'video_generation',
       )
       .map((model) => model.id);
+    // 旧 cindy-request 偏好不携带 providerId；同一完整 modelId 同时来自 XD 与
+    // 第三方时必须让托管默认来源先参与 first-wins，避免静默改用第三方凭证计费。
+    const providers =
+      kind === 'embed'
+        ? catalog.providers
+        : [
+            ...catalog.providers.filter((provider) => provider.id === 'xd'),
+            ...catalog.providers.filter((provider) => provider.id !== 'xd'),
+          ];
     return deriveCindyMediaConfig(
-      catalog.providers,
+      providers,
       kind,
       (providerId, modelId) =>
         isProviderDisabled(access, providerId) ||

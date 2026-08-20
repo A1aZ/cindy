@@ -9749,6 +9749,8 @@
       "layoutMenuLabel": "Worker 列表顯示方式",
       "layoutTabs": "平鋪",
       "layoutDropdown": "下拉",
+      "scrollWorkersLeft": "向左查看更多 Worker",
+      "scrollWorkersRight": "向右查看更多 Worker",
       "errorBadge": "錯誤",
       "errorBadgeAria": "有 Worker 出錯"
     },

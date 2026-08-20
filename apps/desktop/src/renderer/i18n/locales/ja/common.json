@@ -9749,6 +9749,8 @@
       "layoutMenuLabel": "Worker リストの表示方式",
       "layoutTabs": "タブ",
       "layoutDropdown": "ドロップダウン",
+      "scrollWorkersLeft": "前の Worker を表示",
+      "scrollWorkersRight": "次の Worker を表示",
       "errorBadge": "エラー",
       "errorBadgeAria": "エラーが発生した Worker があります"
     },

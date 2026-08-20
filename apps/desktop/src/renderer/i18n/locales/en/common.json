@@ -9763,6 +9763,8 @@
       "layoutMenuLabel": "Worker list layout",
       "layoutTabs": "Tabs",
       "layoutDropdown": "Dropdown",
+      "scrollWorkersLeft": "Scroll to earlier workers",
+      "scrollWorkersRight": "Scroll to more workers",
       "errorBadge": "ERR",
       "errorBadgeAria": "A worker has an error"
     },

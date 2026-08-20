@@ -140,6 +140,14 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
         : deny('denied-unknown-origin');
     }
     if (record.scope === 'organization') {
+      // Same discipline as the public branch: scope is only meaningful together
+      // with source. `legacy-adopted` rows are synthesized after a successful
+      // market listing for official-prefix plugins that predate the market
+      // (`plugin-market/service.ts::adoptLegacyInstallations`) — they attest
+      // "this id exists on this machine", not "these bytes were distributed by
+      // that organization's server market". `git-market` / `local-market` rows
+      // carry a placeholder scope, which is likewise not a trust statement.
+      if (record.source !== 'market') return deny('denied-unknown-origin');
       if (!isCurrentOrganizationRecord(record, facts.currentOrganization)) {
         return deny('denied-foreign-org');
       }

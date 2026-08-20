@@ -289,6 +289,27 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         scope,
       ).toMatchObject({ brokerEligible: false, hostPrimitiveEligible: false });
     }
+    // ⚠️ 上面那组用的 id 是 `cindy-art`,而当前组织前缀是 `acme`——它其实死在
+    // 「前缀不匹配」那一步,**根本没走到 source 判断**,所以单靠它会给出假信心
+    // (reviewer 指出)。下面这组前缀真的匹配,才是实际验证 organization 分支
+    // 必须同时要求 `source === 'market'` 的用例:少了那个检查,`legacy-adopted`
+    // 与自定义来源的 organization 行都会被判成「本组织市场安装」而拿到 Broker。
+    for (const source of ['legacy-adopted', 'git-market', 'local-market'] as const) {
+      expect(
+        resolveGhostFirstPartyPrivilege(
+          facts({
+            ghostId: 'acme-feishu',
+            marketRecord: market({ scope: 'organization', organizationId: 'org-acme', source }),
+            currentOrganization: CURRENT_ORG,
+          }),
+        ),
+        source,
+      ).toEqual({
+        brokerEligible: false,
+        hostPrimitiveEligible: false,
+        basis: 'denied-unknown-origin',
+      });
+    }
     // 同一个 id 只要 builtin 为真就走优先级 1,台账怎么写都不影响——这才是
     // 随包插件今天的实际路径。
     expect(

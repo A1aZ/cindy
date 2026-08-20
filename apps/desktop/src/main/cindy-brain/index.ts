@@ -3447,13 +3447,23 @@ function resolveAndMigrateGhostMediaPreference(
 ): CindyMediaPreferenceModel | null {
   const selected = resolveMediaPreferenceOrDefault(config, preference);
   if (preference && selected && preference !== selected.id) {
-    log.info('migrating stale ghost media preference to available model', {
-      ghostId,
-      capability,
-      previousPreference: preference,
-      nextPreference: selected.id,
-    });
-    writeGhostCindyOverride(ghostId, capability, selected.id);
+    try {
+      writeGhostCindyOverride(ghostId, capability, selected.id);
+      log.info('migrating stale ghost media preference to available model', {
+        ghostId,
+        capability,
+        previousPreference: preference,
+        nextPreference: selected.id,
+      });
+    } catch (error) {
+      log.warn('persisting migrated ghost media preference failed; using runtime fallback', {
+        ghostId,
+        capability,
+        previousPreference: preference,
+        fallbackPreference: selected.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   return selected;
 }

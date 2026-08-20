@@ -3580,15 +3580,14 @@ function assertMediaModelStillEnabled(
 ): void {
   const capability: GhostMediaCapability = `${kind}.${action}`;
   const available =
-    providerId === 'xd'
-      ? getCatalogMediaConfig(kind, action).models.some(
-          (candidate) => candidate.providerId === providerId && candidate.id === model,
+    providerId && kind === 'image' && providerId !== 'xd'
+      ? getMediaPreferenceConfig(capability).models.some(
+          (candidate) => candidate.providerId === providerId && candidate.modelId === model,
         )
-      : providerId
-        ? getMediaPreferenceConfig(capability).models.some(
-            (candidate) => candidate.providerId === providerId && candidate.modelId === model,
-          )
-        : getCatalogMediaConfig(kind, action).models.some((candidate) => candidate.id === model);
+      : getCatalogMediaConfig(kind, action).models.some(
+          (candidate) =>
+            candidate.id === model && (!providerId || candidate.providerId === providerId),
+        );
   if (!available) {
     throw new Error(
       kind === 'image'

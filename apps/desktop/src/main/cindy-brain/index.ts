@@ -3348,6 +3348,54 @@ function resolveMediaPreferenceOrDefault(
 }
 
 /**
+ * Art 1.12.5–1.13.2 已经走 Core media，但还不会在 prepare 时传
+ * providerId。这段兼容窗口只能稳定表达 Cindy AI 来源；1.13.3 起
+ * 插件会传完整来源，恢复全部 Provider 选择。
+ */
+function isProviderBlindCoreArt(ghost: InstalledGhost): boolean {
+  return (
+    ghost.manifest.id === 'cindy-art' &&
+    supportsCindyVersion(ghost.manifest.version, '1.12.5') &&
+    !supportsCindyVersion(ghost.manifest.version, '1.13.3')
+  );
+}
+
+function getGhostMediaPreferenceConfig(
+  ghostId: string,
+  capability: GhostMediaCapability,
+): CindyMediaPreferenceConfig {
+  const config = getMediaPreferenceConfig(capability);
+  const ghost = getGhostManager().list().find((candidate) => candidate.manifest.id === ghostId);
+  if (!ghost || !isProviderBlindCoreArt(ghost)) return config;
+  const models = config.models.filter((model) => model.providerId === 'xd');
+  const standard = models[0]?.id;
+  return {
+    models,
+    defaults: standard ? { standard, draft: standard, best: standard } : null,
+  };
+}
+
+/** 存量钉定已失效或旧插件无法表达时，一次性升级为当前可用选型。 */
+function resolveAndMigrateGhostMediaPreference(
+  ghostId: string,
+  capability: GhostMediaCapability,
+  config: CindyMediaPreferenceConfig,
+  preference: string | undefined,
+): CindyMediaPreferenceModel | null {
+  const selected = resolveMediaPreferenceOrDefault(config, preference);
+  if (preference && selected && preference !== selected.id) {
+    log.info('migrating stale ghost media preference to available model', {
+      ghostId,
+      capability,
+      previousPreference: preference,
+      nextPreference: selected.id,
+    });
+    writeGhostCindyOverride(ghostId, capability, selected.id);
+  }
+  return selected;
+}
+
+/**
  * 插件配置页的模型目录；这里只读目录，不提供任何生成入口。Host 只按 Gateway mode
  * 切图片/视频大类并透传 modalities，具体动作支持度由插件自行解释。
  */
@@ -3372,7 +3420,10 @@ async function getGhostConfigurableMediaModels(
     // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
     const availability = await listExecutableMediaModels();
     const mode = type === 'image' ? 'image_generation' : 'video_generation';
-    const models = availability.models.filter((model) => model.mode === mode);
+    const models = availability.models.filter(
+      (model) =>
+        model.mode === mode && (!isProviderBlindCoreArt(ghost) || model.providerId === 'xd'),
+    );
     if (
       models.length === 0 &&
       availability.unavailable.some((model) => model.retryable)
@@ -3424,8 +3475,8 @@ async function getGhostConfigurableMediaModels(
 
 /**
  * 读取插件在 Host「Cindy 能力」中的现有媒体选型。
- * 这里只投影当前有效值，不复制或迁移配置；已配置模型失效时，
- * 统一回落到该能力当前的默认（第一个可用）模型。
+ * 已配置模型失效，或旧插件无法表达完整来源时，回落到当前第一个
+ * 可用模型，并一次性迁移存量配置，保证页面展示与实际执行一致。
  */
 function getGhostConfiguredMediaModel(
   ghostId: string,
@@ -3452,9 +3503,14 @@ function getGhostConfiguredMediaModel(
     };
   }
 
-  const config = getMediaPreferenceConfig(mediaCapability);
+  const config = getGhostMediaPreferenceConfig(ghostId, mediaCapability);
   const override = readGhostCindyOverrides(ghostId)[mediaCapability];
-  const selected = resolveMediaPreferenceOrDefault(config, override);
+  const selected = resolveAndMigrateGhostMediaPreference(
+    ghostId,
+    mediaCapability,
+    config,
+    override,
+  );
   if (!selected) {
     return {
       ok: false,
@@ -3931,8 +3987,11 @@ export function getGhostCindySlot(): GhostCindySlot {
       getMediaOverride: (ghostId, capability) => {
         const value = readGhostCindyOverrides(ghostId)[capability as CindyCapabilityKey] ?? null;
         if (!value) return null;
-        const selected = resolveMediaPreferenceOrDefault(
-          getMediaPreferenceConfig(capability as GhostMediaCapability),
+        const mediaCapability = capability as GhostMediaCapability;
+        const selected = resolveAndMigrateGhostMediaPreference(
+          ghostId,
+          mediaCapability,
+          getGhostMediaPreferenceConfig(ghostId, mediaCapability),
           value,
         );
         return selected
@@ -6172,8 +6231,10 @@ export function registerGhostIpc(): void {
     for (const capability of GHOST_MEDIA_CAPABILITIES) {
       const value = storedOverrides[capability];
       if (!value) continue;
-      const selected = resolveMediaPreferenceOrDefault(
-        getMediaPreferenceConfig(capability),
+      const selected = resolveAndMigrateGhostMediaPreference(
+        ghostId as string,
+        capability,
+        getGhostMediaPreferenceConfig(ghostId as string, capability),
         value,
       );
       if (selected) overrides[capability] = selected.id;
@@ -6223,10 +6284,10 @@ export function registerGhostIpc(): void {
       : null;
     event.returnValue = {
       overrides,
-      image: byKind(getMediaPreferenceConfig('image.generate')),
-      imageEdit: byKind(getMediaPreferenceConfig('image.edit')),
-      video: byKind(getMediaPreferenceConfig('video.generate')),
-      videoEdit: byKind(getMediaPreferenceConfig('video.edit')),
+      image: byKind(getGhostMediaPreferenceConfig(ghostId as string, 'image.generate')),
+      imageEdit: byKind(getGhostMediaPreferenceConfig(ghostId as string, 'image.edit')),
+      video: byKind(getGhostMediaPreferenceConfig(ghostId as string, 'video.generate')),
+      videoEdit: byKind(getGhostMediaPreferenceConfig(ghostId as string, 'video.edit')),
       text: {
         options: textOptions,
         defaultModel:
@@ -6299,10 +6360,12 @@ export function registerGhostIpc(): void {
       // fail-closed 兜底,不在这层把「暂时没配 key」当成非法值。
       if (
         !isCindyOverrideModelAllowed(capability as string, model, {
-          image: getMediaPreferenceConfig(
+          image: getGhostMediaPreferenceConfig(
+            ghostId,
             capability === 'image.edit' ? 'image.edit' : 'image.generate',
           ).models,
-          video: getMediaPreferenceConfig(
+          video: getGhostMediaPreferenceConfig(
+            ghostId,
             capability === 'video.edit' ? 'video.edit' : 'video.generate',
           ).models,
           embed: getCatalogEmbedConfig().models,

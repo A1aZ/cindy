@@ -1130,22 +1130,32 @@ async function prepareInvocation(
   const matchingModels = models.filter(
     (candidate) => candidate.id === modelId && (!providerId || candidate.providerId === providerId),
   );
-  if (!providerId && matchingModels.length > 1) {
-    return failure(
-      'MODEL_NOT_AVAILABLE',
-      '该模型同时来自多个 Provider，请从模型目录选择精确来源并在 prepare 时传入 provider_id',
-    );
+  const model = providerId
+    ? matchingModels[0]
+    : (matchingModels.find((candidate) => candidate.providerId === 'xd') ??
+      matchingModels[0]);
+  if (!providerId && model && matchingModels.length !== 1) {
+    log.warn('legacy media prepare resolved to available model', {
+      requestedModelId: modelId,
+      resolvedProviderId: model.providerId,
+      resolvedModelId: model.id,
+      matchingProviderCount: matchingModels.length,
+    });
   }
-  const model = matchingModels[0];
   if (!model) {
     return failure('MODEL_NOT_AVAILABLE', '该模型或指定 Provider 当前不可见，或不是请求的媒体类型');
   }
+  const resolvedModelId = model.id;
   let preparedGuide: PreparedMediaInvocationGuide;
   if (model.providerId !== 'xd') {
     if (capability !== 'image.generate' && capability !== 'image.edit') {
       return failure('CAPABILITY_NOT_SUPPORTED', '该第三方 Provider 当前不支持请求的媒体能力');
     }
-    const providerModel = resolveProviderMediaModel(model.providerId, modelId, capability);
+    const providerModel = resolveProviderMediaModel(
+      model.providerId,
+      resolvedModelId,
+      capability,
+    );
     if (!providerModel) {
       return failure('MODEL_NOT_AVAILABLE', '该第三方媒体模型或执行来源当前不可用');
     }
@@ -1153,7 +1163,7 @@ async function prepareInvocation(
   } else {
     let resolvedGuide: ResolvedMediaInvocationGuide;
     try {
-      resolvedGuide = await fetchMediaInvocationGuide(modelId);
+      resolvedGuide = await fetchMediaInvocationGuide(resolvedModelId);
       assertAuthScope(scope);
     } catch (error) {
       if (error instanceof ServerApiError && error.code === 'MEDIA_INVOCATION_GUIDE_NOT_FOUND') {
@@ -1164,7 +1174,7 @@ async function prepareInvocation(
       }
       if (error instanceof MediaGuideCompatibilityError) {
         log.warn('media Guide rejected by current client', {
-          modelId,
+          modelId: resolvedModelId,
           code: error.code,
           detail: error.detail,
         });
@@ -1199,7 +1209,7 @@ async function prepareInvocation(
     void _operations;
     preparedGuide = {
       // Guide 查询键不参与调用身份；配置、持久化和 Gateway 请求始终使用完整 modelId。
-      modelId,
+      modelId: resolvedModelId,
       ...guideProtocol,
       ...operation,
     };
@@ -1227,7 +1237,7 @@ async function prepareInvocation(
     status: 'prepared',
     invocation_id: id,
     provider_id: model.providerId,
-    model_id: modelId,
+    model_id: resolvedModelId,
     model_name: model.name ?? model.id,
     capability,
     guide_revision: preparedGuide.revision,

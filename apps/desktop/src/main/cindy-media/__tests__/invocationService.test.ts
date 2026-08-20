@@ -372,7 +372,7 @@ describe('Cindy Core media invocation state and security boundary', () => {
     });
   });
 
-  it('旧调用未传 providerId 时不在同名 Provider 中静默选择来源', async () => {
+  it('旧调用未传 providerId 时同名来源优先回落 Cindy AI', async () => {
     const model = {
       id: 'openai/gpt-image-2',
       name: 'GPT Image 2',
@@ -382,20 +382,21 @@ describe('Cindy Core media invocation state and security boundary', () => {
       officialDocs: 'https://platform.openai.com/docs/guides/image-generation',
     };
     mocks.models.mockResolvedValue([{ ...model, providerId: 'xd' }, model]);
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(operation({ mode: 'sync', media: [] })),
+    );
 
-    await expect(
-      callCindyMedia({
-        action: 'prepare',
-        modelId: model.id,
-        capability: 'image.generate',
-      }),
-    ).resolves.toMatchObject({
-      ok: false,
-      errorCode: 'MODEL_NOT_AVAILABLE',
-      retryable: false,
-      message: expect.stringContaining('provider_id'),
+    const prepared = await callCindyMedia({
+      action: 'prepare',
+      modelId: model.id,
+      capability: 'image.generate',
     });
-    expect(mocks.guide).not.toHaveBeenCalled();
+    expect(prepared).toMatchObject({
+      ok: true,
+      provider_id: 'xd',
+      model_id: model.id,
+    });
+    expect(mocks.guide).toHaveBeenCalledWith(model.id);
     expect(mocks.providerModel).not.toHaveBeenCalled();
   });
 

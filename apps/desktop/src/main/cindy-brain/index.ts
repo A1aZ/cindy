@@ -80,6 +80,7 @@ import {
 import { exportGhostPackage } from './exportGhostPackage.js';
 import { GhostMutationCoordinator } from './ghostMutationCoordinator.js';
 import { createOneShotTicketStore } from './oneShotTickets.js';
+import { shouldRejectReservedGhostIds } from './reservedGhostIdGate.js';
 import {
   bindForgePackStagingTempDir,
   getForgePackStagingControllerIfConfigured,
@@ -681,7 +682,7 @@ function getLegacyGhostRecoveryStatusForActiveSession(): LegacyGhostRecoveryStat
     isAppSessionBoundaryPending(),
     {
       reservedCommands: reservedBuiltinCommands,
-      rejectReservedIds: app.isPackaged,
+      rejectReservedIds: shouldRejectReservedGhostIds(app.isPackaged),
     },
   );
 }
@@ -798,7 +799,7 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
         {
           shouldAbort,
           reservedCommands: reservedBuiltinCommands,
-          rejectReservedIds: app.isPackaged,
+          rejectReservedIds: shouldRejectReservedGhostIds(app.isPackaged),
         },
       );
     } catch (error) {
@@ -5214,10 +5215,11 @@ export function getGhostLibraryBindingStore(): LibraryBindingStore {
 /**
  * 官方保留前缀守门(docs/dev-rules/plugin-security-and-authoring.md):packaged 版本上,用户装入
  * 通道(install/update/inspect 三个 IPC,即拖入/选文件/forge 转交的共同出口)
- * 对 `cindy-` 前缀 id 一律拒装——卸载内置意识后抢注同 id 的第三方包,会冒充
- * 官方身份并蹭走凭证别名(用户历史填过的机器级 key 被注入攻击者白名单域名)。
- * dev 构建豁免:内置意识(cindy-art / cindy-web-search)的开发迭代靠打包重装。
- * 官方预装(builtinGhostProvisioner)走内部安装路径,不经这些 IPC。
+ * 对 `cindy-` / `filo-` / `xd-` 前缀 id 一律拒装——卸载内置意识后抢注同 id 的
+ * 第三方包,会冒充官方身份并蹭走凭证别名(用户历史填过的机器级 key 被注入攻击者白名单域名)。
+ * dev 构建默认豁免:方便 `cindy-` / `filo-` / `xd-` 官方前缀插件在本地迭代;需要复现
+ * packaged 行为时可设置 `XDT_GHOST_RESERVED_PREFIX_GATE=1`,此开关只能收紧、不能放宽。
+ * 若恢复随包 seed,builtinGhostProvisioner 的内部安装路径不经这些 IPC;不要把本闸套到播种路径。
  */
 function rejectReservedPublisherSlug(id: string): void {
   if (!isReservedConnectionPluginSlug(id)) return;
@@ -5230,9 +5232,10 @@ function rejectReservedPublisherSlug(id: string): void {
 function rejectReservedGhostId(id: string): void {
   // Member-publisher identity slugs are never installable, including market
   // packages and unpackaged dev builds. Official prefix rejection stays
-  // packaged-only so first-party iteration can still reload cindy-/xd- plugins.
+  // packaged-only by default so first-party iteration can still reload cindy-/filo-/xd- plugins.
+  // The hidden dev override can reproduce the packaged gate but can never disable it.
   rejectReservedPublisherSlug(id);
-  if (!app.isPackaged) return;
+  if (!shouldRejectReservedGhostIds(app.isPackaged)) return;
   if (!isUserInstallReservedGhostId(id)) return;
   throwIpcError(
     'GHOST_ID_RESERVED',

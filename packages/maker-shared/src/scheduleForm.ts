@@ -7,6 +7,7 @@ import type {
   RemoteScheduleWriteInput,
   RemoteTemplateParameter,
 } from './scheduleTypes';
+import { presentationText, type PresentationLocalizer } from './presentationLocalization.js';
 
 export const MOBILE_SCHEDULE_EFFORT_VALUES = [
   'minimal',
@@ -182,11 +183,15 @@ export function applyTemplateToMobileScheduleDraft(
 export function validateTemplateParamValues(
   template: Pick<RemoteScheduleTemplate, 'parameters'>,
   values: Record<string, string>,
+  localizer?: PresentationLocalizer,
 ): string | null {
   for (const parameter of template.parameters ?? []) {
     if (!parameter.required) continue;
     if ((values[parameter.key] ?? parameter.default ?? '').trim()) continue;
-    return `请输入模板参数：${parameter.label || parameter.key}`;
+    const label = parameter.label || parameter.key;
+    return presentationText(localizer, 'devices.automations.presentation.validation.templateParameter', `请输入模板参数：${label}`, {
+      label,
+    });
   }
   return null;
 }
@@ -218,22 +223,44 @@ export function applyMobileTemplateParams(
 
 export function validateMobileScheduleDraft(
   draft: MobileScheduleDraft,
+  localizer?: PresentationLocalizer,
 ): ScheduleDraftValidation | null {
-  if (!draft.name.trim()) return { field: 'name', message: '请输入任务名称' };
+  if (!draft.name.trim()) {
+    return {
+      field: 'name',
+      message: presentationText(localizer, 'devices.automations.presentation.validation.name', '请输入任务名称'),
+    };
+  }
   // "仅运行脚本"任务(桌面端高级功能)prompt 合法为空——mobile 没有编辑
   // scriptConfig 的 UI,不该拿桌面端才有意义的字段挡住这类任务在移动端的其它
   // 可编辑操作(改名、通知开关等),否则打开/保存一个桌面端创建的脚本任务在
   // 移动端会先于任何改动就校验失败(codex review 发现)。
   if (draft.executionMode !== 'script' && !draft.prompt.trim()) {
-    return { field: 'prompt', message: '请输入任务提示词' };
+    return {
+      field: 'prompt',
+      message: presentationText(localizer, 'devices.automations.presentation.validation.prompt', '请输入任务提示词'),
+    };
   }
-  if (!draft.timezone.trim()) return { field: 'timezone', message: '请输入时区' };
+  if (!draft.timezone.trim()) {
+    return {
+      field: 'timezone',
+      message: presentationText(localizer, 'devices.automations.presentation.validation.timezone', '请输入时区'),
+    };
+  }
   if (draft.targetSessionId.trim() === MOBILE_SCHEDULE_PENDING_SESSION_ID) {
-    return { field: 'targetSessionId', message: '请选择要绑定的任务' };
+    return {
+      field: 'targetSessionId',
+      message: presentationText(localizer, 'devices.automations.presentation.validation.boundSession', '请选择要绑定的任务'),
+    };
   }
   if (draft.runMode === 'recurring') {
-    if (!draft.cronExpr.trim()) return { field: 'cronExpr', message: '请输入 cron 表达式' };
-    const intervalError = validateIntervalMinutes(draft.intervalMinutes);
+    if (!draft.cronExpr.trim()) {
+      return {
+        field: 'cronExpr',
+        message: presentationText(localizer, 'devices.automations.presentation.validation.cron', '请输入 cron 表达式'),
+      };
+    }
+    const intervalError = validateIntervalMinutes(draft.intervalMinutes, localizer);
     if (intervalError) return { field: 'intervalMinutes', message: intervalError };
   }
   if (
@@ -241,12 +268,17 @@ export function validateMobileScheduleDraft(
     !draft.targetSessionId.trim() &&
     !draft.workingDir.trim()
   ) {
-    return { field: 'workingDir', message: '请输入项目目录' };
+    return {
+      field: 'workingDir',
+      message: presentationText(localizer, 'devices.automations.presentation.validation.workingDir', '请输入项目目录'),
+    };
   }
   if (draft.effort.trim() && !isMobileScheduleEffort(draft.effort.trim())) {
     return {
       field: 'effort',
-      message: `推理强度只能是 ${MOBILE_SCHEDULE_EFFORT_VALUES.join(' / ')}`,
+      message: presentationText(localizer, 'devices.automations.presentation.validation.effort', `推理强度只能是 ${MOBILE_SCHEDULE_EFFORT_VALUES.join(' / ')}`, {
+        values: MOBILE_SCHEDULE_EFFORT_VALUES.join(' / '),
+      }),
     };
   }
   return null;
@@ -513,14 +545,17 @@ function defaultModelFor(agentKind: RemoteScheduleAgentKind): string {
   return DEFAULT_CLAUDE_MODEL;
 }
 
-function validateIntervalMinutes(value: string): string | null {
+function validateIntervalMinutes(
+  value: string,
+  localizer?: PresentationLocalizer,
+): string | null {
   if (!value.trim()) return null;
   const minutes = Number(value);
   if (!Number.isInteger(minutes) || minutes <= 0) {
-    return '间隔分钟必须是正整数';
+    return presentationText(localizer, 'devices.automations.presentation.validation.intervalPositiveInteger', '间隔分钟必须是正整数');
   }
   if (intervalMinutesToCronExpr(minutes) === null) {
-    return '分钟间隔只支持 1-59 分钟，或 1-23 小时的整点间隔';
+    return presentationText(localizer, 'devices.automations.presentation.validation.intervalUnsupported', '分钟间隔只支持 1-59 分钟，或 1-23 小时的整点间隔');
   }
   return null;
 }

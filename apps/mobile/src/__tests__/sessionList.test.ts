@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { i18n } from '@/i18n';
 import {
   buildSessionMessagePreviewIndex,
   buildRemoteSessionListContext,
@@ -17,6 +18,10 @@ import {
 } from '@/session/sessionList';
 import type { RemoteSchedule, RemoteScheduleRun } from '@/scheduler/types';
 import type { RemoteMessage, RemoteSession } from '@/session/types';
+
+beforeAll(async () => {
+  await i18n.changeLanguage('zh-CN');
+});
 
 function session(id: string, patch: Partial<RemoteSession> = {}): RemoteSession {
   return {
@@ -145,7 +150,7 @@ describe('sessionList', () => {
     expect(buildRemoteSessionCardPreview({
       ...base,
       scheduleInfo: { scheduleId: 's', scheduleName: '巡检', unreadRunIds: [], unreadCount: 0, running: true, latestRunAt: 0 },
-    }, { running: true })).toBe('自动化执行中');
+    }, { running: true })).toBe('自动化运行中');
   });
 
   it('shows the device-link preview on idle rows, null when the session has no message', () => {
@@ -246,7 +251,7 @@ describe('sessionList', () => {
     expect(group).toMatchObject({
       title: '移动端巡检',
       subtitle: '自动化 · 2 个任务 · Claude Code · claude-sonnet-4-6',
-      detail: '2 个任务 · 4 分钟前 · 自动化执行中 · 1 个自动化未读',
+      detail: '2 个任务 · 4 分钟前 · 自动化运行中 · 未读 1',
       automationGroup: {
         key: 'schedule:sched-1',
         sessionIds: ['running', 'old'],
@@ -372,8 +377,8 @@ describe('sessionList', () => {
       ['scheduled-waiting', 1],
       ['waiting', 2],
     ]);
-    expect(waitingRows.find((item) => item.session.id === 'waiting')?.detail).toContain('等待处理 2 个');
-    expect(waitingRows.find((item) => item.session.id === 'scheduled-waiting')?.detail).toContain('等待处理 1 个');
+    expect(waitingRows.find((item) => item.session.id === 'waiting')?.detail).toContain('待处理 2');
+    expect(waitingRows.find((item) => item.session.id === 'scheduled-waiting')?.detail).toContain('待处理 1');
 
     const automationRows = buildRemoteSessionSections(sessions, Date.now(), {
       pendingInteractionIndex,
@@ -419,7 +424,7 @@ describe('sessionList', () => {
     });
     expect(remoteSessionFilterLabel('waiting', overview)).toBe('待处理 1');
     expect(remoteSessionFilterLabel('all', overview)).toBe('全部 5');
-    expect(remoteSessionControlsSummary('automation', overview)).toBe('自动化 2 · 项目分组');
+    expect(remoteSessionControlsSummary('automation', overview)).toBe('自动化 2 · 按项目分组');
     expect(remoteSessionOverviewCopy(overview)).toBe('1 个置顶 · 3 个项目 · 1 个自动化执行中');
   });
 
@@ -442,7 +447,7 @@ describe('sessionList', () => {
       statusFilter: 'active',
     })).toMatchObject({
       title: '搜索结果',
-      detail: '1 个匹配任务 · 活跃 2 · 项目分组',
+      detail: '1 个匹配任务 · 活跃 2 · 按项目分组',
       hint: '搜索范围包含标题、项目路径、模型、自动化名称和消息预览。',
       resultCount: 1,
       rowCount: 1,
@@ -473,7 +478,7 @@ describe('sessionList', () => {
       statusFilter: 'automation',
     })).toMatchObject({
       title: '自动化生成的任务',
-      detail: '2 个任务 · 1 行 · 自动化 2 · 项目分组',
+      detail: '2 个任务 · 1 行 · 自动化 2 · 按项目分组',
       hint: '自动化生成的任务会按计划聚合，展开后可以进入单次运行。',
       resultCount: 2,
       rowCount: 1,
@@ -494,7 +499,7 @@ describe('sessionList', () => {
       title: '没有归档任务',
     });
     expect(deviceSessionEmptyState('active', '')).toMatchObject({
-      title: '这台电脑暂无活动任务',
+      title: '这台电脑暂无活跃任务',
     });
   });
 

@@ -84,6 +84,7 @@ function WorkerAvatar({
   showAttentionDot?: boolean;
   selected?: boolean;
 }) {
+  const { t } = useTranslation();
   const vendor = agentKindToVendor(agent);
   const selectedIdleClassName =
     selected && status !== 'running' && status !== 'error'
@@ -104,7 +105,7 @@ function WorkerAvatar({
             backgroundColor: 'var(--card-status-done)',
             boxShadow: '0 0 0 1.5px var(--surface-elevated)',
           }}
-          aria-label="unread"
+          aria-label={t('orca.rolePill.unread')}
         />
       )}
     </span>

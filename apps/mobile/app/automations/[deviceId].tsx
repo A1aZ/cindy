@@ -12,6 +12,8 @@ import {
 import { Text, TextInput } from '@/components/AppText';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
+import { mobilePresentationLocalizer } from '@/i18n/presentationLocalizer';
 import { ConnectionBanner } from '@/components/ConnectionBanner';
 import { useUnresponsiveDevices } from '@/device-link/unresponsiveDevicesStore';
 import { goBackGuarded } from '@/utils/backGuard';
@@ -381,13 +383,17 @@ export default function AutomationsScreen() {
 
   const submitScheduleForm = useCallback(async () => {
     if (!formDraft || busyAction) return;
-    const validation = validateMobileScheduleDraft(formDraft);
+    const validation = validateMobileScheduleDraft(formDraft, mobilePresentationLocalizer);
     if (validation) {
       setFormError(validation.message);
       return;
     }
     if (formMode === 'create' && selectedTemplate && !templatePromptDirty) {
-      const paramError = validateTemplateParamValues(selectedTemplate, templateParamValues);
+      const paramError = validateTemplateParamValues(
+        selectedTemplate,
+        templateParamValues,
+        mobilePresentationLocalizer,
+      );
       if (paramError) {
         setFormError(paramError);
         return;
@@ -1061,7 +1067,11 @@ function ScheduleFormCard({
     <View style={styles.formCard} testID="automations.form">
       <View style={styles.formHeader}>
         <View>
-          <Text style={styles.sectionTitle}>{mode === 'edit' ? 'Edit Automation' : 'New Automation'}</Text>
+          <Text style={styles.sectionTitle}>
+            {mode === 'edit'
+              ? t('devices.automations.form.title.edit')
+              : t('devices.automations.form.title.create')}
+          </Text>
           <Text style={styles.formTitle}>{mode === 'edit' ? t('devices.automations.form.title.edit') : t('devices.automations.form.title.create')}</Text>
         </View>
         {busy ? <ActivityIndicator color={colors.textSecondary} /> : null}
@@ -1196,7 +1206,10 @@ function ScheduleFormCard({
                         || session.workingDir || session.id}
                     </Text>
                     <Text style={styles.boundSessionMeta} numberOfLines={1}>
-                      {formatSessionOptionMeta(session)}
+                      {formatSessionOptionMeta(
+                        session,
+                        t('devices.automations.form.workspace.dialogue'),
+                      )}
                     </Text>
                   </View>
                 </MainWindowRowButton>
@@ -1441,7 +1454,7 @@ function ScheduleDeleteCard({
         sessionIds: state.sessionIds ?? [],
         sessionCount: state.sessionIds?.length ?? 0,
         inflightCount: state.inflightCount ?? 0,
-      });
+      }, mobilePresentationLocalizer);
   const confirmText = state.disposition === 'delete'
     ? t('devices.automations.delete.confirmDeleteBoth')
     : state.disposition === 'archive'
@@ -1452,7 +1465,7 @@ function ScheduleDeleteCard({
     <View style={styles.deleteCard} testID="automations.deleteDialog">
       <View style={styles.deleteHeader}>
         <View style={styles.deleteHeaderText}>
-          <Text style={styles.sectionTitle}>Delete Automation</Text>
+          <Text style={styles.sectionTitle}>{t('devices.automations.heading.delete')}</Text>
           <Text style={styles.deleteTitle} numberOfLines={2}>{t('devices.automations.delete.title', { name: state.schedule.name })}</Text>
         </View>
         {state.loading || busy ? <ActivityIndicator color={colors.textSecondary} /> : null}
@@ -1533,12 +1546,16 @@ function SchedulePauseCard({
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const confirmation = buildSchedulePauseConfirmation(state.schedule, state.inflightCount);
+  const confirmation = buildSchedulePauseConfirmation(
+    state.schedule,
+    state.inflightCount,
+    mobilePresentationLocalizer,
+  );
   return (
     <View style={styles.pauseCard} testID="automations.pauseDialog">
       <View style={styles.deleteHeader}>
         <View style={styles.deleteHeaderText}>
-          <Text style={styles.sectionTitle}>Pause Automation</Text>
+          <Text style={styles.sectionTitle}>{t('devices.automations.heading.pause')}</Text>
           <Text style={styles.deleteTitle} numberOfLines={2}>
             {confirmation?.title ?? t('devices.automations.pause.title', { name: state.schedule.name || state.schedule.id })}
           </Text>
@@ -1590,12 +1607,12 @@ function RunDeleteCard({
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const summary = summarizeRun(state.run);
+  const summary = summarizeRun(state.run, Date.now(), mobilePresentationLocalizer);
   return (
     <View style={styles.pauseCard} testID="automations.runDeleteDialog">
       <View style={styles.deleteHeader}>
         <View style={styles.deleteHeaderText}>
-          <Text style={styles.sectionTitle}>Delete Run</Text>
+          <Text style={styles.sectionTitle}>{t('devices.automations.heading.deleteRun')}</Text>
           <Text style={styles.deleteTitle} numberOfLines={2}>
             {t('devices.automations.runDelete.title')}
           </Text>
@@ -1694,7 +1711,11 @@ function TemplatePicker({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
-  const selected = templates.find((template) => template.id === selectedTemplateId) ?? null;
+  const localizedTemplates = useMemo(
+    () => templates.map((template) => localizeBuiltinTemplate(template, t)),
+    [t, templates],
+  );
+  const selected = localizedTemplates.find((template) => template.id === selectedTemplateId) ?? null;
   return (
     <View style={styles.templateSection} testID="automations.templateSection">
       <View style={styles.templateHeader}>
@@ -1718,7 +1739,7 @@ function TemplatePicker({
         contentContainerStyle={styles.templateList}
         testID="automations.templateList"
       >
-        {templates.map((template) => (
+        {localizedTemplates.map((template) => (
           <TemplateCard
             key={template.id}
             disabled={busy}
@@ -1913,7 +1934,7 @@ function ScheduleRow({
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const summary = summarizeSchedule(schedule, runs);
+  const summary = summarizeSchedule(schedule, runs, Date.now(), mobilePresentationLocalizer);
   return (
     <MainWindowRowButton
       accessibilityLabel={t('devices.automations.scheduleRowA11y', { title: summary.title })}
@@ -1959,7 +1980,7 @@ function ScheduleDetail({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
-  const summary = summarizeSchedule(schedule, runs);
+  const summary = summarizeSchedule(schedule, runs, Date.now(), mobilePresentationLocalizer);
   const paused = schedule.status === 'paused';
   const actionBusy = !!busyAction || runsLoading;
   const pauseDisabled = actionBusy || schedule.status === 'expired';
@@ -1987,7 +2008,9 @@ function ScheduleDetail({
         primaryActions={[{
           accessibilityLabel: t('devices.automations.detail.runNowA11y'),
           disabled: actionBusy,
-          label: busyAction === `run:${schedule.id}` ? t('devices.automations.detail.running') : 'Run now',
+          label: busyAction === `run:${schedule.id}`
+            ? t('devices.automations.detail.running')
+            : t('devices.automations.runNow'),
           onPress: onRunNow,
           testID: 'automations.runNowButton',
           tone: 'primary',
@@ -2032,7 +2055,7 @@ function RunRow({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
-  const summary = summarizeRun(run);
+  const summary = summarizeRun(run, Date.now(), mobilePresentationLocalizer);
   const actionBusy = !!busyAction || opening;
   const hasActions = summary.canOpenSession || summary.canRestart || summary.canMarkRead || summary.canDelete;
   return (
@@ -2135,6 +2158,41 @@ const TEMPLATE_CATEGORY_RANK: Record<string, number> = {
   'office-docs': 3,
 };
 
+const BUILTIN_TEMPLATE_IDS = new Set([
+  'nightly-test-heal',
+  'pr-gatekeeper',
+  'domain-radar',
+  'competitor-watch',
+  'weekly-work-draft',
+  'knowledge-freshness',
+]);
+
+function localizeBuiltinTemplate(
+  template: RemoteScheduleTemplate,
+  t: TFunction,
+): RemoteScheduleTemplate {
+  if (template.source !== 'builtin' || !BUILTIN_TEMPLATE_IDS.has(template.id)) return template;
+  const prefix = `devices.automations.template.builtin.${template.id}`;
+  const templateVariables = Object.fromEntries(
+    (template.parameters ?? []).map((parameter) => [parameter.key, `{{${parameter.key}}}`]),
+  );
+  return {
+    ...template,
+    name: t(`${prefix}.name`, { defaultValue: template.name }),
+    description: t(`${prefix}.description`, { defaultValue: template.description }),
+    prompt: template.prompt
+      ? t(`${prefix}.prompt`, { defaultValue: template.prompt, ...templateVariables })
+      : template.prompt,
+    parameters: template.parameters?.map((parameter) => ({
+      ...parameter,
+      label: t(`${prefix}.params.${parameter.key}.label`, { defaultValue: parameter.label }),
+      placeholder: parameter.placeholder
+        ? t(`${prefix}.params.${parameter.key}.placeholder`, { defaultValue: parameter.placeholder })
+        : parameter.placeholder,
+    })),
+  };
+}
+
 function sortTemplatesForMobile(
   list: readonly RemoteScheduleTemplate[],
 ): RemoteScheduleTemplate[] {
@@ -2168,9 +2226,9 @@ function buildBoundSessionOptions(
   return [selected, ...options.slice(0, 5)];
 }
 
-function formatSessionOptionMeta(session: RemoteSession): string {
+function formatSessionOptionMeta(session: RemoteSession, dialogueLabel: string): string {
   const agent = mobileAgentLabelFromUnknown(session.agentKind);
-  const workspace = session.workingDir ? lastPathSegment(session.workingDir) : 'Dialogue';
+  const workspace = session.workingDir ? lastPathSegment(session.workingDir) : dialogueLabel;
   return `${agent} · ${workspace} · ${session.id.slice(0, 8)}`;
 }
 

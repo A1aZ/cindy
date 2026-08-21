@@ -14108,7 +14108,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined;
     const defaultPath = path.join(app.getPath('documents'), 'cindy-session.html');
     const picked = await dialog.showSaveDialog(parent!, {
-      title: 'Export session to HTML',
+      title: t('ccAgent.sidebar.sessionMenu.exportHtml'),
       defaultPath,
       filters: [{ name: 'HTML', extensions: ['html'] }],
     });

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { mobilePresentationLocalizer } from '@/i18n/presentationLocalizer';
 import {
   Check,
   CornerDownLeft,
@@ -172,7 +173,7 @@ export function InteractionPanel({
   const queuePresentation = buildPendingInteractionQueuePresentation(sortedInteractions, {
     maxVisible: sortedInteractions.length || 1,
     readOnly: !!readOnlyReason,
-  });
+  }, mobilePresentationLocalizer);
   const activeRequestIdForPresentation = readRequestId(activeInteraction);
   const selectedQueueItem = queuePresentation.items.find((item) => item.requestId === activeRequestIdForPresentation)
     ?? queuePresentation.active;
@@ -597,7 +598,10 @@ function PermissionCard({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
-  const presentation = useMemo(() => buildPermissionReviewPresentation(item.request), [item.request]);
+  const presentation = useMemo(
+    () => buildPermissionReviewPresentation(item.request, mobilePresentationLocalizer),
+    [item.request],
+  );
   const suggestions = sessionScopedPermissionSuggestions(item.request.suggestions);
   const requestId = readRequestId(item);
   const [armedDecision, setArmedDecision] = useState<'allow-once' | 'always-allow' | null>(null);
@@ -752,7 +756,7 @@ function AskUserQuestionCard({
   const presentation = useMemo(() => buildAskQuestionReviewPresentation({
     currentIndex,
     questions,
-  }), [currentIndex, questions]);
+  }, mobilePresentationLocalizer), [currentIndex, questions]);
   const current = presentation.current;
 
   useEffect(() => {
@@ -1099,7 +1103,7 @@ function PlanReviewCard({
     filePath,
     maxOutlineItems: 8,
     plan: planText,
-  }), [filePath, originalPlan, planText]);
+  }, mobilePresentationLocalizer), [filePath, originalPlan, planText]);
   const isEdit = viewerState === 'edit';
   const isMinimized = viewerState === 'minimized';
   const expandedPlan = viewerState === 'expanded' || viewerState === 'edit';
@@ -1608,7 +1612,7 @@ function ResolveButton({
     invalidReason,
     label,
     requestId,
-  });
+  }, mobilePresentationLocalizer);
   const buttonStyle = variant === 'primary'
     ? styles.primaryButton
     : variant === 'secondary'

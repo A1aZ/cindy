@@ -6173,11 +6173,12 @@ function MessageMoreButton({
   iconSize: number;
   onPress(): void;
 }) {
+  const { t } = useTranslation();
   const { colors } = useTheme();
   const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
-      accessibilityLabel="更多消息操作"
+      accessibilityLabel={t('message.renderer.moreActions')}
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled === true }}
       disabled={disabled}

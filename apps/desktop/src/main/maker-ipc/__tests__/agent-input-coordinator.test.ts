@@ -170,6 +170,7 @@ function createHarness(opts?: {
   getRecoveryContextSnapshot?: (sessionId: string, userClientId: string) => Promise<RecoveryContextSnapshot>;
 }) {
   let running = false;
+  let liveRunningOverride: boolean | null | 'unknown' = null;
   let turnGeneration = 0;
   let turnSessionIdentity: object = {};
   let pendingInteraction = false;
@@ -286,6 +287,10 @@ function createHarness(opts?: {
     onRejectedUserTurn,
     supersedeRetriedUserTurn,
     isTurnRunning: () => running,
+    isLiveTurnRunning: () => {
+      if (liveRunningOverride === 'unknown') return undefined;
+      return liveRunningOverride === null ? running : liveRunningOverride;
+    },
     getTurnGeneration: () => turnGeneration,
     getTurnSessionIdentity: () => turnSessionIdentity,
     reconcileTurnIdle,
@@ -361,6 +366,9 @@ function createHarness(opts?: {
     supersedeRetriedUserTurn,
     setRunning(value: boolean) {
       running = value;
+    },
+    setLiveRunning(value: boolean | null | 'unknown') {
+      liveRunningOverride = value;
     },
     setTurnGeneration(value: number) {
       turnGeneration = value;
@@ -5940,6 +5948,161 @@ describe('AgentInputCoordinator steer transaction', () => {
     );
     expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
     expect(mocks.touchUserSendInDb).toHaveBeenCalledWith(sid, undefined);
+  });
+
+  it('reconciles a stale tracker on drain and releases the queued head without Stop/steer', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 'drain-stale-tracker';
+      const first = makeItem('q-1', 'queued-after-idle');
+
+      h.setRunning(true);
+      h.setLiveRunning(false);
+      h.reconcileTurnIdle.mockImplementation(() => {
+        h.setRunning(false);
+        h.setLiveRunning(false);
+        return true;
+      });
+
+      h.coordinator.enqueue(sid, first);
+      await flush();
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+
+      expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+      expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not treat a second immediate drain as confirmation of a lost terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 'drain-stale-tracker-grace';
+      h.setRunning(true);
+      h.setLiveRunning(false);
+      h.reconcileTurnIdle.mockImplementation(() => {
+        h.setRunning(false);
+        h.setLiveRunning(false);
+        return true;
+      });
+
+      h.coordinator.enqueue(sid, makeItem('q-1', 'queued-after-idle'));
+      await flush();
+      h.coordinator.enqueue(sid, makeItem('q-2', 'second-drain'));
+      await flush();
+
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(249);
+      await flush();
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+      expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reconcile a dispatched turn that has not started yet', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 'drain-dispatched-not-started';
+      const first = makeItem('q-1', 'first');
+      const second = makeItem('q-2', 'queued-before-agent-start');
+
+      h.coordinator.enqueue(sid, first);
+      await flush();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+      h.setLiveRunning(false);
+      h.setRunning(true);
+      h.coordinator.enqueue(sid, second);
+      await flush();
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+      expect(latestProjection(h.projections).pendingQueue.map((q) => q.clientId)).toEqual(['q-2']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not synthesize done when the real terminal arrives during the live-idle grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 'drain-stale-real-done';
+      const first = makeItem('q-1', 'first');
+      const second = makeItem('q-2', 'queued-after-idle');
+
+      h.coordinator.enqueue(sid, first);
+      await flush();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+      h.setLiveRunning(false);
+      h.setRunning(true);
+      h.coordinator.enqueue(sid, second);
+      await flush();
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+      h.setRunning(false);
+      h.coordinator.onTurnEvent(sid, 'done');
+      await flush();
+
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+      expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+        type: 'user',
+        content: 'queued-after-idle',
+      });
+
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+      expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reconcile while the live turn is still running', async () => {
+    const h = createHarness();
+    const sid = 'drain-live-busy';
+    h.setRunning(true);
+    h.reconcileTurnIdle.mockReturnValue(false);
+    h.coordinator.enqueue(sid, makeItem('q-1', 'wait'));
+    await flush();
+    expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+    expect(h.sendToAgent).not.toHaveBeenCalled();
+    expect(latestProjection(h.projections).pendingQueue.map((q) => q.clientId)).toEqual(['q-1']);
+  });
+
+  it('does not reconcile when the live Session probe is unavailable', async () => {
+    const h = createHarness();
+    const sid = 'drain-live-unknown';
+    h.setRunning(true);
+    h.setLiveRunning('unknown');
+    h.coordinator.enqueue(sid, makeItem('q-1', 'wait'));
+    await flush();
+    expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+    expect(h.sendToAgent).not.toHaveBeenCalled();
+    expect(latestProjection(h.projections).pendingQueue.map((q) => q.clientId)).toEqual(['q-1']);
   });
 
   it('recovers from a zombie turn: NO_ACTIVE_TURN reconciles stale busy state and dispatches the fallback', async () => {

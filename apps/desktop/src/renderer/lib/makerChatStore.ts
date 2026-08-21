@@ -5748,11 +5748,14 @@ export function handleStreamEvent(
       if (boundaryId && state.messages.some((message) => message.clientId === clientId)) {
         return state;
       }
-      const finalized = finalizeStreamingInState(state);
+      // Background compact belongs to the previous idle cycle. Finalizing here
+      // would seal a product turn that started after compaction_start.
+      const nextState =
+        event.turnScope === 'background' ? state : finalizeStreamingInState(state);
       return {
-        ...finalized,
+        ...nextState,
         messages: [
-          ...finalized.messages,
+          ...nextState.messages,
           {
             clientId,
             role: 'assistant' as const,
@@ -5942,6 +5945,39 @@ function mergeLiveGenerationStatus(
   return merged;
 }
 
+/** Idle compact / late background status may refresh copy and context tokens without flipping the product turn. */
+function applyBackgroundStatus(
+  state: SessionChatState,
+  data: Record<string, unknown>,
+): SessionChatState {
+  const rawStatus = typeof data.status === 'string' ? data.status.trim() : '';
+  // A late idle-compact Done must not paint the product turn as finished.
+  const status =
+    !rawStatus || (rawStatus === 'Done' && state.agentStatus.isRunning)
+      ? state.agentStatus.status
+      : rawStatus;
+  let contextTokens = state.agentStatus.contextTokens;
+  let contextWindow = state.agentStatus.contextWindow;
+  if (
+    typeof data.contextWindow === 'number' &&
+    data.contextWindow > 0 &&
+    typeof data.contextTokens === 'number' &&
+    data.contextTokens >= 0
+  ) {
+    contextTokens = data.contextTokens;
+    contextWindow = data.contextWindow;
+  }
+  return {
+    ...state,
+    agentStatus: {
+      ...state.agentStatus,
+      status,
+      contextTokens,
+      contextWindow,
+    },
+  };
+}
+
 function handleStatusUpdate(
   state: SessionChatState,
   update: CCAgentStatusUpdate,
@@ -6103,6 +6139,7 @@ type MakerEventPayload = {
     source?: 'claude-code' | 'codex' | 'pi' | 'vision-bridge';
     agentMeta?: Record<string, unknown>;
     turnContinuationId?: number;
+    turnScope?: 'turn' | 'background';
   };
   persistId?: string;
   resolvedContent?: string;
@@ -6286,6 +6323,7 @@ function dispatchStreamEventPayload(
     ...(event.turnContinuationId !== undefined
       ? { turnContinuationId: event.turnContinuationId }
       : {}),
+    ...(event.turnScope !== undefined ? { turnScope: event.turnScope } : {}),
     persistId,
     resolvedContent,
   } as CCAgentStreamEvent;
@@ -6666,9 +6704,14 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
     // 持久化 (totalCostUsd / contextTokens / contextWindow → sessions 表) 已搬到 main 端的
     // sessionSpendBroadcaster, renderer 只更新 in-memory agentStatus, 不再 IPC 写库 (避免多 window 竞写)。
     if (event.type === 'status') {
+      const data = event.data as Record<string, unknown>;
+      if (event.turnScope === 'background') {
+        setState(sessionId, (s) => applyBackgroundStatus(s, data));
+        return;
+      }
       const update = {
         sessionId,
-        ...(event.data as Record<string, unknown>),
+        ...data,
         ...(event.turnContinuationId !== undefined
           ? { turnContinuationId: event.turnContinuationId }
           : {}),

@@ -58,6 +58,7 @@ import {
   BaseAgent,
   MAIN_OWNED_SEND_CONTEXT,
   PiManagedPackageMutationCancelledError,
+  PiNativeProviderProxyNotReadyError,
   TurnDispatchRejectedError,
   TurnDispatchUnconfirmedError,
   TurnPermissionPolicyUnsupportedError,
@@ -1353,6 +1354,7 @@ export class PiAgent extends BaseAgent {
         nativeProviders = resolved?.providers ?? [];
         nativeEnv = resolved?.env ?? {};
       } catch (err) {
+        if (err instanceof PiNativeProviderProxyNotReadyError) throw err;
         nativeResolveFailed = true;
         this.deps.logger.warn('pi resolvePiNativeProviders failed', {
           message: err instanceof Error ? err.message : String(err),

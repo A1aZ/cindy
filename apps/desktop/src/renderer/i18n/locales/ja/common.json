@@ -6561,6 +6561,7 @@
     },
     "chatInput": {
       "defaultPlaceholder": "今日は何をしましょうか〜",
+      "createAgentPlaceholder": "{{appName}}さん、こんにちは！",
       "voiceInput": {
         "start": "音声入力を開始",
         "stop": "音声入力を停止",

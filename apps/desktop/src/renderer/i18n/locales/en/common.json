@@ -6563,6 +6563,7 @@
     },
     "chatInput": {
       "defaultPlaceholder": "What shall we work on today~",
+      "createAgentPlaceholder": "Hi {{appName}}!",
       "voiceInput": {
         "start": "Start voice input",
         "stop": "Stop voice input",

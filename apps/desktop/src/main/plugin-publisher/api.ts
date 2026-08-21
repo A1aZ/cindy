@@ -18,9 +18,11 @@ import {
 } from '@cindy/plugin-protocol';
 
 import { getClientEndpoint } from '../clientEndpointsService.js';
+import { createLogger } from '../logger.js';
 import { ServerApiError, serverApiFetch, type ApiFetchOptions } from '../serverApiClient.js';
 
 const PLUGIN_PUBLISHER_API_TIMEOUT_MS = 15_000;
+export const UNKNOWN_FAILURE_CODE_REPORT_LIMIT = 64;
 const CONNECTION_UNAUTHORIZED_CODES = new Set([
   'CONNECTION_UNAUTHORIZED',
   'INVALID_CONNECTION_TOKEN',
@@ -41,8 +43,34 @@ export class PluginPublisherApiError extends Error {
 export interface PluginPublisherApiDeps {
   getToken(): Promise<string>;
   invalidateToken(): void;
+  unknownFailureCodeReporter?: UnknownFailureCodeReporter;
   fetchImpl?: <T>(apiPath: string, options: Omit<ApiFetchOptions, 'baseUrl'>) => Promise<T>;
 }
+
+export interface UnknownFailureCodeReporter {
+  report(code: string): void;
+}
+
+export function createUnknownFailureCodeReporter(
+  reportUnknownCode: (code: string) => void,
+): UnknownFailureCodeReporter {
+  const reportedCodes = new Set<string>();
+  return {
+    report(code) {
+      if (reportedCodes.has(code)) return;
+      // Saturate instead of evicting: eviction lets a stream of new codes recycle old entries
+      // and produce an unbounded warning flood.
+      if (reportedCodes.size >= UNKNOWN_FAILURE_CODE_REPORT_LIMIT) return;
+      reportedCodes.add(code);
+      reportUnknownCode(code);
+    },
+  };
+}
+
+const log = createLogger('plugin-publisher');
+const defaultUnknownFailureCodeReporter = createUnknownFailureCodeReporter((code) => {
+  log.warn('plugin publisher received unknown member upload failure code', { code });
+});
 
 function wrapError(error: unknown): never {
   if (error instanceof PluginPublisherApiError) throw error;
@@ -53,7 +81,24 @@ function wrapError(error: unknown): never {
 }
 
 export class PluginPublisherApi {
-  constructor(private readonly deps: PluginPublisherApiDeps) {}
+  private readonly unknownFailureCodeReporter: UnknownFailureCodeReporter;
+
+  constructor(private readonly deps: PluginPublisherApiDeps) {
+    this.unknownFailureCodeReporter =
+      deps.unknownFailureCodeReporter ?? defaultUnknownFailureCodeReporter;
+  }
+
+  private reportUnknownFailureCode(code: string): void {
+    this.unknownFailureCodeReporter.report(code);
+  }
+
+  private inspectFailures(statuses: readonly PluginMemberUploadStatusResponse[]): void {
+    for (const status of statuses) {
+      if (status.failure?.knownCode === null) {
+        this.reportUnknownFailureCode(status.failure.code);
+      }
+    }
+  }
 
   private async authorizedFetch<T>(
     apiPath: string,
@@ -131,7 +176,9 @@ export class PluginPublisherApi {
       `/api/publisher/uploads/${encodeURIComponent(uploadId)}`,
       { method: 'GET' },
     );
-    return parsePluginMemberUploadStatusResponse(raw);
+    const response = parsePluginMemberUploadStatusResponse(raw);
+    this.inspectFailures([response]);
+    return response;
   }
 
   async listMine(cursor?: string): Promise<ListMyPluginMemberReleasesResponse> {
@@ -141,6 +188,8 @@ export class PluginPublisherApi {
     const raw = await this.authorizedFetch<unknown>(`/api/publisher/releases/mine${suffix}`, {
       method: 'GET',
     });
-    return parseListMyPluginMemberReleasesResponse(raw);
+    const response = parseListMyPluginMemberReleasesResponse(raw);
+    this.inspectFailures(response.releases);
+    return response;
   }
 }

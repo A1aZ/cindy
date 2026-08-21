@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { ServerApiError } from '../../serverApiClient.js';
-import { PluginPublisherApi } from '../api.js';
+import {
+  createUnknownFailureCodeReporter,
+  PluginPublisherApi,
+  UNKNOWN_FAILURE_CODE_REPORT_LIMIT,
+} from '../api.js';
 
 const SHA = 'a'.repeat(64);
 
@@ -86,5 +90,74 @@ describe('PluginPublisherApi', () => {
     await expect(api.commit('upload-1')).resolves.toMatchObject({ status: 'validating' });
     expect(invalidateToken).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports an unknown bounded failure code once without forwarding its message', async () => {
+    const onUnknownFailureCode = vi.fn();
+    const unknownFailure = {
+      code: 'PUBLISH_FUTURE_POLICY',
+      message: 'user-facing server detail that must not enter the warning',
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        uploadId: 'upload-unknown',
+        status: 'failed',
+        pluginId: null,
+        releaseId: null,
+        ghostId: null,
+        version: null,
+        reviewStatus: null,
+        failure: unknownFailure,
+      })
+      .mockResolvedValueOnce({
+        releases: [
+          {
+            uploadId: 'upload-unknown',
+            status: 'failed',
+            pluginId: null,
+            releaseId: null,
+            ghostId: null,
+            version: null,
+            reviewStatus: null,
+            failure: unknownFailure,
+            createdAt: '2026-08-19T08:15:00.000Z',
+            updatedAt: '2026-08-19T08:16:00.000Z',
+          },
+        ],
+        nextCursor: null,
+      });
+    const api = new PluginPublisherApi({
+      getToken: async () => 'conn-token',
+      invalidateToken: vi.fn(),
+      unknownFailureCodeReporter: createUnknownFailureCodeReporter(onUnknownFailureCode),
+      fetchImpl: fetchImpl as never,
+    });
+
+    const status = await api.status('upload-unknown');
+    const list = await api.listMine();
+
+    expect(onUnknownFailureCode).toHaveBeenCalledOnce();
+    expect(onUnknownFailureCode).toHaveBeenCalledWith('PUBLISH_FUTURE_POLICY');
+    expect(status.failure?.message).toBe(unknownFailure.message);
+    expect(list.releases[0]?.failure?.message).toBe(unknownFailure.message);
+  });
+
+  it('saturates unknown failure reports instead of evicting and flooding logs', () => {
+    expect(UNKNOWN_FAILURE_CODE_REPORT_LIMIT).toBe(64);
+
+    const onUnknownFailureCode = vi.fn();
+    const reporter = createUnknownFailureCodeReporter(onUnknownFailureCode);
+
+    for (let index = 0; index <= UNKNOWN_FAILURE_CODE_REPORT_LIMIT; index += 1) {
+      reporter.report(`FUTURE_CODE_${index}`);
+    }
+    // An eviction policy would report the 65th code and could keep warning forever.
+    reporter.report('FUTURE_CODE_0');
+
+    expect(onUnknownFailureCode).toHaveBeenCalledTimes(UNKNOWN_FAILURE_CODE_REPORT_LIMIT);
+    expect(onUnknownFailureCode).not.toHaveBeenCalledWith(
+      `FUTURE_CODE_${UNKNOWN_FAILURE_CODE_REPORT_LIMIT}`,
+    );
   });
 });

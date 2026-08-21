@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
+  PluginProtocolError,
   PLUGIN_MEMBER_RELEASE_REVIEW_STATUSES,
   PLUGIN_MEMBER_UPLOAD_FAILURE_CODES,
   PLUGIN_MEMBER_UPLOAD_MAX_ARCHIVE_BYTES,
@@ -123,8 +124,12 @@ describe('member upload contract', () => {
         version: null,
         reviewStatus: null,
         failure: { code: 'PLUGIN_PACKAGE_INVALID', message: 'ghost.json 不合法' },
-      }).failure?.code,
-    ).toBe('PLUGIN_PACKAGE_INVALID');
+      }).failure,
+    ).toEqual({
+      code: 'PLUGIN_PACKAGE_INVALID',
+      knownCode: 'PLUGIN_PACKAGE_INVALID',
+      message: 'ghost.json 不合法',
+    });
     expect(() =>
       parsePluginMemberUploadStatusResponse({
         ...succeededStatus(),
@@ -157,7 +162,63 @@ describe('member upload contract', () => {
       failure: { code, message: 'failure message' },
     });
 
-    expect(response.failure).toEqual({ code, message: 'failure message' });
+    expect(response.failure).toEqual({ code, knownCode: code, message: 'failure message' });
+  });
+
+  it('preserves an unknown bounded failure code while marking it unknown', () => {
+    const response = parsePluginMemberUploadStatusResponse({
+      uploadId: 'upload-unknown-failure-code',
+      status: 'failed',
+      pluginId: null,
+      releaseId: null,
+      ghostId: null,
+      version: null,
+      reviewStatus: null,
+      failure: { code: 'PUBLISH_NEW_SERVER_RULE', message: 'server explanation' },
+    });
+
+    expect(response.failure).toEqual({
+      code: 'PUBLISH_NEW_SERVER_RULE',
+      knownCode: null,
+      message: 'server explanation',
+    });
+  });
+
+  it.each(['A', 'A'.repeat(64)])(
+    'accepts bounded UPPER_SNAKE failure code boundary %s',
+    (code) => {
+      const response = parsePluginMemberUploadStatusResponse({
+        uploadId: 'upload-bounded-failure-code',
+        status: 'failed',
+        pluginId: null,
+        releaseId: null,
+        ghostId: null,
+        version: null,
+        reviewStatus: null,
+        failure: { code, message: 'server explanation' },
+      });
+
+      expect(response.failure).toEqual({ code, knownCode: null, message: 'server explanation' });
+    },
+  );
+
+  it.each([
+    ['', 'empty'],
+    ['A'.repeat(65), 'overlong'],
+    ['publish-new-code', 'illegal characters'],
+  ])('rejects %s member upload failure codes (%s)', (code) => {
+    expect(() =>
+      parsePluginMemberUploadStatusResponse({
+        uploadId: 'upload-malformed-failure-code',
+        status: 'failed',
+        pluginId: null,
+        releaseId: null,
+        ghostId: null,
+        version: null,
+        reviewStatus: null,
+        failure: { code, message: 'server explanation' },
+      }),
+    ).toThrow(PluginProtocolError);
   });
 
   it('rejects invalid ghost IDs in status and my-publishes responses', () => {

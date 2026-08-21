@@ -4102,6 +4102,18 @@ interface ElectronAPI {
         ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
       ) => void,
     ) => () => void;
+    getProjectOrder: () => Promise<import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot>;
+    applyProjectOrder: (request: {
+      manualProjectOrder: readonly string[];
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp;
+      projectOrder: 'activity' | 'custom';
+    }) => Promise<import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot>;
+    onProjectOrderChanged: (
+      cb: (
+        snapshot: import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot,
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
   };
 
   remotePrecreatedWorktreeLedger: {

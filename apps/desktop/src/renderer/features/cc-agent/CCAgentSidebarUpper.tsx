@@ -142,6 +142,13 @@ import {
 import { sessionActivityMs } from './lib/dateSessionGrouping';
 import { matchesSidebarSessionStatus } from './lib/sidebarSessionStatusFilter';
 import { sortProjectsForSidebar, sortSessionsForSidebar } from './lib/sidebarProjectSorting';
+import { resolveDisplayedProjectOrder } from '@cindy/maker-shared/project-order-sync';
+import {
+  controllerManualOrderForDevice,
+  projectOrderWriteScopeForSelection,
+  useLocalHostProjectOrder,
+  useRemoteHostProjectOrders,
+} from './hooks/useRemoteHostProjectOrders';
 import { isOrcaWorkerSession, resolveSessionRoute } from '@/lib/orcaSessionIdentity';
 import {
   buildProjectKeyComparisonSet,
@@ -1267,6 +1274,11 @@ function ExpandedView({
   // 机器切换栏选中机器后整体过滤:本机 → 只本地会话;远程 → 只该机器会话。
   // 过滤在源头做,下游 grouping / pinned / projects / dialogues / date-grouped / search 自动继承。
   const selectedMachineId = useEffectiveSelectedMachineId();
+  const localHostProjectOrder = useLocalHostProjectOrder({
+    custom: filter.projectOrder === 'custom',
+    keys: filter.manualProjectOrder,
+  });
+  const { orders: remoteHostProjectOrders } = useRemoteHostProjectOrders(selectedMachineId);
   const switcherDevices = useSwitcherDevices();
   // E 期「按设备分组」:远程设备顺序 + 名称/在线状态(设备切换栏同序同源)。
   // 空 map = 没有远程设备 → ProjectsSection 隐藏该分组选项、不切段。
@@ -1714,6 +1726,38 @@ function ExpandedView({
     [visibleDialogues, dialogueSortBy],
   );
 
+  const hostProjectSort = useMemo(() => {
+    const scope = projectOrderWriteScopeForSelection(selectedMachineId);
+    const hostSnapshot = scope.kind === 'host' && scope.deviceId === null
+      ? localHostProjectOrder.snapshot
+      : scope.kind === 'host' && scope.deviceId
+        ? remoteHostProjectOrders.get(scope.deviceId)
+        : undefined;
+    const hostManual = scope.kind === 'host' && scope.deviceId === null
+      ? localHostProjectOrder.snapshot.manualProjectOrder
+      : scope.kind === 'host' && scope.deviceId
+        ? controllerManualOrderForDevice(scope.deviceId, hostSnapshot) ?? []
+        : [];
+    const displayed = resolveDisplayedProjectOrder(
+      scope,
+      hostSnapshot,
+      filter,
+      hostManual,
+    );
+    return {
+      order: displayed.manualProjectOrder,
+      projectOrder: displayed.projectOrder,
+      sortBy: filter.sortBy,
+    };
+  }, [
+    filter.manualProjectOrder,
+    filter.projectOrder,
+    filter.sortBy,
+    localHostProjectOrder.snapshot,
+    remoteHostProjectOrders,
+    selectedMachineId,
+  ]);
+
   const visibleProjectsWithVendor = useMemo(() => {
     const unpinnedProjects = visibleProjects.filter(
       (project) => !pinnedProjectKeys.has(project.projectKey),
@@ -1732,17 +1776,15 @@ function ExpandedView({
     });
     return sortProjectsForSidebar(
       projects,
-      filter.sortBy,
-      filter.manualProjectOrder,
-      filter.projectOrder,
+      hostProjectSort.sortBy,
+      hostProjectSort.order,
+      hostProjectSort.projectOrder,
     );
   }, [
     visibleProjects,
     pinnedProjectKeys,
     vendorPredicate,
-    filter.sortBy,
-    filter.manualProjectOrder,
-    filter.projectOrder,
+    hostProjectSort,
   ]);
 
   // 折叠 rail 没有独立的 Pinned 项目瓷砖，因此项目面板必须保留置顶项目，
@@ -1762,11 +1804,11 @@ function ExpandedView({
     });
     return sortProjectsForSidebar(
       projects,
-      filter.sortBy,
-      filter.manualProjectOrder,
-      filter.projectOrder,
+      hostProjectSort.sortBy,
+      hostProjectSort.order,
+      hostProjectSort.projectOrder,
     );
-  }, [visibleProjects, vendorPredicate, filter.sortBy, filter.manualProjectOrder, filter.projectOrder]);
+  }, [visibleProjects, vendorPredicate, hostProjectSort]);
 
   /**
    * Pinned 拖拽落定回调。SortableList 给的是当前 visible（含 vendor / projectsFilter

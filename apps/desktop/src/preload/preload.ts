@@ -2,6 +2,13 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
 import { isDeepLinkProviderConnectId } from '../shared/deepLinkSchemes';
+import {
+  parseProjectOrderSnapshot,
+  SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL,
+  SIDEBAR_GET_PROJECT_ORDER_CHANNEL,
+  SIDEBAR_PROJECT_ORDER_CHANGED_CHANNEL,
+  type SyncedProjectOrderSnapshot,
+} from '../shared/projectOrderSettings';
 import type { SessionDragPreviewPalette } from '../shared/sessionDragPreview';
 import {
   AGENT_ISLAND_GET_DISPLAY_OPTIONS_CHANNEL,
@@ -454,6 +461,7 @@ const fanOutSidebarPinnedOrderChanged = createIpcFanOut('sidebar-settings:pinned
 const fanOutSidebarHiddenProjectKeysChanged = createIpcFanOut(
   'sidebar-settings:hidden-project-keys-changed',
 );
+const fanOutSidebarProjectOrderChanged = createIpcFanOut(SIDEBAR_PROJECT_ORDER_CHANGED_CHANNEL);
 // Workdir File Browser — push events from chokidar (add/change/unlink/...)
 const fanOutFileBrowserEvent = createIpcFanOut('maker:file-browser:event');
 const fanOutFileBrowserTransfer = createIpcFanOut('maker:file-browser:transfer');
@@ -4653,6 +4661,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ) {
           cb(Array.from(payload), ownerStamp);
         }
+      }),
+    getProjectOrder: async (): Promise<SyncedProjectOrderSnapshot> =>
+      parseProjectOrderSnapshot(await ipcRenderer.invoke(SIDEBAR_GET_PROJECT_ORDER_CHANNEL)),
+    applyProjectOrder: async (request: {
+      manualProjectOrder: readonly string[];
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp;
+      projectOrder: 'activity' | 'custom';
+    }): Promise<SyncedProjectOrderSnapshot> =>
+      parseProjectOrderSnapshot(await ipcRenderer.invoke(SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL, {
+        ...request.ownerStamp,
+        manualProjectOrder: request.manualProjectOrder,
+        projectOrder: request.projectOrder,
+      })),
+    onProjectOrderChanged: (
+      cb: (
+        snapshot: SyncedProjectOrderSnapshot,
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ): (() => void) =>
+      fanOutSidebarProjectOrderChanged((payload, ownerStamp) => {
+        if (!isDataOwnerPushStamp(ownerStamp)) return;
+        cb(parseProjectOrderSnapshot({ ...parseProjectOrderSnapshot(payload), ownerStamp }), ownerStamp);
       }),
   },
 

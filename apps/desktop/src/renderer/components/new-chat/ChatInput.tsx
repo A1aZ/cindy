@@ -5986,9 +5986,8 @@ export function ChatInput({
 
   /**
    * 切模型前的上下文容量护栏(大窗口 → 小窗口场景)。
-   * 为什么必须在**切换前**拦: `/compact` 自救本身是一次 LLM 调用, 要把全量历史喂给
-   * "当前模型" —— 切到小窗口模型之后连压缩请求都可能超限, 只有还没切走的大窗口模型
-   * 能读完整历史。分级语义见 shared/modelSwitchAssessment.ts。
+   * 分级语义见 shared/modelSwitchAssessment.ts。overflow 确认后由 host 交接换窗,
+   * 不要再建议用户先 /compact —— 小窗口模型压整段历史同样会失败。
    * 返回 false = 用户取消, 调用方直接放弃本次切换(无任何副作用)。
    * fail-open: 占用未知(0)/ 目标窗口未知 / 阈值读取失败都不拦。
    */
@@ -6032,12 +6031,17 @@ export function ChatInput({
       // 期望用户先取消回去压缩(点上下文圆环)或新开会话, "仍然切换"是次选。
       return confirmDialog({
         title: t('newChat.chatInput.modelSwitchContextGuard.title'),
-        description: t('newChat.chatInput.modelSwitchContextGuard.overflowDescription', vars),
+        description: t(
+          remoteHostId
+            ? 'newChat.chatInput.modelSwitchContextGuard.overflowDescriptionRemote'
+            : 'newChat.chatInput.modelSwitchContextGuard.overflowDescription',
+          vars,
+        ),
         confirmText: t('newChat.chatInput.modelSwitchContextGuard.confirmSwitch'),
         cancelText: t('newChat.chatInput.modelSwitchContextGuard.cancelSwitch'),
       });
     },
-    [sessionId, confirmDialog, t],
+    [sessionId, remoteHostId, confirmDialog, t],
   );
 
   // session-agent-switch 意图制:选中「只属于另一家引擎」的模型 → 只向 main 登记

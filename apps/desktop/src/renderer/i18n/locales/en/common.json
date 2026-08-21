@@ -6603,11 +6603,12 @@
       "effortRuntimeDirty": "Reasoning effort is still updating. Wait a moment, then send again.",
       "credentialSwitchApplied": "Model provider switch is now in effect.",
       "modelSwitchContextGuard": {
-        "title": "Target model has a smaller context window",
-        "warnToast": "This session uses {{used}} of context — about {{pct}}% of the target model's {{total}} window after switching",
-        "overflowDescription": "This session uses {{used}} of context, exceeding the target model's {{total}} window (about {{pct}}%). After switching, replies and even compaction may fail. Compact the session first (click the context ring) or start a new session for this model. Switch anyway?",
-        "confirmSwitch": "Switch model anyway",
-        "cancelSwitch": "Cancel switch"
+        "title": "This model can't fit the current conversation",
+        "warnToast": "This conversation already uses {{used}} — about {{pct}}% of the new model's {{total}} capacity",
+        "overflowDescription": "This conversation already uses {{used}}, more than the new model can hold ({{total}}, about {{pct}}%). If you switch, Cindy will make a short summary and continue. Your chat history stays; it just won't all be passed through verbatim.",
+        "overflowDescriptionRemote": "This conversation already uses {{used}}, more than the new model can hold ({{total}}, about {{pct}}%). On a remote session Cindy cannot rebuild a fresh agent context, so the next request may still fail. You can switch anyway, or keep this model.",
+        "confirmSwitch": "Switch and continue",
+        "cancelSwitch": "Keep this model"
       },
       "agentSwitch": {
         "engineNotReady": "Engine switched, but the new engine failed to start; it will retry when you send a message",
@@ -6987,7 +6988,8 @@
       "silentStopContinueTitle": "Continue the current task",
       "piTransportClosed": "Remote Pi connection interrupted (SSH channel closed). The remote task is still running — reconnect to continue.",
       "piManagerUnavailable": "Remote Pi manager is not ready. Retry shortly; if it keeps failing, reinstall Pi under Settings → Remote Machines.",
-      "piBundledNodeMissing": "The remote host is missing its runtime (Node.js). Expand the host under Settings → Remote Machines and click Install on Claude Code or Codex first (they bundle Node.js), then start a Pi task."
+      "piBundledNodeMissing": "The remote host is missing its runtime (Node.js). Expand the host under Settings → Remote Machines and click Install on Claude Code or Codex first (they bundle Node.js), then start a Pi task.",
+      "contextOverflow": "This message itself exceeds the model's context window, so Cindy cannot continue it in a fresh agent session. Shorten the input or remove a large attachment, then try again."
     },
     "backgroundActivity": {
       "status": "Background subtasks running, still consuming model usage…",
@@ -7317,6 +7319,13 @@
         "handoffTitle": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
         "handoffTitleEnglishSource": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
         "resumedBadge": "session resumed"
+      },
+      "contextRebuild": {
+        "labelOverflow": "Context reorganized, continuing",
+        "labelTimeout": "Last turn didn't respond; context reorganized to continue",
+        "toggleHint": "View handoff context",
+        "handoffTitle": "Handoff — the context summary sent to the next stretch of this conversation (not part of the chat transcript; shown only here)",
+        "handoffTitleEnglishSource": "Handoff — the context summary sent to the next stretch of this conversation (not part of the chat transcript; shown only here)"
       },
       "review": {
         "running": "Reviewing current work",

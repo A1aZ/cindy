@@ -276,6 +276,9 @@ function createHarness(opts?: {
   const onRejectedUserTurn = vi.fn<NonNullable<AgentInputCoordinatorDeps['onRejectedUserTurn']>>(
     () => {},
   );
+  const persistTerminalSendError = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['persistTerminalSendError']>
+  >(() => {});
   const supersedeRetriedUserTurn = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['supersedeRetriedUserTurn']>
   >(async () => []);
@@ -289,6 +292,7 @@ function createHarness(opts?: {
     previewQueuedUserTurn,
     onDiscardedQueuedMessage,
     onRejectedUserTurn,
+    persistTerminalSendError,
     supersedeRetriedUserTurn,
     isTurnRunning: () => running,
     isLiveTurnRunning: () => {
@@ -368,6 +372,7 @@ function createHarness(opts?: {
     previewQueuedUserTurn,
     onDiscardedQueuedMessage,
     onRejectedUserTurn,
+    persistTerminalSendError,
     supersedeRetriedUserTurn,
     setRunning(value: boolean) {
       running = value;
@@ -1794,6 +1799,25 @@ describe('AgentInputCoordinator send transaction', () => {
         }),
       }),
       expect.objectContaining({ shouldBroadcast: expect.any(Function) }),
+    );
+  });
+
+  it('persists the agent-facing wire payload for mention messages', async () => {
+    const h = createHarness();
+    const sid = 'persist-wire-mentions';
+    const item = makeItem('q-1', 'look at this', {
+      mentions: [{ type: 'file', name: 'README.md', path: '/repo/README.md' }],
+    });
+    h.coordinator.enqueue(sid, item);
+    await flush();
+    expect(h.sendToAgent.mock.calls[0]?.[3]?.persistUserMessage?.agentFacingWireContent).toEqual(
+      h.sendToAgent.mock.calls[0]?.[1],
+    );
+    const wire = h.sendToAgent.mock.calls[0]?.[1] as { content?: unknown };
+    expect(wire.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'mention', path: '/repo/README.md' }),
+      ]),
     );
   });
 
@@ -3836,6 +3860,12 @@ describe('AgentInputCoordinator send transaction', () => {
       expect.objectContaining(first),
       'failed',
     );
+    expect(h.persistTerminalSendError).toHaveBeenCalledWith(sid, 'turn/start failed');
+
+    h.coordinator.retryLastError(sid);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(latestProjection(h.projections).error).toBeNull();
   });
 
   it('dispatches new text after a persisted Pi image capability rejection', async () => {

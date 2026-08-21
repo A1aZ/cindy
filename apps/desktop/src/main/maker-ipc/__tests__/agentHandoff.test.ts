@@ -194,7 +194,7 @@ describe('buildForkOriginHandoff', () => {
     const text = buildForkOriginHandoff('sess-parent-2');
     expect(text).not.toContain('search_chat_history');
     expect(text).not.toContain('get_chat_history');
-    expect(text).not.toContain('== Work state');
+    expect(text).not.toContain('== Work ledger');
     expect(text.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(3);
   });
 });
@@ -548,7 +548,7 @@ describe('buildHandoffText 工作状态区(社区 handoff packet 口径)', () =>
       ],
       opts,
     );
-    expect(text).toContain('== Work state (auto-extracted) ==');
+    expect(text).toContain('== Work ledger (auto-extracted) ==');
     expect(text).toContain('- /repo/a.ts');
     expect(text).toContain('- /repo/b.ts');
     expect(text).toContain('- /repo/c.ts');
@@ -573,7 +573,32 @@ describe('buildHandoffText 工作状态区(社区 handoff packet 口径)', () =>
 
   it('无工具活动时不渲染工作状态区', () => {
     const text = buildHandoffText([msg('user', '你好'), msg('assistant', '你好!')], opts);
-    expect(text).not.toContain('== Work state');
+    expect(text).not.toContain('== Work ledger');
+  });
+
+  it('把命令与 tool_result 成败收进 ledger,不把整段 stdout 写进去', () => {
+    const text = buildHandoffText(
+      [
+        msg('user', '跑测试'),
+        {
+          role: 'tool_use',
+          content: { toolName: 'Bash', input: { command: 'pnpm test:unit' } },
+          createdAt: 0,
+          toolUseId: 't1',
+        },
+        {
+          role: 'tool_result',
+          content: `${'FAIL src/foo.test.ts\n'.repeat(40)}exit code 1`,
+          createdAt: 1,
+          toolUseId: 't1',
+        },
+      ],
+      opts,
+    );
+    expect(text).toContain('- pnpm test:unit → exit 1');
+    expect(text).toContain('Failed attempts:');
+    expect(text).toContain('src/foo.test.ts');
+    expect(text).not.toContain('FAIL src/foo.test.ts\nFAIL src/foo.test.ts');
   });
 
   it('framing 包含「先核对工作区、以工作区为准」纪律', () => {
@@ -593,6 +618,9 @@ describe('buildHandoffText 早期原文检索指引', () => {
     expect(text).toContain('search_chat_history');
     expect(text).toContain('get_chat_history');
     expect(text).toContain('"session_ids":["sess-abc"]');
+    expect(text).toContain('"limit":10');
+    expect(text).toContain('"limit":20');
+    expect(text).toContain('Never request the default 200-row page');
     // 指引在结束标记之前
     expect(text.indexOf('Retrieving earlier verbatim history')).toBeLessThan(
       text.indexOf('End of handoff note'),
@@ -712,6 +740,9 @@ describe('buildHandoffText 超限收缩保住首尾', () => {
       sessionId: 'sess-cap',
     });
     expect(text.length).toBe(16_000); // 确实顶到上限 = 确实走了兜底分支
+    expect(text).toContain('"session_ids":["sess-cap"]');
+    expect(text).toContain('"limit":10');
+    expect(text).toContain('"limit":20');
     expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows =="))
       .toBe(true);
   });
@@ -726,6 +757,22 @@ describe('buildHandoffText 超限收缩保住首尾', () => {
     expect(text.length).toBe(16_000);
     expect(text.trimEnd().endsWith("== End of rebuild note; the user's new message follows =="))
       .toBe(true);
+  });
+
+  it('context-overflow 走隐藏重建 framing,不用可见的 agent-switch 口径', () => {
+    const text = buildHandoffText([msg('user', '继续改'), msg('assistant', '好')], {
+      fromLabel: 'Pi',
+      toLabel: 'Pi',
+      sessionId: 'sess-overflow',
+      reason: 'context-overflow',
+    });
+    expect(text).toContain("exceeded the model's context window");
+    expect(text).toContain('[Session context rebuild · internal context]');
+    expect(text).not.toContain('from here on you (Pi) continue it');
+    expect(text).toContain('"limit":10');
+    expect(text.trimEnd().endsWith("== End of rebuild note; the user's new message follows ==")).toBe(
+      true,
+    );
   });
 
   it('单轮 100 条 tool_use 折叠中部,且硬上限/检索段/结束标记全部存活', () => {

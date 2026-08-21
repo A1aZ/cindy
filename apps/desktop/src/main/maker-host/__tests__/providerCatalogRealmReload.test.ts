@@ -622,12 +622,8 @@ describe('provider catalog realm reload', () => {
     const startupXd = getDesktopSelectableCatalog().providers.find(
       (provider) => provider.id === 'xd',
     );
-    expect(startupXd?.imageModels).toEqual(
-      BUNDLED_CATALOG.providers.find((provider) => provider.id === 'xd')?.imageModels,
-    );
-    expect(startupXd?.videoModels).toEqual(
-      BUNDLED_CATALOG.providers.find((provider) => provider.id === 'xd')?.videoModels,
-    );
+    expect(startupXd?.imageModels).toEqual([]);
+    expect(startupXd?.videoModels).toEqual([]);
     expect(startupXd?.embeddingModels).toEqual([]);
 
     h.endpoint = 'https://model.global.example';
@@ -720,7 +716,7 @@ describe('provider catalog realm reload', () => {
     const currentXd = currentCatalog.providers.find((provider) => provider.id === 'xd');
     expect(currentXd?.imageModels).toEqual([]);
     expect(currentXd?.embeddingModels).toEqual([]);
-    expect(currentXd?.videoModels).toEqual([{ id: 'seedance-fast', name: 'Seedance Fast' }]);
+    expect(currentXd?.videoModels).toEqual([]);
     expect(deriveCindyMediaConfig(currentCatalog.providers, 'embed')).toEqual({
       models: [],
       defaults: null,
@@ -792,8 +788,8 @@ describe('provider catalog realm reload', () => {
     const projectedEmbedding = getDesktopSelectableCatalog().providers.find(
       (provider) => provider.id === 'xd',
     );
-    expect(projectedEmbedding?.imageModels).toEqual(inheritedEmbeddingXd.imageModels);
-    expect(projectedEmbedding?.videoModels).toEqual(inheritedEmbeddingXd.videoModels);
+    expect(projectedEmbedding?.imageModels).toEqual([]);
+    expect(projectedEmbedding?.videoModels).toEqual([]);
     expect(projectedEmbedding?.embeddingModels).toEqual([]);
 
     const evidenceUpgrade = refreshActiveCatalogFromSource();
@@ -958,7 +954,7 @@ describe('provider catalog realm reload', () => {
         getDesktopSelectableCatalog().providers.find((provider) => provider.id === 'xd'),
       ).toMatchObject({
         imageModels: [],
-        videoModels: fallbackXd.videoModels,
+        videoModels: [],
         embeddingModels: fallbackXd.embeddingModels,
       });
       expect(events).toHaveLength(2);
@@ -1051,7 +1047,7 @@ describe('provider catalog realm reload', () => {
     expect(activeMarker()).toBe('catalog-current-same-registry');
     expect(promotedXd?.imageModels).toEqual([]);
     expect(promotedXd?.embeddingModels).toEqual([]);
-    expect(promotedXd?.videoModels).toEqual([{ id: 'seedance-fast', name: 'Seedance Fast' }]);
+    expect(promotedXd?.videoModels).toEqual([]);
     expect(promoted.providers.find((provider) => provider.id === 'xai')?.videoModels).toEqual(
       recoveredXai.videoModels,
     );

@@ -5215,8 +5215,8 @@ export function getGhostLibraryBindingStore(): LibraryBindingStore {
 /**
  * 官方保留前缀守门(docs/dev-rules/plugin-security-and-authoring.md):packaged 版本上,用户装入
  * 通道(install/update/inspect 三个 IPC,即拖入/选文件/forge 转交的共同出口)
- * 对 `cindy-` / `filo-` / `xd-` 前缀 id 一律拒装——卸载内置意识后抢注同 id 的
- * 第三方包,会冒充官方身份并蹭走凭证别名(用户历史填过的机器级 key 被注入攻击者白名单域名)。
+ * 对 `cindy-` / `filo-` / `xd-` 前缀 id 一律拒装——抢注同 id 的第三方包会冒充官方身份并
+ * 蹭走凭证别名(用户历史填过的机器级 key 被注入攻击者白名单域名)。
  * dev 构建默认豁免:方便 `cindy-` / `filo-` / `xd-` 官方前缀插件在本地迭代;需要复现
  * packaged 行为时可设置 `XDT_GHOST_RESERVED_PREFIX_GATE=1`,此开关只能收紧、不能放宽。
  * 若恢复随包 seed,builtinGhostProvisioner 的内部安装路径不经这些 IPC;不要把本闸套到播种路径。
@@ -5475,7 +5475,7 @@ async function installOrUpdateMarketGhostPackageLocked(
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
     assertGhostSupportsCurrentCindy(inspected.canonicalManifest);
     // Publisher identity slugs stay reserved even on the market path.
-    // Official cindy-/xd- prefixes remain exempt here; these two slugs do not.
+    // Official reserved prefixes from shared/ghost.ts remain exempt here; publisher slugs do not.
     rejectReservedPublisherSlug(inspected.canonicalManifest.id);
     if (
       inspected.canonicalManifest.id !== expected.ghostId ||

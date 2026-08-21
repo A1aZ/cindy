@@ -1615,12 +1615,12 @@ export function isValidGhostId(id: unknown): id is string {
 }
 
 /**
- * 官方意识 id 前缀(docs/dev-rules/plugin-security-and-authoring.md):`cindy-` 保留给随包预装的
- * 第一方意识。用户装入通道(拖入/选文件/forge 转交)对该前缀**在 packaged
- * 版本上拒装**——否则卸载内置意识后,同 id 的第三方包可抢注官方身份,连带
+ * 官方意识历史 id 前缀常量:`cindy-`。完整保留集合与用户装入通道判定以
+ * `GHOST_OFFICIAL_ID_PREFIXES` 为准；官方市场可安装命中保留前缀的插件，
+ * 用户装入通道(拖入/选文件/forge 转交/自定义市场)则在 packaged 版本上拒装
+ * (dev 默认豁免,可用开发开关复现)。否则同 id 的第三方包可抢注官方身份,连带
  * 蹭走凭证别名(providerSecrets 的 GHOST_SECRET_STORAGE_ALIASES 按 id 生效,
- * 抢注者能拿到用户历史填过的机器级 key)。dev 构建豁免:官方意识的开发迭代
- * 本来就靠打包重装。
+ * 抢注者能拿到用户历史填过的机器级 key)。
  */
 export const GHOST_OFFICIAL_ID_PREFIX = 'cindy-';
 
@@ -1642,7 +1642,7 @@ export function isOfficialGhostId(id: string): boolean {
 }
 
 /**
- * 用户装入通道（拖入 / 选文件 / forge 转交）是否拒装该 id。
+ * 用户装入通道（拖入 / 选文件 / forge 转交 / 自定义市场）是否拒装该 id。
  * 当前与 `isOfficialGhostId` 等价；本批不放宽组织前缀。
  */
 export function isUserInstallReservedGhostId(id: string): boolean {

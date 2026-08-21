@@ -382,11 +382,10 @@ describe('resolveGhostFirstPartyPrivilege', () => {
   // 来源(`plugin-market/service.ts::adoptLegacyInstallations`)。判据对它一律 deny:
   // 它既不是 `source: 'market'`(所以进不了 public 那支),也不是 git/local market。
   //
-  // **今天这是空操作**,因为所有真正用到 Broker 或宿主原语的插件都是随包的
-  // (`xd-feishu` / `xd-atlassian` / `x-manager`),走优先级 1 的 builtin 分支,
-  // 根本到不了这里。但将来一旦有**非随包**的官方前缀插件要用这两类特权,
-  // 这条分支就会把它 fail-closed 掉——那时必须显式决策,不能当漏网 bug 顺手放宽。
-  it('denies legacy-adopted rows, which today only bundled plugins could hit', () => {
+  // `legacy-adopted` 不是静态官方资格或组织资格的替代来源:即使 id 命中静态官方前缀,
+  // 或命中当前组织前缀,也必须 fail-closed。若要改变这条来源边界必须显式决策,
+  // 不能把它当漏网 bug 顺手放宽。
+  it('denies legacy-adopted rows for static official and matching organization ids', () => {
     for (const scope of ['public', 'organization'] as const) {
       expect(
         resolveGhostFirstPartyPrivilege(
@@ -420,8 +419,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         basis: 'denied-unknown-origin',
       });
     }
-    // 同一个 id 只要 builtin 为真就走优先级 1,台账怎么写都不影响——这才是
-    // 随包插件今天的实际路径。
+    // 同一个 id 只要 builtin 事实为真就走优先级 1,台账怎么写都不影响。
     expect(
       resolveGhostFirstPartyPrivilege(
         facts({

@@ -44,7 +44,8 @@
 - `.cindy` 是以 `ghost.json` 为身份卡的插件包，现行唯一形态为 `kind: 'chip'`。
 - 代码目录与运行时使用 `cindy-brain` / `Ghost` 命名，**不得重新引入已退役的 cartridge
   声明型兼容层**。
-- `cindy-` id 前缀保留给随包官方插件，第三方插件不得占用。
+- `cindy-` / `filo-` / `xd-` 是官方保留 id 前缀，第三方插件不得占用；前缀正本见
+  `apps/desktop/src/shared/ghost.ts` 的 `GHOST_OFFICIAL_ID_PREFIXES`。
 
 ## 2. 运行时沙箱与进程隔离
 

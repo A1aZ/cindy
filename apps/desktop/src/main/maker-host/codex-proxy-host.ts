@@ -313,6 +313,26 @@ function subagentRouteFromHeaders(
   return subagentRouteByThread.get(threadId);
 }
 
+/**
+ * Resolve only the independent Subagent route carried by this WS upgrade.
+ *
+ * A registered child already owns a frozen route snapshot. Its first
+ * collab_spawn upgrade can race thread/started, so fall back to the explicit
+ * parent header without mutating thread ownership from the handshake path.
+ */
+function subagentRouteForWebSocketUpgrade(
+  headers: Readonly<Record<string, string>>,
+): CodexSubagentRouteSnapshot | undefined {
+  const registeredRoute = subagentRouteFromHeaders(headers);
+  if (registeredRoute) return registeredRoute;
+  if (!isCollabSpawnRequest(headers)) return undefined;
+
+  const parentThreadId = headerValue(headers, 'x-codex-parent-thread-id');
+  if (!parentThreadId) return undefined;
+  return subagentRouteByThread.get(parentThreadId)
+    ?? subagentRouteByParentThread.get(parentThreadId);
+}
+
 interface ProviderRequestContext {
   sessionId?: string;
   providerId: string | null;
@@ -2523,20 +2543,18 @@ function createCodexProxyHandle(
         });
         return null;
       }
-      // 独立子代理 Provider 路由的主防线是在 app-server spawn 配置里整体关闭 WS，
-      // 因为 startup-prewarm 的匿名共享连接无法按 thread 安全切分。这里保留线程级
-      // fail-closed 作为第二道防线：若旧调用方或配置漂移仍发来 upgrade，就回 null →
-      // 426，让 Codex 降到 HTTP，避免恢复 codex/ 折扣前缀、换鉴权与档位路由的整条
-      // transform 链被 socket 级透传绕过。
-      if (threadId !== 'unknown') {
-        const carriesSubagentRoute = subagentRouteByThread.has(threadId)
-          || subagentRouteByParentThread.has(threadId);
-        const isCollabSpawn = headerValue(headers, 'x-openai-subagent')
-          .toLowerCase() === CODEX_COLLAB_SPAWN_SUBAGENT;
-        if (carriesSubagentRoute || isCollabSpawn) {
-          log.info('codex websocket declined for subagent HTTP routing', { threadId });
-          return null;
-        }
+      // 独立 Subagent Provider 需要 HTTP body transform，但父 thread 不需要。
+      // bundled Codex 在每次 upgrade 都带 thread/session 身份，collab_spawn 还带
+      // parent thread id；只拒绝确实命中路由快照的子 thread，426 会让该子会话
+      // 自己降到 HTTP，不影响父 thread 的预热/复用 socket。
+      const subagentRoute = subagentRouteForWebSocketUpgrade(headers);
+      if (subagentRoute) {
+        log.info('codex websocket declined for subagent HTTP routing', {
+          threadId,
+          providerId: subagentRoute.providerId,
+          catalogModel: subagentRoute.catalogModel,
+        });
+        return null;
       }
       return CODEX_OAUTH_UPSTREAM;
     },

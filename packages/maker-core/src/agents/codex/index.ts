@@ -4848,8 +4848,8 @@ export class CodexAgent extends BaseAgent {
      * 本 thread 的 Responses 请求是否走 WebSocket。
      *
      * 先要求 thread 选了 OpenAI 身份 provider，再服从本 app-server 启动时冻结的
-     * `supports_websockets` 能力。配置独立子代理 Provider 路由的 host 会整体关闭 WS，
-     * 此时 threadModelProvider 仍用于远端压缩身份，但请求改走 HTTP。
+     * `supports_websockets` 能力。独立子代理 Provider 路由不会整体关闭该能力；proxy
+     * 只对命中路由的子 thread 回 426，使其按会话降到 HTTP，父 thread 仍走 WS。
      *
      * 单独起名是为了把「选没选 provider」和「实际走不走 WS」分开，避免 prompt 注入
      * 通道错误地只看 provider 身份。

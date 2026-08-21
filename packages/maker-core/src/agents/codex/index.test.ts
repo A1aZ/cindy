@@ -3877,7 +3877,7 @@ describe('CodexAgent.startSession developerInstructions', () => {
     await handle.close();
   });
 
-  it('uses HTTP prompt injection when OpenAI WebSocket is disabled for subagent routing', async () => {
+  it('uses HTTP prompt injection when the host reports OpenAI WebSocket unavailable', async () => {
     const registerCodexSystemPromptForThread = vi.fn();
     const agent = new CodexAgent(createDeps(
       { systemPrompt: 'HOST PRODUCT PROMPT' },

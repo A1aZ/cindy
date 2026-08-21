@@ -1517,7 +1517,6 @@ export function getMaker(): Maker {
             };
           }
         }
-        const openAiWebSocketsEnabled = !subagentRoute;
         return {
           // 子代理护栏/默认模型每次 createHost 现读 store:DeferredCodexRestart 兑现
           // (dispose host)后的新 spawn 自动带新值。agents.* 对 control-plane 的
@@ -1529,14 +1528,14 @@ export function getMaker(): Maker {
                   forceDisableSubagents,
                 })
               : []),
-            ...buildCodexProxySpawnArgs(endpoint, authInjection, { openAiWebSocketsEnabled }),
+            ...buildCodexProxySpawnArgs(endpoint, authInjection),
           ],
           extraEnv: mcpExtraEnv,
           ...(subagentModelFallback ? { subagentModelFallback } : {}),
           ...(subagentRoute ? { subagentRoute } : {}),
           ...(buildSessionMcpConfig ? { buildSessionMcpConfig } : {}),
           codexProxyActive: ready,
-          codexOpenAiWebSocketsEnabled: useOAuthBearer && ready && openAiWebSocketsEnabled,
+          codexOpenAiWebSocketsEnabled: useOAuthBearer && ready,
           codexBrowserUseAvailable: browserCompanionSpawnConfig.codexBrowserUseAvailable,
           ...(browserCompanion?.status === 'ready'
             ? {

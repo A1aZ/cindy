@@ -1072,11 +1072,6 @@ function ScheduleFormCard({
     <View style={styles.formCard} testID="automations.form">
       <View style={styles.formHeader}>
         <View>
-          <Text style={styles.sectionTitle}>
-            {mode === 'edit'
-              ? t('devices.automations.form.title.edit')
-              : t('devices.automations.form.title.create')}
-          </Text>
           <Text style={styles.formTitle}>{mode === 'edit' ? t('devices.automations.form.title.edit') : t('devices.automations.form.title.create')}</Text>
         </View>
         {busy ? <ActivityIndicator color={colors.textSecondary} /> : null}

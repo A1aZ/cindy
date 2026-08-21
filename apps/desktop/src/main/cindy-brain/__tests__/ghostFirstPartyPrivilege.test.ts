@@ -66,6 +66,43 @@ describe('resolveGhostFirstPartyPrivilege', () => {
     }
   });
 
+  // 事实供给层(`ghostFirstPartyFacts.ts` 的 `builtinOnlyFacts`)在「身份是组织、但前缀
+  // 缓存取不到」时会给随包插件填 `currentOrganization: null`——那不是真事实，只是输入
+  // 类型没有「是组织但前缀未知」的表示。它安全的唯一依据就是这条不变量:
+  // **优先级 1 在返回前不读 `currentOrganization` 与 `marketRecord`。**
+  // 这条测试就是那个填充值的护栏:哪天有人让优先级 1 开始读这两个字段,这里会红,
+  // 提醒他去修供给层,而不是让一个假事实静默生效。
+  it('priority 1 is independent of ledger and organization facts', () => {
+    const expected = {
+      brokerEligible: true,
+      hostPrimitiveEligible: true,
+      basis: 'builtin-official',
+    };
+    const ledgerShapes = [
+      null,
+      market({ scope: 'personal' }),
+      market({ scope: 'organization', organizationId: 'org-other' }),
+      market({ scope: 'public', source: 'legacy-adopted' }),
+      market({ scope: 'public', installed: false }),
+    ];
+    const orgShapes = [
+      null,
+      CURRENT_ORG,
+      { organizationId: 'org-acme', pluginPrefix: null },
+      { organizationId: 'org-other', pluginPrefix: 'other' },
+    ];
+    for (const marketRecord of ledgerShapes) {
+      for (const currentOrganization of orgShapes) {
+        expect(
+          resolveGhostFirstPartyPrivilege(
+            facts({ ghostId: 'xd-feishu', builtin: true, marketRecord, currentOrganization }),
+          ),
+          JSON.stringify({ marketRecord, currentOrganization }),
+        ).toEqual(expected);
+      }
+    }
+  });
+
   it('denies bundled plugins that miss the static official table, including x-manager reclaimPort', () => {
     for (const ghostId of BUNDLED_NON_OFFICIAL_IDS) {
       expect(

@@ -103,6 +103,7 @@ import {
 } from '../ledger';
 import { PluginMarketService } from '../service';
 import type { PluginMarketApi } from '../api';
+import { createOrganizationPrefixStore } from '../organizationPrefixStore';
 
 const roots: string[] = [];
 const PLUGIN_ID = `c${'a'.repeat(24)}`;
@@ -252,7 +253,13 @@ function harness(items: VisiblePluginSummary[], removals: PluginRemovalNotice[] 
   roots.push(root);
   const ledger = new PluginMarketLedger(path.join(root, 'ledger.json'));
   const api = {
-    listAll: vi.fn(async () => ({ plugins: items, removals })),
+    listAll: vi.fn(
+      async (): Promise<Awaited<ReturnType<PluginMarketApi['listAll']>>> => ({
+        plugins: items,
+        removals,
+        currentOrganization: null,
+      }),
+    ),
     detail: vi.fn(async (pluginId: string): Promise<VisiblePluginDetail> => {
       const item = items.find((candidate) => candidate.id === pluginId);
       if (!item) throw new Error('not found');
@@ -345,6 +352,29 @@ describe('PluginMarketService migration and defaultInstall', () => {
       unavailableReason: null,
     });
     expect(runtime.install).not.toHaveBeenCalled();
+  });
+
+  it('remembers the listed organization prefix after a successful snapshot', async () => {
+    const item = summary();
+    const h = harness([item]);
+    const prefixRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-org-prefix-service-'));
+    roots.push(prefixRoot);
+    const { ownerScopedUserDataPath } = await import('../../appSessionState.js');
+    vi.mocked(ownerScopedUserDataPath).mockImplementation((...parts: string[]) =>
+      path.join(prefixRoot, ...parts),
+    );
+    h.api.listAll.mockResolvedValue({
+      plugins: [item],
+      removals: [],
+      currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+    });
+
+    await h.service.snapshot();
+
+    const store = createOrganizationPrefixStore(
+      path.join(prefixRoot, 'plugin-market', 'organization.v1.json'),
+    );
+    expect(store.lookup('org-acme')).toEqual({ kind: 'known', pluginPrefix: 'acme' });
   });
 
   it('passes the optional release icon metadata to renderer-safe market items', async () => {

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import {
   isValidPluginResourceId,
   supportsCindyVersion,
+  type PluginCurrentOrganization,
   type PluginRemovalNotice,
   type VisiblePluginDetail,
   type VisiblePluginSummary,
@@ -80,6 +81,7 @@ import { readInstalledGhostManifest } from '../installedGhostManifest.js';
 import { withGhostInstallLock } from '../cindy-brain/ghostInstallLock.js';
 import { GhostPackagePermissionReviewRequiredError } from '../cindy-brain/packagePermissionReview.js';
 import { PluginMarketApi } from './api.js';
+import { createOrganizationPrefixStore } from './organizationPrefixStore.js';
 import { downloadVerifiedPlugin } from './download.js';
 import { installCustomMarketPlugin } from './install.js';
 import {
@@ -599,12 +601,14 @@ export class PluginMarketService {
     }
     let plugins: VisiblePluginSummary[];
     let removals: PluginRemovalNotice[];
+    let currentOrganization: PluginCurrentOrganization | null | undefined;
     let customDiscovery: CustomMarketDiscovery;
     try {
       // 官方目录与自定义发现并行；单个本地/网络盘来源卡顿不会串行拖住官方请求。
       const [catalog, discovered] = await Promise.all([this.api.listAll(), customDiscoveryPromise]);
       plugins = visiblePluginsForOwner(owner, catalog.plugins);
       removals = catalog.removals;
+      currentOrganization = catalog.currentOrganization;
       customDiscovery = discovered;
     } catch (error) {
       log.warn('market list unavailable', {
@@ -623,6 +627,7 @@ export class PluginMarketService {
     }
 
     requireSameMarketOwner(owner);
+    this.rememberCurrentOrganization(currentOrganization);
     const ledger = this.ledgerForOwner(owner);
     await this.adoptLegacyInstallations(plugins, ledger, owner);
     await this.recoverDisconnectedMarketInstallations(plugins, ledger, owner);
@@ -790,8 +795,10 @@ export class PluginMarketService {
       // 本地(免账号)模式只对 public 插件暴露详情;目录 summary 也是 detail 身份
       // 绑定的依据,服务端返回的 id/ghostId/scope 与请求不一致时必须拒,防止把
       // A 的详情内容(含权限清单)呈现给请求 B 的 Renderer。
-      const catalog = visiblePluginsForOwner(owner, (await this.api.listAll()).plugins);
+      const listed = await this.api.listAll();
       requireSameMarketOwner(owner);
+      this.rememberCurrentOrganization(listed.currentOrganization);
+      const catalog = visiblePluginsForOwner(owner, listed.plugins);
       const summary = catalog.find((candidate) => candidate.id === pluginId);
       if (!summary) {
         throwIpcError('NOT_FOUND', 'Plugin is unavailable to the active account');
@@ -986,8 +993,10 @@ export class PluginMarketService {
       // 可见性的条目在调用 detail 之前就要拒掉,不能把组织私有插件的详情拉下来。
       // 目录 summary 也是 detail 身份绑定的依据:detail 自报的 id/ghostId/scope/
       // 发布必须与用户确认时看到的那份 summary 一致,否则 A 的确认会被导向 B 的内容。
-      const catalog = visiblePluginsForOwner(owner, (await this.api.listAll()).plugins);
+      const listed = await this.api.listAll();
       requireSameMarketOwner(owner);
+      this.rememberCurrentOrganization(listed.currentOrganization);
+      const catalog = visiblePluginsForOwner(owner, listed.plugins);
       const selected = catalog.find((candidate) => candidate.id === pluginId);
       if (!selected) {
         throwIpcError('NOT_FOUND', 'Plugin is unavailable to the active account');
@@ -2661,6 +2670,22 @@ export class PluginMarketService {
   private ledgerForOwner(owner: ActiveAppSession): PluginMarketLedger {
     requireSameMarketOwner(owner);
     return this.ledger.bind(ownerScopedUserDataPath('plugin-market', 'ledger.v1.json'));
+  }
+
+  /**
+   * Persist the org plugin prefix from a successful market list.
+   * Call only after `requireSameMarketOwner`, so the owner-scoped path matches
+   * the identity that received this list. Personal / unsigned lists send
+   * `currentOrganization: null` and are a no-op — they must not synthesize
+   * `pluginPrefix: null` for an org that was never listed.
+   */
+  private rememberCurrentOrganization(
+    currentOrganization: PluginCurrentOrganization | null | undefined,
+  ): void {
+    if (!currentOrganization) return;
+    createOrganizationPrefixStore(
+      ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
+    ).remember(currentOrganization.organizationId, currentOrganization.pluginPrefix);
   }
 
   private withLedgerMutation<T>(

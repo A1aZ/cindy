@@ -82,8 +82,15 @@ import { GhostMutationCoordinator } from './ghostMutationCoordinator.js';
 import { createOneShotTicketStore } from './oneShotTickets.js';
 import {
   bindForgePackStagingTempDir,
+  getForgePackStagingControllerIfConfigured,
   invalidateForgePackTicketsForOwner,
+  releaseForgePackStaging,
 } from './forgePackStaging.js';
+import {
+  abandonForgePackInstall,
+  consumeForgePackAtInspect,
+  consumeForgePackAtInstall,
+} from './forgePackConsume.js';
 import { withGhostInstallLock } from './ghostInstallLock.js';
 import {
   GhostPackagePermissionReviewRequiredError,
@@ -5283,6 +5290,7 @@ export async function installAndDock(
     enable?: boolean;
     expectedPackageSha256?: string;
     trustOverride?: GhostHostTrustOverride;
+    installOrigin?: string;
   },
 ): Promise<InstalledGhost> {
   return withGhostInstallLock(opts.ghostId, () => installAndDockLocked(manager, lizFilePath, opts));
@@ -5296,6 +5304,7 @@ async function installAndDockLocked(
     enable?: boolean;
     expectedPackageSha256?: string;
     trustOverride?: GhostHostTrustOverride;
+    installOrigin?: string;
   },
 ): Promise<InstalledGhost> {
   // 默认沉睡(2026-07-09 Lizi 定案):装入 ≠ 授权运行,用户在确认框显式勾选
@@ -5306,6 +5315,7 @@ async function installAndDockLocked(
       ? { expectedPackageSha256: opts.expectedPackageSha256 }
       : {}),
     ...(opts.trustOverride ? { trustOverride: opts.trustOverride } : {}),
+    ...(opts.installOrigin !== undefined ? { installOrigin: opts.installOrigin } : {}),
   });
   if ('rejection' in result) throwInstallError(result.rejection);
   // 纵深防御:调用方给错 id 意味着刚才那把锁上在了错误的键上(等于没上锁)。
@@ -6868,8 +6878,13 @@ export function registerGhostIpc(): void {
     if (typeof lizFilePath !== 'string' || lizFilePath.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'lizFilePath must be a non-empty string');
     }
-    const installOpts = opts as { enable?: unknown; expectedPackageSha256?: unknown } | undefined;
+    const installOpts = opts as {
+      enable?: unknown;
+      expectedPackageSha256?: unknown;
+      packTicket?: unknown;
+    } | undefined;
     const expectedPackageSha256 = installOpts?.expectedPackageSha256;
+    const packTicket = typeof installOpts?.packTicket === 'string' ? installOpts.packTicket : undefined;
     if (
       typeof expectedPackageSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(expectedPackageSha256)
@@ -6890,16 +6905,45 @@ export function registerGhostIpc(): void {
     // owner 租约在锁外整段持有(防中途 owner 切换把落位写进新 owner);按 ghostId 的
     // 互斥锁由 installAndDock 自动获取(卡点),这里传 id 即可。二者语义不同,叠加保留。
     const releaseMutation = beginGhostMutation(mutationOwner);
+    let forgeInstall: ReturnType<typeof consumeForgePackAtInstall> = { kind: 'manual' };
     try {
+      const forgeController = getForgePackStagingControllerIfConfigured();
+      if (packTicket && !forgeController) {
+        throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
+      }
+      forgeInstall = forgeController
+        ? consumeForgePackAtInstall(forgeController, {
+            packTicket,
+            packageSha256: probe.packageSha256,
+            manifestId: probe.manifest.id,
+            currentOwner: mutationOwner,
+            boundaryPending: isAppSessionBoundaryPending(),
+          })
+        : ({ kind: 'manual' } as const);
+      if (forgeInstall.kind === 'rejected') {
+        if (forgeInstall.reason === 'session-boundary-pending') {
+          throwIpcError('PRECONDITION_FAILED', '账号切换中，请稍后再试');
+        }
+        throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
+      }
+      const installOrigin = forgeInstall.kind === 'agent-forge' ? 'agent-forge' : 'manual';
       return {
         ghost: await installAndDock(manager, lizFilePath, {
           ghostId: probe.manifest.id,
           enable,
           expectedPackageSha256,
+          installOrigin,
         }),
       };
     } finally {
       releaseMutation();
+      if (forgeInstall.kind === 'agent-forge') {
+        try {
+          releaseForgePackStaging(forgeInstall.ticket.stagingPath);
+        } catch {
+          // Staging cleanup must not leak the owner mutation lease.
+        }
+      }
     }
   });
 
@@ -6917,10 +6961,12 @@ export function registerGhostIpc(): void {
       | {
           expectedPackageSha256?: unknown;
           expectedInstalledApproval?: unknown;
+          packTicket?: unknown;
         }
       | undefined;
     const expectedPackageSha256 = updateOptions?.expectedPackageSha256;
     const expectedInstalledApproval = updateOptions?.expectedInstalledApproval;
+    const packTicket = typeof updateOptions?.packTicket === 'string' ? updateOptions.packTicket : undefined;
     if (
       typeof expectedPackageSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(expectedPackageSha256)
@@ -6949,7 +6995,28 @@ export function registerGhostIpc(): void {
     // 与市场/本地装入/卸载共用的按 ghostId 互斥叠加(二者语义不同,决策 A 都保留)。
     // 锁序不变量(违反即死锁):owner lease → per-id lock。
     const releaseMutation = beginGhostMutation(mutationOwner);
+    let forgeUpdate: ReturnType<typeof consumeForgePackAtInstall> = { kind: 'manual' };
     try {
+      const forgeUpdateController = getForgePackStagingControllerIfConfigured();
+      if (packTicket && !forgeUpdateController) {
+        throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
+      }
+      forgeUpdate = forgeUpdateController
+        ? consumeForgePackAtInstall(forgeUpdateController, {
+            packTicket,
+            packageSha256: inspected.packageSha256,
+            manifestId: inspected.manifest.id,
+            currentOwner: mutationOwner,
+            boundaryPending: isAppSessionBoundaryPending(),
+          })
+        : ({ kind: 'manual' } as const);
+      if (forgeUpdate.kind === 'rejected') {
+        if (forgeUpdate.reason === 'session-boundary-pending') {
+          throwIpcError('PRECONDITION_FAILED', '账号切换中，请稍后再试');
+        }
+        throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
+      }
+      const updateOrigin = forgeUpdate.kind === 'agent-forge' ? 'agent-forge' : 'manual';
       return await withGhostInstallLock(inspected.manifest.id, async () => {
         const previousGhost = manager.list().find((g) => g.manifest.id === inspected.manifest.id);
         runtime.stop(inspected.manifest.id);
@@ -7030,6 +7097,7 @@ export function registerGhostIpc(): void {
             manager.update(lizFilePath, {
               expectedPackageSha256,
               expectedInstalledApproval,
+              installOrigin: updateOrigin,
               ...(previousGhost
                 ? {
                     beforePackageCommit: () =>
@@ -7091,6 +7159,13 @@ export function registerGhostIpc(): void {
       });
     } finally {
       releaseMutation();
+      if (forgeUpdate.kind === 'agent-forge') {
+        try {
+          releaseForgePackStaging(forgeUpdate.ticket.stagingPath);
+        } catch {
+          // Staging cleanup must not leak the owner mutation lease.
+        }
+      }
     }
   });
 
@@ -7256,12 +7331,41 @@ export function registerGhostIpc(): void {
     // 官方前缀在 inspect 就拒(确认弹窗都不该弹出来),install/update 双保险再拦。
     rejectReservedGhostId(result.manifest.id);
     rejectUnauthorizedTokenBroker(result.manifest);
+    let packTicket: string | undefined;
+    const inspectController = getForgePackStagingControllerIfConfigured();
+    const forgeInspect = inspectController
+      ? consumeForgePackAtInspect(inspectController, {
+          filePath: lizFilePath,
+          packageSha256: result.packageSha256,
+          manifestId: result.manifest.id,
+          currentOwner: getActiveAppSession(),
+          boundaryPending: isAppSessionBoundaryPending(),
+        })
+      : ({ kind: 'not-forge' } as const);
+    if (forgeInspect.kind === 'rejected') {
+      if (forgeInspect.reason === 'session-boundary-pending') {
+        throwIpcError('PRECONDITION_FAILED', '账号切换中，请稍后再试');
+      }
+      throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
+    }
+    if (forgeInspect.kind === 'accepted') packTicket = forgeInspect.packTicket;
     return {
       manifest: result.manifest,
       trust: result.trust,
       packageSha256: result.packageSha256,
       ...(result.iconDataUrl !== undefined ? { iconDataUrl: result.iconDataUrl } : {}),
+      ...(packTicket ? { packTicket } : {}),
     };
+  });
+
+  ipcMain.handle('ghosts:abandon-pack-ticket', async (event, packTicket: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof packTicket !== 'string' || packTicket.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'packTicket must be a non-empty string');
+    }
+    const controller = getForgePackStagingControllerIfConfigured();
+    if (controller) abandonForgePackInstall(controller, packTicket);
+    return { ok: true };
   });
 
   ipcMain.handle('ghosts:uninstall', async (event, id: unknown) => {

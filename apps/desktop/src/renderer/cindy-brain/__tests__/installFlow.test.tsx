@@ -47,6 +47,7 @@ function setupWindow(
       listSync: vi.fn(() => ({ ghosts: installedGhosts })),
       install,
       update,
+      abandonPackTicket: vi.fn(async () => ({ ok: true })),
     },
   };
   Object.defineProperty(globalThis, 'window', {

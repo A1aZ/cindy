@@ -1115,13 +1115,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setupStatus: (id: string): Promise<unknown> => ipcRenderer.invoke('ghosts:setup-status', id),
     install: (
       lizFilePath: string,
-      opts: { enable?: boolean; expectedPackageSha256: string },
+      opts: { enable?: boolean; expectedPackageSha256: string; packTicket?: string },
     ): Promise<{ ghost: unknown }> => ipcRenderer.invoke('ghosts:install', lizFilePath, opts),
     update: (
       lizFilePath: string,
       opts: {
         expectedPackageSha256: string;
         expectedInstalledApproval: string;
+        packTicket?: string;
       },
     ): Promise<{ ghost: unknown }> => ipcRenderer.invoke('ghosts:update', lizFilePath, opts),
     cindyPrefsSync: (
@@ -1187,7 +1188,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       trust: unknown;
       packageSha256: string;
       iconDataUrl?: string;
+      packTicket?: string;
     }> => ipcRenderer.invoke('ghosts:inspect', lizFilePath),
+    abandonPackTicket: (packTicket: string): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('ghosts:abandon-pack-ticket', packTicket),
     /** 本地包第三条恢复路径:从已装目录读确认卡事实(零副作用)。 */
     reapproveInspect: (
       id: string,

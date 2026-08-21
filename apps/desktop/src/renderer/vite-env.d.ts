@@ -1239,7 +1239,7 @@ interface ElectronAPI {
     install: (
       lizFilePath: string,
       /** enable:装入后立即开启(确认框勾选决定;缺省沉睡)。 */
-      opts: { enable?: boolean; expectedPackageSha256: string },
+      opts: { enable?: boolean; expectedPackageSha256: string; packTicket?: string },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /** 原位更新(同 id 换版):唤醒状态与面板位置延续,沙箱熄灯待重拉。 */
     update: (
@@ -1247,6 +1247,7 @@ interface ElectronAPI {
       opts: {
         expectedPackageSha256: string;
         expectedInstalledApproval: string;
+        packTicket?: string;
       },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /**
@@ -1313,7 +1314,11 @@ interface ElectronAPI {
       /** 本次检查的整包指纹；安装/更新时回传，防止确认后文件被替换。 */
       packageSha256: string;
       iconDataUrl?: string;
+      /** Host 一次性打包凭证。有则回传给 install/update；无则按手动装入。 */
+      packTicket?: string;
     }>;
+    /** 用户取消确认框时丢掉 inspect 签发的一次性打包凭证并清理 staging。 */
+    abandonPackTicket: (packTicket: string) => Promise<{ ok: true }>;
     /** 本地包第三条恢复路径第一步:从已装目录读确认卡事实,零副作用。 */
     reapproveInspect: (
       id: string,

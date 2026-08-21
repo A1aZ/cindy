@@ -137,6 +137,7 @@ async function confirmAndRunUpdate(
   installed: InstalledGhost,
   deps: InstallFlowDeps,
   origin?: GhostInstallOrigin,
+  packTicket?: string,
 ): Promise<void> {
   const { t, confirm } = deps;
   // 权限 diff:只把新增/移除的权限亮给用户,不变项折叠计数。
@@ -167,11 +168,15 @@ async function confirmAndRunUpdate(
     cancelText: t('settings.ghosts.updateConfirm.cancel'),
     requireTypedConfirmation: typedIdConfirmation(t, manifest.id, escalate),
   });
-  if (!ok) return;
+  if (!ok) {
+    if (packTicket) await window.electronAPI.ghosts.abandonPackTicket(packTicket);
+    return;
+  }
   try {
     const { ghost } = await window.electronAPI.ghosts.update(lizFilePath, {
       expectedPackageSha256: packageSha256,
       expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
+      ...(packTicket ? { packTicket } : {}),
     });
     toast.success(
       t('settings.ghosts.toast.updated', {
@@ -199,11 +204,13 @@ export async function confirmAndInstallGhost(
   let manifest: GhostManifest;
   let trust: GhostTrustInfo;
   let packageSha256: string;
+  let packTicket: string | undefined;
   try {
     const inspected = await window.electronAPI.ghosts.inspect(lizFilePath);
     manifest = inspected.manifest;
     trust = inspected.trust;
     packageSha256 = inspected.packageSha256;
+    packTicket = inspected.packTicket;
   } catch (err) {
     toast.error(t(ghostInstallErrorKey(extractIpcError(err)?.code)));
     return;
@@ -213,7 +220,16 @@ export async function confirmAndInstallGhost(
   // "已经注入",直接给换版确认)。origin 透传:Agent 发起的更新也要能加重。
   const installed = findInstalled(manifest.id);
   if (installed) {
-    await confirmAndRunUpdate(lizFilePath, manifest, trust, packageSha256, installed, deps, origin);
+    await confirmAndRunUpdate(
+      lizFilePath,
+      manifest,
+      trust,
+      packageSha256,
+      installed,
+      deps,
+      origin,
+      packTicket,
+    );
     return;
   }
 
@@ -268,7 +284,10 @@ export async function confirmAndInstallGhost(
     cancelText: t('settings.ghosts.installConfirm.cancel'),
     requireTypedConfirmation: typedIdConfirmation(t, manifest.id, requireTypedId),
   });
-  if (!ok) return;
+  if (!ok) {
+    if (packTicket) await window.electronAPI.ghosts.abandonPackTicket(packTicket);
+    return;
+  }
 
   // 2.5) 用户在确认框里选了自定义位置 → **装入前**先落 binding(keyed by
   // ghostId,与安装顺序无关):否则「立即开启」的常驻插件会在 install 返回
@@ -289,6 +308,7 @@ export async function confirmAndInstallGhost(
     const { ghost } = await window.electronAPI.ghosts.install(lizFilePath, {
       enable: true,
       expectedPackageSha256: packageSha256,
+      ...(packTicket ? { packTicket } : {}),
     });
     toast.success(t('settings.ghosts.toast.installed', { name: ghost.manifest.name }));
     if (willOpenPanel) {
@@ -401,16 +421,19 @@ export async function pickAndUpdateGhost(expectedId: string, deps: InstallFlowDe
   let manifest: GhostManifest;
   let trust: GhostTrustInfo;
   let packageSha256: string;
+  let packTicket: string | undefined;
   try {
     const inspected = await window.electronAPI.ghosts.inspect(picked.filePath);
     manifest = inspected.manifest;
     trust = inspected.trust;
     packageSha256 = inspected.packageSha256;
+    packTicket = inspected.packTicket;
   } catch (err) {
     toast.error(t(ghostInstallErrorKey(extractIpcError(err)?.code)));
     return;
   }
   if (manifest.id !== expectedId) {
+    if (packTicket) await window.electronAPI.ghosts.abandonPackTicket(packTicket);
     toast.error(
       t('settings.ghosts.errors.updateIdMismatch', { id: manifest.id, expected: expectedId }),
     );
@@ -418,11 +441,21 @@ export async function pickAndUpdateGhost(expectedId: string, deps: InstallFlowDe
   }
   const installed = findInstalled(expectedId);
   if (!installed) {
+    if (packTicket) await window.electronAPI.ghosts.abandonPackTicket(packTicket);
     // 详情页开着的意识刚被别处抽离——极端竞态,按通用错误提示。
     toast.error(t('settings.ghosts.errors.generic'));
     return;
   }
-  await confirmAndRunUpdate(picked.filePath, manifest, trust, packageSha256, installed, deps);
+  await confirmAndRunUpdate(
+    picked.filePath,
+    manifest,
+    trust,
+    packageSha256,
+    installed,
+    deps,
+    undefined,
+    packTicket,
+  );
 }
 
 /**

@@ -9477,6 +9477,10 @@ export default function SessionScreen() {
                     sideTaskRunning={remoteSessionRunStatus.sideTaskRunning}
                     startedAt={composerActivityStartedAtMs}
                     tokenUsage={composerActivityTokenUsage}
+                    outputTokens={remoteSessionRunStatus.outputTokens}
+                    generationDurationMs={remoteSessionRunStatus.generationDurationMs}
+                    generationReliable={remoteSessionRunStatus.generationReliable}
+                    generationActive={remoteSessionRunStatus.generationActive}
                     visible={showComposerActivity}
                   />
                 </View>
@@ -10332,12 +10336,20 @@ function ComposerActivityStatus({
   sideTaskRunning,
   startedAt,
   tokenUsage,
+  outputTokens,
+  generationDurationMs,
+  generationReliable,
+  generationActive,
   visible,
 }: {
   reconnectAttempt: RemoteSessionRunStatus['reconnectAttempt'];
   sideTaskRunning: boolean;
   startedAt: number | null;
   tokenUsage: number;
+  outputTokens: number;
+  generationDurationMs: number;
+  generationReliable: boolean;
+  generationActive: boolean;
   visible: boolean;
 }) {
   const styles = useThemedStyles(makeStyles);
@@ -10361,7 +10373,18 @@ function ComposerActivityStatus({
   if (!visible) return null;
 
   const elapsedText = formatComposerActivityElapsed(elapsed);
-  const tokenText = formatComposerActivityTokens(tokenUsage);
+  const tokenCount = formatComposerActivityTokenCount(tokenUsage);
+  const tokenText = t('session.screen.tokenCount', { tokens: tokenCount });
+  const tokenA11yText = t('session.screen.tokenCountFull', { tokens: tokenCount });
+  const rateValue = formatComposerActivityRateValue(
+    outputTokens,
+    generationDurationMs,
+    generationReliable,
+  );
+  const rateText = rateValue
+    ? t('session.screen.tokenRate', { rate: rateValue })
+    : null;
+  const showUsageMeta = Boolean(rateText) || tokenUsage > 0;
   // 三类进度共用这一个 attempt 字段, 但说法必须分开: 模型容量、请求限流与传输层重连
   // 的用户含义不同，混用会把用户引向错误的排查方向。
   const activityText = reconnectAttempt
@@ -10391,11 +10414,27 @@ function ComposerActivityStatus({
       </View>
       <View style={styles.composerActivityMeta}>
         <Text style={styles.composerActivityMetaText}>{elapsedText}</Text>
-        {!sideTaskRunning ? (
+        {!sideTaskRunning && showUsageMeta ? (
           <>
             <Text style={styles.composerActivityMetaText}>·</Text>
-            <ArrowDown color={colors.textSecondary} size={iconSize.xs} strokeWidth={iconStroke.regular} />
-            <Text style={styles.composerActivityMetaText}>{tokenText}</Text>
+            {rateText ? (
+              <Text
+                accessibilityLabel={rateText}
+                style={styles.composerActivityMetaText}
+              >
+                {rateText}
+              </Text>
+            ) : (
+              <>
+                <ArrowDown color={colors.textSecondary} size={iconSize.xs} strokeWidth={iconStroke.regular} />
+                <Text
+                  accessibilityLabel={tokenA11yText}
+                  style={styles.composerActivityMetaText}
+                >
+                  {tokenText}
+                </Text>
+              </>
+            )}
           </>
         ) : null}
       </View>
@@ -10410,10 +10449,22 @@ function formatComposerActivityElapsed(seconds: number): string {
   return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
 }
 
-function formatComposerActivityTokens(tokenUsage: number): string {
+function formatComposerActivityTokenCount(tokenUsage: number): string {
   const safeTokens = Math.max(0, Math.round(tokenUsage));
-  if (safeTokens >= 1000) return `${(safeTokens / 1000).toFixed(1)}k tokens`;
-  return `${safeTokens} tokens`;
+  return safeTokens >= 1000 ? `${(safeTokens / 1000).toFixed(1)}k` : `${safeTokens}`;
+}
+
+function formatComposerActivityRateValue(
+  outputTokens: number,
+  durationMs: number,
+  generationReliable: boolean,
+): string | null {
+  if (!generationReliable || outputTokens <= 0 || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return null;
+  }
+  const rate = (outputTokens * 1000) / durationMs;
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  return rate < 0.1 ? '<0.1' : rate >= 100 ? rate.toFixed(0) : rate.toFixed(1).replace(/\.0$/, '');
 }
 
 function ComposerPaletteRow({

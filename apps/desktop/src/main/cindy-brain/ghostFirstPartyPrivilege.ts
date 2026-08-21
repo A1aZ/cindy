@@ -5,9 +5,9 @@
  * conclusion. Callers decide whether to refuse install or only withhold
  * privileges; this module does not refuse loading.
  *
- * Not wired yet. Existing `isBrokerEligibleGhostId` /
- * `isFirstPartyHostPrivilegeGhostId` call sites stay on the static prefix
- * predicates until the next step.
+ * Call sites that previously used only `isBrokerEligibleGhostId` now ask this
+ * resolver **after** the static official-prefix hit (`cindy-` / `filo-` / `xd-`).
+ * Official-prefix plugins keep today's grant. Everything else is decided here.
  *
  * Input priority: first evaluable of
  *   1. builtin seed → static official table
@@ -31,7 +31,7 @@
  */
 import { PLUGIN_PREFIX_PATTERN, type PluginScope } from '@cindy/plugin-protocol';
 
-import { isOfficialGhostId } from '../../shared/ghost.js';
+import { isBrokerEligibleGhostId, isOfficialGhostId } from '../../shared/ghost.js';
 
 /**
  * Ghost ids that share Host credential aliases (`GHOST_SECRET_STORAGE_ALIASES`).
@@ -73,6 +73,12 @@ export interface GhostFirstPartyFacts {
   builtin: boolean;
   marketRecord: GhostFirstPartyMarketRecord | null;
   currentOrganization: GhostFirstPartyCurrentOrganization | null;
+  /**
+   * Authorization-time install origin from `effectiveInstallOrigin(receipt)`.
+   * Missing / unreadable receipts are `manual` (fail-closed, equals today).
+   * Local org-prefix packages only receive Broker when this is `agent-forge`.
+   */
+  installOrigin: 'manual' | 'agent-forge';
 }
 
 function matchesCurrentOrgPrefix(
@@ -160,14 +166,35 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
       (record.source === 'git-market' || record.source === 'local-market') &&
       matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)
     ) {
-      return allow('local-current-org-prefix', false);
+      // Custom-market rows are not a forge install. Granting Broker here would
+      // silently raise privilege for packages that today's install gate rejects.
+      return facts.installOrigin === 'agent-forge'
+        ? allow('local-current-org-prefix', false)
+        : deny('denied-unknown-origin');
     }
     return deny('denied-unknown-origin');
   }
 
-  if (matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)) {
+  if (
+    facts.installOrigin === 'agent-forge' &&
+    matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)
+  ) {
     return allow('local-current-org-prefix', false);
   }
 
   return deny('denied-unknown-origin');
+}
+
+/**
+ * Incremental broker gate: official prefix (`cindy-` / `filo-` / `xd-`) keeps
+ * today's grant without consulting facts. Everything else asks the resolver.
+ * Unavailable facts are fail-closed (no broker).
+ */
+export function authorizeGhostTokenBroker(
+  ghostId: string,
+  load: { kind: 'ready'; facts: GhostFirstPartyFacts } | { kind: string },
+): boolean {
+  if (isBrokerEligibleGhostId(ghostId)) return true;
+  if (load.kind !== 'ready' || !('facts' in load)) return false;
+  return resolveGhostFirstPartyPrivilege(load.facts).brokerEligible;
 }

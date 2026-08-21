@@ -292,11 +292,14 @@ import {
   type ConnectionAudienceResolver,
 } from './connectionAudienceResolver.js';
 import {
+  applyGhostFirstPartyFactsOverrides,
   loadGhostFirstPartyFactsLoader,
   type GhostFirstPartyFactsLoader,
   type GhostFirstPartyFactsLoad,
+  type GhostFirstPartyFactsOverrides,
   type GhostFirstPartyFactsPurpose,
 } from './ghostFirstPartyFacts.js';
+import { authorizeGhostTokenBroker } from './ghostFirstPartyPrivilege.js';
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
 import { GhostFsSlot } from './fsSlot.js';
 import { GhostLibrarySlot } from './librarySlot.js';
@@ -1495,6 +1498,8 @@ export function getGhostManager(): GhostManager {
       // 随包批准入口的 builtin-only 边界:id 必须对应一颗随包种子。该入口不经用户
       // 确认就铸出批准,不能只靠"唯一调用者是随包对账"这条纪律。
       isTrustedBundledId: (id) => listBuiltinSeedIds(builtinSeedRootDirs()).includes(id),
+      isTokenBrokerAuthorized: (manifest) =>
+        isGhostTokenBrokerAuthorized(manifest.id, 'install'),
       isTrustedBundledSource,
       recordBuiltinTombstone: (id) => recordBuiltinTombstone(brainRootDir(), id, log),
       clearBuiltinTombstone: (id) => clearBuiltinTombstone(brainRootDir(), id, log),
@@ -2568,6 +2573,13 @@ function getConnectionAudienceResolver(): ConnectionAudienceResolver {
           .find((candidate) => candidate.manifest.id === ghostId)?.manifest ?? null,
       readInstalledManifestDigest: readInstalledGhostManifestDigest,
       readMarketInstallation: (ghostId) => getPluginMarketLedger().installationForGhost(ghostId),
+      readApprovedPackageSha256: (ghostId) =>
+        getGhostManager().approvedInstallEvidence(ghostId)?.packageSha256 ?? null,
+      readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
+      lookupOrganizationPrefix: (orgId) =>
+        createOrganizationPrefixStore(
+          ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
+        ).lookup(orgId),
       log,
     });
   }
@@ -2597,6 +2609,7 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
         createOrganizationPrefixStore(
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
         ).lookup(orgId),
+      readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
     });
   }
   return ghostFirstPartyFactsLoaderSingleton;
@@ -2616,13 +2629,30 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
 export function loadGhostFirstPartyFactsForGhost(
   ghostId: string,
   purpose: GhostFirstPartyFactsPurpose,
+  overrides?: GhostFirstPartyFactsOverrides,
 ): GhostFirstPartyFactsLoad {
   const state = getAuthState();
   const user = state.isAuthenticated ? state.user : null;
-  return getGhostFirstPartyFactsLoader().load(ghostId, purpose, {
-    membershipKind: user?.membershipKind ?? 'personal',
-    orgId: user?.orgId ?? null,
-  });
+  return applyGhostFirstPartyFactsOverrides(
+    getGhostFirstPartyFactsLoader().load(ghostId, purpose, {
+      membershipKind: user?.membershipKind ?? 'personal',
+      orgId: user?.orgId ?? null,
+    }),
+    overrides,
+  );
+}
+
+function isGhostTokenBrokerAuthorized(
+  ghostId: string,
+  purpose: GhostFirstPartyFactsPurpose,
+  overrides?: GhostFirstPartyFactsOverrides,
+): boolean {
+  // Official prefix keeps today's grant without consulting facts.
+  if (isBrokerEligibleGhostId(ghostId)) return true;
+  return authorizeGhostTokenBroker(
+    ghostId,
+    loadGhostFirstPartyFactsForGhost(ghostId, purpose, overrides),
+  );
 }
 
 /** Main-memory-only Connection token issuer/cache. */
@@ -4524,8 +4554,9 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
       // 意识 OAuth 的 token 端点(Google / Atlassian 等)多在境外。
       fetchImpl: (url, init) => outboundFetch(url, init as RequestInit),
       openExternal: (url) => shell.openExternal(url),
-      // tokenBroker 声明的意识(仅第一方,门控在装入闸与连接闸)经独立
-      // oauth-broker 服务换/刷 token:serverApiFetch 自带登录 JWT 注入与
+      // 静态官方前缀照旧放行；其余资格由装入来源与当前组织事实共同判定。
+      // 校验层保持纯函数不感知装入语境，门控在装入闸与连接闸。经独立 oauth-broker
+      // 服务换/刷 token:serverApiFetch 自带登录 JWT 注入与
       // TOKEN_EXPIRED 自动刷新。基地址来自运行期端点清单;当前 region 提供该
       // 服务时恒指 broker,**不再回退主 server 老路由**
       // (2026-07 apiBaseUrl 清理:旧"编译期注入可能为空 → 回退"的分支随
@@ -4586,6 +4617,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
         return currentDecl !== undefined && isDeepStrictEqual(currentDecl, decl);
       },
       withMutationLock: withActiveOwnerGhostOauthMutationLock,
+      isTokenBrokerAuthorized: (ghostId) => isGhostTokenBrokerAuthorized(ghostId, 'runtime'),
     });
   }
   return ghostOauthManagerSingleton;
@@ -4711,6 +4743,13 @@ export async function executeGhostSetupAction(args: {
         ok: false,
         errorCode: 'ACTION_STALE',
         message: '授权声明已变更，请重新尝试',
+      };
+    }
+    if (decl.tokenBroker !== undefined && !isGhostTokenBrokerAuthorized(args.ghostId, 'runtime')) {
+      return {
+        ok: false,
+        errorCode: 'AUTH_FAILED',
+        message: '当前安装来源或组织身份无权使用授权 broker',
       };
     }
     const connected = await getGhostOauthAccountManager().connectAccount(
@@ -5210,20 +5249,26 @@ export function rejectReservedGhostIdForCustomMarket(id: string): void {
 }
 
 /**
- * tokenBroker 第一方门控·装入闸:oauth 详单声明了 tokenBroker 的意识,XDT
- * server 的授权 broker(带用户登录 JWT 的服务端资产)只对官方前缀 id 开放,
- * 第三方包声明即拒装(连接闸在 /oauth connect 端点二次兜底)。不区分
- * dev/packaged:broker 是服务端资产,dev 也不豁免。
+ * tokenBroker 第一方门控·装入闸。官方前缀命中照今天放行；否则问 first-party
+ * 判据。不区分 dev/packaged:broker 是服务端资产,dev 也不豁免。
  */
-function rejectUnauthorizedTokenBroker(manifest: GhostManifest): void {
+function rejectUnauthorizedTokenBroker(
+  manifest: GhostManifest,
+  overrides?: GhostFirstPartyFactsOverrides,
+): void {
   if (isBrokerEligibleGhostId(manifest.id)) return;
   const brokered = (manifest.network?.secrets ?? []).some(
     (s) => s.oauth?.tokenBroker !== undefined,
   );
   if (!brokered) return;
+  if (isGhostTokenBrokerAuthorized(manifest.id, 'install', overrides)) return;
+  const reason =
+    overrides?.installOrigin === 'manual'
+      ? '手动装入的 .cindy 不能使用授权 broker；请改从组织插件市场安装，或让插件作者在组织身份下使用 ghost forge 构建'
+      : '当前安装来源或组织身份无权使用授权 broker';
   throwIpcError(
     'GHOST_FILE_INVALID',
-    `id "${manifest.id}" 声明了 oauth.tokenBroker——XDT 授权 broker 仅第一方官方意识可用`,
+    `id "${manifest.id}" 声明了 oauth.tokenBroker——${reason}`,
   );
 }
 
@@ -5368,6 +5413,14 @@ export async function installOrUpdateMarketGhostPackage(
     permissionPolicy?:
       | { mode: 'manual'; sourceType: PluginMarketItemSource }
       | { mode: 'cap'; manifest: GhostManifest; sourceType: PluginMarketItemSource };
+    /**
+     * Organization server-market packages pass this Host-built fact because the
+     * ledger row is written after install/update. Official-prefix ids never
+     * consult it (they short-circuit). Not "first install only": the same
+     * commitDownloadedPackage path covers org server-market install, update,
+     * defaultInstall, and source replacement.
+     */
+    pendingMarketRecord?: GhostFirstPartyFactsOverrides['marketRecord'];
     /** 安装锁内从当前已落位包读取的 canonical 权限基线。 */
     permissionBaselineManifest?: GhostManifest;
     /** 用户已在页面确认过的权限清单;真实包未超出则跳过 Host。 */
@@ -5399,6 +5452,8 @@ async function installOrUpdateMarketGhostPackageLocked(
     permissionPolicy?:
       | { mode: 'manual'; sourceType: PluginMarketItemSource }
       | { mode: 'cap'; manifest: GhostManifest; sourceType: PluginMarketItemSource };
+    /** Same Host-built org server-market fact as the exported entry; not first-install only. */
+    pendingMarketRecord?: GhostFirstPartyFactsOverrides['marketRecord'];
     permissionBaselineManifest?: GhostManifest;
     reviewedManifest?: GhostManifest;
     approvedPackageSha256?: string;
@@ -5531,7 +5586,12 @@ async function installOrUpdateMarketGhostPackageLocked(
         throw new GhostPackagePermissionReviewRequiredError(review);
       }
     }
-    rejectUnauthorizedTokenBroker(inspected.canonicalManifest);
+    rejectUnauthorizedTokenBroker(
+      inspected.canonicalManifest,
+      expected.pendingMarketRecord !== undefined
+        ? { marketRecord: expected.pendingMarketRecord }
+        : undefined,
+    );
 
     // Node 高风险条目由 renderer 装入确认卡权限清单如实展示;
     // 2026-07-24 Lizi 定案:不再有 Main 侧原生二次确认弹窗(PR #333,本处为其
@@ -6001,6 +6061,7 @@ export function registerGhostIpc(): void {
       networkHosts: runtimeManifest.network?.hosts,
       manager: getGhostOauthAccountManager(),
       ghostId,
+      isTokenBrokerAuthorized: (id) => isGhostTokenBrokerAuthorized(id, 'runtime'),
       withMutationLock: withActiveOwnerGhostOauthMutationLock,
       onChanged: (secretKey) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth', ref: secretKey });
@@ -6898,7 +6959,6 @@ export function registerGhostIpc(): void {
       throwIpcError('GHOST_FILE_INVALID', '插件文件在确认后发生了变化，请重新选择并确认');
     }
     rejectReservedGhostId(probe.manifest.id);
-    rejectUnauthorizedTokenBroker(probe.manifest);
     // Node 高风险提示在 renderer 装入确认卡的权限清单里如实展示;
     // 2026-07-24 Lizi 定案:不再追加 Main 原生二次确认弹窗。
     const enable = installOpts?.enable === true;
@@ -6927,6 +6987,7 @@ export function registerGhostIpc(): void {
         throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
       }
       const installOrigin = forgeInstall.kind === 'agent-forge' ? 'agent-forge' : 'manual';
+      rejectUnauthorizedTokenBroker(probe.manifest, { installOrigin });
       return {
         ghost: await installAndDock(manager, lizFilePath, {
           ghostId: probe.manifest.id,
@@ -6989,7 +7050,6 @@ export function registerGhostIpc(): void {
       throwIpcError('GHOST_FILE_INVALID', '插件文件在确认后发生了变化，请重新选择并确认');
     }
     rejectReservedGhostId(inspected.manifest.id);
-    rejectUnauthorizedTokenBroker(inspected.manifest);
     // 从熄灯到换版收尾整段持 owner 租约:熄灯之后每一步都在改"当前 owner"的插件世界,
     // 中途 owner 切换落定会把后半段(update 落盘/停靠/点火)写进新 owner。租约在锁外,
     // 与市场/本地装入/卸载共用的按 ghostId 互斥叠加(二者语义不同,决策 A 都保留)。
@@ -7017,6 +7077,7 @@ export function registerGhostIpc(): void {
         throwIpcError('GHOST_FILE_INVALID', '插件打包凭证已失效，请重新打包并确认');
       }
       const updateOrigin = forgeUpdate.kind === 'agent-forge' ? 'agent-forge' : 'manual';
+      rejectUnauthorizedTokenBroker(inspected.manifest, { installOrigin: updateOrigin });
       return await withGhostInstallLock(inspected.manifest.id, async () => {
         const previousGhost = manager.list().find((g) => g.manifest.id === inspected.manifest.id);
         runtime.stop(inspected.manifest.id);
@@ -7220,6 +7281,7 @@ export function registerGhostIpc(): void {
     const owner = captureGhostMutationOwner();
     const result = await manager.inspectInstalledReapproval(id);
     if ('rejection' in result) throwInstallError(result.rejection);
+    rejectUnauthorizedTokenBroker(result.manifest);
     const inspectTicket = reapproveTickets.issue({
       owner,
       id,
@@ -7330,9 +7392,12 @@ export function registerGhostIpc(): void {
     assertGhostSupportsCurrentCindy(result.canonicalManifest);
     // 官方前缀在 inspect 就拒(确认弹窗都不该弹出来),install/update 双保险再拦。
     rejectReservedGhostId(result.manifest.id);
-    rejectUnauthorizedTokenBroker(result.manifest);
     let packTicket: string | undefined;
     const inspectController = getForgePackStagingControllerIfConfigured();
+    const peekTicket = inspectController?.peekMatchingStagingPath(lizFilePath) ?? null;
+    rejectUnauthorizedTokenBroker(result.manifest, {
+      installOrigin: peekTicket ? 'agent-forge' : 'manual',
+    });
     const forgeInspect = inspectController
       ? consumeForgePackAtInspect(inspectController, {
           filePath: lizFilePath,
@@ -7406,12 +7471,19 @@ export function registerGhostIpc(): void {
       inspectPackage: async (filePath) => {
         const probe = await manager.inspect(filePath);
         if ('rejection' in probe) return false;
-        // tokenBroker 门控(同 rejectUnauthorizedTokenBroker):第三方包
-        // 声明即不可装入,官方前缀豁免。
+        // tokenBroker 门控(同 rejectUnauthorizedTokenBroker):官方前缀照旧;
+        // 其余问已装 receipt 的装入来源与当前组织身份。
         const brokered = (probe.manifest.network?.secrets ?? []).some(
           (s) => s.oauth?.tokenBroker !== undefined,
         );
-        if (brokered && !isBrokerEligibleGhostId(probe.manifest.id)) return false;
+        if (
+          brokered &&
+          !isGhostTokenBrokerAuthorized(probe.manifest.id, 'install', {
+            installOrigin: manager.readEffectiveInstallOrigin(probe.manifest.id),
+          })
+        ) {
+          return false;
+        }
         // 指令查重(同 install/update):与当前已装撞名即拒,排除自身。
         const commandFold = probe.manifest.command?.toLowerCase();
         if (commandFold === undefined) return true;

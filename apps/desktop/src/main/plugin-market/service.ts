@@ -1967,6 +1967,16 @@ export class PluginMarketService {
         ghostId: plugin.ghostId,
         version: plugin.currentRelease.version,
         ...(plugin.ghostId === 'cindy-github' ? { officialCindyGithub: true } : {}),
+        ...(plugin.scope === 'organization' && plugin.organizationId
+          ? {
+              pendingMarketRecord: {
+                scope: plugin.scope,
+                organizationId: plugin.organizationId,
+                source: 'market',
+                installed: true,
+              },
+            }
+          : {}),
         ...(options.permissionPolicy
           ? {
               permissionPolicy: options.permissionPolicy,

@@ -1839,6 +1839,39 @@ describe('tokenBroker 模式', () => {
     expect(vault.read(GHOST, `${KEY}-rt-acc-1`)).toBeNull();
     expect(mgr.listAccounts(GHOST, KEY)[0]?.status).toBe('expired');
   });
+
+  it('getFreshAccessToken refuses a cached broker token after eligibility is withdrawn', async () => {
+    let authorized = true;
+    const vault = seededVault();
+    const mgr = new GhostOauthAccountManager({
+      vault,
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      openExternal: vi.fn(),
+      broker: {
+        exchange: vi.fn(),
+        refresh: vi.fn(async () => ({
+          ok: true as const,
+          bundle: {
+            accessToken: 'at-cached',
+            refreshToken: 'rt-seed',
+            expiresAt: Date.now() + 60_000,
+            grantedScope: null,
+          },
+        })),
+      },
+      sleep: instantSleep,
+      isTokenBrokerAuthorized: () => authorized,
+    });
+    await expect(mgr.getFreshAccessToken(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
+      ok: true,
+      accessToken: 'at-cached',
+    });
+    authorized = false;
+    await expect(mgr.getFreshAccessToken(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
+      ok: false,
+      error: 'BROKER_FORBIDDEN',
+    });
+  });
 });
 
 describe('brokerBounce(双地址弹跳回调)', () => {

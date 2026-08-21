@@ -1,9 +1,7 @@
 /**
  * Assembles `GhostFirstPartyFacts` for `resolveGhostFirstPartyPrivilege`.
  *
- * This loader only collects facts. It does not grant or refuse privileges, and
- * existing `isBrokerEligibleGhostId` / `isFirstPartyHostPrivilegeGhostId` call
- * sites stay unwired.
+ * This loader only collects facts. It does not grant or refuse privileges.
  *
  * Do not return a bare `GhostFirstPartyFacts` object: callers must be able to
  * tell "facts are complete" from "a required fact could not be obtained".
@@ -63,6 +61,8 @@ export interface LoadGhostFirstPartyFactsLoaderOptions {
   readInstalledBuiltin(ghostId: string): boolean;
   readMarketInstallation(ghostId: string): PluginMarketInstallationRecord | null;
   lookupOrganizationPrefix(orgId: string): OrganizationPrefixLookup;
+  /** Missing / unreadable receipts must return `manual`. */
+  readInstallOrigin(ghostId: string): 'manual' | 'agent-forge';
 }
 
 function actionFor(purpose: GhostFirstPartyFactsPurpose): GhostFirstPartyFactsUnavailableAction {
@@ -77,6 +77,26 @@ function toMarketRecord(
     organizationId: record.organizationId,
     source: record.source,
     installed: record.installed,
+  };
+}
+
+export type GhostFirstPartyFactsOverrides = {
+  installOrigin?: 'manual' | 'agent-forge';
+  marketRecord?: GhostFirstPartyMarketRecord | null;
+};
+
+export function applyGhostFirstPartyFactsOverrides(
+  load: GhostFirstPartyFactsLoad,
+  overrides?: GhostFirstPartyFactsOverrides,
+): GhostFirstPartyFactsLoad {
+  if (!overrides || load.kind !== 'ready') return load;
+  return {
+    kind: 'ready',
+    facts: {
+      ...load.facts,
+      ...(overrides.installOrigin !== undefined ? { installOrigin: overrides.installOrigin } : {}),
+      ...(overrides.marketRecord !== undefined ? { marketRecord: overrides.marketRecord } : {}),
+    },
   };
 }
 
@@ -112,6 +132,13 @@ export function loadGhostFirstPartyFactsLoader(
         marketRecord = null;
       }
 
+      let installOrigin: 'manual' | 'agent-forge' = 'manual';
+      try {
+        installOrigin = options.readInstallOrigin(ghostId);
+      } catch {
+        installOrigin = 'manual';
+      }
+
       if (identity.membershipKind !== 'org' || !identity.orgId) {
         return {
           kind: 'ready',
@@ -120,6 +147,7 @@ export function loadGhostFirstPartyFactsLoader(
             builtin,
             marketRecord,
             currentOrganization: null,
+            installOrigin,
           },
         };
       }
@@ -141,7 +169,7 @@ export function loadGhostFirstPartyFactsLoader(
        */
       const builtinOnlyFacts = (): GhostFirstPartyFactsLoad => ({
         kind: 'ready',
-        facts: { ghostId, builtin, marketRecord, currentOrganization: null },
+        facts: { ghostId, builtin, marketRecord, currentOrganization: null, installOrigin },
       });
 
       let lookup: OrganizationPrefixLookup;
@@ -163,6 +191,7 @@ export function loadGhostFirstPartyFactsLoader(
               organizationId: identity.orgId,
               pluginPrefix: lookup.pluginPrefix,
             },
+            installOrigin,
           },
         };
       }

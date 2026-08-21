@@ -1115,6 +1115,66 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.api.listAll).toHaveBeenCalledTimes(1);
     // 锁定装完即开的最终结果:装入入口返回的 ghost 必须是启用态。
     expect(ghost?.enabled).toBe(true);
+    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
+  });
+
+  it('passes a Host-built pendingMarketRecord only for organization server-market packages', async () => {
+    const orgItem = summary({
+      ghostId: 'acme-tool',
+      scope: 'organization',
+      organizationId: 'org-1',
+      source: 'local-market',
+      installed: false,
+    } as Partial<VisiblePluginSummary> & { source: string; installed: boolean });
+    runtime.install.mockResolvedValue({
+      manifest: manifest('acme-tool'),
+      dir: '/userData/cindy-brain/acme-tool',
+      enabled: true,
+    });
+    const orgHarness = harness([orgItem]);
+    await orgHarness.service.install(orgItem.id, {
+      ...reviewedInstallOptions(orgItem),
+      expectedManifest: manifest('acme-tool'),
+    });
+    expect(runtime.install).toHaveBeenCalledWith(
+      expect.stringMatching(/\.cindy$/),
+      expect.objectContaining({
+        pendingMarketRecord: {
+          scope: 'organization',
+          organizationId: 'org-1',
+          source: 'market',
+          installed: true,
+        },
+      }),
+    );
+    const pending = runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord as {
+      source: string;
+      installed: boolean;
+    };
+    expect(pending.source).toBe('market');
+    expect(pending.installed).toBe(true);
+
+    runtime.install.mockReset();
+    const publicItem = summary({ scope: 'public', organizationId: null });
+    runtime.install.mockResolvedValue({
+      manifest: manifest(),
+      dir: '/userData/cindy-brain/cindy-test',
+      enabled: true,
+    });
+    const publicHarness = harness([publicItem]);
+    await publicHarness.service.install(publicItem.id, reviewedInstallOptions(publicItem));
+    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
+
+    runtime.install.mockReset();
+    const personalItem = summary({ scope: 'personal', organizationId: null });
+    runtime.install.mockResolvedValue({
+      manifest: manifest(),
+      dir: '/userData/cindy-brain/cindy-test',
+      enabled: true,
+    });
+    const personalHarness = harness([personalItem]);
+    await personalHarness.service.install(personalItem.id, reviewedInstallOptions(personalItem));
+    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
   });
 
   it('manual market install accepts the normalized setup manifest returned by detail', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   FIRST_PARTY_ALIAS_GHOST_IDS,
+  authorizeGhostTokenBroker,
   resolveGhostFirstPartyPrivilege,
   type GhostFirstPartyFacts,
   type GhostFirstPartyMarketRecord,
@@ -29,6 +30,7 @@ function facts(partial: Partial<GhostFirstPartyFacts> & Pick<GhostFirstPartyFact
     builtin: false,
     marketRecord: null,
     currentOrganization: null,
+    installOrigin: 'manual',
     ...partial,
   };
 }
@@ -45,9 +47,10 @@ function market(
 }
 
 describe('resolveGhostFirstPartyPrivilege', () => {
-  // 存量兼容红线(P0):随包的 xd-feishu / xd-atlassian 是全仓唯一声明 oauth.tokenBroker
-  // 的两个插件。用户切成个人身份、或从未打开过市场页(无台账)时,它们必须照旧拿到
-  // Broker 与宿主原语——退化了就是已装插件在升级后失效。
+  // 纯函数分支测试:用 xd-feishu / xd-atlassian 作为代表性官方前缀 id，验证
+  // builtin + 官方前缀会同时得到 Broker 与宿主原语；这不表示它们随发行包分发。
+  // 静态官方前缀的存量兼容由后面的 authorizeGhostTokenBroker(...,
+  // { kind: 'unavailable' }) 对照用例锁定。
   // `currentOrganization: null` 与 `marketRecord: null` 在这里**显式写出**,不吃
   // `facts()` 的默认值:否则将来有人为省事把默认改成"有组织",这条依然会通过
   // (优先级 1 本就不看 org),但"个人身份"这个场景就悄悄没人守了。
@@ -247,7 +250,28 @@ describe('resolveGhostFirstPartyPrivilege', () => {
     });
   });
 
-  it('gives local / custom-market packages broker when the id matches the current org prefix', () => {
+  it('gives a forge-built local package broker when the id matches the current org prefix, not a manual install', () => {
+    const shared = {
+      ghostId: 'acme-feishu',
+      currentOrganization: CURRENT_ORG,
+    } as const;
+    expect(
+      resolveGhostFirstPartyPrivilege(facts({ ...shared, installOrigin: 'agent-forge' })),
+    ).toEqual({
+      brokerEligible: true,
+      hostPrimitiveEligible: false,
+      basis: 'local-current-org-prefix',
+    });
+    expect(
+      resolveGhostFirstPartyPrivilege(facts({ ...shared, installOrigin: 'manual' })),
+    ).toEqual({
+      brokerEligible: false,
+      hostPrimitiveEligible: false,
+      basis: 'denied-unknown-origin',
+    });
+  });
+
+  it('does not raise a custom-market package to broker unless it was forge-installed', () => {
     expect(
       resolveGhostFirstPartyPrivilege(
         facts({
@@ -258,24 +282,13 @@ describe('resolveGhostFirstPartyPrivilege', () => {
             source: 'local-market',
           }),
           currentOrganization: CURRENT_ORG,
+          installOrigin: 'manual',
         }),
       ),
     ).toEqual({
-      brokerEligible: true,
+      brokerEligible: false,
       hostPrimitiveEligible: false,
-      basis: 'local-current-org-prefix',
-    });
-    expect(
-      resolveGhostFirstPartyPrivilege(
-        facts({
-          ghostId: 'acme-feishu',
-          currentOrganization: CURRENT_ORG,
-        }),
-      ),
-    ).toEqual({
-      brokerEligible: true,
-      hostPrimitiveEligible: false,
-      basis: 'local-current-org-prefix',
+      basis: 'denied-unknown-origin',
     });
   });
 
@@ -301,8 +314,68 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         basis: 'denied-unknown-origin',
       });
     }
-    // 作者自测不受影响:从未发布过的 id 压根没有台账行(marketRecord 为 null),
-    // 照旧走到兜底并放行——这条在上面「local / custom-market」那条用例里钉着。
+    // 作者自测:从未发布过的 id 没有台账行。手动装仍 deny;只有 forge 装入
+    // 才走兜底放 Broker(见「forge-built local package」那条对照用例)。
+  });
+
+  it('keeps official-prefix broker even when facts are unavailable, and asks the resolver otherwise', () => {
+    expect(
+      authorizeGhostTokenBroker('xd-feishu', { kind: 'unavailable' }),
+    ).toBe(true);
+    expect(
+      authorizeGhostTokenBroker('acme-feishu', { kind: 'unavailable' }),
+    ).toBe(false);
+    expect(
+      authorizeGhostTokenBroker(
+        'acme-feishu',
+        {
+          kind: 'ready',
+          facts: facts({
+            ghostId: 'acme-feishu',
+            currentOrganization: CURRENT_ORG,
+            installOrigin: 'agent-forge',
+          }),
+        },
+      ),
+    ).toBe(true);
+    expect(
+      authorizeGhostTokenBroker(
+        'acme-feishu',
+        {
+          kind: 'ready',
+          facts: facts({
+            ghostId: 'acme-feishu',
+            currentOrganization: CURRENT_ORG,
+            installOrigin: 'manual',
+          }),
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('uses pending org-market facts only for non-official ids; official prefix never consults them', () => {
+    const pendingOrgMarket = facts({
+      ghostId: 'acme-feishu',
+      marketRecord: market({ scope: 'organization', organizationId: 'org-acme' }),
+      currentOrganization: CURRENT_ORG,
+      installOrigin: 'manual',
+    });
+    expect(authorizeGhostTokenBroker('acme-feishu', { kind: 'ready', facts: pendingOrgMarket })).toBe(
+      true,
+    );
+    expect(
+      authorizeGhostTokenBroker('cindy-art', {
+        kind: 'ready',
+        facts: facts({
+          ghostId: 'cindy-art',
+          builtin: false,
+          marketRecord: null,
+          currentOrganization: null,
+          installOrigin: 'manual',
+        }),
+      }),
+    ).toBe(true);
+    expect(authorizeGhostTokenBroker('cindy-art', { kind: 'unavailable' })).toBe(true);
   });
 
   // `legacy-adopted` 是市场列表成功后为「早于市场就已装在本机的官方前缀插件」合成的

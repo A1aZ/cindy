@@ -45,6 +45,7 @@ import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
   createGhostInstallReceipt,
+  effectiveInstallOrigin,
   GhostInstallReceiptStore,
   hashApprovedSkillContent,
   readLegacyInstallTrust,
@@ -194,6 +195,11 @@ export interface GhostManagerOptions {
    * 该入口不经用户确认就铸出批准，因此 id 与 source 都必须由生产接线明确放行。
    */
   isTrustedBundledId?: (id: string) => boolean;
+  /**
+   * tokenBroker 装入闸。缺省只认静态官方前缀（测试夹具）。生产接线问
+   * first-party 判据，官方前缀命中仍走静态表。
+   */
+  isTokenBrokerAuthorized?: (manifest: GhostManifest) => boolean;
   /** sourceDir 是否就是该 id 的随包只读种子目录，而非任意本机可变目录。 */
   isTrustedBundledSource?: (id: string, sourceDir: string) => boolean;
   /** Persist the user's builtin-uninstall intent before approval/content removal. */
@@ -1050,6 +1056,21 @@ export class GhostManager {
   }
 
   /**
+   * Authorization-time install origin. Missing / unreadable receipts are
+   * `manual` — same fail-closed as today, never a privilege upgrade.
+   */
+  readEffectiveInstallOrigin(id: string): 'manual' | 'agent-forge' {
+    this.ensureCurrentOwnerContextSync();
+    try {
+      const approval = this.readApproval(id);
+      if (approval.state !== 'approved') return 'manual';
+      return effectiveInstallOrigin(approval.receipt);
+    } catch {
+      return 'manual';
+    }
+  }
+
+  /**
    * Host-owned evidence for reconnecting an installation to retained source metadata.
    * A pending package mutation or an invalid approval fails closed. Legacy provenance
    * is accepted only from the completed one-time migration's explicit id list.
@@ -1854,16 +1875,18 @@ export class GhostManager {
     if (validated.manifest.id !== id) {
       return { rejection: { code: 'file-invalid', reason: '清单 id 与安装目录不一致' } };
     }
-    // tokenBroker 门控与装入侧同一条规则(XDT 授权 broker 仅第一方官方插件可用,
-    // 不区分 dev/packaged):走已装目录重新确认的都不是随包插件,声明即拒。
+    // tokenBroker 门控与装入侧同一条规则。官方前缀命中照旧放行；其余问
+    // 生产接线的 first-party 判据（含 receipt 装入来源）。
+    const brokerAuthorized =
+      this.options.isTokenBrokerAuthorized?.(validated.manifest) ?? isBrokerEligibleGhostId(id);
     if (
-      !isBrokerEligibleGhostId(id) &&
+      !brokerAuthorized &&
       (validated.manifest.network?.secrets ?? []).some((s) => s.oauth?.tokenBroker !== undefined)
     ) {
       return {
         rejection: {
           code: 'file-invalid',
-          reason: `id "${id}" 声明了 oauth.tokenBroker——XDT 授权 broker 仅第一方官方插件可用`,
+          reason: `id "${id}" 声明了 oauth.tokenBroker——当前安装来源或组织身份无权使用授权 broker`,
         },
       };
     }

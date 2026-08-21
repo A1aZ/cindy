@@ -90,6 +90,8 @@ export async function handleGhostOauthRequest(args: {
   networkHosts?: readonly string[];
   manager: GhostOauthEndpointManager;
   ghostId: string;
+  /** Official prefix first; otherwise first-party resolver. Defaults to official-prefix only. */
+  isTokenBrokerAuthorized?: (ghostId: string) => boolean;
   /** Serialize credential/account persistence with package OAuth migration. */
   withMutationLock?: <T>(ghostId: string, task: () => Promise<T> | T) => Promise<T>;
   /** Successful semantic persistence only; never receives credential values. */
@@ -205,15 +207,16 @@ export async function handleGhostOauthRequest(args: {
 
   if (action === 'connect' && segments.length === 2) {
     if (method !== 'POST') return { status: 405 };
-    // tokenBroker 第一方门控·连接闸(装入闸的运行时兜底,覆盖 dev 装入等
-    // 旁路):XDT 授权 broker 只对官方前缀意识开放。
-    if (decl.tokenBroker !== undefined && !isBrokerEligibleGhostId(ghostId)) {
+    // tokenBroker 第一方门控·连接闸。官方前缀命中照今天放行；否则问接线处判据。
+    const brokerAuthorized =
+      args.isTokenBrokerAuthorized?.(ghostId) ?? isBrokerEligibleGhostId(ghostId);
+    if (decl.tokenBroker !== undefined && !brokerAuthorized) {
       return {
         status: 200,
         body: JSON.stringify({
           ok: false,
           error: 'BROKER_FORBIDDEN',
-          detail: 'tokenBroker 仅第一方官方意识可用',
+          detail: '当前安装来源或组织身份无权使用授权 broker',
         }),
       };
     }

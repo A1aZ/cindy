@@ -82,8 +82,10 @@ import { useSessionAttentionKinds } from '@/lib/sessionAttentionStore';
 import { useSessionAttentionUrgencySet } from '../../contexts/SessionAttentionUrgencyContext';
 import {
   getRemoteSessionActivity,
+  isRemoteSessionActivityActive,
   useRemoteSessionActivityRevision,
 } from '@/features/device-link/remoteSessionActivityStore';
+import { absorbSessionStarting } from '@/lib/sessionStartingStore';
 import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
 import { MainListScopeHeader } from '../MainListScopeHeader';
 import { SectionCollapse } from '../SectionCollapse';
@@ -463,6 +465,26 @@ export function ProjectsSection({
     remoteActivityRevision,
     viewedIdForSort,
   ]);
+
+  // starting 只让位给真实 in-flight:本地 isRunning(见 useStartingSessionIds),
+  // 远程 running / needs-interaction。终态 attention 不再吸收 —— 旧终态会误伤
+  // 新发送,新终态又要代次才能和旧的区分,两边补丁会来回打。没经过 running
+  // 的快完成靠 TTL。
+  useEffect(() => {
+    const settled = new Set<string>();
+    const considerRemote = (session: Session) => {
+      if (isRemoteSessionActivityActive(getRemoteSessionActivity(session.id))) {
+        settled.add(session.id);
+      }
+    };
+    for (const project of projects) {
+      for (const session of project.sessions) considerRemote(session);
+    }
+    for (const session of dialogues) considerRemote(session);
+    for (const session of unclassified) considerRemote(session);
+    absorbSessionStarting(settled);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remoteActivityRevision 代表 getRemoteSessionActivity 读到的整表内容
+  }, [projects, dialogues, unclassified, remoteActivityRevision]);
 
   // E 期「按设备分组」:有远程设备连接 + 开关开 → 按设备切段(本机在前,
   // 远程按设备切换栏顺序);其余情况单段直渲。切段后按当前排序重排本段。

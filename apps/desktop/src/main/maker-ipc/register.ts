@@ -694,6 +694,7 @@ import {
   type MakerSessionAgentSwitchHandlerDeps,
 } from './sessionAgentSwitchHandler.js';
 import {
+  extractAgentIslandPromptText,
   prependNoteToWireUserMessage,
   prependHandoffToUserMessage,
   type HandoffWireMessage,
@@ -3266,31 +3267,7 @@ function rollbackAgentIslandUserPrompt(
   }
 }
 
-function extractAgentIslandPromptText(content: unknown): string | null {
-  if (typeof content === 'string') return content.trim() || null;
-  if (Array.isArray(content)) return extractAgentIslandPromptTextFromBlocks(content);
-  if (!content || typeof content !== 'object') return null;
-  const record = content as { content?: unknown; text?: unknown };
-  if (typeof record.content === 'string') return record.content.trim() || null;
-  if (Array.isArray(record.content)) return extractAgentIslandPromptTextFromBlocks(record.content);
-  if (typeof record.text === 'string') return record.text.trim() || null;
-  return null;
-}
 
-function extractAgentIslandPromptTextFromBlocks(blocks: unknown[]): string | null {
-  const text = blocks
-    .map((block) => {
-      if (typeof block === 'string') return block;
-      if (!block || typeof block !== 'object') return '';
-      const record = block as { type?: unknown; text?: unknown };
-      return record.type === 'text' && typeof record.text === 'string' ? record.text : '';
-    })
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-  return text || null;
-}
 
 /**
  * 当前是否有任意一个 session 正在跑 turn。
@@ -11697,6 +11674,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       failPendingSchedulerAutoResume(sessionId);
       publishUiSessionIntervention(sessionId);
     },
+    previewQueuedUserTurn: (sessionId, item) => {
+      notifyAgentIslandUserPrompt(
+        {
+          id: sessionId,
+          agentKind: item.createOpts?.agentKind,
+          workDir: item.workingDir,
+        },
+        item.text || item.persistedContent,
+        { source: 'enqueue', clientId: item.clientId },
+      );
+    },
     onAutomaticEnqueue: (sessionId) => {
       // Orca 等自动输入会推进同一会话，必须撤销旧 retry owner，避免它消费这轮事件；
       // 但预算充值仍只发生在真人消息的持久化路径，自动输入不会重置 episode。
@@ -11705,6 +11693,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       publishUiSessionIntervention(sessionId);
     },
     onRejectedUserTurn: (sessionId, item) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'rejected');
       // Auto-resume items have an exact-token cleanup boundary below. Keep
       // their attempt lease until that boundary can restore recovery and
       // finalize the suppressed error; releasing it here would make a later
@@ -11714,6 +11703,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     // 队列项未派发即被丢弃(stop/remove/clearSession) → 释放暂存的 accepted 副作用, 防回调表泄漏。
     onDiscardedQueuedMessage: (sessionId, item) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'discarded');
       discardQueuedAttachmentOwnership(sessionId, item.clientId);
       orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
       // Auto-resume cleanup must run before generic claimed-retry release:
@@ -11763,13 +11753,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         screenGhostUserMessage(sessionId, agentFacingText),
       );
     },
-    onUserMessageBlocked: (sessionId, item, verdict) =>
+    onUserMessageBlocked: (sessionId, item, verdict) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'blocked');
       broadcastGhostMessageBlocked({
         sessionId,
         clientId: item.clientId,
         text: item.text,
         ...verdict,
-      }),
+      });
+    },
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
     beforeDispatchUserTurn: async (sessionId, item) => {

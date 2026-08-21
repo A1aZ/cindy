@@ -839,6 +839,12 @@ export class AgentIslandService {
   handleUserPrompt(meta: AgentIslandSessionMeta, prompt: string, debugMeta: AgentIslandUserPromptDebugMeta = {}): boolean {
     const receivedAt = Date.now();
     const hydrated = this.hydrateMeta(meta);
+    const rollbackKey = this.userPromptRollbackKey(hydrated.sessionId, debugMeta.clientId);
+    // 入队预览和 persist 预览共用 clientId。已经预览过的第二次只确认,不再追加
+    // activity、不推进 epoch,否则岛上同一条消息出现两遍、开始音效对应的回滚基线也会被冲掉。
+    if (rollbackKey && this.userPromptRollbackTokens.has(rollbackKey)) {
+      return true;
+    }
     const previousInteractionEpoch = this.interactionEpochBySession.get(hydrated.sessionId);
     const wasStopped = this.stoppedSessionIds.has(hydrated.sessionId);
     const wasReplacementTurnPending = this.replacementTurnPendingSessionIds.has(hydrated.sessionId);
@@ -859,7 +865,6 @@ export class AgentIslandService {
     if (deferInteractionEpochUntilDispatch) {
       this.replacementTurnDispatchingSessionIds.delete(hydrated.sessionId);
     }
-    const rollbackKey = this.userPromptRollbackKey(hydrated.sessionId, debugMeta.clientId);
     if (rollbackKey) {
       this.userPromptRollbackTokens.set(rollbackKey, {
         state: createAgentIslandUserPromptRollbackToken(this.state, hydrated.sessionId),

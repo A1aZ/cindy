@@ -473,6 +473,11 @@ export interface AgentInputCoordinatorDeps {
    * pendingQueue.unshift、不经这两个用户输入入口, 于是不会自我作废。
    */
   onUserEnqueue?: (sessionId: string) => void;
+  /**
+   * 真人消息刚进队、尚未 drain / sendToAgent。灵动岛用它在 agent 进程拉起前
+   * 就进入 running 并播开始音效,避免「任务开始」跟着 isRunning 一起晚响。
+   */
+  previewQueuedUserTurn?: (sessionId: string, item: AgentInputQueuedMessage) => void;
   /** 自动输入推进了会话，但不构成真人介入，也不能重置自动恢复预算。 */
   onAutomaticEnqueue?: (sessionId: string) => void;
   /**
@@ -1543,6 +1548,11 @@ export class AgentInputCoordinator {
     // 仍有 getDrainableHead 幂等校验, 不会与既有 wake 点重复派发。agent 忙 / 队列
     // 已有积压时走 else, 维持原排队语义(emit 中间态 + 异步 drain)。
     if (this.getDrainableHead(sessionId, state) === item) {
+      // 只预览马上要派发的队首。排队项若也预览,删除较早项会把整份岛快照滚回去,
+      // 抹掉后来的预览和期间事件。合成 Continue 同样不预览内部 prompt。
+      if (!automaticOrigin && !isUiContinuationItem(item)) {
+        this.deps.previewQueuedUserTurn?.(sessionId, item);
+      }
       void this.drain(sessionId, 'enqueue-immediate');
     } else {
       this.emit(sessionId);
@@ -4505,6 +4515,7 @@ export class AgentInputCoordinator {
       if (!isSchedulerOriginItem(item)) this.deps.onAutomaticEnqueue?.(sessionId);
     } else if (!isUiContinuationItem(item)) {
       this.deps.onUserEnqueue?.(sessionId);
+      this.deps.previewQueuedUserTurn?.(sessionId, item);
     }
     this.abandonActiveTurnRecoveryForUserAction(state);
     this.clearErrorUnlessQueueHeadBlocked(state, item.clientId);

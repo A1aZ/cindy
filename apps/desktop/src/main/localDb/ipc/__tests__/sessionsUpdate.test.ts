@@ -8,6 +8,10 @@
  *
  * 通过 mock electron ipcMain 捕获真实 handler + 内存 sqlite 全列 sessions 表做集成断言。
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
@@ -31,6 +35,7 @@ const h = vi.hoisted(() => ({
   routeLock: vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
     task(),
   ) as SessionRouteLockMock,
+  userDataDir: null as string | null,
 }));
 
 vi.mock('electron', () => ({
@@ -40,6 +45,11 @@ vi.mock('electron', () => ({
     }),
   },
   BrowserWindow: { getAllWindows: () => [] },
+  // status 写路径(removeHookAttachmentDir / removeTurnChangeSetsForSession)会调
+  // app.getPath('userData') 并对真实文件系统做 fire-and-forget fs.rm。这里返回每次
+  // 测试用 mkdtemp 生成的独立目录，避免并发 worktree 共享同一字面量路径互相删 fixture，
+  // 也避免 Windows 把 POSIX 字面量解析成盘符根相对路径。
+  app: { getPath: () => h.userDataDir },
 }));
 vi.mock('../../../logger', () => ({
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -168,6 +178,7 @@ beforeEach(() => {
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
   h.routeLock.mockImplementation(async (_sessionId, task) => task());
   h.handlers.clear();
+  h.userDataDir = mkdtempSync(path.join(os.tmpdir(), 'cindy-sessions-update-'));
   createDb();
   setSessionRouteLockImplementation(h.routeLock);
   registerSessionIpc();
@@ -175,6 +186,11 @@ beforeEach(() => {
 
 afterEach(() => {
   setSessionRouteLockImplementation(null);
+  const dir = h.userDataDir;
+  if (dir) {
+    rmSync(dir, { recursive: true, force: true });
+    h.userDataDir = null;
+  }
 });
 
 describe('local-db:sessions:update handler wiring', () => {
@@ -229,6 +245,24 @@ describe('local-db:sessions:update handler wiring', () => {
       expect.objectContaining({
         sessionId: 'codex-local',
         patch: { permissionMode: 'ask' },
+      }),
+    );
+  });
+
+  it('broadcasts status-only patches so secondary windows converge on delete', async () => {
+    await invokeUpdate('cc-local', { status: 'deleted' });
+
+    const persisted = h
+      .sqlite!.prepare('SELECT status FROM sessions WHERE id = ?')
+      .get('cc-local') as { status: string };
+    expect(persisted.status).toBe('deleted');
+    // #3175 回归:纯 status 变化(无 title / settings / project / pinnedAt)也必须广播
+    // sessions:patched,否则「在新窗口打开」的副窗口收不到删除,仍停留在旧视图。
+    expect(h.tapWindowBroadcast).toHaveBeenCalledWith(
+      'local-db:sessions:patched',
+      expect.objectContaining({
+        sessionId: 'cc-local',
+        patch: { status: 'deleted' },
       }),
     );
   });

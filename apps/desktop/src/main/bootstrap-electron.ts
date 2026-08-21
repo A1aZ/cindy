@@ -1746,11 +1746,16 @@ const ghostPanelWindowsController = new GhostPanelWindowsController({
 });
 registerGhostPanelWindowIpc(ghostPanelWindowsController);
 
-// ── 资源用量独立子窗口 ──────────────────────────────────────────────
-// 单实例轻量子窗口:顶部菜单「资源用量」→ open()。不需要 detach/attach 偏好、
+// ── 资源监视器独立窗口 ──────────────────────────────────────────────
+// 单实例轻量独立窗口:顶部菜单「资源监视器」→ open()。不需要 detach/attach 偏好、
 // 不需要 session 上下文转发。后台预热后常驻复用，普通关窗只隐藏。
+// macOS 全屏时监视器自己进新的 Space，不能挂 parent；其它平台仍挂主窗，
+// 这样最小化 / 关到托盘时监视器一起消失。
 const resourceUsageWindowController = new ResourceUsageWindowController({
-  createWindow: () => createResourceUsageWindow(mainWindowRef),
+  createWindow: () => {
+    const owner = mainWindowRef;
+    return createResourceUsageWindow(owner && !owner.isDestroyed() ? owner : undefined);
+  },
   isOpenSender: (sender) =>
     isResourceUsageOpenSender({
       sender,
@@ -1758,6 +1763,13 @@ const resourceUsageWindowController = new ResourceUsageWindowController({
       senderWindow: BrowserWindow.fromWebContents(sender),
       isSecondaryAppWindow,
     }),
+  getOwnerWindow: (sender) => {
+    const senderWindow = BrowserWindow.fromWebContents(sender);
+    if (senderWindow && !senderWindow.isDestroyed()) return senderWindow;
+    const owner = mainWindowRef;
+    if (!owner || owner.isDestroyed()) return null;
+    return owner;
+  },
 });
 registerResourceUsageWindowIpc({ controller: resourceUsageWindowController });
 
@@ -3010,6 +3022,7 @@ const createWindow = () => {
     // can restore it without remounting the renderer.
     if (process.platform === 'darwin') {
       event.preventDefault();
+      resourceUsageWindowController.hideWithOwner();
       if (mainWindow.isFullScreen()) {
         mainWindow.once('leave-full-screen', () => {
           if (!mainWindow.isDestroyed()) mainWindow.hide();

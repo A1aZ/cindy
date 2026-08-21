@@ -401,7 +401,7 @@
     "createAutomation": "자동화 새로 만들기",
     "recentRuns": "최근 실행",
     "runs": {
-      "emptyCopy": "Run now를 누르면 새 실행이 여기에 표시됩니다.",
+      "emptyCopy": "‘{{runNow}}’을 누르면 새 실행이 여기에 표시됩니다.",
       "emptyTitle": "아직 실행 기록이 없습니다"
     },
     "form": {

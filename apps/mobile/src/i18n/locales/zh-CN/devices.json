@@ -401,7 +401,7 @@
     "createAutomation": "新建自动化",
     "recentRuns": "最近执行",
     "runs": {
-      "emptyCopy": "点击 Run now 后会在这里看到新 run。",
+      "emptyCopy": "点击“{{runNow}}”后，新的执行会显示在这里。",
       "emptyTitle": "还没有执行记录"
     },
     "form": {

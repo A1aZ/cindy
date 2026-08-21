@@ -401,7 +401,7 @@
     "createAutomation": "New Automation",
     "recentRuns": "Recent Runs",
     "runs": {
-      "emptyCopy": "After you tap Run now, new runs show up here.",
+      "emptyCopy": "After you tap {{runNow}}, new runs show up here.",
       "emptyTitle": "No runs yet"
     },
     "form": {

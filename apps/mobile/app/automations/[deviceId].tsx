@@ -81,6 +81,10 @@ import {
   type MobileScheduleDraft,
 } from '@/scheduler/scheduleFormModel';
 import { useRemoteScheduleEventSnapshot } from '@/scheduler/remoteScheduleEvents';
+import {
+  buildMobileTemplateOverrides,
+  isLocalizedBuiltinTemplate,
+} from '@/scheduler/scheduleTemplateLocalization';
 import type {
   RemoteSchedule,
   RemoteScheduleRun,
@@ -428,11 +432,10 @@ export default function AutomationsScreen() {
           return withTransientRemoteRetry(() => maker.schedule.update(formScheduleId, wireInput));
         }
         if (selectedTemplate && !templatePromptDirty) {
-          const { prompt: _templatePrompt, ...overrides } = wireInput;
           return maker.schedule.createFromTemplate({
             templateId: selectedTemplate.id,
             paramValues: templateParamValues,
-            overrides,
+            overrides: buildMobileTemplateOverrides(wireInput, selectedTemplate),
           });
         }
         return maker.schedule.create(wireInput);
@@ -970,7 +973,9 @@ export default function AutomationsScreen() {
                 </View>
                 {displayedRuns.length === 0 ? (
                   <MainWindowEmptyState
-                    copy={t('devices.automations.runs.emptyCopy')}
+                    copy={t('devices.automations.runs.emptyCopy', {
+                      runNow: t('devices.automations.runNow'),
+                    })}
                     style={styles.emptyInline}
                     title={t('devices.automations.runs.emptyTitle')}
                   />
@@ -2158,20 +2163,11 @@ const TEMPLATE_CATEGORY_RANK: Record<string, number> = {
   'office-docs': 3,
 };
 
-const BUILTIN_TEMPLATE_IDS = new Set([
-  'nightly-test-heal',
-  'pr-gatekeeper',
-  'domain-radar',
-  'competitor-watch',
-  'weekly-work-draft',
-  'knowledge-freshness',
-]);
-
 function localizeBuiltinTemplate(
   template: RemoteScheduleTemplate,
   t: TFunction,
 ): RemoteScheduleTemplate {
-  if (template.source !== 'builtin' || !BUILTIN_TEMPLATE_IDS.has(template.id)) return template;
+  if (!isLocalizedBuiltinTemplate(template)) return template;
   const prefix = `devices.automations.template.builtin.${template.id}`;
   const templateVariables = Object.fromEntries(
     (template.parameters ?? []).map((parameter) => [parameter.key, `{{${parameter.key}}}`]),

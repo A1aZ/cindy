@@ -803,11 +803,32 @@ function WorkerTabsList({
   };
 
   return (
-    <div className="relative min-w-0 flex-1">
+    <div className="relative flex min-w-0 flex-1 items-center">
+      {/* 箭头放在滚动区域外, 两侧常驻等宽占位: 既不覆盖 tab 点击区, 也避免
+          箭头出现/隐藏时改变 scroller 宽度造成边缘状态来回抖动。 */}
+      <div className="h-6 w-5 shrink-0">
+        {scrollState.left && (
+          <button
+            type="button"
+            aria-label={t('orca.rolePill.scrollWorkersLeft')}
+            className="inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            onClick={() => {
+              const element = scrollRef.current;
+              if (!element) return;
+              element.scrollBy({
+                left: -workerTabsScrollStep(element.clientWidth),
+                behavior: 'smooth',
+              });
+            }}
+          >
+            <ChevronLeft size={14} />
+          </button>
+        )}
+      </div>
       <div
         ref={scrollRef}
         data-testid="worker-tabs-scroller"
-        className="flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto overscroll-x-contain pr-3 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto overscroll-x-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         onScroll={updateScrollState}
         onWheel={handleWheel}
       >
@@ -881,47 +902,38 @@ function WorkerTabsList({
         })}
       </div>
       {scrollState.left && (
-        <>
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0 left-0 w-8"
-            style={{ background: 'linear-gradient(to right, hsl(var(--content-area)), transparent)' }}
-          />
-          <button
-            type="button"
-            aria-label={t('orca.rolePill.scrollWorkersLeft')}
-            className="absolute inset-y-0 left-0 z-10 inline-flex w-6 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            onClick={() => {
-              const element = scrollRef.current;
-              if (!element) return;
-              element.scrollBy({ left: -workerTabsScrollStep(element.clientWidth), behavior: 'smooth' });
-            }}
-          >
-            <ChevronLeft size={14} />
-          </button>
-        </>
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 left-5 w-4"
+          style={{ background: 'linear-gradient(to right, hsl(var(--content-area)), transparent)' }}
+        />
       )}
       {scrollState.right && (
-        <>
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0 right-0 w-8"
-            style={{ background: 'linear-gradient(to right, transparent, hsl(var(--content-area)))' }}
-          />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 right-5 w-4"
+          style={{ background: 'linear-gradient(to right, transparent, hsl(var(--content-area)))' }}
+        />
+      )}
+      <div className="h-6 w-5 shrink-0">
+        {scrollState.right && (
           <button
             type="button"
             aria-label={t('orca.rolePill.scrollWorkersRight')}
-            className="absolute inset-y-0 right-0 z-10 inline-flex w-6 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            className="inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             onClick={() => {
               const element = scrollRef.current;
               if (!element) return;
-              element.scrollBy({ left: workerTabsScrollStep(element.clientWidth), behavior: 'smooth' });
+              element.scrollBy({
+                left: workerTabsScrollStep(element.clientWidth),
+                behavior: 'smooth',
+              });
             }}
           >
             <ChevronRight size={14} />
           </button>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }

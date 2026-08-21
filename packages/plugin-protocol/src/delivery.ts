@@ -400,6 +400,7 @@ function parseCurrentOrganization(value: unknown): PluginCurrentOrganization | n
   const organizationId = string(
     raw.organizationId,
     'response.currentOrganization.organizationId',
+    128,
   );
   // 「对象在、但省略了 pluginPrefix key」是畸形响应，不能规范化成 null：
   // 那会把「未登记前缀」和「取不到组织」混成一种，上层再也分不开。

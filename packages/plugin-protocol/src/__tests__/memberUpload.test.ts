@@ -141,6 +141,25 @@ describe('member upload contract', () => {
     ).toThrow(/failure/);
   });
 
+  it.each([
+    'PUBLISH_PREFIX_UNREGISTERED',
+    'PUBLISH_GHOST_ID_PREFIX_MISMATCH',
+    'PUBLISH_VERSION_EXISTS',
+  ] as const)('parses %s failure codes without throwing', (code) => {
+    const response = parsePluginMemberUploadStatusResponse({
+      uploadId: 'upload-failure-code',
+      status: 'failed',
+      pluginId: null,
+      releaseId: null,
+      ghostId: null,
+      version: null,
+      reviewStatus: null,
+      failure: { code, message: 'failure message' },
+    });
+
+    expect(response.failure).toEqual({ code, message: 'failure message' });
+  });
+
   it('rejects invalid ghost IDs in status and my-publishes responses', () => {
     expect(() =>
       parsePluginMemberUploadStatusResponse({

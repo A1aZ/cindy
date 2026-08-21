@@ -583,6 +583,29 @@ describe('plugin delivery contract', () => {
     });
   });
 
+  it('enforces the server organizationId length limit of 128 characters', () => {
+    const organizationId128 = 'a'.repeat(128);
+    const accepted = parseListPluginsResponse({
+      schemaVersion: PLUGIN_API_SCHEMA_VERSION,
+      plugins: [],
+      nextCursor: null,
+      currentOrganization: { organizationId: organizationId128, pluginPrefix: null },
+    });
+    expect(accepted.currentOrganization).toEqual({
+      organizationId: organizationId128,
+      pluginPrefix: null,
+    });
+
+    expect(() =>
+      parseListPluginsResponse({
+        schemaVersion: PLUGIN_API_SCHEMA_VERSION,
+        plugins: [],
+        nextCursor: null,
+        currentOrganization: { organizationId: 'a'.repeat(129), pluginPrefix: null },
+      }),
+    ).toThrow(PluginProtocolError);
+  });
+
   it('rejects currentOrganization when the pluginPrefix key is missing', () => {
     expect(() =>
       parseListPluginsResponse({

@@ -235,7 +235,10 @@ export type CindyForgePackErrorCode =
 export type CindyForgePackResult =
   | {
       ok: true;
-      /** 打包产物(.cindy)的绝对路径(临时目录,装入后可弃)。 */
+      /**
+       * 作者副本的文件名提示（如 `demo-1.0.0.cindy`），不可用于访问。
+       * 不是绝对路径，也不是 Host staging 路径；装入走确认框，不要拿这个字段去读盘。
+       */
       cindyPath: string;
       id: string;
       name: string;

@@ -66,7 +66,7 @@ function fakeDeps(
     }),
     forgePack: async () => ({
       ok: true,
-      cindyPath: "/tmp/x.cindy",
+      cindyPath: "x-1.0.0.cindy",
       id: "x",
       name: "X",
       version: "1.0.0",
@@ -1449,7 +1449,10 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
       ok: true,
       id: "x",
       version: "1.0.0",
+      cindyPath: "x-1.0.0.cindy",
     });
+    expect(parsePayload(okResult).cindyPath.includes("/")).toBe(false);
+    expect(parsePayload(okResult).cindyPath.includes("\\")).toBe(false);
 
     const failed = await handleForgePack(
       fakeDeps({
@@ -1475,7 +1478,7 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
         requests.push(request);
         return {
           ok: true,
-          cindyPath: "/src/my-ghost/my-ghost-1.0.0.cindy",
+          cindyPath: "my-ghost-1.0.0.cindy",
           id: "my-ghost",
           name: "My Ghost",
           version: "1.0.0",

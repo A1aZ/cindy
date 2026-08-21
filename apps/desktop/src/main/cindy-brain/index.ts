@@ -80,6 +80,10 @@ import {
 import { exportGhostPackage } from './exportGhostPackage.js';
 import { GhostMutationCoordinator } from './ghostMutationCoordinator.js';
 import { createOneShotTicketStore } from './oneShotTickets.js';
+import {
+  bindForgePackStagingTempDir,
+  invalidateForgePackTicketsForOwner,
+} from './forgePackStaging.js';
 import { withGhostInstallLock } from './ghostInstallLock.js';
 import {
   GhostPackagePermissionReviewRequiredError,
@@ -6243,11 +6247,13 @@ export function registerGhostIpc(): void {
   };
 
   void app.whenReady().then(() => {
+    bindForgePackStagingTempDir(() => app.getPath('temp'));
     onAuthStateChange(() => {
       // Login/logout, Membership switches, and refresh integration all cross
       // an auth notification boundary. Discard every short-lived Connection
       // assertion so a late request can never reuse the previous identity.
       connectionTokenProviderSingleton?.clearAll();
+      invalidateForgePackTicketsForOwner(getActiveAppSession());
       // 当前任务绑定属于窗口内的 owner 上下文，切账号/会员身份后不得沿用旧快照。
       ghostSessionFocusByWebContents.clear();
       clearIOSSimulatorRendererAccess();

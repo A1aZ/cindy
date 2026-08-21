@@ -6,8 +6,9 @@
  *   喂给 agent——替代"人读的作者文档",同事对 AI 说"帮我做个 XX 意识"即可;
  * - packGhostDir:源码目录 → 校验(与装入同一套 validateGhostManifest)→
  *   打包 .cindy 到源码目录自身(id-version.cindy,同名覆盖;shouldSkip 跳过
- *   *.cindy 防套娃)。装入确认弹窗由调用方(mcp-integrations 接线)经双击
- *   转交通道触发,本文件不碰 UI。
+ *   *.cindy 防套娃),并同时返回内存里的 `buf`。作者副本给人拿走;安装链路
+ *   必须用 `buf` 直写 Host staging,不能从源码目录回读。装入确认弹窗由
+ *   调用方(mcp-integrations 接线)经双击转交通道触发,本文件不碰 UI。
  *
  * 安全边界:agent 能写意识源码(它本来就有文件工具),但打包必须过校验、
  * 装入必须过用户确认框(默认沉睡)——与手动拖 .cindy 完全同一条门。
@@ -163,7 +164,7 @@ function shouldSkip(name: string): boolean {
 }
 
 export type ForgePackResult =
-  | { ok: true; cindyPath: string; manifest: GhostManifest }
+  | { ok: true; cindyPath: string; manifest: GhostManifest; buf: Buffer }
   | {
       ok: false;
       errorCode:
@@ -1320,7 +1321,9 @@ export async function packGhostDir(
       message: `写入打包产物失败:${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  return { ok: true, cindyPath, manifest: built.manifest };
+  // 作者目录里的副本只给人手动拿走。安装链路必须用内存里的 `buf` 直写
+  // staging，绝不能从 cindyPath 回读——agent 能在确认前替换那份文件。
+  return { ok: true, cindyPath, manifest: built.manifest, buf: built.buf };
 }
 
 /**
@@ -1374,7 +1377,7 @@ export async function packGhostDirToFile(
       message: `写入打包产物失败:${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  return { ok: true, cindyPath: destPath, manifest: built.manifest };
+  return { ok: true, cindyPath: destPath, manifest: built.manifest, buf: built.buf };
 }
 
 /**

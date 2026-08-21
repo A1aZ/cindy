@@ -80,6 +80,10 @@ import { readInstalledGhostManual } from '../cindy-brain/ghostManual.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir } from '../cindy-brain/forge.js';
 import {
+  completeForgePackStaging,
+  invalidateForgePackTicket,
+} from '../cindy-brain/forgePackStaging.js';
+import {
   currentPublisherIdentity,
   getPluginPublisherOrchestrator,
   startPluginPublish,
@@ -1776,14 +1780,50 @@ export function getCindyGhostsMcpDeps(
           ...(sessionTitle ? { sessionTitle } : {}),
           ...(sourceRelPath ? { sourceRelPath } : {}),
         };
-        // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
-        // 自动转"更新 vX → vY"),用户点头才真装。lease 持到转交完成。带上 agent
-        // 来源,确认框据此展示来源横幅 + 分级加重(高危需手输 id 确认)。
-        await handleIncomingCindyFile(packed.cindyPath, 'ghost-forge', origin);
-        log.info('ghost forge packed', { dir, cindyPath: packed.cindyPath, id: packed.manifest.id });
+        const owner = captureGhostMutationOwnerForMcp();
+        const alreadyInstalled = getGhostManager()
+          .list()
+          .some((ghost) => ghost.manifest.id === packed.manifest.id);
+        let staged;
+        try {
+          // 安装链路只认这份内存字节直写的 staging。workdir 里的 .cindy 只是
+          // 作者副本；agent 换掉它不能改确认框将要检查的包。
+          // operationKind 只是打包时点的提示/审计，不是不可变拒绝条件：
+          // 打包到消费之间同 id 可能被另一入口装上或卸掉，真实分类在消费
+          // 入口持锁后重做，允许与票里的值不同。
+          staged = completeForgePackStaging({
+            buf: packed.buf,
+            manifestId: packed.manifest.id,
+            owner,
+            operationKind: alreadyInstalled ? 'update' : 'install',
+            authorCindyPath: packed.cindyPath,
+          });
+        } catch (err) {
+          return {
+            ok: false,
+            errorCode: 'INTERNAL',
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+        try {
+          // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
+          // 自动转"更新 vX → vY"),用户点头才真装。lease 持到转交完成。带上 agent
+          // 来源,确认框据此展示来源横幅 + 分级加重(高危需手输 id 确认)。
+          // 交给这条通道的必须是 staging,不能是 workdir 产物。
+          await handleIncomingCindyFile(staged.installPath, 'ghost-forge', origin);
+        } catch (err) {
+          invalidateForgePackTicket(staged.ticket);
+          return {
+            ok: false,
+            errorCode: 'INTERNAL',
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+        log.info('ghost forge packed', { dir, id: packed.manifest.id });
         return {
           ok: true,
-          cindyPath: packed.cindyPath,
+          // 给 agent 的只是作者副本文件名提示，不可用于访问；staging 路径不下发。
+          cindyPath: staged.agentCindyPath,
           id: packed.manifest.id,
           name: packed.manifest.name,
           version: packed.manifest.version,

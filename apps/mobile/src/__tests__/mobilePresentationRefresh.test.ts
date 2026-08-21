@@ -30,4 +30,12 @@ describe('mobile localized presentation refresh', () => {
 
     expect(composerProjection).toContain('i18nInstance.language');
   });
+
+  it('rebuilds open interaction cards when the language changes', () => {
+    const source = read('src/session/InteractionPanel.tsx');
+
+    expect(source).toContain('[i18nInstance.language, item.request]');
+    expect(source).toContain('[currentIndex, i18nInstance.language, questions]');
+    expect(source).toContain('[filePath, i18nInstance.language, originalPlan, planText]');
+  });
 });

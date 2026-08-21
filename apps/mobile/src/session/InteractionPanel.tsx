@@ -597,10 +597,10 @@ function PermissionCard({
   touchLayout: InteractionTouchLayout;
 }) {
   const styles = useThemedStyles(makeStyles);
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const presentation = useMemo(
     () => buildPermissionReviewPresentation(item.request, mobilePresentationLocalizer),
-    [item.request],
+    [i18nInstance.language, item.request],
   );
   const suggestions = sessionScopedPermissionSuggestions(item.request.suggestions);
   const requestId = readRequestId(item);
@@ -743,7 +743,7 @@ function AskUserQuestionCard({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const requestId = readRequestId(item) ?? '';
   const questions = useMemo(() => normalizeAskQuestions(item.request.questions), [item.request.questions]);
   const draftCompletedRef = useRef(false);
@@ -756,7 +756,7 @@ function AskUserQuestionCard({
   const presentation = useMemo(() => buildAskQuestionReviewPresentation({
     currentIndex,
     questions,
-  }, mobilePresentationLocalizer), [currentIndex, questions]);
+  }, mobilePresentationLocalizer), [currentIndex, i18nInstance.language, questions]);
   const current = presentation.current;
 
   useEffect(() => {
@@ -1082,7 +1082,7 @@ function PlanReviewCard({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const requestId = readRequestId(item) ?? '';
   const [planText, setPlanText] = useState(() =>
     readPlanReviewDraft(requestId)?.planText ?? planReviewPlan(item.request)
@@ -1103,7 +1103,7 @@ function PlanReviewCard({
     filePath,
     maxOutlineItems: 8,
     plan: planText,
-  }, mobilePresentationLocalizer), [filePath, originalPlan, planText]);
+  }, mobilePresentationLocalizer), [filePath, i18nInstance.language, originalPlan, planText]);
   const isEdit = viewerState === 'edit';
   const isMinimized = viewerState === 'minimized';
   const expandedPlan = viewerState === 'expanded' || viewerState === 'edit';

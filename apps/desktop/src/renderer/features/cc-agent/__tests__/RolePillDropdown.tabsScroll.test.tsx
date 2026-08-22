@@ -74,6 +74,22 @@ function mockScrollerOverflow(scroller: HTMLElement, { scrollLeft = 0, clientWid
   });
 }
 
+function setReducedMotion(reduced: boolean): void {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: vi.fn().mockImplementation(() => ({
+      matches: reduced,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 describe('WorkerTabsList overflow scrolling', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -81,6 +97,7 @@ describe('WorkerTabsList overflow scrolling', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   it('uses a bounded step that fits the visible tab strip', () => {
@@ -88,13 +105,15 @@ describe('WorkerTabsList overflow scrolling', () => {
     expect(workerTabsScrollStep(40)).toBe(80);
   });
 
-  it('does not show scroll buttons when every tab fits', () => {
+  it('keeps edge scroll buttons mounted but disabled', () => {
     renderOverflowToolbar(manyWorkers(2));
     const scroller = screen.getByTestId('worker-tabs-scroller');
     mockScrollerOverflow(scroller, { clientWidth: 400, scrollWidth: 200 });
     fireEvent.scroll(scroller);
-    expect(screen.queryByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'orca.rolePill.scrollWorkersRight' })).toBeNull();
+    const left = screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' });
+    const right = screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersRight' });
+    expect(left.getAttribute('aria-disabled')).toBe('true');
+    expect(right.getAttribute('aria-disabled')).toBe('true');
   });
 
   it('shows a right arrow when tabs overflow and scrolls one step', () => {
@@ -105,8 +124,10 @@ describe('WorkerTabsList overflow scrolling', () => {
     scroller.scrollBy = scrollBy;
     fireEvent.scroll(scroller);
 
-    expect(screen.queryByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' })).toBeNull();
+    const left = screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' });
     const right = screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersRight' });
+    expect(left.getAttribute('aria-disabled')).toBe('true');
+    expect(right.getAttribute('aria-disabled')).toBeNull();
     fireEvent.click(right);
     expect(scrollBy).toHaveBeenCalledWith({ left: workerTabsScrollStep(200), behavior: 'smooth' });
   });
@@ -121,5 +142,48 @@ describe('WorkerTabsList overflow scrolling', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' }));
     expect(scrollBy).toHaveBeenCalledWith({ left: -workerTabsScrollStep(200), behavior: 'smooth' });
+  });
+
+  it('keeps keyboard focus on an arrow that reaches the edge', async () => {
+    vi.useFakeTimers();
+    renderOverflowToolbar();
+    const scroller = screen.getByTestId('worker-tabs-scroller');
+    mockScrollerOverflow(scroller, { scrollLeft: 0, clientWidth: 200, scrollWidth: 800 });
+    fireEvent.scroll(scroller);
+
+    const right = screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersRight' });
+    await act(async () => {
+      right.focus();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    mockScrollerOverflow(scroller, { scrollLeft: 600, clientWidth: 200, scrollWidth: 800 });
+    fireEvent.scroll(scroller);
+
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(right.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(right);
+  });
+
+  it('scrolls instantly for reduced motion users', () => {
+    setReducedMotion(true);
+    renderOverflowToolbar();
+    const scroller = screen.getByTestId('worker-tabs-scroller');
+    const scrollBy = vi.fn();
+    mockScrollerOverflow(scroller, { scrollLeft: 0, clientWidth: 200, scrollWidth: 800 });
+    scroller.scrollBy = scrollBy;
+    fireEvent.scroll(scroller);
+
+    fireEvent.click(screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersRight' }));
+    expect(scrollBy).toHaveBeenCalledWith({ left: workerTabsScrollStep(200), behavior: 'auto' });
+
+    mockScrollerOverflow(scroller, { scrollLeft: 240, clientWidth: 200, scrollWidth: 800 });
+    fireEvent.scroll(scroller);
+    fireEvent.click(screen.getByRole('button', { name: 'orca.rolePill.scrollWorkersLeft' }));
+    expect(scrollBy).toHaveBeenCalledWith({ left: -workerTabsScrollStep(200), behavior: 'auto' });
   });
 });

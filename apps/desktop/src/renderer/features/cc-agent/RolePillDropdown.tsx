@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Plus, X, EllipsisVertical } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAppShortcutDisplay } from '@/hooks/useAppShortcut';
+import { useReducedMotion } from '@/hooks/useReducedMotion';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { Tip } from '@/components/ui/tooltip';
 import { VendorIcon, agentKindToVendor } from '@/components/sidebar/VendorIcon';
@@ -751,6 +752,7 @@ function WorkerTabsList({
   const focusedTabRef = useRef<HTMLButtonElement | null>(null);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const attention = useWorkerAttentionSnapshot();
+  const reducedMotion = useReducedMotion();
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const focusedWorkerId =
     selectedWorkerId ?? workers.find((worker) => worker.focused)?.workerId ?? null;
@@ -805,25 +807,30 @@ function WorkerTabsList({
   return (
     <div className="relative flex min-w-0 flex-1 items-center">
       {/* 箭头放在滚动区域外, 两侧常驻等宽占位: 既不覆盖 tab 点击区, 也避免
-          箭头出现/隐藏时改变 scroller 宽度造成边缘状态来回抖动。 */}
+          箭头出现/隐藏时改变 scroller 宽度造成边缘状态来回抖动。 到边后按钮只
+          禁用不卸载, 避免键盘焦点被突然丢回 body。 */}
       <div className="h-6 w-5 shrink-0">
-        {scrollState.left && (
+        <Tip text={t('orca.rolePill.scrollWorkersLeft')} side="bottom" delay={250}>
           <button
             type="button"
             aria-label={t('orca.rolePill.scrollWorkersLeft')}
-            className="inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            aria-disabled={!scrollState.left || undefined}
+            className={cn(
+              'inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100',
+              !scrollState.left && 'pointer-events-none opacity-0',
+            )}
             onClick={() => {
               const element = scrollRef.current;
-              if (!element) return;
+              if (!element || !scrollState.left) return;
               element.scrollBy({
                 left: -workerTabsScrollStep(element.clientWidth),
-                behavior: 'smooth',
+                behavior: reducedMotion ? 'auto' : 'smooth',
               });
             }}
           >
             <ChevronLeft size={14} />
           </button>
-        )}
+        </Tip>
       </div>
       <div
         ref={scrollRef}
@@ -916,23 +923,27 @@ function WorkerTabsList({
         />
       )}
       <div className="h-6 w-5 shrink-0">
-        {scrollState.right && (
+        <Tip text={t('orca.rolePill.scrollWorkersRight')} side="bottom" delay={250}>
           <button
             type="button"
             aria-label={t('orca.rolePill.scrollWorkersRight')}
-            className="inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            aria-disabled={!scrollState.right || undefined}
+            className={cn(
+              'inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100',
+              !scrollState.right && 'pointer-events-none opacity-0',
+            )}
             onClick={() => {
               const element = scrollRef.current;
-              if (!element) return;
+              if (!element || !scrollState.right) return;
               element.scrollBy({
                 left: workerTabsScrollStep(element.clientWidth),
-                behavior: 'smooth',
+                behavior: reducedMotion ? 'auto' : 'smooth',
               });
             }}
           >
             <ChevronRight size={14} />
           </button>
-        )}
+        </Tip>
       </div>
     </div>
   );

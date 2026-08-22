@@ -357,6 +357,12 @@ describe('local-db:sessions:update handler wiring', () => {
     expect(h.closeSession).toHaveBeenCalledWith('codex-local');
   });
 
+  it('does not reacquire the route lock for a combined workingDir and status patch', async () => {
+    await invokeUpdate('codex-local', { workingDir: '/new/dir', status: 'active' });
+
+    expect(h.routeLock).toHaveBeenCalledTimes(1);
+  });
+
   it('does nothing for remote sessions', async () => {
     await invokeUpdate('cc-remote', { workingDir: '/new/dir' });
     expect(h.relocate).not.toHaveBeenCalled();

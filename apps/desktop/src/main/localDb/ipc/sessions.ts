@@ -110,8 +110,9 @@ async function withStatusWriteLock<T>(
   sessionId: string,
   status: unknown,
   task: () => Promise<T>,
+  alreadyLocked = false,
 ): Promise<T> {
-  if (status === undefined) return task();
+  if (status === undefined || alreadyLocked) return task();
   return withSessionRouteLock(sessionId, task);
 }
 
@@ -1456,7 +1457,12 @@ export function registerSessionIpc(
     // 先记号后写库,代价只是写库失败时该会话本进程内不再自动起名 —— 用户毕竟确实
     // 按下过保存,这个方向的偏差是安全的。
     if (typeof p.title === 'string') noteUserTitleWritten(sid);
-    await withStatusWriteLock(sid, p.status, () => writeSessionPatch(db, sid, setObj, p.status));
+    await withStatusWriteLock(
+      sid,
+      p.status,
+      () => writeSessionPatch(db, sid, setObj, p.status),
+      p.workingDir !== undefined,
+    );
     // session-git-pr-context:/clear 经此处写 clearedAt——边界之前的消息对用户
     // 不可见,PR 引用同步重算(fire-and-forget,内部按 clearedAt/rewindAt 过滤)。
     if (p.clearedAt !== undefined) {

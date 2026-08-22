@@ -130,7 +130,7 @@ function avKindFor(pathOrName: string): 'video' | 'audio' | null {
 export default function RemoteFilePreviewScreen() {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const params = useLocalSearchParams<{
     sessionId: string;
     deviceId?: string;
@@ -298,7 +298,7 @@ export default function RemoteFilePreviewScreen() {
     return () => {
       cancelled = true;
     };
-  }, [deviceId, initialRelPath, maker, openLink, recoveryEpoch, sortMode, workdir]);
+  }, [deviceId, i18nInstance.language, initialRelPath, maker, openLink, recoveryEpoch, sortMode, workdir]);
 
   const current = siblings?.[pageIndex] ?? null;
   const pagerRef = useRef<FlatList<FileBrowserGridItem>>(null);

@@ -82,6 +82,16 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('[i18nInstance.language, sortMode]');
   });
 
+  it('rebuilds preview-page file metadata when the language changes', () => {
+    const source = read('app/files/preview/[sessionId].tsx');
+    const siblingProjection = source.slice(
+      source.indexOf('// 同目录 pager:'),
+      source.indexOf('const current = siblings?.[pageIndex] ?? null'),
+    );
+
+    expect(siblingProjection).toContain('i18nInstance.language');
+  });
+
   it('rebuilds quota summaries when the language changes', () => {
     const source = read('src/session/SessionMenuSheet.tsx');
 

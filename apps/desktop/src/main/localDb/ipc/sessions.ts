@@ -76,6 +76,11 @@ export interface SessionRecycleScope {
   mediaDb: DbClient['drizzle'];
 }
 
+export interface RegisterSessionIpcOpts {
+  /** Close a local Pi/Codex runtime only if its current turn is idle. */
+  closeIdleSessionForMove?: (sessionId: string) => Promise<boolean>;
+}
+
 let sessionRemovalCancelOperations: SessionRemovalCancelOperations | null = null;
 let sessionRemovalCleanup: SessionRemovalCleanup | null = null;
 
@@ -952,6 +957,7 @@ export async function clearSessionContextInDb(sessionId: string, atMs?: number):
 
 export function registerSessionIpc(
   readSessionListLogScope: () => string | null = () => null,
+  opts: RegisterSessionIpcOpts = {},
 ): void {
   // interrupted-turn-resume 假阳性修复:每次 last_turn_ended_at 真正落库(正常收尾 /
   // barrier 版收尾 / ack)都广播 lastTurnEndedAt patch —— renderer 的 session 快照可能
@@ -1417,10 +1423,13 @@ export function registerSessionIpc(
     // before persisting the new directory so the next send lazily recreates the
     // runtime with the moved session's cwd instead of continuing in the old one.
     if (movingLocalNonClaudeSession) {
-      const makerHost = await import('../../maker-host/index.js');
-      await makerHost.withRehydrateCloseSuppressed(sid, async () => {
-        await makerHost.getMakerIfReady()?.closeSession(sid);
-      });
+      if (!opts.closeIdleSessionForMove) {
+        throwIpcError('INTERNAL', '会话移动 runtime 操作未配置');
+      }
+      const idle = await opts.closeIdleSessionForMove(sid);
+      if (idle === false) {
+        throwIpcError('PRECONDITION_FAILED', '运行中的任务不能移动');
+      }
     }
     // 只有纯设置字段(model/effort 等)才跳过 bump；凡带 activity 字段
     // (clearedAt / sdkSessionId / status / token 用量等)仍需更新 updatedAt，

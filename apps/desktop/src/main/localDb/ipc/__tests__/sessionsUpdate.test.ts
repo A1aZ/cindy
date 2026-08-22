@@ -30,7 +30,7 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
-  closeSession: vi.fn(async () => undefined),
+  closeSession: vi.fn(async (_sessionId: string) => undefined),
   tapWindowBroadcast: vi.fn(),
   summarizeSession: vi.fn(async () => undefined),
   stopAndRemovePiSubagentRuns: vi.fn(async (_root: string) => true),
@@ -40,6 +40,7 @@ const h = vi.hoisted(() => ({
     isSessionAlive: (id: string) => boolean;
     closeSession: (id: string) => Promise<void>;
   } | null => null),
+  closeIdleSessionForMove: vi.fn(async (_sessionId: string) => true),
   withRehydrateCloseSuppressed: vi.fn(
     async (_sessionId: string, task: () => Promise<void>) => task(),
   ),
@@ -222,13 +223,18 @@ beforeEach(() => {
   h.clearPiSubagentDeletedTombstone.mockClear();
   h.clearPiSubagentDeletedTombstone.mockImplementation(async () => undefined);
   h.getMakerIfReady.mockReset();
+  h.closeIdleSessionForMove.mockReset();
+  h.closeIdleSessionForMove.mockImplementation(async (sessionId) => {
+    await h.withRehydrateCloseSuppressed(sessionId, () => h.closeSession(sessionId));
+    return true;
+  });
   h.withRehydrateCloseSuppressed.mockClear();
   h.withRehydrateCloseSuppressed.mockImplementation(async (_sessionId, task) => task());
   h.getMakerIfReady.mockReturnValue({ isSessionAlive: () => false, closeSession: h.closeSession });
   h.userDataDir = mkdtempSync(path.join(os.tmpdir(), 'cindy-sessions-update-'));
   createDb();
   setSessionRouteLockImplementation(h.routeLock);
-  registerSessionIpc();
+  registerSessionIpc(undefined, { closeIdleSessionForMove: h.closeIdleSessionForMove });
 });
 
 afterEach(async () => {
@@ -705,6 +711,19 @@ describe('local-db:sessions:update handler wiring', () => {
       'codex-local',
       expect.any(Function),
     );
+  });
+
+  it('rejects moving a local Pi/Codex session whose turn became active', async () => {
+    h.closeIdleSessionForMove.mockResolvedValueOnce(false);
+
+    await expect(
+      invokeUpdate('codex-local', { workingDir: '/new/dir' }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
+
+    expect(
+      h.sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?').get('codex-local'),
+    ).toEqual({ working_dir: '/old/dir' });
+    expect(h.closeSession).not.toHaveBeenCalled();
   });
 
   it('does not reacquire the route lock for a combined workingDir and status patch', async () => {

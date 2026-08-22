@@ -812,7 +812,7 @@ describe('Cindy durable PI Subagent runner', () => {
       // different in-process serialisation buckets and race on disk exactly the
       // way two Cindy processes would.
       const aliasRoot = path.join(path.dirname(fixture.root), `alias-${randomUUID()}`);
-      await symlink(fixture.root, aliasRoot, 'dir');
+      await symlink(fixture.root, aliasRoot, process.platform === 'win32' ? 'junction' : 'dir');
       roots.push(aliasRoot);
 
       const settled = await Promise.allSettled([
@@ -835,12 +835,21 @@ describe('Cindy durable PI Subagent runner', () => {
           ? { fulfilled: outcome.value }
           : { rejected: String((outcome.reason as Error)?.stack ?? outcome.reason) }
       )), null, 2);
-      const refusedTheClaim = settled.filter((outcome) => (
-        outcome.status === 'rejected'
-        && /already resuming this Subagent generation/i.test(String(outcome.reason?.message ?? ''))
+      const refusedTheResume = settled.filter((outcome) => (
+        (outcome.status === 'fulfilled' && outcome.value === null)
+        || (
+          outcome.status === 'rejected'
+          && /already resuming this Subagent generation/i.test(String(outcome.reason?.message ?? ''))
+        )
       ));
-      expect(refusedTheClaim, `resume outcomes: ${describeOutcomes()}`).toHaveLength(1);
+      const unexpectedRejections = settled.filter((outcome) => (
+        outcome.status === 'rejected'
+        && !/already resuming this Subagent generation/i.test(String(outcome.reason?.message ?? ''))
+      ));
+      expect(unexpectedRejections, `resume outcomes: ${describeOutcomes()}`).toHaveLength(0);
+      expect(refusedTheResume.length, `resume outcomes: ${describeOutcomes()}`).toBeGreaterThanOrEqual(1);
       expect(started.length).toBeLessThanOrEqual(1);
+      expect(refusedTheResume.length + started.length, `resume outcomes: ${describeOutcomes()}`).toBe(2);
       // Whoever got through, there is never a second live generation over the
       // same PI child session — that is what a lost claim has to prevent.
       const runs = await listPiSubagentRuns(fixture.root);

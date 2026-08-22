@@ -158,6 +158,7 @@ import {
   addPlanModeComposerCommand,
   consumePlanModeComposerCommand,
   isPlanModeComposerCommandText,
+  planModeComposerDraftText,
   shouldPreservePlanModeComposerDraft,
 } from './planModeComposerCommand';
 import { PendingQueuePanel } from './PendingQueuePanel';
@@ -4997,6 +4998,14 @@ export function ChatInput({
             editorStorageKey: storageKeyForDraftRef.current,
             sourceStorageKey,
           });
+          const existingDraft = sourceStorageKey ? getComposerDraft(sourceStorageKey) : undefined;
+          // Capture this before consuming `/plan`, which clears the live editor.
+          const draftText = planModeComposerDraftText(
+            editorOwnsSource,
+            editorOwnsSource ? editor.getJSON() : null,
+            existingDraft?.text,
+            true,
+          );
           if (editorOwnsSource) {
             planModeEntry?.onToggle(!planModeEntry.enabled);
             isRestoringRef.current = true;
@@ -5013,11 +5022,10 @@ export function ChatInput({
             if (
               shouldPreservePlanModeComposerDraft(attachmentsForSend.length, commentsForSend.length)
             ) {
-              const existingDraft = getComposerDraft(sourceStorageKey);
               saveComposerDraft(
                 sourceStorageKey,
                 {
-                  text: editorOwnsSource ? editor.getJSON() : (existingDraft?.text ?? null),
+                  text: draftText,
                   attachments: attachmentsForSend,
                   quotes: existingDraft?.quotes ?? [],
                   browserComments: commentsForSend,

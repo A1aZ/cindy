@@ -356,7 +356,17 @@ export default function DeviceDetailScreen() {
       // 展开,与首页交互一致);自动化任务作用域页本身就是"某任务的全部运行",必须平铺不折叠。
       groupAutomations: !automationScopeKey,
     }),
-    [automationScopeKey, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, searchQuery, sessions, statusFilter, t],
+    [
+      automationScopeKey,
+      i18nInstance.language,
+      messagePreviewIndex,
+      pendingInteractionIndex,
+      scheduleIndex,
+      searchQuery,
+      sessions,
+      statusFilter,
+      t,
+    ],
   );
   const displaySections = useMemo(() => {
     if (automationScopeKey || !shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status)) {

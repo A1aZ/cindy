@@ -2031,12 +2031,12 @@ export default function SessionScreen() {
   // 写编排只读 reason(fork/rewind、队列编辑、会话设置写、pending interaction):对 lead + worker 都返回。
   const collaborationReadOnlyReason = useMemo(
     () => sessionCollaborationReadOnlyReason(currentSession),
-    [currentSession?.orcaRole],
+    [currentSession?.orcaRole, i18nInstance.language],
   );
   // composer(发消息)只读 reason:仅非 lead 的协作角色只读;Lead 返回 null → 可在手机上发文字消息。
   const composerReadOnlyReason = useMemo(
     () => sessionCollaborationComposerReadOnlyReason(currentSession),
-    [currentSession?.orcaRole],
+    [currentSession?.orcaRole, i18nInstance.language],
   );
   const activePendingInteraction = useMemo(() => {
     return selectPendingInteractionByRequestId(pending, pendingInteractionActiveRequestId);
@@ -2075,7 +2075,7 @@ export default function SessionScreen() {
   const pendingInteractionBlocksComposer = pendingInteractionsBlockRemoteComposer(pending);
   const remoteUnavailableReason = useMemo(
     () => describeRemoteError(connectionError),
-    [connectionError],
+    [connectionError, i18nInstance.language],
   );
   // 自动恢复类错误只影响 outbox 派发，不锁 composer；确定性错误（撤权、关闭远程
   // 控制、版本不兼容等）仍按原规则禁发。连接 issue 沿用 banner 的 active 判定，

@@ -49,7 +49,7 @@
       }
     },
     "sessionList": {
-      "section": { "pinned": "ピン留め" },
+      "section": { "pinned": "ピン留め", "dialogue": "会話" },
       "filterWithCount": "{{label}} {{count}}",
       "controlsSummary": "{{filter}} · {{group}}別にグループ化",
       "automation": "自動化",

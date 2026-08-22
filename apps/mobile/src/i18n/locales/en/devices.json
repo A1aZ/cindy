@@ -49,7 +49,7 @@
       }
     },
     "sessionList": {
-      "section": { "pinned": "Pinned" },
+      "section": { "pinned": "Pinned", "dialogue": "Chat" },
       "filterWithCount": "{{label}} {{count}}",
       "controlsSummary": "{{filter}} · Grouped by {{group}}",
       "automation": "Automation",

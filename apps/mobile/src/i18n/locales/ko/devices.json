@@ -49,7 +49,7 @@
       }
     },
     "sessionList": {
-      "section": { "pinned": "고정됨" },
+      "section": { "pinned": "고정됨", "dialogue": "대화" },
       "filterWithCount": "{{label}} {{count}}",
       "controlsSummary": "{{filter}} · {{group}}별 그룹",
       "automation": "자동화",

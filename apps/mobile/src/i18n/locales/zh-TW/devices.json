@@ -49,7 +49,7 @@
       }
     },
     "sessionList": {
-      "section": { "pinned": "置頂" },
+      "section": { "pinned": "置頂", "dialogue": "對話" },
       "filterWithCount": "{{label}} {{count}}",
       "controlsSummary": "{{filter}} · 依{{group}}分組",
       "automation": "自動化",

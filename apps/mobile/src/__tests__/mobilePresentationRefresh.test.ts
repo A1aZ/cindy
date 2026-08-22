@@ -59,6 +59,23 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('[i18nInstance.language, selectedSessions]');
   });
 
+  it('rebuilds remote and collaboration notices when the language changes', () => {
+    const source = read('app/sessions/[sessionId].tsx');
+
+    expect(source).toContain('[connectionError, i18nInstance.language]');
+    expect(source.match(/\[currentSession\?\.orcaRole, i18nInstance\.language\]/g)).toHaveLength(2);
+  });
+
+  it('rebuilds localized session sections when the language changes', () => {
+    const source = read('app/devices/[deviceId].tsx');
+    const sectionProjection = source.slice(
+      source.indexOf('const sections = useMemo'),
+      source.indexOf('const listContext = useMemo'),
+    );
+
+    expect(sectionProjection).toContain('i18nInstance.language');
+  });
+
   it('rebuilds file metadata when the language changes', () => {
     const source = read('app/files/[sessionId].tsx');
 

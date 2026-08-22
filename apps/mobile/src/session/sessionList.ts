@@ -20,7 +20,11 @@ export function buildRemoteSessionSections(
 ): RemoteSessionSection[] {
   return buildRemoteSessionSectionsShared(sessions, now, options).map((section) => ({
     ...section,
-    title: section.key === 'pinned' ? i18n.t('devices.presentation.sessionList.section.pinned') : section.title,
+    title: section.key === 'pinned'
+      ? i18n.t('devices.presentation.sessionList.section.pinned')
+      : section.key === 'dialogue'
+        ? i18n.t('devices.presentation.sessionList.section.dialogue')
+        : section.title,
     data: section.data.map((item) => localizeRemoteSessionListItem(item, now)),
   }));
 }

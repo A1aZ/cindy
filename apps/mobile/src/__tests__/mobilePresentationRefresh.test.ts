@@ -51,4 +51,19 @@ describe('mobile localized presentation refresh', () => {
 
     expect(source).toContain('[i18nInstance.language, selectedSessions]');
   });
+
+  it('rebuilds file metadata when the language changes', () => {
+    const source = read('app/files/[sessionId].tsx');
+
+    expect(source).toContain('[i18nInstance.language, sortMode]');
+  });
+
+  it('rebuilds quota summaries when the language changes', () => {
+    const source = read('src/session/SessionMenuSheet.tsx');
+
+    expect(source).toContain(
+      '[accountUsage, i18nInstance.language, quotaBucketTables, session.model, visible, quotaStaleTick]',
+    );
+    expect(source).toContain('[codexRateLimits, i18nInstance.language]');
+  });
 });

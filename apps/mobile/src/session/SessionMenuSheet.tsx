@@ -167,7 +167,7 @@ export function SessionMenuSheet({
 }: SessionMenuSheetProps) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
 
@@ -464,10 +464,10 @@ export function SessionMenuSheet({
     });
     return summarizeAccountRateLimits(scoped, now, mobilePresentationLocalizer);
     // visible / quotaStaleTick 进依赖: 重开与到点失效都要按当前时间重选。
-  }, [accountUsage, quotaBucketTables, session.model, visible, quotaStaleTick]);
+  }, [accountUsage, i18nInstance.language, quotaBucketTables, session.model, visible, quotaStaleTick]);
   const resetSummary = useMemo(
     () => summarizeCodexRateLimitReset(codexRateLimits, Date.now(), mobilePresentationLocalizer),
-    [codexRateLimits],
+    [codexRateLimits, i18nInstance.language],
   );
   const workspace = buildSessionInfoWorkspace(session);
   const showExtraDirs = sessionInfoShowsExtraDirs(session);

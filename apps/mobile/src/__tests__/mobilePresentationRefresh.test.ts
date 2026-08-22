@@ -81,6 +81,14 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('error={formErrorText}');
   });
 
+  it('keeps template-parameter validation metadata until render time', () => {
+    const source = read('app/automations/[deviceId].tsx');
+
+    expect(source).toContain('setFormError(paramError)');
+    expect(source).toContain('selectedTemplatePresentation,');
+    expect(source).toContain('localizeTemplateParamValidation(');
+  });
+
   it('rebuilds localized session sections when the language changes', () => {
     const source = read('app/devices/[deviceId].tsx');
     const sectionProjection = source.slice(

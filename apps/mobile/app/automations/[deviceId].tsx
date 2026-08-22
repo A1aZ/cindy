@@ -68,6 +68,7 @@ import {
   deriveMobileScheduleSessionMode,
   hasMobileScheduleRealBinding,
   localizeScheduleDraftValidation,
+  localizeTemplateParamValidation,
   MOBILE_SCHEDULE_PENDING_SESSION_ID,
   updateDraftAgentKind,
   updateDraftBoundSessionId,
@@ -81,6 +82,7 @@ import {
   validateMobileScheduleDraft,
   type MobileScheduleDraft,
   type ScheduleDraftValidation,
+  type TemplateParamValidation,
 } from '@/scheduler/scheduleFormModel';
 import { useRemoteScheduleEventSnapshot } from '@/scheduler/remoteScheduleEvents';
 import {
@@ -153,7 +155,9 @@ export default function AutomationsScreen() {
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null);
   const [formDraft, setFormDraft] = useState<MobileScheduleDraft | null>(null);
   const [formScheduleId, setFormScheduleId] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | ScheduleDraftValidation | null>(null);
+  const [formError, setFormError] = useState<
+    string | ScheduleDraftValidation | TemplateParamValidation | null
+  >(null);
   const [templates, setTemplates] = useState<RemoteScheduleTemplate[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
@@ -175,10 +179,25 @@ export default function AutomationsScreen() {
     () => summarizeAutomationOverview(schedules, runsBySchedule),
     [runsBySchedule, schedules],
   );
+  const selectedTemplatePresentation = useMemo(
+    () => selectedTemplate
+      ? localizeBuiltinTemplate(
+          templates.find((template) => template.id === selectedTemplate.id) ?? selectedTemplate,
+          t,
+        )
+      : null,
+    [selectedTemplate, t, templates],
+  );
   const formErrorText = typeof formError === 'string'
     ? formError
     : formError
-      ? localizeScheduleDraftValidation(formError, mobilePresentationLocalizer)
+      ? 'parameterKey' in formError && selectedTemplatePresentation
+        ? localizeTemplateParamValidation(
+            formError,
+            selectedTemplatePresentation,
+            mobilePresentationLocalizer,
+          )
+        : localizeScheduleDraftValidation(formError, mobilePresentationLocalizer)
       : null;
   const bindableSessions = useMemo(
     () => selectBindableSessions(remoteSessions, deviceId),

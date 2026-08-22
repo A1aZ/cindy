@@ -76,6 +76,10 @@ export interface ScheduleDraftValidation {
   messageValues?: Readonly<Record<string, PresentationInterpolationValue>>;
 }
 
+export interface TemplateParamValidation extends ScheduleDraftValidation {
+  parameterKey: string;
+}
+
 function scheduleDraftValidation(
   field: keyof MobileScheduleDraft,
   localizer: PresentationLocalizer | undefined,
@@ -101,6 +105,21 @@ export function localizeScheduleDraftValidation(
     validation.messageKey,
     validation.messageFallback,
     validation.messageValues,
+  );
+}
+
+export function localizeTemplateParamValidation(
+  validation: TemplateParamValidation,
+  template: Pick<RemoteScheduleTemplate, 'parameters'>,
+  localizer?: PresentationLocalizer,
+): string {
+  const parameter = template.parameters?.find((item) => item.key === validation.parameterKey);
+  const label = parameter?.label || validation.parameterKey;
+  return presentationText(
+    localizer,
+    validation.messageKey,
+    `请输入模板参数：${label}`,
+    { label },
   );
 }
 
@@ -219,14 +238,21 @@ export function validateTemplateParamValues(
   template: Pick<RemoteScheduleTemplate, 'parameters'>,
   values: Record<string, string>,
   localizer?: PresentationLocalizer,
-): string | null {
+): TemplateParamValidation | null {
   for (const parameter of template.parameters ?? []) {
     if (!parameter.required) continue;
     if ((values[parameter.key] ?? parameter.default ?? '').trim()) continue;
     const label = parameter.label || parameter.key;
-    return presentationText(localizer, 'devices.automations.presentation.validation.templateParameter', `请输入模板参数：${label}`, {
-      label,
-    });
+    return {
+      ...scheduleDraftValidation(
+        'prompt',
+        localizer,
+        'devices.automations.presentation.validation.templateParameter',
+        `请输入模板参数：${label}`,
+        { label },
+      ),
+      parameterKey: parameter.key,
+    };
   }
   return null;
 }

@@ -73,6 +73,14 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('{describeAgentAuthError(error) ?? error}');
   });
 
+  it('keeps schedule validation metadata until render time', () => {
+    const source = read('app/automations/[deviceId].tsx');
+
+    expect(source).toContain('setFormError(validation)');
+    expect(source).toContain('localizeScheduleDraftValidation(formError, mobilePresentationLocalizer)');
+    expect(source).toContain('error={formErrorText}');
+  });
+
   it('rebuilds localized session sections when the language changes', () => {
     const source = read('app/devices/[deviceId].tsx');
     const sectionProjection = source.slice(

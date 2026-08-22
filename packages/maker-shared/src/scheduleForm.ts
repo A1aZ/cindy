@@ -7,7 +7,11 @@ import type {
   RemoteScheduleWriteInput,
   RemoteTemplateParameter,
 } from './scheduleTypes';
-import { presentationText, type PresentationLocalizer } from './presentationLocalization.js';
+import {
+  presentationText,
+  type PresentationInterpolationValue,
+  type PresentationLocalizer,
+} from './presentationLocalization.js';
 
 export const MOBILE_SCHEDULE_EFFORT_VALUES = [
   'minimal',
@@ -67,6 +71,37 @@ export interface MobileScheduleDraft {
 export interface ScheduleDraftValidation {
   field: keyof MobileScheduleDraft;
   message: string;
+  messageFallback: string;
+  messageKey: string;
+  messageValues?: Readonly<Record<string, PresentationInterpolationValue>>;
+}
+
+function scheduleDraftValidation(
+  field: keyof MobileScheduleDraft,
+  localizer: PresentationLocalizer | undefined,
+  messageKey: string,
+  messageFallback: string,
+  messageValues?: Readonly<Record<string, PresentationInterpolationValue>>,
+): ScheduleDraftValidation {
+  return {
+    field,
+    message: presentationText(localizer, messageKey, messageFallback, messageValues),
+    messageFallback,
+    messageKey,
+    messageValues,
+  };
+}
+
+export function localizeScheduleDraftValidation(
+  validation: ScheduleDraftValidation,
+  localizer?: PresentationLocalizer,
+): string {
+  return presentationText(
+    localizer,
+    validation.messageKey,
+    validation.messageFallback,
+    validation.messageValues,
+  );
 }
 
 const DEFAULT_CRON = '0 9 * * *';
@@ -226,60 +261,75 @@ export function validateMobileScheduleDraft(
   localizer?: PresentationLocalizer,
 ): ScheduleDraftValidation | null {
   if (!draft.name.trim()) {
-    return {
-      field: 'name',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.name', '请输入任务名称'),
-    };
+    return scheduleDraftValidation(
+      'name',
+      localizer,
+      'devices.automations.presentation.validation.name',
+      '请输入任务名称',
+    );
   }
   // "仅运行脚本"任务(桌面端高级功能)prompt 合法为空——mobile 没有编辑
   // scriptConfig 的 UI,不该拿桌面端才有意义的字段挡住这类任务在移动端的其它
   // 可编辑操作(改名、通知开关等),否则打开/保存一个桌面端创建的脚本任务在
   // 移动端会先于任何改动就校验失败(codex review 发现)。
   if (draft.executionMode !== 'script' && !draft.prompt.trim()) {
-    return {
-      field: 'prompt',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.prompt', '请输入任务提示词'),
-    };
+    return scheduleDraftValidation(
+      'prompt',
+      localizer,
+      'devices.automations.presentation.validation.prompt',
+      '请输入任务提示词',
+    );
   }
   if (!draft.timezone.trim()) {
-    return {
-      field: 'timezone',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.timezone', '请输入时区'),
-    };
+    return scheduleDraftValidation(
+      'timezone',
+      localizer,
+      'devices.automations.presentation.validation.timezone',
+      '请输入时区',
+    );
   }
   if (draft.targetSessionId.trim() === MOBILE_SCHEDULE_PENDING_SESSION_ID) {
-    return {
-      field: 'targetSessionId',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.boundSession', '请选择要绑定的任务'),
-    };
+    return scheduleDraftValidation(
+      'targetSessionId',
+      localizer,
+      'devices.automations.presentation.validation.boundSession',
+      '请选择要绑定的任务',
+    );
   }
   if (draft.runMode === 'recurring') {
     if (!draft.cronExpr.trim()) {
-      return {
-        field: 'cronExpr',
-        message: presentationText(localizer, 'devices.automations.presentation.validation.cron', '请输入 cron 表达式'),
-      };
+      return scheduleDraftValidation(
+        'cronExpr',
+        localizer,
+        'devices.automations.presentation.validation.cron',
+        '请输入 cron 表达式',
+      );
     }
-    const intervalError = validateIntervalMinutes(draft.intervalMinutes, localizer);
-    if (intervalError) return { field: 'intervalMinutes', message: intervalError };
+    const intervalValidation = validateIntervalMinutes(draft.intervalMinutes, localizer);
+    if (intervalValidation) return intervalValidation;
   }
   if (
     draft.workspaceKind === 'project' &&
     !draft.targetSessionId.trim() &&
     !draft.workingDir.trim()
   ) {
-    return {
-      field: 'workingDir',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.workingDir', '请输入项目目录'),
-    };
+    return scheduleDraftValidation(
+      'workingDir',
+      localizer,
+      'devices.automations.presentation.validation.workingDir',
+      '请输入项目目录',
+    );
   }
   if (draft.effort.trim() && !isMobileScheduleEffort(draft.effort.trim())) {
-    return {
-      field: 'effort',
-      message: presentationText(localizer, 'devices.automations.presentation.validation.effort', `推理强度只能是 ${MOBILE_SCHEDULE_EFFORT_VALUES.join(' / ')}`, {
+    return scheduleDraftValidation(
+      'effort',
+      localizer,
+      'devices.automations.presentation.validation.effort',
+      `推理强度只能是 ${MOBILE_SCHEDULE_EFFORT_VALUES.join(' / ')}`,
+      {
         values: MOBILE_SCHEDULE_EFFORT_VALUES.join(' / '),
-      }),
-    };
+      },
+    );
   }
   return null;
 }
@@ -548,14 +598,24 @@ function defaultModelFor(agentKind: RemoteScheduleAgentKind): string {
 function validateIntervalMinutes(
   value: string,
   localizer?: PresentationLocalizer,
-): string | null {
+): ScheduleDraftValidation | null {
   if (!value.trim()) return null;
   const minutes = Number(value);
   if (!Number.isInteger(minutes) || minutes <= 0) {
-    return presentationText(localizer, 'devices.automations.presentation.validation.intervalPositiveInteger', '间隔分钟必须是正整数');
+    return scheduleDraftValidation(
+      'intervalMinutes',
+      localizer,
+      'devices.automations.presentation.validation.intervalPositiveInteger',
+      '间隔分钟必须是正整数',
+    );
   }
   if (intervalMinutesToCronExpr(minutes) === null) {
-    return presentationText(localizer, 'devices.automations.presentation.validation.intervalUnsupported', '分钟间隔只支持 1-59 分钟，或 1-23 小时的整点间隔');
+    return scheduleDraftValidation(
+      'intervalMinutes',
+      localizer,
+      'devices.automations.presentation.validation.intervalUnsupported',
+      '分钟间隔只支持 1-59 分钟，或 1-23 小时的整点间隔',
+    );
   }
   return null;
 }

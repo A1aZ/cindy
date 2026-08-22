@@ -67,6 +67,7 @@ import {
   createTemplateParamDefaults,
   deriveMobileScheduleSessionMode,
   hasMobileScheduleRealBinding,
+  localizeScheduleDraftValidation,
   MOBILE_SCHEDULE_PENDING_SESSION_ID,
   updateDraftAgentKind,
   updateDraftBoundSessionId,
@@ -79,6 +80,7 @@ import {
   validateTemplateParamValues,
   validateMobileScheduleDraft,
   type MobileScheduleDraft,
+  type ScheduleDraftValidation,
 } from '@/scheduler/scheduleFormModel';
 import { useRemoteScheduleEventSnapshot } from '@/scheduler/remoteScheduleEvents';
 import {
@@ -151,7 +153,7 @@ export default function AutomationsScreen() {
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null);
   const [formDraft, setFormDraft] = useState<MobileScheduleDraft | null>(null);
   const [formScheduleId, setFormScheduleId] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | ScheduleDraftValidation | null>(null);
   const [templates, setTemplates] = useState<RemoteScheduleTemplate[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
@@ -173,6 +175,11 @@ export default function AutomationsScreen() {
     () => summarizeAutomationOverview(schedules, runsBySchedule),
     [runsBySchedule, schedules],
   );
+  const formErrorText = typeof formError === 'string'
+    ? formError
+    : formError
+      ? localizeScheduleDraftValidation(formError, mobilePresentationLocalizer)
+      : null;
   const bindableSessions = useMemo(
     () => selectBindableSessions(remoteSessions, deviceId),
     [deviceId, remoteSessions],
@@ -389,7 +396,7 @@ export default function AutomationsScreen() {
     if (!formDraft || busyAction) return;
     const validation = validateMobileScheduleDraft(formDraft, mobilePresentationLocalizer);
     if (validation) {
-      setFormError(validation.message);
+      setFormError(validation);
       return;
     }
     if (formMode === 'create' && selectedTemplate && !templatePromptDirty) {
@@ -846,7 +853,7 @@ export default function AutomationsScreen() {
           <ScheduleFormCard
             busy={busyAction === 'create' || busyAction === `edit:${formScheduleId}`}
             draft={formDraft}
-            error={formError}
+            error={formErrorText}
             mode={formMode ?? 'create'}
             onCancel={closeScheduleForm}
             onChange={setFormDraft}

@@ -6,6 +6,7 @@ import {
   createMobileScheduleDraft,
   createTemplateParamDefaults,
   deriveMobileScheduleSessionMode,
+  localizeScheduleDraftValidation,
   MOBILE_SCHEDULE_PENDING_SESSION_ID,
   updateDraftAgentKind,
   updateDraftBoundSessionId,
@@ -112,6 +113,23 @@ describe('mobile schedule form model', () => {
       runMode: 'manual',
       intervalMinutes: '90',
     })).toBeNull();
+  });
+
+  it('relocalizes a stored draft validation without rerunning validation rules', () => {
+    const draft = createMobileScheduleDraft(null);
+    const oldLocalizer = {
+      translate: () => '旧语言错误',
+    };
+    const validation = validateMobileScheduleDraft(draft, oldLocalizer);
+
+    expect(validation).toMatchObject({
+      field: 'name',
+      message: '旧语言错误',
+      messageKey: 'devices.automations.presentation.validation.name',
+    });
+    expect(validation && localizeScheduleDraftValidation(validation, {
+      translate: () => 'New locale error',
+    })).toBe('New locale error');
   });
 
   it('does not require a project path when editing a bound desktop schedule', () => {

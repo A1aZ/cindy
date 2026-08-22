@@ -1418,7 +1418,9 @@ export function registerSessionIpc(
     // runtime with the moved session's cwd instead of continuing in the old one.
     if (movingLocalNonClaudeSession) {
       const makerHost = await import('../../maker-host/index.js');
-      await makerHost.getMakerIfReady()?.closeSession(sid);
+      await makerHost.withRehydrateCloseSuppressed(sid, async () => {
+        await makerHost.getMakerIfReady()?.closeSession(sid);
+      });
     }
     // 只有纯设置字段(model/effort 等)才跳过 bump；凡带 activity 字段
     // (clearedAt / sdkSessionId / status / token 用量等)仍需更新 updatedAt，

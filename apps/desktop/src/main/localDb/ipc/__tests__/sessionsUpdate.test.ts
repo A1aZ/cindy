@@ -40,6 +40,9 @@ const h = vi.hoisted(() => ({
     isSessionAlive: (id: string) => boolean;
     closeSession: (id: string) => Promise<void>;
   } | null => null),
+  withRehydrateCloseSuppressed: vi.fn(
+    async (_sessionId: string, task: () => Promise<void>) => task(),
+  ),
   setPinnedSectionCardMode: vi.fn(),
   upsertRecentWorkdir: vi.fn(async () => undefined),
   routeLock: vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
@@ -101,6 +104,7 @@ vi.mock('../../../maker-host/claude-transcript-relocation.js', () => ({
 // the whole Host.
 vi.mock('../../../maker-host/index.js', () => ({
   getMakerIfReady: h.getMakerIfReady,
+  withRehydrateCloseSuppressed: h.withRehydrateCloseSuppressed,
 }));
 // delete 路径的 removeHookAttachmentDir 会真删 turn change-set;归档路径动态
 // import cindy-brain(重副作用模块)。两者都 mock 掉,本文件只断言广播行为。
@@ -218,6 +222,8 @@ beforeEach(() => {
   h.clearPiSubagentDeletedTombstone.mockClear();
   h.clearPiSubagentDeletedTombstone.mockImplementation(async () => undefined);
   h.getMakerIfReady.mockReset();
+  h.withRehydrateCloseSuppressed.mockClear();
+  h.withRehydrateCloseSuppressed.mockImplementation(async (_sessionId, task) => task());
   h.getMakerIfReady.mockReturnValue({ isSessionAlive: () => false, closeSession: h.closeSession });
   h.userDataDir = mkdtempSync(path.join(os.tmpdir(), 'cindy-sessions-update-'));
   createDb();
@@ -695,6 +701,10 @@ describe('local-db:sessions:update handler wiring', () => {
     await invokeUpdate('codex-local', { workingDir: '/new/dir' });
 
     expect(h.closeSession).toHaveBeenCalledWith('codex-local');
+    expect(h.withRehydrateCloseSuppressed).toHaveBeenCalledWith(
+      'codex-local',
+      expect.any(Function),
+    );
   });
 
   it('does not reacquire the route lock for a combined workingDir and status patch', async () => {

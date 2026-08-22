@@ -8475,8 +8475,11 @@
         "startedSeconds": "{{count}} 秒前に開始",
         "startedMinutes": "{{count}} 分前に開始",
         "startedHours": "{{count}} 時間前に開始",
+        "intervalMinutes": "{{count}}分",
+        "intervalHours": "{{count}}時間",
+        "intervalDays": "{{count}}日",
         "nextLessThanMinute": "次回は 1 分以内",
-        "next": "次回 {{when}}（{{interval}} 後）"
+        "next": "次回 {{when}}（{{interval}}後）"
       },
       "destination": {
         "boundSession": "タスク {{id}} に紐付け",

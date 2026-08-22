@@ -8475,6 +8475,9 @@
         "startedSeconds": "{{count}}초 전에 시작",
         "startedMinutes": "{{count}}분 전에 시작",
         "startedHours": "{{count}}시간 전에 시작",
+        "intervalMinutes": "{{count}}분",
+        "intervalHours": "{{count}}시간",
+        "intervalDays": "{{count}}일",
         "nextLessThanMinute": "다음 실행까지 1분 미만",
         "next": "다음 {{when}}（{{interval}} 후）"
       },

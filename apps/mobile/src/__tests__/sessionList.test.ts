@@ -153,6 +153,25 @@ describe('sessionList', () => {
     }, { running: true })).toBe('自动化运行中');
   });
 
+  it('does not translate a real message that happens to match a generated preview state', async () => {
+    const previousLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage('en');
+      const item = toRemoteSessionListItem(
+        session('literal-status-message'),
+        Date.now(),
+        undefined,
+        0,
+        '运行中',
+      );
+
+      expect(buildRemoteSessionCardPreview(item)).toBe('运行中');
+      expect(buildRemoteSessionCardPreview(item, { running: true })).toBe('Running');
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
+
   it('shows the device-link preview on idle rows, null when the session has no message', () => {
     // 首页未打开的会话消息未 load,改由 device-link 会话列表带的 session.preview(桌面产出),
     // 经 sessionRowMessagePreview 流入 item.messagePreview;真正零消息会话则留空。

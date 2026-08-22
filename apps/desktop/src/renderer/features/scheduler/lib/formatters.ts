@@ -189,9 +189,25 @@ export function formatNextRun(
   const today = startOfLocalDay(new Date(now));
   const nextDay = startOfLocalDay(next);
   let interval: string;
-  if (diff < MS_HOUR) interval = `${Math.floor(diff / MS_MIN)}m`;
-  else if (diff < MS_DAY) interval = `${Math.floor(diff / MS_HOUR)}h`;
-  else interval = `${Math.floor(diff / MS_DAY)}d`;
+  if (diff < MS_HOUR) {
+    const count = Math.floor(diff / MS_MIN);
+    interval = translate?.('scheduler.presentation.time.intervalMinutes', {
+      defaultValue: `${count}m`,
+      count,
+    }) ?? `${count}m`;
+  } else if (diff < MS_DAY) {
+    const count = Math.floor(diff / MS_HOUR);
+    interval = translate?.('scheduler.presentation.time.intervalHours', {
+      defaultValue: `${count}h`,
+      count,
+    }) ?? `${count}h`;
+  } else {
+    const count = Math.floor(diff / MS_DAY);
+    interval = translate?.('scheduler.presentation.time.intervalDays', {
+      defaultValue: `${count}d`,
+      count,
+    }) ?? `${count}d`;
+  }
   const time = hm(next);
   let when: string;
   if (nextDay.getTime() === today.getTime()) when = time;

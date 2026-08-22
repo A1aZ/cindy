@@ -46,9 +46,9 @@ export function buildMobileHomePresentation(options: MobileHomeOptions): MobileH
         deviceName,
         sessions: project.sessions.map((item) => localizeRemoteSessionListItem(item, now)),
         subtitle: [deviceName, workingDir].filter(Boolean).join(' · '),
-        title: project.title === '未分类项目'
-          ? i18n.t('devices.presentation.home.uncategorizedProject')
-          : project.title,
+        title: project.workingDir
+          ? project.title
+          : i18n.t('devices.presentation.home.uncategorizedProject'),
       };
     }),
   };

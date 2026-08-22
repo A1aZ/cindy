@@ -66,6 +66,13 @@ describe('mobile localized presentation refresh', () => {
     expect(source.match(/\[currentSession\?\.orcaRole, i18nInstance\.language\]/g)).toHaveLength(2);
   });
 
+  it('keeps new-task authentication errors raw until render time', () => {
+    const source = read('app/sessions/new.tsx');
+
+    expect(source).toContain('setError(raw)');
+    expect(source).toContain('{describeAgentAuthError(error) ?? error}');
+  });
+
   it('rebuilds localized session sections when the language changes', () => {
     const source = read('app/devices/[deviceId].tsx');
     const sectionProjection = source.slice(

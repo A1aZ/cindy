@@ -8487,6 +8487,9 @@
         "startedSeconds": "Started {{count}}s ago",
         "startedMinutes": "Started {{count}}m ago",
         "startedHours": "Started {{count}}h ago",
+        "intervalMinutes": "{{count}}m",
+        "intervalHours": "{{count}}h",
+        "intervalDays": "{{count}}d",
         "nextLessThanMinute": "Next less than 1 min",
         "next": "Next {{when}} (in {{interval}})"
       },

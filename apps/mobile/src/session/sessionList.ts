@@ -1,4 +1,5 @@
 import { i18n } from '@/i18n';
+import { mobilePresentationLocalizer } from '@/i18n/presentationLocalizer';
 import {
   buildRemoteSessionCardPreview as buildRemoteSessionCardPreviewShared,
   buildRemoteSessionListContext as buildRemoteSessionListContextShared,
@@ -121,21 +122,10 @@ export function buildRemoteSessionCardPreview(
   item: RemoteSessionListItem,
   options: { running?: boolean } = {},
 ): string | null {
-  const preview = buildRemoteSessionCardPreviewShared(item, options);
-  const key = preview === '等待授权'
-    ? 'permission'
-    : preview === '等待计划审阅'
-      ? 'planReview'
-      : preview === '等待你的回复'
-        ? 'answer'
-        : preview === '等待你处理'
-          ? 'attention'
-          : preview === '自动化执行中'
-            ? 'automationRunning'
-            : preview === '运行中'
-              ? 'running'
-              : null;
-  return key ? i18n.t(`devices.presentation.sessionList.preview.${key}`) : preview;
+  return buildRemoteSessionCardPreviewShared(item, {
+    ...options,
+    localizer: mobilePresentationLocalizer,
+  });
 }
 
 export function formatRemoteSessionSidebarTime(iso: string | undefined, now = Date.now()): string {

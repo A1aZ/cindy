@@ -8475,8 +8475,11 @@
         "startedSeconds": "{{count}} 秒前开始",
         "startedMinutes": "{{count}} 分钟前开始",
         "startedHours": "{{count}} 小时前开始",
+        "intervalMinutes": "{{count}}分钟",
+        "intervalHours": "{{count}}小时",
+        "intervalDays": "{{count}}天",
         "nextLessThanMinute": "下次不到 1 分钟",
-        "next": "下次 {{when}}（{{interval}} 后）"
+        "next": "下次 {{when}}（{{interval}}后）"
       },
       "destination": {
         "boundSession": "绑定到任务 {{id}}",

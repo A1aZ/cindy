@@ -38,4 +38,17 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('[currentIndex, i18nInstance.language, questions]');
     expect(source).toContain('[filePath, i18nInstance.language, originalPlan, planText]');
   });
+
+  it('rebuilds cached payload presentations when the language changes', () => {
+    const source = read('src/session/MessageRenderer.tsx');
+
+    expect(source.match(/\[i18nInstance\.language, payload\]/g)).toHaveLength(4);
+    expect(source).toContain('[diff, i18nInstance.language]');
+  });
+
+  it('rebuilds bulk-action copy when the language changes', () => {
+    const source = read('app/devices/[deviceId].tsx');
+
+    expect(source).toContain('[i18nInstance.language, selectedSessions]');
+  });
 });

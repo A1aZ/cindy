@@ -5095,7 +5095,7 @@ function MessagePayloadModal({
   onShareImage?: ComponentProps<typeof ImageLightbox>['onShareImage'];
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const [payloadCopyState, setPayloadCopyState] = useState<PayloadHeaderCopyState>('idle');
   const payloadCopySeqRef = useRef(0);
@@ -5125,11 +5125,11 @@ function MessagePayloadModal({
   }, [imageAnnotation, onClose]);
   const payloadSummary = useMemo(
     () => payload ? summarizeMessagePayload(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadPreview = useMemo(
     () => payload ? summarizeMessagePayloadPreview(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadDetailText = payloadHeaderDetailText(payloadPreview, payloadSummary?.subtitle);
   const canCopyPayload = !!payloadSummary?.copyableText?.trim();
@@ -5477,13 +5477,16 @@ function MessagePayloadBody({
   onResolveRemoteMedia?: ResolveRemoteMediaFn;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const { width: screenWidth } = useWindowDimensions();
   const [remoteState, setRemoteState] = useState<RemoteMediaState>({ status: 'idle' });
   const [playerStatus, setPlayerStatus] = useState<MobileMediaPlayerStatus | null>(null);
   const resolvedRemoteMediaRef = useRef<MobileResolvedRemoteMedia | null>(null);
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const payloadLayout = useMemo(() => buildPayloadBodyLayout({
     kind: payload.kind,
     screenWidth,
@@ -5657,9 +5660,12 @@ function DiffPayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
-  const view = useMemo(() => formatDiffPayloadView(diff), [diff]);
+  const view = useMemo(
+    () => formatDiffPayloadView(diff),
+    [diff, i18nInstance.language],
+  );
   const [filePreviewVisible, setFilePreviewVisible] = useState(false);
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(view.filePath, onReadTextFilePreview);
   const openFilePreview = useCallback(() => {
@@ -5842,10 +5848,13 @@ function FilePayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const sourcePath = payload.sourcePath ?? '';
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(sourcePath, onReadTextFilePreview);
 
   return (

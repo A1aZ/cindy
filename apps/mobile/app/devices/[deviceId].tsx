@@ -113,7 +113,7 @@ type RemoteListStatusFilter = Extract<RemoteSessionStatusFilter, 'active' | 'arc
 export default function DeviceDetailScreen() {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const params = useLocalSearchParams<{
     deviceId: string;
     deviceName?: string;
@@ -385,7 +385,7 @@ export default function DeviceDetailScreen() {
     pin: summarizeMobileSessionBulkAction(selectedSessions, 'pin'),
     restore: summarizeMobileSessionBulkAction(selectedSessions, 'restore'),
     unpin: summarizeMobileSessionBulkAction(selectedSessions, 'unpin'),
-  }), [selectedSessions]);
+  }), [i18nInstance.language, selectedSessions]);
   const bulkActionLayout = useMemo(
     () => visibleMobileSessionBulkActions(bulkActionSummaries),
     [bulkActionSummaries],

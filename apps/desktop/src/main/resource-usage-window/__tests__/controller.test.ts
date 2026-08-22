@@ -14,7 +14,6 @@ interface FakeWindow {
   destroy: ReturnType<typeof vi.fn>;
   hide: ReturnType<typeof vi.fn>;
   show: ReturnType<typeof vi.fn>;
-  setTitle: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   restore: ReturnType<typeof vi.fn>;
   setFullScreen: ReturnType<typeof vi.fn>;
@@ -76,7 +75,6 @@ function fakeWindow(id: number, minimized = false): FakeWindow {
     show: vi.fn(() => {
       visible = true;
     }),
-    setTitle: vi.fn(),
     focus: vi.fn(),
     restore: vi.fn(),
     setFullScreen: vi.fn(),
@@ -170,13 +168,12 @@ describe('ResourceUsageWindowController', () => {
     expect(windows[0]?.focus).toHaveBeenCalledOnce();
   });
 
-  it('updates the native title and renderer locale of an already prewarmed window', () => {
+  it('sends locale changes to an already prewarmed window', () => {
     const { controller, windows } = makeHarness();
     controller.prewarm();
 
     controller.setLocale('zh-CN');
 
-    expect(windows[0]?.setTitle).toHaveBeenCalledWith('资源用量');
     expect(windows[0]?.send).toHaveBeenCalledWith(
       RESOURCE_USAGE_WINDOW_LOCALE_CHANGED_CHANNEL,
       'zh-CN',

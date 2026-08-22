@@ -7254,6 +7254,16 @@ app.on('ready', async () => {
   registerLocalDbIpc({
     cancelSessionOperations: cancelIOSSimulatorSessionOperations,
     cleanupRemovedSession: cleanupIOSSimulatorRemovedSession,
+    closeIdleSessionForMove: async (sessionId) => {
+      const maker = getMakerIfReady();
+      if (maker?.getSession(sessionId)?.isTurnRunning()) return false;
+      if (maker) {
+        await rehydrateCloseSuppression.withSuppressed(sessionId, () =>
+          maker.closeSession(sessionId),
+        );
+      }
+      return true;
+    },
     reconcilePersistedSessionRuntimes: reconcilePersistedIOSSimulatorOwnership,
     withSessionLock: withSendToSessionLock,
     // Mirrors exactly what the resume handler requires (`maker-ipc/register.ts`):

@@ -808,15 +808,27 @@ function WorkerTabsList({
     <div className="relative flex min-w-0 flex-1 items-center">
       {/* 箭头放在滚动区域外, 两侧常驻等宽占位: 既不覆盖 tab 点击区, 也避免
           箭头出现/隐藏时改变 scroller 宽度造成边缘状态来回抖动。 到边后按钮只
-          禁用不卸载, 避免键盘焦点被突然丢回 body。 */}
+          禁用不卸载, 名称与 Tip 改为到边说明, 避免键盘焦点被突然丢回 body。 */}
       <div className="h-6 w-5 shrink-0">
-        <Tip text={t('orca.rolePill.scrollWorkersLeft')} side="bottom" delay={250}>
+        <Tip
+          text={
+            scrollState.left
+              ? t('orca.rolePill.scrollWorkersLeft')
+              : t('orca.rolePill.scrollWorkersLeftEdge')
+          }
+          side="bottom"
+          delay={250}
+        >
           <button
             type="button"
-            aria-label={t('orca.rolePill.scrollWorkersLeft')}
+            aria-label={
+              scrollState.left
+                ? t('orca.rolePill.scrollWorkersLeft')
+                : t('orca.rolePill.scrollWorkersLeftEdge')
+            }
             aria-disabled={!scrollState.left || undefined}
             className={cn(
-              'inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100',
+              'inline-flex h-6 w-5 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
               !scrollState.left && 'pointer-events-none opacity-0',
             )}
             onClick={() => {
@@ -923,13 +935,25 @@ function WorkerTabsList({
         />
       )}
       <div className="h-6 w-5 shrink-0">
-        <Tip text={t('orca.rolePill.scrollWorkersRight')} side="bottom" delay={250}>
+        <Tip
+          text={
+            scrollState.right
+              ? t('orca.rolePill.scrollWorkersRight')
+              : t('orca.rolePill.scrollWorkersRightEdge')
+          }
+          side="bottom"
+          delay={250}
+        >
           <button
             type="button"
-            aria-label={t('orca.rolePill.scrollWorkersRight')}
+            aria-label={
+              scrollState.right
+                ? t('orca.rolePill.scrollWorkersRight')
+                : t('orca.rolePill.scrollWorkersRightEdge')
+            }
             aria-disabled={!scrollState.right || undefined}
             className={cn(
-              'inline-flex h-6 w-5 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100',
+              'inline-flex h-6 w-5 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
               !scrollState.right && 'pointer-events-none opacity-0',
             )}
             onClick={() => {

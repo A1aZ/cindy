@@ -9751,6 +9751,8 @@
       "layoutDropdown": "드롭다운",
       "scrollWorkersLeft": "이전 Worker 보기",
       "scrollWorkersRight": "다음 Worker 보기",
+      "scrollWorkersLeftEdge": "이미 첫 Worker 를 표시하고 있습니다",
+      "scrollWorkersRightEdge": "이미 마지막 Worker 를 표시하고 있습니다",
       "errorBadge": "오류",
       "errorBadgeAria": "오류가 발생한 Worker 가 있습니다"
     },

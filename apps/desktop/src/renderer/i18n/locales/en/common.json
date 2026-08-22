@@ -9765,6 +9765,8 @@
       "layoutDropdown": "Dropdown",
       "scrollWorkersLeft": "Scroll to earlier workers",
       "scrollWorkersRight": "Scroll to more workers",
+      "scrollWorkersLeftEdge": "Already at the earliest worker",
+      "scrollWorkersRightEdge": "Already at the latest worker",
       "errorBadge": "ERR",
       "errorBadgeAria": "A worker has an error"
     },

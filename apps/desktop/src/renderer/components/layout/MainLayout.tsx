@@ -50,7 +50,12 @@ import {
   getRsbWindowUiState,
   useRightSidebarWindowState,
 } from '@/lib/rightSidebarWindowState';
-import { didUserCloseDetachedSidebarWindow } from '@/lib/rsbWindowTransitions';
+import {
+  detachedHostAfterOpen,
+  didUserCloseDetachedSidebarWindow,
+  nextDetachedHostAfterFocus,
+  sessionIdForDetachedSidebarClose,
+} from '@/lib/rsbWindowTransitions';
 import { routeSidebarCommand } from '@/features/right-sidebar/lib/detachedSidebarRouting';
 import { openTerminalFromShortcut } from '@/features/right-sidebar/lib/openTerminalShortcut';
 import { executeSidebarCommand } from '@/features/right-sidebar/lib/executeSidebarCommand';
@@ -277,13 +282,19 @@ export function MainLayout() {
   >(undefined);
   const rightSidebarSessionIdRef = useRef(rightSidebarSessionId);
   rightSidebarSessionIdRef.current = rightSidebarSessionId;
+  const detachedHostSessionIdRef = useRef<string | null>(null);
   const isRightSidebarCollapsedRef = useRef(isRightSidebarCollapsed);
   isRightSidebarCollapsedRef.current = isRightSidebarCollapsed;
   const rsbDetachedRef = useRef(rsbDetached);
   rsbDetachedRef.current = rsbDetached;
+  const navigateToSessionRef = useRef<(sessionId: string) => void>(() => undefined);
   const declareRightSidebarSessionId = useCallback(
     (sessionId: string | null, opts: RightSidebarSessionDeclarationOptions = {}) => {
       rightSidebarSessionIdRef.current = sessionId;
+      detachedHostSessionIdRef.current = nextDetachedHostAfterFocus(
+        detachedHostSessionIdRef.current,
+        sessionId,
+      );
       setRightSidebarSessionId(sessionId);
       setRightSidebarSubagentsAvailable(sessionId ? opts.subagentsAvailable : undefined);
       if (!sessionId || !rsbWindow.loaded || rsbDetached) return;
@@ -520,6 +531,7 @@ export function MainLayout() {
     },
     [navigate],
   );
+  navigateToSessionRef.current = navigateToSession;
   useEffect(() => {
     const unsubscribe = window.electronAPI.onNotificationFocusSession((sessionId) => {
       if (typeof sessionId !== 'string' || !sessionId) return;
@@ -763,21 +775,12 @@ export function MainLayout() {
   // .handleTabOpRequest):open/focus → 'open',close 最后一个 tab → 'close'。
   // 全部走纯代码确定性,不让模型推理。
   //
-  // Cross-session race(用户痛点):
+  // Cross-session 呼起必须跟发起方 session,不能只认当前焦点:
   //   1) agent 在 session A 调 open → 触发 visibility 'open' + sessionId=A
-  //   2) 用户在 dispatch 到达本 listener 之前切到 session B
-  //   3) 此时 `rightSidebarSessionId` 已经是 B
-  // 朴素实现会把 B 的侧边栏弹开(用户没要求的 UI 跳),并且 A 的新 tab 还存在 A
-  // 的 bucket 里(其 collapsed 存档没改,用户切回 A 还要手动展开才能看见)。
-  //
-  // 正确分支:
-  //   - 信号 sessionId === 当前 rightSidebarSessionId → 前台路径:setState + 动画
-  //     + 持久化(用户体感:agent 操作可见)
-  //   - 信号 sessionId !== 当前 rightSidebarSessionId → 后台路径:仅 writeCollapsedFor
-  //     到目标 sessionId 的存档,UI 不动。用户切回 A 时,sessionId useEffect 触发
-  //     `readCollapsedFor(A)` 拿到 false,瞬间渲染展开的侧栏 — 没有"刚到就弹"的
-  //     违和感(规则 7: 不要 loading 闪屏)。
-  //   - 信号未带 sessionId(直接 UI button 触发) → 跟前台路径同意义,默认走当前 session
+  //   2) 用户此时看着 session B(远程连接、副窗、切走等)
+  //   旧实现只给 B 弹栏 / 或把异会话请求丢掉,A 的浏览器永远看不见。
+  //   现在: detached 把子窗口钉到 A;内嵌则写入 A 的存档并 navigate 到 A。
+  //   信号未带 sessionId(直接 UI button)仍走当前 session。
   useEffect(() => {
     return onRequestRightSidebarVisibility((visibility, opts) => {
       const currentSessionId = rightSidebarSessionIdRef.current;
@@ -787,24 +790,29 @@ export function MainLayout() {
       const windowState = getRsbWindowUiState();
       if (!windowState.loaded) return;
       const detachedNow = !isSecondaryWindow() && windowState.detached;
-      // detached 模式:可见性 = 子窗口开闭。当前会话的请求驱动窗口;异会话请求
-      // 只写内嵌折叠存档(供日后关偏好回内嵌时用),UI 不动。
+      // detached 模式:可见性 = 子窗口开闭。呼起必须跟发起方 session,不能只认
+      // 主窗当前焦点 —— 远程连接 / 后台 session 的 agent 开页否则会丢在焦点桶里。
       // (agent tab-op 在 detached 时 dispatch 到子窗口 renderer,其内的
       // SidebarWindowLayout 也订阅了本通道;这里主要覆盖主窗内直接调用方。)
       if (detachedNow) {
-        if (targetSessionId === currentSessionId) {
-          writeCollapsedFor(targetSessionId, targetCollapsed);
-          if (visibility === 'open') {
-            // userInitiated 透传:插件 preview / agent 自动化(false)只把内容送进
-            // 子窗口,不 show+focus 抢用户前台;用户手势(缺省 true)行为不变。
-            void window.electronAPI.rightSidebarWindow
-              .open({ userInitiated: opts.userInitiated !== false })
-              .catch(() => undefined);
-          } else {
-            void window.electronAPI.rightSidebarWindow.close().catch(() => undefined);
-          }
-        } else {
-          writeCollapsedFor(targetSessionId, targetCollapsed);
+        writeCollapsedFor(targetSessionId, targetCollapsed);
+        if (visibility === 'open') {
+          detachedHostSessionIdRef.current = detachedHostAfterOpen({
+            currentSessionId,
+            targetSessionId,
+            previousHostSessionId: detachedHostSessionIdRef.current,
+          });
+          // userInitiated 透传:插件 preview / agent 自动化(false)只把内容送进
+          // 子窗口,不 show+focus 抢用户前台;用户手势(缺省 true)行为不变。
+          // sessionId 让 controller 把子窗口钉在发起方 session 上。
+          void window.electronAPI.rightSidebarWindow
+            .open({
+              userInitiated: opts.userInitiated !== false,
+              sessionId: targetSessionId,
+            })
+            .catch(() => undefined);
+        } else if (targetSessionId === currentSessionId) {
+          void window.electronAPI.rightSidebarWindow.close().catch(() => undefined);
         }
         return;
       }
@@ -819,23 +827,29 @@ export function MainLayout() {
           return targetCollapsed;
         });
       } else {
-        // 后台路径:只写存档,用户切回该 session 时 useEffect 读到新值瞬间渲染
+        // 后台路径:写入目标 session 存档。用户手势跨任务 open 才切主窗;
+        // agent / 插件自动化(userInitiated:false)只落档,不抢当前输入焦点。
         writeCollapsedFor(targetSessionId, targetCollapsed);
+        if (visibility === 'open' && opts.userInitiated !== false) {
+          navigateToSessionRef.current?.(targetSessionId);
+        }
       }
     });
   }, []);
 
   // detached 子窗口的所有真实关窗入口最终都会广播 open:true→false。只要偏好仍是
-  // detached，就把当前 session 记为用户显式收起；合并回主窗会先变 detached=false，
-  // 不命中本分支，继续由 attach 路径写“开”。
+  // detached，就把**实际宿主 session**记为用户显式收起；合并回主窗会先变
+  // detached=false，不命中本分支，继续由 attach 路径写“开”。
   const prevRsbWindowStateRef = useRef(rsbWindow);
   useEffect(() => {
     const prev = prevRsbWindowStateRef.current;
     prevRsbWindowStateRef.current = rsbWindow;
-    const sessionId = rightSidebarSessionIdRef.current;
-    if (sessionId && didUserCloseDetachedSidebarWindow(prev, rsbWindow, !isSecondaryWindow())) {
-      writeCollapsedFor(sessionId, true);
-    }
+    if (!didUserCloseDetachedSidebarWindow(prev, rsbWindow, !isSecondaryWindow())) return;
+    const sessionId = sessionIdForDetachedSidebarClose(
+      rsbWindow.hostSessionId ?? detachedHostSessionIdRef.current,
+      rightSidebarSessionIdRef.current,
+    );
+    if (sessionId) writeCollapsedFor(sessionId, true);
   }, [rsbWindow]);
 
   // RSB Maximize(Phase 6):侧栏接管整个内容区。

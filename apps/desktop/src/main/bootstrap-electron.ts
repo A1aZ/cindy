@@ -535,6 +535,7 @@ import {
   setIsDetachedForBackend,
 } from './mcp-integrations/browser.js';
 import { RsbWindowController } from './right-sidebar-window/controller.js';
+import { resolveRsbHostContextFromSession } from './right-sidebar-window/resolveHostContext.js';
 import { createRightSidebarWindow } from './right-sidebar-window/window.js';
 import { registerRsbWindowIpc } from './right-sidebar-window/ipc.js';
 import { ResourceUsageWindowController } from './resource-usage-window/controller.js';
@@ -1835,6 +1836,7 @@ const rsbWindowController = new RsbWindowController({
   tabHandoffChannel: MAKER_PUSH.RSB_WINDOW_TAB_HANDOFF,
   isQuitting: () => isQuitting,
   canCloseWindow: () => !hasActiveRsbNativePopupSurfaces(),
+  resolveHostContext: resolveRsbHostContextFromSession,
   log: createLogger('right-sidebar-window-controller'),
 });
 
@@ -2089,7 +2091,9 @@ registerTabOpResultHandler({
 // an automation tab-op pop the sidebar window first when the user prefers
 // detached mode but has the window closed.
 setMainWindowAccessorForBackend(() => rsbWindowController.getHostWebContents());
-setEnsureHostForBackend(() => rsbWindowController.ensureOpenForAutomation());
+setEnsureHostForBackend((sessionId) =>
+  rsbWindowController.ensureOpenForAutomation({ sessionId }),
+);
 setIsDetachedForBackend(() => readRsbWindowSettings().detached);
 setBrowserSessionUploadRootResolver(async (sessionId) => {
   try {

@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
+  closeSession: vi.fn(async () => undefined),
   tapWindowBroadcast: vi.fn(),
   summarizeSession: vi.fn(async () => undefined),
   setPinnedSectionCardMode: vi.fn(),
@@ -69,6 +70,9 @@ vi.mock('../../../messagePersistBroadcaster', () => ({ noteSessionClearBoundary:
 vi.mock('../../../sessionIds', () => ({ resolveBusinessSessionId: (id: string) => id }));
 vi.mock('../../../maker-host/claude-transcript-relocation.js', () => ({
   relocateClaudeTranscriptsForSessionMove: h.relocate,
+}));
+vi.mock('../../../maker-host/index.js', () => ({
+  getMakerIfReady: () => ({ closeSession: h.closeSession }),
 }));
 
 import { registerSessionIpc } from '../sessions';
@@ -166,6 +170,7 @@ async function invokeUpdate(id: string, patch: Record<string, unknown>): Promise
 beforeEach(() => {
   vi.clearAllMocks();
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
+  h.closeSession.mockClear();
   h.routeLock.mockImplementation(async (_sessionId, task) => task());
   h.handlers.clear();
   createDb();
@@ -341,11 +346,21 @@ describe('local-db:sessions:update handler wiring', () => {
   it('does nothing for codex sessions', async () => {
     await invokeUpdate('codex-local', { workingDir: '/new/dir' });
     expect(h.relocate).not.toHaveBeenCalled();
+    expect(h.closeSession).toHaveBeenCalledWith('codex-local');
+  });
+
+  it('closes a local Pi runtime before moving its working directory', async () => {
+    h.sqlite!.prepare('UPDATE sessions SET agent_kind = ? WHERE id = ?').run('pi', 'codex-local');
+
+    await invokeUpdate('codex-local', { workingDir: '/new/dir' });
+
+    expect(h.closeSession).toHaveBeenCalledWith('codex-local');
   });
 
   it('does nothing for remote sessions', async () => {
     await invokeUpdate('cc-remote', { workingDir: '/new/dir' });
     expect(h.relocate).not.toHaveBeenCalled();
+    expect(h.closeSession).not.toHaveBeenCalled();
   });
 });
 

@@ -1410,6 +1410,21 @@ export function registerSessionIpc(
               .where(eq(sessions.id, sid))
           )[0]
         : undefined;
+    const movingLocalNonClaudeSession =
+      beforeMove &&
+      beforeMove.agentKind !== 'cc' &&
+      !beforeMove.remoteHostId &&
+      beforeMove.workingDir &&
+      typeof p.workingDir === 'string' &&
+      p.workingDir &&
+      normalizeWorkingDirForStorage(beforeMove.workingDir) !== p.workingDir;
+    // Pi/Codex keep a live Maker handle whose cwd is fixed at bootstrap. Close it
+    // before persisting the new directory so the next send lazily recreates the
+    // runtime with the moved session's cwd instead of continuing in the old one.
+    if (movingLocalNonClaudeSession) {
+      const makerHost = await import('../../maker-host/index.js');
+      await makerHost.getMakerIfReady()?.closeSession(sid);
+    }
     // 只有纯设置字段(model/effort 等)才跳过 bump；凡带 activity 字段
     // (clearedAt / sdkSessionId / status / token 用量等)仍需更新 updatedAt，
     // 否则本地 /clear 后重启侧栏时间回退旧值。

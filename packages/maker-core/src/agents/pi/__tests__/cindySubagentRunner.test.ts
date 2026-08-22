@@ -823,13 +823,10 @@ describe('Cindy durable PI Subagent runner', () => {
         (outcome) => outcome.status === 'fulfilled' && typeof outcome.value === 'string',
       );
       // Mutual exclusion is the claim under test, and it is asserted without
-      // assuming *which* racer wins. Either may now finish: the containment
-      // guard resolves both sides canonically, so a symlinked root is no longer
-      // rejected as an escape. Asserting "exactly one fulfilled" instead would
-      // still be a coin flip on which racer got there first.
-      // Windows CI saw this set come back empty, which no local ordering
-      // reproduces. Dump both outcomes verbatim so the next run names the cause
-      // instead of only reporting the count.
+      // assuming *which* racer wins. The containment guard resolves both roots
+      // canonically, so the invariant is exactly one started resume and exactly
+      // one refused resume. Dump both outcomes verbatim so a platform-specific
+      // failure names the cause instead of only reporting the count.
       const describeOutcomes = (): string => JSON.stringify(settled.map((outcome) => (
         outcome.status === 'fulfilled'
           ? { fulfilled: outcome.value }
@@ -847,9 +844,8 @@ describe('Cindy durable PI Subagent runner', () => {
         && !/already resuming this Subagent generation/i.test(String(outcome.reason?.message ?? ''))
       ));
       expect(unexpectedRejections, `resume outcomes: ${describeOutcomes()}`).toHaveLength(0);
-      expect(refusedTheResume.length, `resume outcomes: ${describeOutcomes()}`).toBeGreaterThanOrEqual(1);
-      expect(started.length).toBeLessThanOrEqual(1);
-      expect(refusedTheResume.length + started.length, `resume outcomes: ${describeOutcomes()}`).toBe(2);
+      expect(started, `resume outcomes: ${describeOutcomes()}`).toHaveLength(1);
+      expect(refusedTheResume, `resume outcomes: ${describeOutcomes()}`).toHaveLength(1);
       // Whoever got through, there is never a second live generation over the
       // same PI child session — that is what a lost claim has to prevent.
       const runs = await listPiSubagentRuns(fixture.root);

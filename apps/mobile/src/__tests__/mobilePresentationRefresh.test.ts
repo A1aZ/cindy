@@ -107,11 +107,16 @@ describe('mobile localized presentation refresh', () => {
 
   it('rebuilds preview-page file metadata when the language changes', () => {
     const source = read('app/files/preview/[sessionId].tsx');
+    const directoryRequest = source.slice(
+      source.indexOf('// 同目录 pager 远端数据:'),
+      source.indexOf('// 同目录 pager 展示投影:'),
+    );
     const siblingProjection = source.slice(
-      source.indexOf('// 同目录 pager:'),
+      source.indexOf('// 同目录 pager 展示投影:'),
       source.indexOf('const current = siblings?.[pageIndex] ?? null'),
     );
 
+    expect(directoryRequest).not.toContain('i18nInstance.language');
     expect(siblingProjection).toContain('i18nInstance.language');
   });
 

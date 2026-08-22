@@ -219,6 +219,25 @@ function hasNestedScrollableAncestorThatCanScrollUp(
   return false;
 }
 
+function hasNestedScrollableAncestorThatCanScrollDown(
+  root: HTMLElement,
+  target: EventTarget | null,
+): boolean {
+  let el = eventTargetElement(target);
+  while (el && el !== root) {
+    if (!root.contains(el)) return false;
+    const overflowY = window.getComputedStyle(el).overflowY;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const canScroll =
+      (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+      maxScroll > SCROLL_DIRECTION_DEAD_ZONE_PX &&
+      el.scrollTop < maxScroll - SCROLL_DIRECTION_DEAD_ZONE_PX;
+    if (canScroll) return true;
+    el = el.parentElement;
+  }
+  return false;
+}
+
 import { UserMessage } from './UserMessage';
 import { AssistantMessage } from './AssistantMessage';
 import { AskUserQuestionBubble } from './AskUserQuestionBubble';
@@ -298,6 +317,11 @@ import {
   readFollowLatestRequestKey,
   shouldBumpSendFollowCancelOnScroll,
   subscribeFollowLatestRequests,
+  REPIN_AT_BOTTOM_PX,
+  isVerticalScrollbarPress,
+  shouldRepinOnDownIntent,
+  shouldRepinOnWheel,
+  shouldUnpinOnScrollbarDrag,
   shouldUnpinOnUpIntent,
   shouldUnpinOnWheel,
 } from './autoFollowIntent';
@@ -1493,12 +1517,14 @@ export function buildRenderItems(
       // 不把后续计划事件带进来，避免改变「正在复核哪张 insertion」的语义。
       const validationMessages = [
         ...prefix,
-        ...messages.slice(index + 1).filter(
-          (message) =>
-            message.role === 'tool_result' &&
-            typeof message.toolUseId === 'string' &&
-            prefixPlanToolUseIds.has(message.toolUseId),
-        ),
+        ...messages
+          .slice(index + 1)
+          .filter(
+            (message) =>
+              message.role === 'tool_result' &&
+              typeof message.toolUseId === 'string' &&
+              prefixPlanToolUseIds.has(message.toolUseId),
+          ),
       ];
       const stateAtInsertion = getLatestMessageTodoState(validationMessages, {
         taskHistoryMayBeIncomplete: true,
@@ -3917,6 +3943,21 @@ export function MessageStream({
     if (firstVisibleItemKey !== null && wasCovering && !windowCoversEnd) {
       isNearBottomRef.current = false;
       setIsNearBottom(false);
+      return;
+    }
+    // 锚定窗向下扩到真正盖住尾部,且用户已经贴在当前窗口底 → 切回默认尾窗并
+    // 恢复跟随。扩窗发生在本次 scroll 之后,同一帧的 handleScroll 还看不到
+    // windowCoversEnd=true,没有下一次滚动时会永远停在「已到底、但不跟」。
+    if (!wasCovering && windowCoversEnd && firstVisibleItemKey !== null) {
+      const el = scrollRef.current;
+      if (!el) return;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= REPIN_AT_BOTTOM_PX) {
+        isNearBottomRef.current = true;
+        setIsNearBottom(true);
+        setUnreadCount(0);
+        setFirstVisibleItemKey(null);
+      }
     }
   }, [firstVisibleItemKey, windowCoversEnd]);
 
@@ -4159,6 +4200,31 @@ export function MessageStream({
     setIsNearBottom(false);
   }, [sessionId]);
 
+  // 与 unpin 对称:用户已经贴死底部时的向下意图恢复跟随。不经过 scroll 事件 —
+  // 贴死底部后再往下滚通常不再改变 scrollTop。历史切片的底不是会话尾,不能从
+  // 那里开始跟随(与 resolveEffectiveNearBottom 同口径)。覆盖末尾的锚定窗也要
+  // 一并清掉,否则下一条 token 会 uncover 再 unpin。
+  const pinAutoFollowForUserDownIntent = useCallback(() => {
+    if (!windowCoversEndRef.current) return;
+    if (isNearBottomRef.current) return;
+    isNearBottomRef.current = true;
+    setIsNearBottom(true);
+    setUnreadCount(0);
+    setFirstVisibleItemKey(null);
+  }, []);
+
+  // 滚动条拖拽:只记按下时的 scrollTop。单纯 mousedown 不解除;上移过死区才 unpin。
+  // 按下期间停掉流式 pin,避免 programmatic 窗口把拖拽 scroll 吞掉后再钉回。
+  const scrollbarDragStartTopRef = useRef<number | null>(null);
+  const pinToBottomRef = useRef<() => void>(() => {});
+  // 拖拽态必须有界结束:mouseup / blur / pointercancel / 页签隐藏都走这里。
+  // Alt-Tab 后在别处松手收不到 mouseup,不清理则 pinToBottom 会永久提前返回。
+  const endScrollbarDrag = useCallback(() => {
+    if (scrollbarDragStartTopRef.current == null) return;
+    scrollbarDragStartTopRef.current = null;
+    if (isNearBottomRef.current) pinToBottomRef.current();
+  }, []);
+
   // ── jump-to-bottom chip ──
   // 用户向下滚动且未到底时显示扁平的"跳到底部" chip,2s 内无滚动自动隐藏。
   // 与 NewMessageIndicator 互斥(它有未读时优先)。state 用 setter 直接控制,
@@ -4217,14 +4283,14 @@ export function MessageStream({
   );
   // wheel/touch/键盘接管：结束当前 smooth，但让期间延期的删除补偿重放。
   const clearChipJumpSuppression = useCallback(() => {
-    // 跳底会乐观置位贴底。接管后若仍贴底：流式 ResizeObserver 会 pinToBottom 拽回
-    // 视口，延期删除重放也会被补偿 effect 直接跳过。有进行中的 chip / focus /
-    // 跳底 generation 时一律解除，不只在已有延期删除时。
+    // 只在打断真正的导航跳转(chip / focus / 延期删除补偿)时解除跟随。
+    // 流式 pinToBottom 也会打开 programmaticScrollRef,把它算进接管条件会让
+    // 生成期间任意滚轮或点滚动条都把跟随掐死;人已经在底部时再也产生不了
+    // 向下 scroll,跟随就恢复不了。想离开底部走 wheel / 触控 / 键盘的上滚意图。
     if (
       deferredDeleteCompensationRef.current ||
       chipJumpGenerationRef.current !== null ||
-      focusJumpRef.current ||
-      programmaticScrollRef.current
+      focusJumpRef.current
     ) {
       unpinAutoFollowForUserUpIntent();
     }
@@ -4390,6 +4456,20 @@ export function MessageStream({
           unpinAutoFollowForUserUpIntent();
         }
         triggerUserIntentFill();
+        return;
+      }
+      if (event.deltaY > 0) {
+        if (hasNestedScrollableAncestorThatCanScrollDown(root, event.target)) return;
+        const distanceFromBottom = root.scrollHeight - root.scrollTop - root.clientHeight;
+        if (
+          shouldRepinOnWheel({
+            deltaX: event.deltaX,
+            deltaY: event.deltaY,
+            distanceFromBottom,
+          })
+        ) {
+          pinAutoFollowForUserDownIntent();
+        }
       }
     };
     const onTouchStart = (event: TouchEvent) => {
@@ -4412,13 +4492,57 @@ export function MessageStream({
           unpinAutoFollowForUserUpIntent();
         }
         triggerUserIntentFill();
+        return;
+      }
+      if (startY - currentY > TOUCH_HISTORY_INTENT_THRESHOLD_PX) {
+        userHistoryTouchStartYRef.current = currentY;
+        if (hasNestedScrollableAncestorThatCanScrollDown(root, event.target)) return;
+        const distanceFromBottom = root.scrollHeight - root.scrollTop - root.clientHeight;
+        if (shouldRepinOnDownIntent({ distanceFromBottom })) {
+          pinAutoFollowForUserDownIntent();
+        }
       }
     };
     const onTouchEnd = () => {
       userHistoryTouchStartYRef.current = null;
     };
-    const onMouseDown = () => {
+    const onMouseDown = (event: MouseEvent) => {
       clearChipJumpSuppression();
+      if (
+        isVerticalScrollbarPress({
+          targetIsRoot: event.target === root,
+          offsetX: event.offsetX,
+          clientWidth: root.clientWidth,
+        })
+      ) {
+        scrollbarDragStartTopRef.current = root.scrollTop;
+      }
+    };
+    const onMouseMove = () => {
+      const startTop = scrollbarDragStartTopRef.current;
+      if (startTop == null) return;
+      if (
+        shouldUnpinOnScrollbarDrag({
+          pointerDown: true,
+          scrollDelta: root.scrollTop - startTop,
+          directionDeadZonePx: SCROLL_DIRECTION_DEAD_ZONE_PX,
+        }) &&
+        shouldUnpinOnUpIntent({ scrollHeight: root.scrollHeight, clientHeight: root.clientHeight })
+      ) {
+        unpinAutoFollowForUserUpIntent();
+      }
+    };
+    const onMouseUp = () => {
+      endScrollbarDrag();
+    };
+    const onPointerCancel = () => {
+      endScrollbarDrag();
+    };
+    const onWindowBlur = () => {
+      endScrollbarDrag();
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) endScrollbarDrag();
     };
     root.addEventListener('wheel', onWheel, { passive: true });
     root.addEventListener('touchstart', onTouchStart, { passive: true });
@@ -4426,6 +4550,11 @@ export function MessageStream({
     root.addEventListener('touchend', onTouchEnd, { passive: true });
     root.addEventListener('touchcancel', onTouchEnd, { passive: true });
     root.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       root.removeEventListener('wheel', onWheel);
       root.removeEventListener('touchstart', onTouchStart);
@@ -4433,8 +4562,19 @@ export function MessageStream({
       root.removeEventListener('touchend', onTouchEnd);
       root.removeEventListener('touchcancel', onTouchEnd);
       root.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [clearChipJumpSuppression, triggerUserIntentFill, unpinAutoFollowForUserUpIntent]);
+  }, [
+    clearChipJumpSuppression,
+    endScrollbarDrag,
+    pinAutoFollowForUserDownIntent,
+    triggerUserIntentFill,
+    unpinAutoFollowForUserUpIntent,
+  ]);
   useEffect(() => {
     const onHistoryNavigationKey = (event: KeyboardEvent) => {
       if (!ownsHardwareScrollActions) return;
@@ -4466,6 +4606,8 @@ export function MessageStream({
   const pinToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // 滚动条拖拽中不要钉回,否则滑块上移会被下一帧 pin 吃掉。
+    if (scrollbarDragStartTopRef.current != null) return;
     const generation = beginProgrammaticScroll();
     suppressScrollbarActivation(el);
     el.scrollTop = el.scrollHeight;
@@ -4478,6 +4620,7 @@ export function MessageStream({
       }
     });
   }, [beginProgrammaticScroll, finishProgrammaticScroll, refreshViewportAnchor]);
+  pinToBottomRef.current = pinToBottom;
 
   // Composer send is an explicit "show me the result" intent. Don't wait for
   // the tail render item to be a user message — assistant / tool cards often
@@ -5091,7 +5234,8 @@ export function MessageStream({
     const distanceFromBottom = el.scrollHeight - currentScrollTop - el.clientHeight;
     const threshold = 100;
 
-    if (!programmaticScrollRef.current) {
+    const draggingScrollbar = scrollbarDragStartTopRef.current != null;
+    if (!programmaticScrollRef.current || draggingScrollbar) {
       // 用户手动滚动 = 接管浏览,退出「还原中」,后续恢复正常 auto-follow 判定。
       restoringRef.current = false;
       // 持续保存浏览位置（rAF 节流，DOM 必然存活），内含删除前快照刷新——纯滚动后
@@ -5106,6 +5250,18 @@ export function MessageStream({
       // 覆盖,这里读的还是上一次值)。跟随态迁移与 jump-down chip 共用。
       // programmatic scroll 不进本分支 — auto-follow 自己滚不该参与判定。
       const delta = currentScrollTop - prevScrollTopRef.current;
+      // 滚动条上拖:前 100px 内 resolveNearBottomOnScroll 会保持跟随。流式 pin
+      // 下一帧又钉回,必须在这里按拖拽上移立即解除。
+      if (
+        shouldUnpinOnScrollbarDrag({
+          pointerDown: draggingScrollbar,
+          scrollDelta: delta,
+          directionDeadZonePx: SCROLL_DIRECTION_DEAD_ZONE_PX,
+        }) &&
+        shouldUnpinOnUpIntent({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight })
+      ) {
+        unpinAutoFollowForUserUpIntent();
+      }
 
       // F2: 跟随态迁移(规则见 resolveNearBottomOnScroll 注释)。恢复跟随要求
       // 明确向下滚 — 意图解除(wheel 上滚)后紧跟着的上滚 scroll 事件距底仍
@@ -5251,6 +5407,7 @@ export function MessageStream({
     setFirstVisibleItemKey,
     setAnchoredForwardItems,
     sessionId,
+    unpinAutoFollowForUserUpIntent,
   ]);
 
   // 渲染窗口下移到 render-item 轴后,U2 "末尾窗口全是 orphan tool_result"

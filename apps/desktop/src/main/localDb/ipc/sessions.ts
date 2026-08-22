@@ -1352,6 +1352,9 @@ export function registerSessionIpc(
     const ownerScope = captureOwnerScope();
     const p = requireObject(patch, 'patch');
     const db = getDbClient().drizzle;
+    // 工作目录切换必须和发送/懒启动共用同一把路由锁。否则发送可能在
+    // 读取旧目录后、写入新目录前重建 runtime，随后仍在旧目录执行。
+    const update = async () => {
     if (p.workspaceKind !== undefined) {
       const value = p.workspaceKind;
       if (value !== 'project' && value !== 'dialogue') {
@@ -1544,6 +1547,8 @@ export function registerSessionIpc(
     notifyGhostSessionStatusChange(sid, p.status, updated.workingDir);
     removeHookAttachmentDir(sid, p.status);
     return updated;
+    };
+    return p.workingDir === undefined ? update() : withSessionRouteLock(sid, update);
   });
 
   // 窄口径会话元数据编辑(status / title / pinnedAt)。专为 device-link 控制端**远程**

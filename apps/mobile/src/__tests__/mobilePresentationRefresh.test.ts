@@ -46,6 +46,13 @@ describe('mobile localized presentation refresh', () => {
     expect(source).toContain('[diff, i18nInstance.language]');
   });
 
+  it('localizes stored file-preview failures when they are rendered', () => {
+    const source = read('src/session/MessageRenderer.tsx');
+
+    expect(source).toContain('message: describeTextPreviewFailure(previewLoadState.result)');
+    expect(source).toContain('[i18nInstance.language, previewLoadState]');
+  });
+
   it('rebuilds bulk-action copy when the language changes', () => {
     const source = read('app/devices/[deviceId].tsx');
 
@@ -65,5 +72,15 @@ describe('mobile localized presentation refresh', () => {
       '[accountUsage, i18nInstance.language, quotaBucketTables, session.model, visible, quotaStaleTick]',
     );
     expect(source).toContain('[codexRateLimits, i18nInstance.language]');
+  });
+
+  it('rebuilds pending-send presentations when the language changes', () => {
+    const source = read('app/sessions/[sessionId].tsx');
+    const pendingSendProjection = source.slice(
+      source.indexOf('const pendingSendItems = useMemo'),
+      source.indexOf('const messageListItems = useMemo'),
+    );
+
+    expect(pendingSendProjection).toContain('i18nInstance.language');
   });
 });

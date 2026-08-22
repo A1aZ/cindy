@@ -5973,6 +5973,7 @@ export default function SessionScreen() {
       });
     },
     [
+      i18nInstance.language,
       inputProjection,
       outboxDisplayItems,
       queueBusy,

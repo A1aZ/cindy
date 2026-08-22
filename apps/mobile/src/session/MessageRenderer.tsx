@@ -5899,29 +5899,37 @@ function FilePayloadBody({
   );
 }
 
+type RemoteTextFilePreviewLoadState =
+  | Exclude<TextFilePreviewState, { status: 'unavailable' }>
+  | { status: 'unavailable'; result: RemoteTextFilePreviewResult }
+  | { status: 'unavailable'; message: string; size: number; limitMb?: number };
+
 function useRemoteTextFilePreview(
   sourcePath: string,
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>,
 ) {
-  const [previewState, setPreviewState] = useState<TextFilePreviewState>({ status: 'idle' });
+  const { i18n: i18nInstance } = useTranslation();
+  const [previewLoadState, setPreviewLoadState] = useState<RemoteTextFilePreviewLoadState>(
+    { status: 'idle' },
+  );
   const previewSeqRef = useRef(0);
   const previewKind = useMemo(() => remoteFilePreviewKind(sourcePath), [sourcePath]);
   const canPreview = previewKind === 'text' && !!sourcePath && !!onReadTextFilePreview;
 
   useEffect(() => {
     previewSeqRef.current += 1;
-    setPreviewState({ status: 'idle' });
+    setPreviewLoadState({ status: 'idle' });
   }, [sourcePath]);
 
   const loadPreview = useCallback(() => {
-    if (!canPreview || previewState.status === 'loading') return;
+    if (!canPreview || previewLoadState.status === 'loading') return;
     const seq = ++previewSeqRef.current;
-    setPreviewState({ status: 'loading' });
+    setPreviewLoadState({ status: 'loading' });
     void onReadTextFilePreview(sourcePath)
       .then((result) => {
         if (previewSeqRef.current !== seq) return;
         if (result.success && typeof result.data === 'string') {
-          setPreviewState({
+          setPreviewLoadState({
             status: 'ready',
             data: result.data,
             size: result.size,
@@ -5929,22 +5937,32 @@ function useRemoteTextFilePreview(
           });
           return;
         }
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
-          message: describeTextPreviewFailure(result),
-          size: result.size,
-          limitMb: result.limitMb,
+          result,
         });
       })
       .catch((err) => {
         if (previewSeqRef.current !== seq) return;
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
           message: err instanceof Error ? err.message : String(err),
           size: 0,
         });
       });
-  }, [canPreview, onReadTextFilePreview, previewState.status, sourcePath]);
+  }, [canPreview, onReadTextFilePreview, previewLoadState.status, sourcePath]);
+
+  const previewState = useMemo<TextFilePreviewState>(() => {
+    if (previewLoadState.status !== 'unavailable' || !('result' in previewLoadState)) {
+      return previewLoadState;
+    }
+    return {
+      status: 'unavailable',
+      message: describeTextPreviewFailure(previewLoadState.result),
+      size: previewLoadState.result.size,
+      limitMb: previewLoadState.result.limitMb,
+    };
+  }, [i18nInstance.language, previewLoadState]);
 
   return { canPreview, loadPreview, previewKind, previewState };
 }

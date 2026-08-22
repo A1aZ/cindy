@@ -2645,7 +2645,7 @@ export function CCAgentSessionView({
           await sessionService.update(sessionId, { extraDirs: next });
         } catch (err) {
           log.warn('extraDirs DB update failed', err);
-          toast.error('附加目录保存失败');
+          toast.error(t('ccAgent.layout.extraDirsSaveFailed'));
           return;
         }
       }
@@ -2657,7 +2657,7 @@ export function CCAgentSessionView({
       }
       await refreshServerSession();
     },
-    [sessionId, refreshServerSession],
+    [sessionId, refreshServerSession, t],
   );
 
   // /issue 命令的 composer 附件不随命令 payload 走 main IPC 往返 —— AttachedFile 是

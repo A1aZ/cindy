@@ -226,7 +226,7 @@ type HydrateDeviceSessionsResult = {
 export default function HomeScreen() {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   // 所有前进导航(进会话 / 新建 / 设置 / 组页面)统一走守卫 push:列表卡顿时的
   // 连点会各自触发一次裸 push,把同一页压进栈 N 层(返回也要 N 次)。
   const guardedPush = useGuardedPush();
@@ -943,7 +943,7 @@ export default function HomeScreen() {
 
   const deviceRows = useMemo(
     () => toDeviceListItems(devices, Date.now(), revokedDevices),
-    [devices, revokedDevices],
+    [devices, i18nInstance.resolvedLanguage, revokedDevices],
   );
 
   useEffect(() => {

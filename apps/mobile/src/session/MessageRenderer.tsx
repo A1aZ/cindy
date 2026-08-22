@@ -5095,7 +5095,7 @@ function MessagePayloadModal({
   onShareImage?: ComponentProps<typeof ImageLightbox>['onShareImage'];
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const [payloadCopyState, setPayloadCopyState] = useState<PayloadHeaderCopyState>('idle');
   const payloadCopySeqRef = useRef(0);
@@ -5125,11 +5125,11 @@ function MessagePayloadModal({
   }, [imageAnnotation, onClose]);
   const payloadSummary = useMemo(
     () => payload ? summarizeMessagePayload(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadPreview = useMemo(
     () => payload ? summarizeMessagePayloadPreview(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadDetailText = payloadHeaderDetailText(payloadPreview, payloadSummary?.subtitle);
   const canCopyPayload = !!payloadSummary?.copyableText?.trim();
@@ -5477,13 +5477,16 @@ function MessagePayloadBody({
   onResolveRemoteMedia?: ResolveRemoteMediaFn;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const { width: screenWidth } = useWindowDimensions();
   const [remoteState, setRemoteState] = useState<RemoteMediaState>({ status: 'idle' });
   const [playerStatus, setPlayerStatus] = useState<MobileMediaPlayerStatus | null>(null);
   const resolvedRemoteMediaRef = useRef<MobileResolvedRemoteMedia | null>(null);
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const payloadLayout = useMemo(() => buildPayloadBodyLayout({
     kind: payload.kind,
     screenWidth,
@@ -5657,9 +5660,12 @@ function DiffPayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
-  const view = useMemo(() => formatDiffPayloadView(diff), [diff]);
+  const view = useMemo(
+    () => formatDiffPayloadView(diff),
+    [diff, i18nInstance.language],
+  );
   const [filePreviewVisible, setFilePreviewVisible] = useState(false);
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(view.filePath, onReadTextFilePreview);
   const openFilePreview = useCallback(() => {
@@ -5842,10 +5848,13 @@ function FilePayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const sourcePath = payload.sourcePath ?? '';
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(sourcePath, onReadTextFilePreview);
 
   return (
@@ -5890,29 +5899,37 @@ function FilePayloadBody({
   );
 }
 
+type RemoteTextFilePreviewLoadState =
+  | Exclude<TextFilePreviewState, { status: 'unavailable' }>
+  | { status: 'unavailable'; result: RemoteTextFilePreviewResult }
+  | { status: 'unavailable'; message: string; size: number; limitMb?: number };
+
 function useRemoteTextFilePreview(
   sourcePath: string,
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>,
 ) {
-  const [previewState, setPreviewState] = useState<TextFilePreviewState>({ status: 'idle' });
+  const { i18n: i18nInstance } = useTranslation();
+  const [previewLoadState, setPreviewLoadState] = useState<RemoteTextFilePreviewLoadState>(
+    { status: 'idle' },
+  );
   const previewSeqRef = useRef(0);
   const previewKind = useMemo(() => remoteFilePreviewKind(sourcePath), [sourcePath]);
   const canPreview = previewKind === 'text' && !!sourcePath && !!onReadTextFilePreview;
 
   useEffect(() => {
     previewSeqRef.current += 1;
-    setPreviewState({ status: 'idle' });
+    setPreviewLoadState({ status: 'idle' });
   }, [sourcePath]);
 
   const loadPreview = useCallback(() => {
-    if (!canPreview || previewState.status === 'loading') return;
+    if (!canPreview || previewLoadState.status === 'loading') return;
     const seq = ++previewSeqRef.current;
-    setPreviewState({ status: 'loading' });
+    setPreviewLoadState({ status: 'loading' });
     void onReadTextFilePreview(sourcePath)
       .then((result) => {
         if (previewSeqRef.current !== seq) return;
         if (result.success && typeof result.data === 'string') {
-          setPreviewState({
+          setPreviewLoadState({
             status: 'ready',
             data: result.data,
             size: result.size,
@@ -5920,22 +5937,32 @@ function useRemoteTextFilePreview(
           });
           return;
         }
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
-          message: describeTextPreviewFailure(result),
-          size: result.size,
-          limitMb: result.limitMb,
+          result,
         });
       })
       .catch((err) => {
         if (previewSeqRef.current !== seq) return;
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
           message: err instanceof Error ? err.message : String(err),
           size: 0,
         });
       });
-  }, [canPreview, onReadTextFilePreview, previewState.status, sourcePath]);
+  }, [canPreview, onReadTextFilePreview, previewLoadState.status, sourcePath]);
+
+  const previewState = useMemo<TextFilePreviewState>(() => {
+    if (previewLoadState.status !== 'unavailable' || !('result' in previewLoadState)) {
+      return previewLoadState;
+    }
+    return {
+      status: 'unavailable',
+      message: describeTextPreviewFailure(previewLoadState.result),
+      size: previewLoadState.result.size,
+      limitMb: previewLoadState.result.limitMb,
+    };
+  }, [i18nInstance.language, previewLoadState]);
 
   return { canPreview, loadPreview, previewKind, previewState };
 }
@@ -6173,11 +6200,12 @@ function MessageMoreButton({
   iconSize: number;
   onPress(): void;
 }) {
+  const { t } = useTranslation();
   const { colors } = useTheme();
   const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
-      accessibilityLabel="更多消息操作"
+      accessibilityLabel={t('message.renderer.moreActions')}
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled === true }}
       disabled={disabled}

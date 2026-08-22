@@ -113,7 +113,7 @@ type RemoteListStatusFilter = Extract<RemoteSessionStatusFilter, 'active' | 'arc
 export default function DeviceDetailScreen() {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const params = useLocalSearchParams<{
     deviceId: string;
     deviceName?: string;
@@ -356,7 +356,17 @@ export default function DeviceDetailScreen() {
       // 展开,与首页交互一致);自动化任务作用域页本身就是"某任务的全部运行",必须平铺不折叠。
       groupAutomations: !automationScopeKey,
     }),
-    [automationScopeKey, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, searchQuery, sessions, statusFilter, t],
+    [
+      automationScopeKey,
+      i18nInstance.language,
+      messagePreviewIndex,
+      pendingInteractionIndex,
+      scheduleIndex,
+      searchQuery,
+      sessions,
+      statusFilter,
+      t,
+    ],
   );
   const displaySections = useMemo(() => {
     if (automationScopeKey || !shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status)) {
@@ -385,7 +395,7 @@ export default function DeviceDetailScreen() {
     pin: summarizeMobileSessionBulkAction(selectedSessions, 'pin'),
     restore: summarizeMobileSessionBulkAction(selectedSessions, 'restore'),
     unpin: summarizeMobileSessionBulkAction(selectedSessions, 'unpin'),
-  }), [selectedSessions]);
+  }), [i18nInstance.language, selectedSessions]);
   const bulkActionLayout = useMemo(
     () => visibleMobileSessionBulkActions(bulkActionSummaries),
     [bulkActionSummaries],
@@ -395,7 +405,7 @@ export default function DeviceDetailScreen() {
   const runningAutomationCount = filterCounts.runningAutomation;
   const controlsSummary = useMemo(
     () => remoteSessionControlsSummary(statusFilter, filterCounts),
-    [filterCounts, statusFilter],
+    [filterCounts, statusFilter, t],
   );
   const windowLayout = buildMainWindowLayout({
     actionCount: 3,
@@ -405,7 +415,7 @@ export default function DeviceDetailScreen() {
   });
   const emptyState = useMemo(
     () => deviceSessionEmptyState(statusFilter, searchQuery),
-    [searchQuery, statusFilter],
+    [searchQuery, statusFilter, t],
   );
   // 首同步完成前(lastSyncedAt === null)抑制"还没有对话"空状态,避免冷进(deep link)先闪空态
   // 再跳成真列表(规则 7:不闪空白/不跳变)。同步失败时 ConnectionBanner 已有错误 + 重试入口。

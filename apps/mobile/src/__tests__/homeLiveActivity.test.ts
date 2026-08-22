@@ -125,4 +125,22 @@ describe('mobile Home live activity', () => {
       await i18n.changeLanguage(previousLanguage);
     }
   });
+
+  it('preserves a real device name that matches the shared fallback copy', async () => {
+    const previousLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage('en');
+      const home = buildMobileHomePresentation({
+        devices: [{ canOpen: true, deviceId: 'dev-1', name: '未知电脑' }],
+        sessions: [session('device-name-matches-fallback', {
+          deviceLinkDeviceId: 'dev-1',
+        })],
+      });
+
+      expect(home.projects[0]?.deviceName).toBe('未知电脑');
+      expect(home.projects[0]?.subtitle).toContain('未知电脑');
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
 });

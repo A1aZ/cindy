@@ -3,6 +3,7 @@ import { i18n } from '@/i18n';
 import { localizeRemoteSessionListItem } from '@/session/sessionList';
 import {
   buildMobileHomePresentation as buildMobileHomePresentationShared,
+  type MobileHomeSessionLike,
   type MobileHomeNoDeviceContext,
   type MobileHomeOptions,
   type MobileHomePresentation,
@@ -37,7 +38,11 @@ export function buildMobileHomePresentation(options: MobileHomeOptions): MobileH
     pinned: base.pinned.map((item) => localizeRemoteSessionListItem(item, now)),
     primaryDevice,
     projects: base.projects.map((project) => {
-      const deviceName = project.deviceName === '未知电脑'
+      const sourceDeviceName = (project.sessions[0]?.session as MobileHomeSessionLike | undefined)?.deviceLinkDeviceName
+        ?? (project.deviceId
+          ? options.devices?.find((device) => device.deviceId === project.deviceId)?.name
+          : undefined);
+      const deviceName = sourceDeviceName == null
         ? i18n.t('devices.presentation.home.unknownComputer')
         : project.deviceName;
       const workingDir = project.workingDir;

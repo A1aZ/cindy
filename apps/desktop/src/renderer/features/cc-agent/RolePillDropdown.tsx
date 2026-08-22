@@ -808,7 +808,7 @@ function WorkerTabsList({
     <div className="relative flex min-w-0 flex-1 items-center">
       {/* 箭头放在滚动区域外, 两侧常驻等宽占位: 既不覆盖 tab 点击区, 也避免
           箭头出现/隐藏时改变 scroller 宽度造成边缘状态来回抖动。 到边后按钮只
-          禁用不卸载, 名称与 Tip 改为到边说明, 避免键盘焦点被突然丢回 body。 */}
+          禁用不卸载并移出 Tab 顺序; 已持有的焦点不强制转移, 名称与 Tip 改为到边说明。 */}
       <div className="h-6 w-5 shrink-0">
         <Tip
           text={
@@ -827,6 +827,7 @@ function WorkerTabsList({
                 : t('orca.rolePill.scrollWorkersLeftEdge')
             }
             aria-disabled={!scrollState.left || undefined}
+            tabIndex={scrollState.left ? 0 : -1}
             className={cn(
               'inline-flex h-6 w-5 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
               !scrollState.left && 'pointer-events-none opacity-0',
@@ -952,6 +953,7 @@ function WorkerTabsList({
                 : t('orca.rolePill.scrollWorkersRightEdge')
             }
             aria-disabled={!scrollState.right || undefined}
+            tabIndex={scrollState.right ? 0 : -1}
             className={cn(
               'inline-flex h-6 w-5 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
               !scrollState.right && 'pointer-events-none opacity-0',

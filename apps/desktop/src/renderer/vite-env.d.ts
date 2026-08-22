@@ -1104,6 +1104,10 @@ type CindyMediaPreferenceKind = {
 
 interface ElectronAPI {
   platform: string;
+  windowBackdropMaterial: import('../shared/windowBackdrop').WindowsBackdropMaterial;
+  onWindowBackdropMaterialChanged?: (
+    cb: (material: import('../shared/windowBackdrop').WindowsBackdropMaterial) => void,
+  ) => () => void;
   osRelease: string;
   appVersion: string;
   /** 运行期端点清单(main 启动时远程 → 缓存 → 烘焙解析;重启生效)。 */
@@ -3503,7 +3507,14 @@ interface ElectronAPI {
   ) => () => void;
   setUpdateRelaunchTheme: (theme: 'light' | 'dark') => void;
   // E4D 毛玻璃:family 切换/启动通知 main 开关 vibrancy(仅 CINDY 透壁纸)
-  theme: { applyVibrancy: (familyId: string, isDark: boolean) => void };
+  theme: {
+    applyVibrancy: (
+      familyId: string,
+      isDark: boolean,
+      mode: 'system' | 'light' | 'dark',
+      systemModeFollowsSystem: boolean,
+    ) => void;
+  };
   /**
    * Manually trigger an update check. Returns the resolved state so the
    * renderer can show the appropriate toast:

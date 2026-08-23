@@ -62,10 +62,9 @@ describe('MyPublishesSectionVisibilityGate', () => {
   };
 
   it('shows both secondary tabs and switches their selected panel when enabled', () => {
-    expect(SHOW_MY_PUBLISHES_SECTION).toBe(true);
     render(
       <MyPublishesSectionVisibilityGate
-        visible={SHOW_MY_PUBLISHES_SECTION}
+        visible
         {...labels}
         publishes={<div data-testid="publishes-content" />}
       >
@@ -103,16 +102,25 @@ describe('MyPublishesSectionVisibilityGate', () => {
     }
 
     const { container } = render(
-      <MyPublishesSectionVisibilityGate visible={false} {...labels} publishes={<PublishesProbe />}>
-        <div data-testid="overview-content-disabled" />
+      <MyPublishesSectionVisibilityGate
+        visible={SHOW_MY_PUBLISHES_SECTION}
+        {...labels}
+        publishes={<PublishesProbe />}
+      >
+        <section className="mt-6" data-testid="installed-content-disabled" />
+        <section className="mt-10" data-testid="recommended-content-disabled" />
       </MyPublishesSectionVisibilityGate>,
     );
 
     // This excludes hiding only the publishing panel while leaving a one-tab row or wrapper noise.
+    expect(SHOW_MY_PUBLISHES_SECTION).toBe(false);
     expect(screen.queryByRole('tablist')).toBeNull();
     expect(screen.queryByRole('tab')).toBeNull();
-    expect(container.children).toHaveLength(1);
-    expect(container.firstElementChild).toBe(screen.getByTestId('overview-content-disabled'));
+    const installed = screen.getByTestId('installed-content-disabled');
+    const recommended = screen.getByTestId('recommended-content-disabled');
+    expect(Array.from(container.children)).toEqual([installed, recommended]);
+    expect(installed.className).toBe('mt-6');
+    expect(recommended.className).toBe('mt-10');
     expect(publishesRender).not.toHaveBeenCalled();
   });
 

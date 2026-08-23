@@ -171,10 +171,10 @@ const MAX_VISIBLE_INSTALLED_PLUGINS = 8;
 const MAX_COLLAPSED_INSTALLED_PLUGIN_PREVIEWS = 3;
 
 /**
- * 「我的发布」暂以插件页二级 tab 呈现，避免与「已安装」争抢顶层布局。
- * 用户确认本期效果后会关掉此开关；下期重新开放仍沿用当前 tab 形态。
+ * 本期隐藏「我的发布」二级 tab，避免与「已安装」争抢顶层布局。
+ * 重新开放前必须先定首个 tab 的标签；当前「概览」仅为已被用户否掉的占位词，并非定案。
  */
-export const SHOW_MY_PUBLISHES_SECTION = true;
+export const SHOW_MY_PUBLISHES_SECTION = false;
 
 /**
  * Product gate for the whole secondary tab experience. The overview stays mounted while tabs

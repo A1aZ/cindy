@@ -1718,11 +1718,20 @@ export function CustomProviderDialog({
   ]);
 
   const activeSavedBaseline = savedBaselineFor(activeTab);
-  const activeKeyCanRemainSaved =
-    hasKey[activeTab] &&
+  // 共享判据：当前表单的端点相对已存基线是否未变。密钥与请求头都只在
+  // 端点未变时继续有效——main 侧改端点后会清掉已存头，renderer 的徽标
+  // 必须同步消失，否则继续宣称「已配置」会误导用户。
+  const activeSavedEndpointUnchanged =
     activeSavedBaseline != null &&
     f.baseUrl.trim() === activeSavedBaseline.baseUrl.trim() &&
     f.modelsUrl.trim() === activeSavedBaseline.modelsUrl.trim();
+  const activeKeyCanRemainSaved = hasKey[activeTab] && activeSavedEndpointUnchanged;
+  // 已存密文头徽标的判据：端点未变 + 仍是 apiKey 鉴权（none 模式会剥凭证头）
+  // + 确实配置过头。headersState 是不可变初值，端点一变就必须隐藏。
+  const activeHeadersCanRemainSaved =
+    initial?.runtimes[activeTab]?.headersState === 'configured' &&
+    authMode === 'apiKey' &&
+    activeSavedEndpointUnchanged;
   const keyPlaceholder = activeKeyCanRemainSaved
     ? t('settings.providers.custom.fields.apiKeyEditPlaceholder')
     : t('settings.providers.custom.fields.apiKeyPlaceholder');
@@ -2416,7 +2425,7 @@ export function CustomProviderDialog({
                   <div className="flex items-center gap-2">
                     <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
                     {/* 已存密文头时给明确徽标 —— 明文不回读进 renderer,无徽标会让人误以为没存上。 */}
-                    {initial?.runtimes[activeTab]?.headersState === 'configured' && (
+                    {activeHeadersCanRemainSaved && (
                       <span
                         className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
                         style={{

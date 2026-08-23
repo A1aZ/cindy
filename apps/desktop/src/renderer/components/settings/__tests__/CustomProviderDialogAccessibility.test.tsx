@@ -475,13 +475,38 @@ describe('CustomProviderDialog accessibility', () => {
     };
     customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
 
+    const user = userEvent.setup();
     render(<CustomProviderDialog initial={initial} onSaved={vi.fn()} onClose={vi.fn()} />);
     await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
 
-    expect(
-      screen.queryByText('settings.providers.custom.runtimeFill.values.configured', { exact: true }),
-    ).not.toBeNull();
+    const configuredBadge = () =>
+      screen.queryByText('settings.providers.custom.runtimeFill.values.configured', {
+        exact: true,
+      });
+
+    // 初始：端点未变，徽标显示。
+    expect(configuredBadge()).not.toBeNull();
     // 明文头值绝不允许出现在 renderer。
+    expect(document.body.textContent).not.toContain('configured-header-secret');
+
+    const baseUrl = screen.getByPlaceholderText(
+      'settings.providers.custom.fields.baseUrlPlaceholder',
+    );
+    await waitForInitialDialogFocus();
+    // 改端点：main 会清掉已存头，徽标必须同步隐藏。
+    await user.clear(baseUrl);
+    await user.type(baseUrl, 'https://changed.example.test/v1');
+    await waitFor(() => expect(configuredBadge()).toBeNull());
+    expect(document.body.textContent).not.toContain('configured-header-secret');
+
+    // 改回原端点：徽标可以重新出现。
+    await user.clear(baseUrl);
+    await user.type(baseUrl, 'https://configured.example.test/v1');
+    await waitFor(() => expect(configuredBadge()).not.toBeNull());
+
+    // 切到无鉴权：none 模式剥凭证头，已存头不再有效，徽标隐藏。
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.authMode.none' }));
+    await waitFor(() => expect(configuredBadge()).toBeNull());
     expect(document.body.textContent).not.toContain('configured-header-secret');
   });
 });

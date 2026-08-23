@@ -303,6 +303,7 @@ import {
   type GhostFirstPartyFactsPurpose,
 } from './ghostFirstPartyFacts.js';
 import { authorizeGhostTokenBroker } from './ghostFirstPartyPrivilege.js';
+import { ghostTokenBrokerInstallError } from './ghostTokenBrokerInstallError.js';
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
 import { GhostFsSlot } from './fsSlot.js';
 import { GhostLibrarySlot } from './librarySlot.js';
@@ -5269,13 +5270,10 @@ function rejectUnauthorizedTokenBroker(
   );
   if (!brokered) return;
   if (isGhostTokenBrokerAuthorized(manifest.id, 'install', overrides)) return;
-  const reason =
-    overrides?.installOrigin === 'manual'
-      ? '手动装入的 .cindy 不能使用授权 broker；请改从组织插件市场安装，或让插件作者在组织身份下使用 ghost forge 构建'
-      : '当前安装来源或组织身份无权使用授权 broker';
+  const authorizationError = ghostTokenBrokerInstallError(overrides?.installOrigin);
   throwIpcError(
-    'GHOST_FILE_INVALID',
-    `id "${manifest.id}" 声明了 oauth.tokenBroker——${reason}`,
+    authorizationError.code,
+    `id "${manifest.id}" 声明了 oauth.tokenBroker——${authorizationError.reason}`,
   );
 }
 

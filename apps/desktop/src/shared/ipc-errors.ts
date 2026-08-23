@@ -179,6 +179,8 @@ export type IpcErrorCode =
   | 'GHOST_HOST_UNSUPPORTED' // 插件包合法，但当前 Cindy 不认识其 schema / capability slot
   | 'GHOST_COMMAND_CONFLICT' // 显式指令与已装意识撞名(装入拒绝)
   | 'GHOST_ID_RESERVED' // id 属 shared/ghost.ts 登记的官方保留前缀,用户通道拒装(防抢注蹭凭证别名)
+  | 'GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED' // 手动 .cindy 来源无权使用授权 broker
+  | 'GHOST_BROKER_NOT_AUTHORIZED' // 当前来源或组织身份无权使用授权 broker
   // 自定义插件市场源(Git / 本地文件夹)
   | 'MARKET_SOURCE_INVALID' // 来源格式非法 / 本地路径不是目录 / 参数组合不允许
   | 'MARKET_GIT_UNAVAILABLE' // 未安装 Git 或版本 < 2.25(稀疏检出下限)
@@ -377,6 +379,8 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'GHOST_HOST_UNSUPPORTED',
   'GHOST_COMMAND_CONFLICT',
   'GHOST_ID_RESERVED',
+  'GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED',
+  'GHOST_BROKER_NOT_AUTHORIZED',
   'MARKET_SOURCE_INVALID',
   'MARKET_GIT_UNAVAILABLE',
   'MARKET_CLONE_AUTH_FAILED',

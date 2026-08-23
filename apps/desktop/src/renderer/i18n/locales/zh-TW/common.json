@@ -4437,6 +4437,8 @@
         "approvalRequired": "繼續前需要重新確認這個插件的權限",
         "commandConflict": "它的指令和已裝插件撞名了，先解除安裝佔用方或讓作者改名",
         "idReserved": "{{reservedGhostIdPrefixes}} 是官方插件保留字首，無法透過拖入、選取檔案、ghost_forge_pack 轉交或自訂插件市場安裝；請從 Cindy 插件市場安裝對應的官方插件",
+        "brokerManualInstallNotAuthorized": "手動安裝的 .cindy 無法使用授權 broker；請改從組織插件市場安裝，或請作者以組織身分使用 ghost_forge_pack 建置",
+        "brokerNotAuthorized": "目前的安裝來源或組織身分無權使用授權 broker；請從組織插件市場安裝，或請作者以組織身分使用 ghost_forge_pack 建置",
         "sourceMissing": "找不到所選檔案",
         "generic": "操作失敗，請稍後重試",
         "updateIdMismatch": "所選檔案是插件「{{id}}」，與當前插件「{{expected}}」不一致"

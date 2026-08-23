@@ -12,6 +12,32 @@ describe('ghostInstallErrorKey', () => {
     expect(ghostInstallErrorKey('GHOST_FILE_INVALID')).toBe('settings.ghosts.errors.fileInvalid');
   });
 
+  it('maps Broker authorization failures without changing generic invalid-file copy', () => {
+    expect(ghostInstallErrorKey('GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED')).toBe(
+      'settings.ghosts.errors.brokerManualInstallNotAuthorized',
+    );
+    expect(ghostInstallErrorKey('GHOST_BROKER_NOT_AUTHORIZED')).toBe(
+      'settings.ghosts.errors.brokerNotAuthorized',
+    );
+    // This control kills a broad remap that turns every malformed .cindy error
+    // into the Broker guidance.
+    expect(ghostInstallErrorKey('GHOST_FILE_INVALID')).toBe('settings.ghosts.errors.fileInvalid');
+  });
+
+  it.each(['zh-CN', 'en', 'ja', 'ko', 'zh-TW'])(
+    'keeps both Broker authorization reasons actionable in %s',
+    (locale) => {
+      for (const code of [
+        'GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED',
+        'GHOST_BROKER_NOT_AUTHORIZED',
+      ]) {
+        const message = i18n.getFixedT(locale)(ghostInstallErrorKey(code)).toString();
+        expect(message).toContain('ghost_forge_pack');
+        expect(message).not.toBe(i18n.getFixedT(locale)('settings.ghosts.errors.fileInvalid'));
+      }
+    },
+  );
+
   it.each(['zh-CN', 'en', 'ja', 'ko', 'zh-TW'])(
     'renders the complete reserved-prefix authority in the %s install error',
     (locale) => {

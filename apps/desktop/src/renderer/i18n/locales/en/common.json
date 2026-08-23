@@ -4438,6 +4438,8 @@
         "approvalRequired": "This plugin's permissions must be reviewed again before continuing.",
         "commandConflict": "Its command conflicts with an installed plugin. Uninstall the other one or rename the command.",
         "idReserved": "{{reservedGhostIdPrefixes}} are reserved for official plugins and can’t be installed by dragging in a package, choosing a file, transferring from ghost_forge_pack, or using a custom plugin marketplace. Install the corresponding official plugin from the Cindy plugin market",
+        "brokerManualInstallNotAuthorized": "A manually installed .cindy package is not authorized to use the authorization broker. Install it from your organization’s plugin market, or ask the author to build it with ghost_forge_pack while signed in to the organization.",
+        "brokerNotAuthorized": "This installation source or organization identity is not authorized to use the authorization broker. Install it from your organization’s plugin market, or ask the author to build it with ghost_forge_pack while signed in to the organization.",
         "sourceMissing": "The selected file could not be found",
         "generic": "Operation failed. Please try again.",
         "updateIdMismatch": "The selected file is plugin \"{{id}}\", which does not match this plugin \"{{expected}}\""

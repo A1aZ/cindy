@@ -2407,6 +2407,7 @@ describe('codex proxy host', () => {
         ],
         transformResponse: expect.any(Function),
         routingTransform: expect.any(Function),
+        retryProvenWebSocketUpgrades: true,
         recoveryRules: expect.arrayContaining([
           expect.objectContaining({ id: 'encrypted_content' }),
           expect.objectContaining({ id: 'image_generation_id' }),
@@ -2453,6 +2454,27 @@ describe('codex proxy host', () => {
     expect(proxyOpts.resolveWebSocketUpstream(ctx)).toBe(
       'https://chatgpt.com/backend-api/codex',
     );
+  });
+
+  it('forgets only the closing session websocket proofs before a provider-route resume', async () => {
+    const host = await freshCodexProxyHost();
+    const forgetWebSocketStateForThread = vi.fn(() => 1);
+    mockState.createAnthropicCompatProxy.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:43210',
+      forgetWebSocketStateForThread,
+      dispose: vi.fn(async () => undefined),
+    });
+    await host.ensureCodexProxyReady();
+    host.registerComposed('session-switching', 'thread-switching', 'PRODUCT_PROMPT');
+    host.registerChildThread('thread-switching', 'thread-switching-child');
+    host.registerComposed('session-untouched', 'thread-untouched', 'PRODUCT_PROMPT');
+
+    host.unregister('session-switching');
+
+    expect(forgetWebSocketStateForThread).toHaveBeenCalledTimes(2);
+    expect(forgetWebSocketStateForThread).toHaveBeenCalledWith('thread-switching');
+    expect(forgetWebSocketStateForThread).toHaveBeenCalledWith('thread-switching-child');
+    expect(forgetWebSocketStateForThread).not.toHaveBeenCalledWith('thread-untouched');
   });
 
   it('declines the next websocket upgrade after a body recovery error is armed', async () => {

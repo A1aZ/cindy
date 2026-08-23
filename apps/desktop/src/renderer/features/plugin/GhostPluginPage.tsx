@@ -170,6 +170,94 @@ const MAX_VISIBLE_INSTALLED_PLUGINS = 8;
 /** 折叠入口只预览前三个隐藏插件，避免头像堆叠反过来抢占操作文案。 */
 const MAX_COLLAPSED_INSTALLED_PLUGIN_PREVIEWS = 3;
 
+/**
+ * 「我的发布」暂以插件页二级 tab 呈现，避免与「已安装」争抢顶层布局。
+ * 用户确认本期效果后会关掉此开关；下期重新开放仍沿用当前 tab 形态。
+ */
+export const SHOW_MY_PUBLISHES_SECTION = true;
+
+/**
+ * Product gate for the whole secondary tab experience. The overview stays mounted while tabs
+ * switch, and a disabled gate returns it without an extra wrapper or hidden publishing effects.
+ */
+export function MyPublishesSectionVisibilityGate({
+  visible,
+  overviewLabel,
+  publishesLabel,
+  tabsAriaLabel,
+  publishes,
+  children,
+}: {
+  visible: boolean;
+  overviewLabel: string;
+  publishesLabel: string;
+  tabsAriaLabel: string;
+  publishes: ReactNode;
+  children: ReactNode;
+}) {
+  const [activeTab, setActiveTab] = useState<'overview' | 'publishes'>('overview');
+  const id = useId();
+  const overviewTabId = `${id}-overview-tab`;
+  const overviewPanelId = `${id}-overview-panel`;
+  const publishesTabId = `${id}-publishes-tab`;
+  const publishesPanelId = `${id}-publishes-panel`;
+
+  if (!visible) return <>{children}</>;
+
+  return (
+    <>
+      <div
+        role="tablist"
+        aria-label={tabsAriaLabel}
+        className="mt-5 flex items-end gap-6 border-b border-[var(--border-default)]"
+      >
+        {([
+          ['overview', overviewLabel, overviewTabId, overviewPanelId],
+          ['publishes', publishesLabel, publishesTabId, publishesPanelId],
+        ] as const).map(([tab, label, tabId, panelId]) => {
+          const active = activeTab === tab;
+          return (
+            <button
+              key={tab}
+              id={tabId}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-controls={panelId}
+              onClick={() => setActiveTab(tab)}
+              className={cn(
+                '-mb-px select-none border-b-2 px-0.5 pb-2.5 pt-1 text-13 font-medium transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+                active
+                  ? 'border-[var(--text-primary)] text-[var(--text-primary)]'
+                  : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        id={overviewPanelId}
+        role="tabpanel"
+        aria-labelledby={overviewTabId}
+        hidden={activeTab !== 'overview'}
+      >
+        {children}
+      </div>
+      <div
+        id={publishesPanelId}
+        role="tabpanel"
+        aria-labelledby={publishesTabId}
+        hidden={activeTab !== 'publishes'}
+      >
+        {publishes}
+      </div>
+    </>
+  );
+}
+
 /** Keeps the installed-section disclosure rule deterministic and directly testable. */
 function visibleInstalledPluginItems<T>(items: readonly T[]): T[] {
   return items.slice(0, MAX_VISIBLE_INSTALLED_PLUGINS);
@@ -1528,6 +1616,18 @@ export function GhostPluginPage({
               </div>
             </header>
 
+            <MyPublishesSectionVisibilityGate
+              visible={SHOW_MY_PUBLISHES_SECTION && showEnterprise}
+              overviewLabel={t('settings.ghosts.page.overviewTab')}
+              publishesLabel={t('settings.ghosts.publish.section')}
+              tabsAriaLabel={t('settings.ghosts.page.secondaryTabsAria')}
+              publishes={
+                <MyPublishesSection
+                  enabled={showEnterprise}
+                  onPublish={() => void handlePublish()}
+                />
+              }
+            >
             {scopeDir ? (
               <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface-chip)] px-4 py-3">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -1683,8 +1783,6 @@ export function GhostPluginPage({
               ) : null}
             </section>
 
-            <MyPublishesSection enabled={showEnterprise} onPublish={() => void handlePublish()} />
-
             {availableMarketItems.length > 0 ||
             searchedAvailableMarketItems.length > 0 ||
             marketSnapshot?.unavailableReason ||
@@ -1820,6 +1918,7 @@ export function GhostPluginPage({
                 )}
               </section>
             ) : null}
+            </MyPublishesSectionVisibilityGate>
           </PluginManagementPage>
         </main>
         {panelAside}

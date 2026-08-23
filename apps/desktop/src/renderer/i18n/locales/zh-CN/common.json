@@ -4062,6 +4062,8 @@
       "page": {
         "search": "搜索插件",
         "clearSearch": "清除插件搜索",
+        "secondaryTabsAria": "插件页内容",
+        "overviewTab": "概览",
         "addPlugin": "添加插件",
         "addPluginAria": "插件添加选项",
         "installedSection": "已安装",

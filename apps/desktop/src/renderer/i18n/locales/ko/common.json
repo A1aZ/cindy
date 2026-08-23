@@ -4062,6 +4062,8 @@
       "page": {
         "search": "플러그인 검색",
         "clearSearch": "플러그인 검색 지우기",
+        "secondaryTabsAria": "플러그인 페이지 섹션",
+        "overviewTab": "개요",
         "addPlugin": "플러그인 추가",
         "addPluginAria": "플러그인 추가 옵션",
         "installedSection": "설치됨",

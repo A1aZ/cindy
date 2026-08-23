@@ -18,7 +18,7 @@ import {
   unixPermissionsForRepackedEntry,
 } from '../ghostZipPermissions';
 import { signGhostPackage } from '../ghostSignature';
-import { hashApprovedSkillContent } from '../ghostInstallReceipt';
+import { GhostInstallReceiptStore, hashApprovedSkillContent } from '../ghostInstallReceipt';
 import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -3308,6 +3308,62 @@ describe('GhostManager · Host approval receipt', () => {
   const skillFiles = (): Record<string, string> => ({
     'skills/demo/SKILL.md':
       '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+  });
+
+  it('keeps a legacy broker receipt approved and present in list without redirectPort', async () => {
+    const legacyBrokerManifest = {
+      ...goodManifest('legacy-broker'),
+      slots: ['network'],
+      tools: undefined,
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['accounts.example.com'],
+        secrets: [
+          {
+            key: 'account',
+            label: 'Account',
+            source: 'oauth',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+            oauth: {
+              authorizeUrl: 'https://accounts.example.com/authorize',
+              tokenUrl: 'https://accounts.example.com/token',
+              clientId: 'builtin-client-id',
+              tokenBroker: 'jira',
+            },
+          },
+        ],
+      },
+    };
+    const installed = await manager.install(
+      await makeCindy('legacy-broker.cindy', legacyBrokerManifest, {
+        'main.js': '// previously installed broker plugin',
+      }),
+    );
+    expect(installed).toMatchObject({ ghost: { approval: { state: 'approved' } } });
+
+    // stateRoot 必须先规范化再交给 store，避免 macOS /var 别名制造假失败。
+    const stateRoot = fs.realpathSync.native(path.join(workDir, 'ghosts-install-state'));
+    const receiptStore = new GhostInstallReceiptStore(
+      () => stateRoot,
+      async ({ parentDir, targetName, operation }) => {
+        if (operation === 'remove') {
+          await fs.promises.rm(path.join(parentDir, targetName), {
+            recursive: true,
+            force: true,
+          });
+        }
+      },
+    );
+    expect(receiptStore.read('legacy-broker')).toMatchObject({ state: 'approved' });
+
+    // 新进程从盘上回读仍须投影该插件；若规则误放回共用 validator，这里会消失。
+    const restarted = new GhostManager({ getRootDir: () => rootDir });
+    expect(restarted.list()).toEqual([
+      expect.objectContaining({
+        manifest: expect.objectContaining({ id: 'legacy-broker' }),
+        approval: expect.objectContaining({ state: 'approved' }),
+      }),
+    ]);
   });
 
   it('rejects an approved snapshot root replaced by a same-bytes link', async () => {

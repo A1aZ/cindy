@@ -4439,6 +4439,7 @@
         "idReserved": "{{reservedGhostIdPrefixes}}는 공식 플러그인용 예약 접두사입니다. 끌어다 놓기, 파일 선택, ghost_forge_pack 전달 또는 사용자 지정 플러그인 마켓으로는 설치할 수 없습니다. 해당 공식 플러그인은 Cindy 플러그인 마켓에서 설치하세요",
         "brokerManualInstallNotAuthorized": "수동으로 설치한 .cindy는 인증 broker를 사용할 수 없습니다. 조직 플러그인 마켓에서 설치하거나, 작성자에게 조직 계정으로 ghost_forge_pack을 사용해 빌드하도록 요청하세요.",
         "brokerNotAuthorized": "현재 설치 출처 또는 조직 계정에는 인증 broker 사용 권한이 없습니다. 조직 플러그인 마켓에서 설치하거나, 작성자에게 조직 계정으로 ghost_forge_pack을 사용해 빌드하도록 요청하세요.",
+        "brokerRedirectPortRequired": "이 플러그인은 인증 broker를 선언했지만 같은 OAuth 설정에 redirectPort를 선언하지 않았습니다. 인증의 마지막 단계가 로컬 수신 포트로 돌아올 수 있도록 작성자에게 이 필드를 추가해 달라고 요청하세요.",
         "sourceMissing": "선택한 파일을 찾을 수 없습니다",
         "generic": "작업에 실패했습니다. 다시 시도해 주세요",
         "updateIdMismatch": "선택한 파일은 플러그인 \"{{id}}\"로, 현재 플러그인 \"{{expected}}\"와 일치하지 않습니다"

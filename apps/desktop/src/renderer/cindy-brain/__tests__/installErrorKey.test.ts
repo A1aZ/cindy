@@ -19,6 +19,9 @@ describe('ghostInstallErrorKey', () => {
     expect(ghostInstallErrorKey('GHOST_BROKER_NOT_AUTHORIZED')).toBe(
       'settings.ghosts.errors.brokerNotAuthorized',
     );
+    expect(ghostInstallErrorKey('GHOST_BROKER_REDIRECT_PORT_REQUIRED')).toBe(
+      'settings.ghosts.errors.brokerRedirectPortRequired',
+    );
     // This control kills a broad remap that turns every malformed .cindy error
     // into the Broker guidance.
     expect(ghostInstallErrorKey('GHOST_FILE_INVALID')).toBe('settings.ghosts.errors.fileInvalid');
@@ -35,6 +38,17 @@ describe('ghostInstallErrorKey', () => {
         expect(message).toContain('ghost_forge_pack');
         expect(message).not.toBe(i18n.getFixedT(locale)('settings.ghosts.errors.fileInvalid'));
       }
+    },
+  );
+
+  it.each(['zh-CN', 'en', 'ja', 'ko', 'zh-TW'])(
+    'keeps the missing redirectPort admission error distinct and actionable in %s',
+    (locale) => {
+      const message = i18n
+        .getFixedT(locale)(ghostInstallErrorKey('GHOST_BROKER_REDIRECT_PORT_REQUIRED'))
+        .toString();
+      expect(message).toContain('redirectPort');
+      expect(message).not.toBe(i18n.getFixedT(locale)('settings.ghosts.errors.fileInvalid'));
     },
   );
 

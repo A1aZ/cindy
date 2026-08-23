@@ -79,6 +79,7 @@ import {
 } from '../utils/readBoundedFile.js';
 import { readInstalledGhostManifest } from '../installedGhostManifest.js';
 import { withGhostInstallLock } from '../cindy-brain/ghostInstallLock.js';
+import { ghostBrokerRedirectPortInstallError } from '../cindy-brain/ghostBrokerRedirectPort.js';
 import { GhostPackagePermissionReviewRequiredError } from '../cindy-brain/packagePermissionReview.js';
 import { PluginMarketApi } from './api.js';
 import { createOrganizationPrefixStore } from './organizationPrefixStore.js';
@@ -1679,7 +1680,7 @@ export class PluginMarketService {
   }
 
   private async installDetail(
-    plugin: VisiblePluginSummary | VisiblePluginDetail,
+    plugin: VisiblePluginDetail,
     options: {
       /** 手动安装时已向用户展示；默认安装时作为自动授权的目录权限上限。 */
       reviewedManifest?: GhostManifest;
@@ -1712,6 +1713,14 @@ export class PluginMarketService {
     requireSameMarketOwner(owner);
     if (owner.mode === 'local' && plugin.scope !== 'public') {
       throwIpcError('PERMISSION_DENIED', 'Local mode can only access public Plugins');
+    }
+    const admissionManifest = validateGhostManifest(plugin.currentRelease.manifest);
+    if (!admissionManifest.ok) {
+      throwIpcError('GHOST_FILE_INVALID', 'This Plugin manifest is not supported');
+    }
+    const brokerPortError = ghostBrokerRedirectPortInstallError(admissionManifest.manifest);
+    if (brokerPortError) {
+      throwIpcError(brokerPortError.code, brokerPortError.reason);
     }
     const existing = getGhostManager()
       .list()

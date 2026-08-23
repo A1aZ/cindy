@@ -187,6 +187,31 @@ function setupSecretManifest(id = 'cindy-test', version = '1.0.0') {
   };
 }
 
+function brokerManifestWithoutPort(id = 'cindy-test', version = '1.0.0') {
+  return {
+    ...manifest(id, version),
+    slots: ['network'],
+    settingsHtml: 'settings.html',
+    network: {
+      hosts: ['accounts.example.com'],
+      secrets: [
+        {
+          key: 'account',
+          label: 'Account',
+          source: 'oauth',
+          inject: { header: 'Authorization', format: 'Bearer {value}' },
+          oauth: {
+            authorizeUrl: 'https://accounts.example.com/authorize',
+            tokenUrl: 'https://accounts.example.com/token',
+            clientId: 'builtin-client-id',
+            tokenBroker: 'jira',
+          },
+        },
+      ],
+    },
+  };
+}
+
 function normalizedManifest(raw: unknown): GhostManifest {
   const validated = validateGhostManifest(raw);
   if (!validated.ok) throw new Error(validated.reason);
@@ -1084,6 +1109,31 @@ describe('PluginMarketService migration and defaultInstall', () => {
         expectedReleaseId: item.currentRelease.id,
       }),
     ).rejects.toThrow('[NOT_FOUND]');
+    expect(h.api.download).not.toHaveBeenCalled();
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
+  it('keeps a no-port broker release visible in detail but rejects market installation before download', async () => {
+    const item = summary();
+    const brokerManifest = brokerManifestWithoutPort();
+    const normalizedBrokerManifest = normalizedManifest(brokerManifest);
+    const h = harness([item]);
+    h.api.detail.mockResolvedValue({
+      ...item,
+      currentRelease: { ...item.currentRelease, manifest: brokerManifest },
+    } as VisiblePluginDetail);
+
+    // 详情必须继续可读；把准入检查错放到共用 validator 或 detail 会先在这里报错。
+    await expect(h.service.detail(item.id)).resolves.toMatchObject({
+      manifest: { network: { secrets: [{ oauth: { tokenBroker: 'jira' } }] } },
+    });
+
+    await expect(
+      h.service.install(item.id, {
+        expectedReleaseId: item.currentRelease.id,
+        expectedManifest: normalizedBrokerManifest,
+      }),
+    ).rejects.toThrow('[GHOST_BROKER_REDIRECT_PORT_REQUIRED]');
     expect(h.api.download).not.toHaveBeenCalled();
     expect(runtime.install).not.toHaveBeenCalled();
   });
@@ -2372,6 +2422,41 @@ describe('PluginMarketService migration and defaultInstall', () => {
       'update-available',
       'update-available',
     ]);
+  });
+
+  it('rejects a no-port broker auto-upgrade without disturbing the installed legacy version', async () => {
+    const item = summary({
+      scope: 'organization',
+      organizationId: 'org-1',
+      defaultInstall: true,
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    const oldManifest = manifest(item.ghostId, '1.0.0');
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-upgrade-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+    runtime.ghosts = [{ manifest: oldManifest, dir: installDir, enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+      manifestDigest: ghostManifestDigest(oldManifest),
+    });
+    h.api.detail.mockResolvedValueOnce({
+      ...item,
+      currentRelease: {
+        ...item.currentRelease,
+        manifest: brokerManifestWithoutPort(item.ghostId, '2.0.0'),
+      },
+    } as VisiblePluginDetail);
+
+    const snapshot = await h.service.snapshot();
+
+    expect(snapshot.items[0]?.installState).toBe('update-available');
+    expect(runtime.ghosts[0]?.manifest.version).toBe('1.0.0');
+    expect(h.api.download).not.toHaveBeenCalled();
+    expect(runtime.install).not.toHaveBeenCalled();
   });
 
   it('aggregates upgrade notices and filters directional controls from a single name', async () => {

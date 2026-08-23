@@ -4439,6 +4439,7 @@
         "idReserved": "{{reservedGhostIdPrefixes}} 是官方插件保留前缀，不能通过拖入、选择文件、ghost_forge_pack 转交或自定义插件市场装入；请从 Cindy 插件市场安装对应的官方插件",
         "brokerManualInstallNotAuthorized": "手动装入的 .cindy 不能使用授权 broker；请改从组织插件市场安装，或让作者在组织身份下使用 ghost_forge_pack 构建",
         "brokerNotAuthorized": "当前安装来源或组织身份无权使用授权 broker；请从组织插件市场安装，或让作者在组织身份下使用 ghost_forge_pack 构建",
+        "brokerRedirectPortRequired": "这个插件声明了授权 broker，但没有在同一项 OAuth 配置中声明 redirectPort。请让作者补上该字段，确保授权最后一跳能回到本机监听端口。",
         "sourceMissing": "找不到所选文件",
         "generic": "操作失败，请稍后重试",
         "updateIdMismatch": "所选文件是插件「{{id}}」，与当前插件「{{expected}}」不一致"

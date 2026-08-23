@@ -304,6 +304,7 @@ import {
 } from './ghostFirstPartyFacts.js';
 import { authorizeGhostTokenBroker } from './ghostFirstPartyPrivilege.js';
 import { ghostTokenBrokerInstallError } from './ghostTokenBrokerInstallError.js';
+import { ghostBrokerRedirectPortInstallError } from './ghostBrokerRedirectPort.js';
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
 import { GhostFsSlot } from './fsSlot.js';
 import { GhostLibrarySlot } from './librarySlot.js';
@@ -5277,6 +5278,12 @@ function rejectUnauthorizedTokenBroker(
   );
 }
 
+/** 新包装入准入；批准 receipt / 已装目录回读不经过这里。 */
+function rejectBrokerWithoutDeclaredRedirectPort(manifest: GhostManifest): void {
+  const error = ghostBrokerRedirectPortInstallError(manifest);
+  if (error) throwIpcError(error.code, error.reason);
+}
+
 /** install 失败分类 → IPC 错误码。 */
 function throwInstallError(rejection: InstallRejection): never {
   switch (rejection.code) {
@@ -7405,6 +7412,7 @@ export function registerGhostIpc(): void {
     let packTicket: string | undefined;
     const inspectController = getForgePackStagingControllerIfConfigured();
     const peekTicket = inspectController?.peekMatchingStagingPath(lizFilePath) ?? null;
+    rejectBrokerWithoutDeclaredRedirectPort(result.manifest);
     rejectUnauthorizedTokenBroker(result.manifest, {
       installOrigin: peekTicket ? 'agent-forge' : 'manual',
     });

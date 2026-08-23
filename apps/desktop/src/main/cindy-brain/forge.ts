@@ -54,6 +54,7 @@ import {
   unixRegularFilePermissionsForArchive,
 } from './ghostZipPermissions.js';
 import { isPathInsideDir } from './dirDeposit.js';
+import { brokerRedirectPortDeclarationIssue } from './ghostBrokerRedirectPort.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 
 /**
@@ -625,6 +626,10 @@ export async function scaffoldGhostDir(
   if (!validation.ok) {
     return { ok: false, errorCode: 'INVALID_INPUT', message: `插件信息不合格:${validation.reason}` };
   }
+  const brokerPortIssue = brokerRedirectPortDeclarationIssue(validation.manifest);
+  if (brokerPortIssue) {
+    return { ok: false, errorCode: 'INVALID_INPUT', message: `插件信息不合格:${brokerPortIssue}` };
+  }
 
   try {
     await fs.promises.lstat(targetDir);
@@ -801,6 +806,10 @@ async function buildGhostPackage(
     const v = validateGhostManifest(manifestRaw);
     if (!v.ok) {
       return { ok: false, errorCode: 'MANIFEST_INVALID', message: `清单不合格:${v.reason}` };
+    }
+    const brokerPortIssue = brokerRedirectPortDeclarationIssue(v.manifest);
+    if (brokerPortIssue) {
+      return { ok: false, errorCode: 'MANIFEST_INVALID', message: `清单不合格:${brokerPortIssue}` };
     }
     if (manifestBytes.byteLength > GHOST_INSTALL_MANIFEST_MAX_BYTES) {
       return {

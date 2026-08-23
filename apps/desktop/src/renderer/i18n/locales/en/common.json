@@ -4440,6 +4440,7 @@
         "idReserved": "{{reservedGhostIdPrefixes}} are reserved for official plugins and can’t be installed by dragging in a package, choosing a file, transferring from ghost_forge_pack, or using a custom plugin marketplace. Install the corresponding official plugin from the Cindy plugin market",
         "brokerManualInstallNotAuthorized": "A manually installed .cindy package is not authorized to use the authorization broker. Install it from your organization’s plugin market, or ask the author to build it with ghost_forge_pack while signed in to the organization.",
         "brokerNotAuthorized": "This installation source or organization identity is not authorized to use the authorization broker. Install it from your organization’s plugin market, or ask the author to build it with ghost_forge_pack while signed in to the organization.",
+        "brokerRedirectPortRequired": "This plugin declares an authorization broker but does not declare redirectPort in the same OAuth configuration. Ask the author to add the field so the final authorization hop can return to the local listening port.",
         "sourceMissing": "The selected file could not be found",
         "generic": "Operation failed. Please try again.",
         "updateIdMismatch": "The selected file is plugin \"{{id}}\", which does not match this plugin \"{{expected}}\""

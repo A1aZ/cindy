@@ -4752,13 +4752,6 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
                   'network.secrets[].oauth.tokenBroker 与 clientSecret 互斥(broker 模式下 secret 由服务端持有,不随包分发)',
               };
             }
-            if (oa.redirectPort === undefined) {
-              return {
-                ok: false,
-                reason:
-                  'network.secrets[].oauth.tokenBroker 必须同时声明 redirectPort（broker 的 redirect_uri 端口必须稳定）',
-              };
-            }
           }
           if (oaClientIdAlternatives !== undefined && oa.tokenBroker === undefined) {
             return {

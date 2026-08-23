@@ -147,6 +147,51 @@ async function makeSrcDir(files: Record<string, string | Buffer>): Promise<strin
 }
 
 describe('packGhostDir', () => {
+  it('rejects a new tokenBroker package without redirectPort but accepts the declared-port shape', async () => {
+    const brokerManifest = {
+      ...GOOD_MANIFEST,
+      slots: ['network'],
+      tools: undefined,
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['accounts.example.com'],
+        secrets: [
+          {
+            key: 'account',
+            label: 'Account',
+            source: 'oauth',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+            oauth: {
+              authorizeUrl: 'https://accounts.example.com/authorize',
+              tokenUrl: 'https://accounts.example.com/token',
+              clientId: 'builtin-client-id',
+              tokenBroker: 'jira',
+            },
+          },
+        ],
+      },
+    };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(brokerManifest),
+      'main.js': '// broker plugin',
+      'settings.html': '<main>settings</main>',
+    });
+
+    await expect(packGhostDir(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MANIFEST_INVALID',
+      message: expect.stringContaining('同一项 oauth 中声明 redirectPort'),
+    });
+    expect(fs.existsSync(path.join(dir, 'demo-1.0.0.cindy'))).toBe(false);
+
+    const secret = brokerManifest.network.secrets[0] as {
+      oauth: Record<string, unknown>;
+    };
+    secret.oauth.redirectPort = 17872;
+    await fs.promises.writeFile(path.join(dir, 'ghost.json'), JSON.stringify(brokerManifest));
+    await expect(packGhostDir(dir)).resolves.toMatchObject({ ok: true });
+  });
+
   it.skipIf(process.platform === 'win32')(
     'archives real Unix execute bits while stripping special bits',
     async () => {

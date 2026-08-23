@@ -286,7 +286,7 @@ describe('ghost · oauth 凭证声明校验', () => {
     }
   });
 
-  it('tokenBroker:必须带 redirectPort;非 broker 仍可省略', () => {
+  it('tokenBroker 无 redirectPort 仍可从共用读路径解析;新包约束由 Host 准入点承担', () => {
     const base = {
       authorizeUrl: 'https://accounts.example.com/authorize',
       tokenUrl: 'https://accounts.example.com/token',
@@ -295,11 +295,17 @@ describe('ghost · oauth 凭证声明校验', () => {
     const missingPort = validateGhostManifest(
       oauthManifest({ oauth: { ...base, tokenBroker: 'jira' } }),
     );
-    expect(missingPort.ok).toBe(false);
-    if (!missingPort.ok) expect(missingPort.reason).toContain('必须同时声明 redirectPort');
+    expect(missingPort.ok).toBe(true);
+    if (missingPort.ok) {
+      expect(missingPort.manifest.network?.secrets?.[0]?.oauth).toMatchObject({
+        tokenBroker: 'jira',
+      });
+      expect(
+        missingPort.manifest.network?.secrets?.[0]?.oauth?.redirectPort,
+      ).toBeUndefined();
+    }
 
-    // This positive pair prevents accidentally requiring a fixed global port,
-    // while the no-broker control prevents widening the requirement to OAuth as a whole.
+    // 这两个对照防止兼容调整误伤原本合法的显式端口与普通 OAuth。
     expect(
       validateGhostManifest(
         oauthManifest({ oauth: { ...base, tokenBroker: 'jira', redirectPort: 17872 } }),

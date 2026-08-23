@@ -775,15 +775,17 @@ export interface GhostSecretOauthDecl {
    * 可选:loopback 回调固定端口(1024–65535)。Atlassian 这类服务商要求回调
    * URI 与应用注册值精确匹配(含端口),声明后主机授权引擎钉死
    * `http://127.0.0.1:<port>/callback`(端口被占用时结构化报错引导重试);
-   * 缺省 = 随机端口(Google 等允许任意 loopback 端口的服务商)。
+   * 声明 tokenBroker 时必填；其它 OAuth 缺省 = 随机端口(Google 等允许任意
+   * loopback 端口的服务商)。
    */
   redirectPort?: number;
   /**
    * 可选:XDT server token broker 的 provider slug(2026-07-14,xd-atlassian
    * 意识化前置)。声明后 code 换 token 与 refresh 不直连 tokenUrl,改经主机
    * 调 XDT server 的授权 broker(带登录 JWT;client secret 在服务端,不随包
-   * 分发)。与 clientSecret 互斥。静态官方前缀照旧放行；其余资格由装入来源与
-   * 当前组织事实共同判定。校验层保持纯函数不感知装入语境，门控在装入闸与连接闸。
+   * 分发)。必须同时声明 redirectPort，并与 clientSecret 互斥。静态官方前缀照旧
+   * 放行；其余资格由装入来源与当前组织事实共同判定。校验层保持纯函数不感知
+   * 装入语境，门控在装入闸与连接闸。
    */
   tokenBroker?: string;
   /**
@@ -2513,7 +2515,7 @@ export function ghostLocalePathFor(
 ): string | null {
   if (!manifest.locales) return null;
   const manifestLocale = (GHOST_LOCALES as readonly string[]).includes(locale ?? '')
-    ? (locale as GhostLocale)
+    ? locale as GhostLocale
     : null;
   return (
     (manifestLocale ? manifest.locales[manifestLocale] : undefined) ?? manifest.locales.en ?? null
@@ -2523,7 +2525,7 @@ export function ghostLocalePathFor(
 /** 插件 app-context 只暴露协议旧四语；宿主新增语言固定回退英文以兼容存量插件。 */
 export function ghostAppContextLocale(locale: string | undefined | null): GhostLocale {
   return (GHOST_LOCALES as readonly string[]).includes(locale ?? '')
-    ? locale as GhostLocale
+    ? (locale as GhostLocale)
     : 'en';
 }
 
@@ -4748,6 +4750,13 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
                 ok: false,
                 reason:
                   'network.secrets[].oauth.tokenBroker 与 clientSecret 互斥(broker 模式下 secret 由服务端持有,不随包分发)',
+              };
+            }
+            if (oa.redirectPort === undefined) {
+              return {
+                ok: false,
+                reason:
+                  'network.secrets[].oauth.tokenBroker 必须同时声明 redirectPort（broker 的 redirect_uri 端口必须稳定）',
               };
             }
           }

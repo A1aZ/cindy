@@ -286,11 +286,34 @@ describe('ghost · oauth 凭证声明校验', () => {
     }
   });
 
+  it('tokenBroker:必须带 redirectPort;非 broker 仍可省略', () => {
+    const base = {
+      authorizeUrl: 'https://accounts.example.com/authorize',
+      tokenUrl: 'https://accounts.example.com/token',
+      clientId: 'builtin-client-id',
+    };
+    const missingPort = validateGhostManifest(
+      oauthManifest({ oauth: { ...base, tokenBroker: 'jira' } }),
+    );
+    expect(missingPort.ok).toBe(false);
+    if (!missingPort.ok) expect(missingPort.reason).toContain('必须同时声明 redirectPort');
+
+    // This positive pair prevents accidentally requiring a fixed global port,
+    // while the no-broker control prevents widening the requirement to OAuth as a whole.
+    expect(
+      validateGhostManifest(
+        oauthManifest({ oauth: { ...base, tokenBroker: 'jira', redirectPort: 17872 } }),
+      ).ok,
+    ).toBe(true);
+    expect(validateGhostManifest(oauthManifest({ oauth: base })).ok).toBe(true);
+  });
+
   it('tokenBroker:合法 slug 通过并保留;非法形状 / 与 clientSecret 互斥 → 拒', () => {
     const base = {
       authorizeUrl: 'https://accounts.example.com/authorize',
       tokenUrl: 'https://accounts.example.com/token',
       clientId: 'builtin-client-id',
+      redirectPort: 17872,
     };
     // broker 模式典型组合:内置 clientId + 无 clientSecret + pkce:false。
     const ok = validateGhostManifest(
@@ -322,6 +345,7 @@ describe('ghost · oauth 凭证声明校验', () => {
       tokenUrl: 'https://accounts.example.com/token',
       clientId: 'cn-client-id',
       tokenBroker: 'slack',
+      redirectPort: 17872,
     };
     const ok = validateGhostManifest(
       oauthManifest({ oauth: { ...base, clientIdAlternatives: ['global-client-id'] } }),

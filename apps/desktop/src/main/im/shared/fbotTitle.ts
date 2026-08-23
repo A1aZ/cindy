@@ -19,6 +19,7 @@
 
 import { desktopSessionStorage } from '../../maker-host/session-storage';
 import { generateMakerSessionTitle } from '../../maker-ipc/title';
+import { readAuxiliaryModelSelection } from '../../utility-model/auxiliary-model-settings-store';
 import { broadcastSessionPatched } from './sessionBroadcast';
 
 export { broadcastSessionPatched } from './sessionBroadcast';
@@ -72,6 +73,9 @@ export async function generateImSessionTitleText(
 ): Promise<string | null> {
   const generated = (await generateMakerSessionTitle(seedText, 'claude-code', sessionId))?.trim();
   if (generated) return generated;
+  // An explicit auxiliary model is an exact, fail-closed route. Do not hide a
+  // failure by falling through to the legacy utility-model candidate chain.
+  if (readAuxiliaryModelSelection('sessionTitleModel')) return null;
   try {
     // 动态 import 保持本模块的静态依赖链不继续膨胀(cindySlot 同款)。
     const [{ requestUtilityText }, { getMaker }] = await Promise.all([

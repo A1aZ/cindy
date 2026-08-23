@@ -7,7 +7,7 @@
  * 标题 + 搜索过滤;首行恒为「跟随默认」(身份卡声明了偏好模型时如实显示声明)。
  */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -30,6 +30,8 @@ export interface OneshotPinOption {
   /** Provider['routing'](IPC 载荷;ProviderLogoMark 的厂牌图标判定用)。 */
   routing?: import('@cindy/model-providers').Provider['routing'];
   agentSuffix?: string;
+  /** False for a persisted route that is no longer credential/catalog ready. */
+  available?: boolean;
 }
 
 export function OneshotModelPinPicker({
@@ -41,6 +43,13 @@ export function OneshotModelPinPicker({
   onChange,
   ariaLabel,
   dense,
+  defaultOptionLabel,
+  searchPlaceholder,
+  noResultsLabel,
+  unavailableLabel,
+  budgetLabel,
+  subscriptionLabel,
+  disabled,
 }: {
   /** 当前钉值;undefined = 跟随默认。 */
   value?: string;
@@ -56,32 +65,44 @@ export function OneshotModelPinPicker({
   ariaLabel: string;
   /** 紧凑字号(设置页 12px;插件详情页 13px)。 */
   dense?: boolean;
+  /** Generic settings surfaces can supply their own automatic-route copy. */
+  defaultOptionLabel?: string;
+  searchPlaceholder?: string;
+  noResultsLabel?: string;
+  unavailableLabel?: string;
+  budgetLabel?: string;
+  subscriptionLabel?: string;
+  disabled?: boolean;
 }): ReactNode {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const current = value ? options.find((o) => o.id === value) : undefined;
   // 覆盖值已不在当前清单(目录演进):如实显示原值,不假装跟随默认。
   // 存量档位钉不是 stale——它合法且仍可路由,只是不再能新建,展示友好名。
   const staleValue = value && !current && !legacyPinLabel ? value : null;
-  const triggerLabel = current?.label
-    ?? legacyPinLabel
-    ?? staleValue
+  const automaticLabel = defaultOptionLabel
     ?? (declaredLabel
       ? t('settings.ghosts.detail.cindyPrefs.defaultOptionDeclared', { model: declaredLabel })
       : t('settings.ghosts.detail.cindyPrefs.defaultOption', { model: defaultLabel }));
+  const triggerLabel = current?.label
+    ?? legacyPinLabel
+    ?? staleValue
+    ?? automaticLabel;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter(
+    const visible = options.filter((option) => option.available !== false || option.id === value);
+    if (!q) return visible;
+    return visible.filter(
       (o) =>
         o.modelName.toLowerCase().includes(q)
         || o.modelId.toLowerCase().includes(q)
         || o.group.toLowerCase().includes(q),
     );
-  }, [options, query]);
+  }, [options, query, value]);
 
   const groups = useMemo(() => {
     const names: string[] = [];
@@ -112,23 +133,43 @@ export function OneshotModelPinPicker({
     );
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        if (disabled && next) return;
+        setOpen(next);
+        if (!next) setQuery('');
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
           aria-label={ariaLabel}
+          disabled={disabled}
           className={cn(
             'flex h-8 w-[300px] max-w-[60%] min-w-0 shrink cursor-pointer appearance-none items-center justify-between gap-2 rounded-full border border-[var(--settings-input-border)] bg-[var(--settings-input-bg)] py-0 pl-3 pr-2.5 text-[var(--settings-input-text)] outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]',
+            'disabled:cursor-not-allowed disabled:opacity-60',
             dense ? 'text-12' : 'text-13',
           )}
         >
-          <span className="min-w-0 truncate">{triggerLabel}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 truncate">{triggerLabel}</span>
+            {current?.available === false && (
+              <span className="shrink-0 text-11 text-[var(--text-tertiary)]">
+                {unavailableLabel ?? t('settings.auxiliaryModels.unavailable')}
+              </span>
+            )}
+          </span>
           <ChevronDown size={13} className="shrink-0 text-[var(--text-tertiary)]" />
         </button>
       </PopoverTrigger>
       <PopoverContent
         align="end"
         sideOffset={6}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          searchRef.current?.focus();
+        }}
         className="w-[320px] overflow-hidden rounded-[12px] border border-[var(--model-dropdown-border)] bg-[var(--model-dropdown-bg)] p-2 shadow-[var(--shadow-menu)]"
       >
         <div className="flex flex-col gap-1.5">
@@ -136,11 +177,12 @@ export function OneshotModelPinPicker({
           <div className="flex items-center gap-2 rounded-full border border-[var(--model-dropdown-border)] bg-[var(--surface)] px-3 py-[7px]">
             <Search size={16} className="shrink-0 text-[var(--text-tertiary)]" />
             <input
+              ref={searchRef}
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('settings.ghosts.detail.cindyPrefs.searchPlaceholder')}
-              aria-label={t('settings.ghosts.detail.cindyPrefs.searchPlaceholder')}
+              placeholder={searchPlaceholder ?? t('settings.ghosts.detail.cindyPrefs.searchPlaceholder')}
+              aria-label={searchPlaceholder ?? t('settings.ghosts.detail.cindyPrefs.searchPlaceholder')}
               className="min-w-0 flex-1 bg-transparent text-14 text-[var(--model-item-text)] outline-none placeholder:text-[var(--text-tertiary)]"
             />
           </div>
@@ -160,9 +202,7 @@ export function OneshotModelPinPicker({
               onClick={() => select(null)}
             >
               <span className="min-w-0 truncate text-14 font-medium leading-5 text-[var(--model-item-text)]">
-                {declaredLabel
-                  ? t('settings.ghosts.detail.cindyPrefs.defaultOptionDeclared', { model: declaredLabel })
-                  : t('settings.ghosts.detail.cindyPrefs.defaultOption', { model: defaultLabel })}
+                {automaticLabel}
               </span>
               {value === undefined && (
                 <Check size={15} className="ml-2 shrink-0 text-[var(--model-item-check)]" />
@@ -171,7 +211,7 @@ export function OneshotModelPinPicker({
 
             {groups.length === 0 ? (
               <div className="px-3 py-6 text-center text-13 text-[var(--text-tertiary)]">
-                {t('newChat.modelSelector.search.noResults')}
+                {noResultsLabel ?? t('newChat.modelSelector.search.noResults')}
               </div>
             ) : (
               groups.map((g) => (
@@ -182,6 +222,7 @@ export function OneshotModelPinPicker({
                   </div>
                   {g.items.map((o) => {
                     const active = value === o.id;
+                    const unavailable = o.available === false;
                     return (
                       <button
                         key={o.id}
@@ -189,7 +230,8 @@ export function OneshotModelPinPicker({
                         role="option"
                         aria-selected={active}
                         data-pin-id={o.id}
-                        className={rowClass(active)}
+                        aria-disabled={unavailable}
+                        className={cn(rowClass(active), unavailable && 'opacity-60')}
                         onClick={() => select(o.id)}
                       >
                         <span className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -211,16 +253,21 @@ export function OneshotModelPinPicker({
                                 {o.agentSuffix}
                               </span>
                             )}
+                            {unavailable && (
+                              <span className="shrink-0 text-11 font-normal text-[var(--text-tertiary)]">
+                                {unavailableLabel ?? t('settings.auxiliaryModels.unavailable')}
+                              </span>
+                            )}
                           </span>
                           <span className="ml-auto flex shrink-0 items-center gap-1.5">
                             {o.subscription && (
                               <span className="inline-flex shrink-0 items-center rounded-full bg-[var(--surface-chip)] px-2 py-[1px] text-11 font-medium text-[var(--text-secondary)]">
-                                {t('settings.providers.models.subscription')}
+                                {subscriptionLabel ?? t('settings.providers.models.subscription')}
                               </span>
                             )}
                             {o.budget && (
                               <span className="inline-flex shrink-0 items-center rounded-full bg-[var(--accent-cta-bg)] px-2 py-[1px] text-11 font-medium leading-[1.45] text-[var(--accent-pure-cta-fg)]">
-                                {t('settings.ghosts.detail.cindyPrefs.budgetBadge')}
+                                {budgetLabel ?? t('settings.ghosts.detail.cindyPrefs.budgetBadge')}
                               </span>
                             )}
                           </span>

@@ -30,6 +30,10 @@ import {
 } from '@cindy/model-providers';
 
 import { applyProviderOrder } from '../../shared/providerOrder.js';
+import {
+  decodeCatalogModelPin,
+  encodeCatalogModelPin,
+} from '../../shared/catalogModelPin.js';
 
 /** oneshot 可路由的 agent(Pi 的 oneShot 未实现,不进钉档清单)。 */
 const ONESHOT_ROUTE_AGENTS = ['codex', 'claude-code'] as const;
@@ -47,30 +51,19 @@ export type OneshotRoute =
   | { kind: 'utility-profile'; profileId: string }
   | { kind: 'catalog'; providerId: string; agentKind: AgentKind; model: string };
 
-/** 目录钉值前缀(与轻量档位键区分:档位键永不带冒号)。 */
-const CATALOG_PIN_PREFIX = 'cat:';
-
 /** 目录钉编码:cat:<providerId>:<agentKind>:<modelId>(modelId 可含 '/' 与 ':')。 */
 export function encodeCatalogPin(providerId: string, agentKind: AgentKind, model: string): string {
-  return `${CATALOG_PIN_PREFIX}${providerId}:${agentKind}:${model}`;
+  if (agentKind !== 'codex' && agentKind !== 'claude-code') {
+    throw new Error(`unsupported catalog pin agent: ${agentKind}`);
+  }
+  return encodeCatalogModelPin({ providerId, agentKind, model });
 }
 
 /** 解码目录钉;不是目录钉(或形态残缺/agent 不可路由)返回 null。 */
 export function decodeCatalogPin(
   raw: string,
 ): { providerId: string; agentKind: AgentKind; model: string } | null {
-  if (!raw.startsWith(CATALOG_PIN_PREFIX)) return null;
-  const rest = raw.slice(CATALOG_PIN_PREFIX.length);
-  const firstSep = rest.indexOf(':');
-  if (firstSep <= 0) return null;
-  const secondSep = rest.indexOf(':', firstSep + 1);
-  if (secondSep <= firstSep + 1) return null;
-  const providerId = rest.slice(0, firstSep);
-  const agentRaw = rest.slice(firstSep + 1, secondSep);
-  const model = rest.slice(secondSep + 1);
-  if (!model) return null;
-  if (!(ONESHOT_ROUTE_AGENTS as readonly string[]).includes(agentRaw)) return null;
-  return { providerId, agentKind: agentRaw as AgentKind, model };
+  return decodeCatalogModelPin(raw);
 }
 
 /**

@@ -131,6 +131,7 @@
       "chipMetrics": "Usage indicator",
       "memory": "Memory",
       "subagentModels": "Subagents",
+      "auxiliaryModels": "Auxiliary models",
       "visionBridge": "Vision Bridge",
       "compaction": "Context compaction",
       "terminalShell": "Default terminal shell",
@@ -2527,6 +2528,29 @@
         "saved": "Subagent settings saved",
         "deferredSuffix": " — running Codex sessions will apply this after their current task finishes"
       }
+    },
+    "auxiliaryModels": {
+      "title": "Auxiliary models",
+      "description": "Choose separate models for automatic task naming and composer prompt suggestions.",
+      "sessionTitle": {
+        "label": "Automatic task naming",
+        "description": "Applies to Claude Code, Codex, and Pi tasks, plus manual AI renaming.",
+        "ariaLabel": "Choose the automatic task naming model",
+        "automatic": "Automatic (follow the current task)"
+      },
+      "promptRecommendation": {
+        "label": "Composer prompt suggestions",
+        "description": "Used only when prompt recommendations are enabled under Tips.",
+        "ariaLabel": "Choose the composer prompt suggestion model",
+        "automatic": "Automatic (keep current routing)"
+      },
+      "explicitRouteHint": "An explicit selection uses only that model. If it is unavailable, Cindy will not switch providers.",
+      "searchPlaceholder": "Search models or providers",
+      "noResults": "No available models",
+      "unavailable": "Currently unavailable",
+      "budget": "Discount",
+      "subscription": "Subscription",
+      "saveFailed": "Failed to save auxiliary model settings"
     },
     "compaction": {
       "title": "Context compaction",

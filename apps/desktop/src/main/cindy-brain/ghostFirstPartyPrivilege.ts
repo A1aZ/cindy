@@ -11,7 +11,8 @@
  *
  * Input priority: first evaluable of
  *   1. builtin seed → static official table
- *   2. plugin-market ledger (source + scope + organizationId)
+ *   2. plugin-market ledger (source + scope + organizationId + Release sha256)
+ *      paired with the approved receipt packageSha256
  *   3. neither → fail-closed, no privilege
  *
  * Discriminator is the combination of `source` and `scope`, not `scope`
@@ -32,6 +33,8 @@
 import { PLUGIN_PREFIX_PATTERN, type PluginScope } from '@cindy/plugin-protocol';
 
 import { isBrokerEligibleGhostId, isOfficialGhostId } from '../../shared/ghost.js';
+
+const PACKAGE_SHA256_RE = /^[a-f0-9]{64}$/;
 
 /**
  * Ghost ids that share Host credential aliases (`GHOST_SECRET_STORAGE_ALIASES`).
@@ -60,6 +63,10 @@ export interface GhostFirstPartyMarketRecord {
   organizationId: string | null;
   source: 'market' | 'legacy-adopted' | 'git-market' | 'local-market';
   installed: boolean;
+  /** Release package hash retained by the server-market ledger row. */
+  sha256: string;
+  /** Approved receipt hash; null includes legacy/reapproved receipts without package evidence. */
+  approvedPackageSha256: string | null;
 }
 
 export interface GhostFirstPartyCurrentOrganization {
@@ -98,6 +105,26 @@ function isCurrentOrganizationRecord(
     record.scope === 'organization' &&
     currentOrganization !== null &&
     record.organizationId === currentOrganization.organizationId
+  );
+}
+
+/**
+ * The single byte-identity gate for organization server-market Broker access.
+ * `manifestDigest` is intentionally absent: an attacker can keep ghost.json
+ * unchanged while replacing executable package bytes.
+ */
+export function marketInstallationMatchesApprovedPackage(
+  record: GhostFirstPartyMarketRecord,
+  currentOrganization: GhostFirstPartyCurrentOrganization | null,
+): boolean {
+  return (
+    record.installed &&
+    record.source === 'market' &&
+    isCurrentOrganizationRecord(record, currentOrganization) &&
+    record.approvedPackageSha256 !== null &&
+    PACKAGE_SHA256_RE.test(record.sha256) &&
+    PACKAGE_SHA256_RE.test(record.approvedPackageSha256) &&
+    record.sha256 === record.approvedPackageSha256
   );
 }
 
@@ -156,6 +183,9 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
       if (record.source !== 'market') return deny('denied-unknown-origin');
       if (!isCurrentOrganizationRecord(record, facts.currentOrganization)) {
         return deny('denied-foreign-org');
+      }
+      if (!marketInstallationMatchesApprovedPackage(record, facts.currentOrganization)) {
+        return deny('denied-unknown-origin');
       }
       if (!matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)) {
         return deny('denied-unknown-origin');

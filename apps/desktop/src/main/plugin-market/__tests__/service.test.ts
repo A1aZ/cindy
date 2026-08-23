@@ -1144,15 +1144,22 @@ describe('PluginMarketService migration and defaultInstall', () => {
           organizationId: 'org-1',
           source: 'market',
           installed: true,
+          sha256: orgItem.currentRelease.sha256,
         },
       }),
     );
     const pending = runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord as {
       source: string;
       installed: boolean;
+      sha256: string;
     };
     expect(pending.source).toBe('market');
     expect(pending.installed).toBe(true);
+    // The pending ticket carries only the server Release hash. The approved
+    // side is Host-bound later to inspect(package bytes), so the service cannot
+    // mint a self-reported match.
+    expect(pending.sha256).toBe(orgItem.currentRelease.sha256);
+    expect(pending).not.toHaveProperty('approvedPackageSha256');
 
     runtime.install.mockReset();
     const publicItem = summary({ scope: 'public', organizationId: null });

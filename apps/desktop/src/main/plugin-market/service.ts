@@ -1974,6 +1974,7 @@ export class PluginMarketService {
                 organizationId: plugin.organizationId,
                 source: 'market',
                 installed: true,
+                sha256: plugin.currentRelease.sha256,
               },
             }
           : {}),
@@ -2126,7 +2127,7 @@ export class PluginMarketService {
    * Repair an existing server provenance record that an older client left
    * disconnected while its approved package remained installed.
    * Recovery is entirely local. Modern receipts must retain the exact Release
-   * package hash. Legacy receipts intentionally omitted that audit-only hash, so
+   * package hash. Legacy receipts intentionally omitted that source hash, so
    * they additionally require the completed one-time migration to name this id
    * and the raw installed manifest to equal the manifest frozen in that receipt.
    * This evidence reconnects the server update route, not current code bytes;

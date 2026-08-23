@@ -1747,9 +1747,10 @@ export class GhostManager {
    *   坏 locale;迁移时读到坏 locale 只可能是**装入后被损坏**,属 §5 的"自相矛盾即
    *   fail closed",也与 receipt「localeResources 键集必须等于 manifest.locales」的
    *   不变量一致(跳过坏 locale 会写出被 validateReceipt 拒绝的 receipt);
-   * - `packageSha256` **不算**(它是 audit-only、运行期不消费,见 §7);省掉它让迁移更快、
-   *   更不会因安装目录里的异常条目误伤——真正的运行期判据 `skillContentSha256` 仍逐字节算,
-   *   技能目录含链接等异常会在那里如实 fail closed。
+   * - `packageSha256` **不回填**：旧安装目录无法反推出原始 `.cindy` 整包 SHA。省略后，
+   *   组织市场 Broker 资格会 fail closed，直到一次经校验的市场更新写入新来源指纹；
+   *   既有 organization-market OIDC 仍沿用 manifestDigest，不受影响。其它运行期字节判据
+   *   `skillContentSha256` 仍逐字节计算，技能目录含链接等异常会在那里如实 fail closed。
    */
   private async backfillLegacyApproval(
     dir: string,

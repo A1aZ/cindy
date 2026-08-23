@@ -87,6 +87,22 @@ describe('installed Plugin Connection audience resolver', () => {
     });
   });
 
+  it('keeps legacy organization-market OIDC independent from receipt package SHA', () => {
+    const resolver = loadConnectionAudienceResolver({
+      ...resolverOptions(),
+      readApprovedPackageSha256: () => null,
+    });
+
+    // This is the intentional compatibility boundary: Broker now requires the
+    // package hash, but the existing market OIDC path remains manifest-bound.
+    expect(resolver.resolve('plugin-a', identity)).toEqual({
+      membershipId: 'membership-1',
+      audience: 'org-example:plugin-a',
+      pluginSlug: 'plugin-a',
+      allowedHosts: ['service-a.x.test'],
+    });
+  });
+
   it('requires a current organization market installation record', () => {
     const resolver = loadConnectionAudienceResolver(
       resolverOptions(manifest, { ...marketInstallation, source: 'local-market' }),

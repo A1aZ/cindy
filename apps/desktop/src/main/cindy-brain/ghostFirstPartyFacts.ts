@@ -60,6 +60,8 @@ export interface GhostFirstPartyFactsLoader {
 export interface LoadGhostFirstPartyFactsLoaderOptions {
   readInstalledBuiltin(ghostId: string): boolean;
   readMarketInstallation(ghostId: string): PluginMarketInstallationRecord | null;
+  /** Missing or legacy package evidence must return null. */
+  readApprovedPackageSha256(ghostId: string): string | null;
   lookupOrganizationPrefix(orgId: string): OrganizationPrefixLookup;
   /** Missing / unreadable receipts must return `manual`. */
   readInstallOrigin(ghostId: string): 'manual' | 'agent-forge';
@@ -71,13 +73,33 @@ function actionFor(purpose: GhostFirstPartyFactsPurpose): GhostFirstPartyFactsUn
 
 function toMarketRecord(
   record: PluginMarketInstallationRecord,
+  approvedPackageSha256: string | null,
 ): GhostFirstPartyMarketRecord {
   return {
     scope: record.scope,
     organizationId: record.organizationId,
     source: record.source,
     installed: record.installed,
+    sha256: record.sha256,
+    approvedPackageSha256,
   };
+}
+
+export type GhostFirstPartyPendingMarketRecord = Omit<
+  GhostFirstPartyMarketRecord,
+  'approvedPackageSha256'
+>;
+
+/**
+ * The pending install exception is Host-built only after inspecting the real
+ * `.cindy` bytes. The caller supplies the ledger Release hash, never the
+ * approved side of the comparison.
+ */
+export function bindPendingMarketRecordToInspectedPackage(
+  record: GhostFirstPartyPendingMarketRecord,
+  inspectedPackageSha256: string,
+): GhostFirstPartyMarketRecord {
+  return { ...record, approvedPackageSha256: inspectedPackageSha256 };
 }
 
 export type GhostFirstPartyFactsOverrides = {
@@ -124,7 +146,9 @@ export function loadGhostFirstPartyFactsLoader(
       let marketRecord: GhostFirstPartyMarketRecord | null = null;
       try {
         const installation = options.readMarketInstallation(ghostId);
-        marketRecord = installation ? toMarketRecord(installation) : null;
+        marketRecord = installation
+          ? toMarketRecord(installation, options.readApprovedPackageSha256(ghostId))
+          : null;
       } catch {
         // Builtin official plugins do not consult the ledger. A corrupt ledger
         // must not take away xd-feishu / xd-atlassian broker eligibility.

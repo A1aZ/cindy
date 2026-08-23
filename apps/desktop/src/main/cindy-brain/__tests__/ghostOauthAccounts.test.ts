@@ -1841,7 +1841,8 @@ describe('tokenBroker 模式', () => {
   });
 
   it('getFreshAccessToken refuses a cached broker token after eligibility is withdrawn', async () => {
-    let authorized = true;
+    const releaseSha256 = 'a'.repeat(64);
+    let approvedPackageSha256 = releaseSha256;
     const vault = seededVault();
     const mgr = new GhostOauthAccountManager({
       vault,
@@ -1860,17 +1861,38 @@ describe('tokenBroker 模式', () => {
         })),
       },
       sleep: instantSleep,
-      isTokenBrokerAuthorized: () => authorized,
+      isTokenBrokerAuthorized: () => approvedPackageSha256 === releaseSha256,
     });
     await expect(mgr.getFreshAccessToken(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
       ok: true,
       accessToken: 'at-cached',
     });
-    authorized = false;
+    // Simulate an unchanged manifest with different approved package bytes.
+    // Authorization is checked before the token cache, so fixing only the
+    // connect path cannot leak the already-cached Broker token.
+    approvedPackageSha256 = 'b'.repeat(64);
     await expect(mgr.getFreshAccessToken(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
       ok: false,
       error: 'BROKER_FORBIDDEN',
     });
+  });
+
+  it('connectAccount refuses before opening the browser when byte-bound eligibility is false', async () => {
+    const openExternal = vi.fn();
+    const mgr = new GhostOauthAccountManager({
+      vault: memoryVault(),
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      openExternal,
+      broker: { exchange: vi.fn(), refresh: vi.fn() },
+      isTokenBrokerAuthorized: () => false,
+    });
+
+    await expect(mgr.connectAccount(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
+      ok: false,
+      error: 'BROKER_FORBIDDEN',
+    });
+    // This kills an implementation that adds the SHA check only to token refresh.
+    expect(openExternal).not.toHaveBeenCalled();
   });
 });
 

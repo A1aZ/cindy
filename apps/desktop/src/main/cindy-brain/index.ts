@@ -294,10 +294,12 @@ import {
 } from './connectionAudienceResolver.js';
 import {
   applyGhostFirstPartyFactsOverrides,
+  bindPendingMarketRecordToInspectedPackage,
   loadGhostFirstPartyFactsLoader,
   type GhostFirstPartyFactsLoader,
   type GhostFirstPartyFactsLoad,
   type GhostFirstPartyFactsOverrides,
+  type GhostFirstPartyPendingMarketRecord,
   type GhostFirstPartyFactsPurpose,
 } from './ghostFirstPartyFacts.js';
 import { authorizeGhostTokenBroker } from './ghostFirstPartyPrivilege.js';
@@ -2606,6 +2608,8 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
         getGhostManager().list().find((candidate) => candidate.manifest.id === ghostId)?.builtin ===
         true,
       readMarketInstallation: (ghostId) => getPluginMarketLedger().installationForGhost(ghostId),
+      readApprovedPackageSha256: (ghostId) =>
+        getGhostManager().approvedInstallEvidence(ghostId)?.packageSha256 ?? null,
       lookupOrganizationPrefix: (orgId) =>
         createOrganizationPrefixStore(
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
@@ -5423,7 +5427,7 @@ export async function installOrUpdateMarketGhostPackage(
      * commitDownloadedPackage path covers org server-market install, update,
      * defaultInstall, and source replacement.
      */
-    pendingMarketRecord?: GhostFirstPartyFactsOverrides['marketRecord'];
+    pendingMarketRecord?: GhostFirstPartyPendingMarketRecord;
     /** 安装锁内从当前已落位包读取的 canonical 权限基线。 */
     permissionBaselineManifest?: GhostManifest;
     /** 用户已在页面确认过的权限清单;真实包未超出则跳过 Host。 */
@@ -5456,7 +5460,7 @@ async function installOrUpdateMarketGhostPackageLocked(
       | { mode: 'manual'; sourceType: PluginMarketItemSource }
       | { mode: 'cap'; manifest: GhostManifest; sourceType: PluginMarketItemSource };
     /** Same Host-built org server-market fact as the exported entry; not first-install only. */
-    pendingMarketRecord?: GhostFirstPartyFactsOverrides['marketRecord'];
+    pendingMarketRecord?: GhostFirstPartyPendingMarketRecord;
     permissionBaselineManifest?: GhostManifest;
     reviewedManifest?: GhostManifest;
     approvedPackageSha256?: string;
@@ -5592,7 +5596,12 @@ async function installOrUpdateMarketGhostPackageLocked(
     rejectUnauthorizedTokenBroker(
       inspected.canonicalManifest,
       expected.pendingMarketRecord !== undefined
-        ? { marketRecord: expected.pendingMarketRecord }
+        ? {
+            marketRecord: bindPendingMarketRecordToInspectedPackage(
+              expected.pendingMarketRecord,
+              inspected.packageSha256,
+            ),
+          }
         : undefined,
     );
 

@@ -60,8 +60,9 @@ export interface GhostInstallReceipt {
   enabled: boolean;
   trust: GhostTrustInfo;
   /**
-   * 批准时点的来源指纹，仅供审计与人工比对：市场/本地包是 `.cindy` 文件哈希，
-   * 随包种子是内容目录哈希。**运行时不校验它**，不要据此认为安装内容持续完整。
+   * 批准时点的来源指纹：市场/本地包是 `.cindy` 文件哈希，随包种子是内容目录哈希。
+   * 组织市场 Broker 资格会把它与 ledger 的 Release sha256 比对；除此以外运行时不会
+   * 重算可变安装目录的整包字节，所以不要据此认为安装内容持续完整。
    */
   packageSha256?: string;
   /**

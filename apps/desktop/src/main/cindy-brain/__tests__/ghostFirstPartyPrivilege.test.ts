@@ -42,6 +42,8 @@ function market(
     organizationId: partial.scope === 'organization' ? (partial.organizationId ?? 'org-acme') : null,
     source: 'market',
     installed: true,
+    sha256: 'a'.repeat(64),
+    approvedPackageSha256: 'a'.repeat(64),
     ...partial,
   };
 }
@@ -215,6 +217,48 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       brokerEligible: true,
       hostPrimitiveEligible: false,
       basis: 'market-organization-current',
+    });
+  });
+
+  it('denies same-manifest organization packages when Release and approved package bytes differ', () => {
+    const sameManifestDifferentBytes = market({
+      scope: 'organization',
+      organizationId: 'org-acme',
+      sha256: 'a'.repeat(64),
+      approvedPackageSha256: 'b'.repeat(64),
+    });
+
+    // Both hashes are package identities. No manifest digest participates, so
+    // keeping ghost.json identical cannot make these different bytes eligible.
+    expect(
+      authorizeGhostTokenBroker('acme-feishu', {
+        kind: 'ready',
+        facts: facts({
+          ghostId: 'acme-feishu',
+          marketRecord: sameManifestDifferentBytes,
+          currentOrganization: CURRENT_ORG,
+        }),
+      }),
+    ).toBe(false);
+  });
+
+  it('denies organization Broker for a legacy receipt without package SHA', () => {
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'acme-feishu',
+          marketRecord: market({
+            scope: 'organization',
+            organizationId: 'org-acme',
+            approvedPackageSha256: null,
+          }),
+          currentOrganization: CURRENT_ORG,
+        }),
+      ),
+    ).toEqual({
+      brokerEligible: false,
+      hostPrimitiveEligible: false,
+      basis: 'denied-unknown-origin',
     });
   });
 

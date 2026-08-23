@@ -255,9 +255,14 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready',
       facts: {
         marketRecord: {
+          scope: 'organization',
+          organizationId: 'org-a',
+          source: 'market',
+          installed: true,
           sha256: 'a'.repeat(64),
           approvedPackageSha256: 'b'.repeat(64),
         },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
       },
     });
     expect(MARKET_ROW.manifestDigest).toBe('c'.repeat(64));

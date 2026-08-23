@@ -1878,19 +1878,22 @@ describe('tokenBroker 模式', () => {
   });
 
   it('connectAccount refuses before opening the browser when byte-bound eligibility is false', async () => {
+    const releaseSha256 = 'a'.repeat(64);
+    const approvedPackageSha256 = 'b'.repeat(64);
     const openExternal = vi.fn();
     const mgr = new GhostOauthAccountManager({
       vault: memoryVault(),
       fetchImpl: vi.fn() as unknown as typeof fetch,
       openExternal,
       broker: { exchange: vi.fn(), refresh: vi.fn() },
-      isTokenBrokerAuthorized: () => false,
+      isTokenBrokerAuthorized: () => approvedPackageSha256 === releaseSha256,
     });
 
     await expect(mgr.connectAccount(GHOST, KEY, BROKER_DECL)).resolves.toMatchObject({
       ok: false,
       error: 'BROKER_FORBIDDEN',
     });
+    expect(approvedPackageSha256).not.toBe(releaseSha256);
     // This kills an implementation that adds the SHA check only to token refresh.
     expect(openExternal).not.toHaveBeenCalled();
   });

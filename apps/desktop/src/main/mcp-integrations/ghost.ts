@@ -1836,6 +1836,9 @@ export function getCindyGhostsMcpDeps(
           };
         }
         log.info('ghost forge packed', { dir, id: packed.manifest.id });
+        const publishHint = currentPublisherIdentity()
+          ? "若接下来要发布到组织市场,请用 intent='publish' 重新打包。"
+          : '';
         return {
           ok: true,
           // 给 agent 的只是作者副本文件名提示，不可用于访问；staging 路径不下发。
@@ -1846,7 +1849,7 @@ export function getCindyGhostsMcpDeps(
           // 不在这里说明确认框的加重形式(如"需手输 id"):本 note 会回到 agent,
           // 被注入的 agent 读到就能照着编引导话术,帮用户"过掉"那一步。
           // 告知"必须在应用内确认才会安装"已足够让作者知道下一步做什么。
-          note: `${iconNote}已打包并弹出装入/更新确认框,请提示用户:只有在应用内确认后插件才会真正安装。`,
+          note: `${iconNote}已打包并弹出装入/更新确认框,请提示用户:只有在应用内确认后插件才会真正安装。${publishHint}`,
         };
       });
     },
@@ -1870,7 +1873,9 @@ export function getCindyGhostsMcpDeps(
           message:
             consumed.reason === 'session-boundary-pending'
               ? '账号切换中，请稍后重试'
-              : '发布票据无效、已过期或已被使用，请重新打包',
+              : consumed.reason === 'owner-mismatch'
+                ? '发布票据无效、已过期或已被使用，请重新打包'
+                : "发布票据无效、已过期或已被使用。发布票据只能由 ghost_forge_pack(intent='publish') 签发;若刚才是按缺省 install 打的包,请用 intent='publish' 重新打一次。",
         };
       }
       const ticket = consumed.ticket;

@@ -1600,13 +1600,30 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
 
   it("forge_pack / publish 描述明确图片字段、发布意图与组织身份限制", () => {
     const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
-      _registeredTools: Record<string, { description?: string } | undefined>;
+      _registeredTools: Record<
+        string,
+        {
+          description?: string;
+          inputSchema?: {
+            shape?: { intent?: { description?: string } };
+          };
+        } | undefined
+      >;
     };
     const description = server._registeredTools.ghost_forge_pack?.description ?? "";
     expect(description).toContain("xdt_image_url");
     expect(description).toContain("xdt_image_urls");
     expect(description).toContain("icon_source");
     expect(description).toContain("intent=publish");
+    expect(description).toContain("intent=publish 仅企业组织成员可用");
+    expect(description).toContain("个人账号不可用,请用缺省的 install");
+    const intentDescription =
+      server._registeredTools.ghost_forge_pack?.inputSchema?.shape?.intent
+        ?.description ?? "";
+    // Excludes documenting the organization restriction only in the tool summary
+    // while the registered intent parameter still advertises publish to everyone.
+    expect(intentDescription).toContain("publish 仅企业组织成员可用");
+    expect(intentDescription).toContain("个人账号不可用,请用缺省的 install");
     const publishDescription = server._registeredTools.ghost_forge_publish?.description ?? "";
     expect(publishDescription).toContain("publishToken");
     expect(publishDescription).toContain("仅企业组织成员可用");

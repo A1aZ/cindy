@@ -124,6 +124,7 @@ const D_GHOST_FORGE_SCAFFOLD = [
 const D_GHOST_FORGE_PACK = [
   "把一个插件源码目录校验并打包成 .cindy。缺省 intent=install,随后主机会弹出装入确认框",
   '(同 id 已装则显示"更新 vX → vY");intent=publish 时不装入,只返回一次性 publishToken。',
+  "intent=publish 仅企业组织成员可用;个人账号不可用,请用缺省的 install。",
   "dir 传源码目录的绝对路径(目录里须有 ghost.json;打包自动跳过 .git / node_modules /",
   "隐藏文件 / *.cindy)。仅当用户明确选择 AI 生成图标时,可把图片工具结果的",
   "xdt_image_url 取单张地址；若只有 xdt_image_urls 则取数组第一项，再把得到的 cindy-media:// 地址传给 icon_source;主机会 best-effort 嵌入,失败保留默认图标继续打包。",
@@ -1296,7 +1297,9 @@ export function createCindyGhostsMcpServer(
       intent: z
         .enum(["install", "publish"])
         .optional()
-        .describe("缺省 install:弹装入确认;publish:不装入,返回一次性发布票据"),
+        .describe(
+          "缺省 install:弹装入确认;publish:不装入,返回一次性发布票据。publish 仅企业组织成员可用;个人账号不可用,请用缺省的 install",
+        ),
     },
     async (input) => handleForgePack(deps, input),
   );

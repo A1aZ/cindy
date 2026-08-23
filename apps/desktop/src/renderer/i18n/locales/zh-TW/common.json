@@ -4205,7 +4205,7 @@
             "authTitle": "私有倉庫",
             "authBody": "認證完全依賴系統的 Git 配置，Cindy 不儲存任何 Git 憑證。SSH 方式：本機已配置可用的 key；若組織開啟了 SAML SSO，還需在 GitHub 的 SSH key 設定裡為該組織點 Configure SSO 授權。HTTPS 方式：使用 Personal Access Token，並由系統 credential helper 儲存。",
             "rulesTitle": "安裝規則",
-            "rulesBody": "插件 id 全域性唯一、先裝先得——與已安裝插件衝突時會明確提示。使用 {{reservedGhostIdPrefixes}} 官方保留字首的插件無法透過拖入、選取檔案、ghost_forge_pack 轉交或自訂插件市場安裝。安裝前會逐項展示插件宣告的權限，確認後即完成安裝並自動開啟。",
+            "rulesBody": "插件 id 全域性唯一、先裝先得——與已安裝插件衝突時會明確提示。id 使用官方保留字首（{{reservedGhostIdPrefixes}}）的插件，無法透過拖入、選取檔案、ghost_forge_pack 轉交或自訂插件市場安裝。安裝前會逐項展示插件宣告的權限，確認後即完成安裝並自動開啟。",
             "copy": "複製指南",
             "copied": "指南已複製到剪貼簿。",
             "copyFailed": "複製失敗，請重試。"

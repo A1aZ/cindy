@@ -104,4 +104,25 @@ describe('ghostInstallErrorKey', () => {
     expect(rawMessage).toEqual(expect.any(String));
     for (const fragment of fragments) expect(rawMessage).toContain(fragment);
   });
+
+  it.each([
+    {
+      locale: 'zh-CN',
+      fragment: 'id 使用官方保留前缀（{{reservedGhostIdPrefixes}}）',
+    },
+    {
+      locale: 'zh-TW',
+      fragment: 'id 使用官方保留字首（{{reservedGhostIdPrefixes}}）',
+    },
+  ])('puts the reserved-prefix category before its id list in $locale', ({ locale, fragment }) => {
+    const rawMessage = i18n.getResource(
+      locale,
+      'common',
+      'settings.ghosts.market.sources.guide.rulesBody',
+    );
+
+    // This excludes the ambiguous Chinese order that placed the list before
+    // “official reserved prefix” and omitted that the prefix belongs to id.
+    expect(rawMessage).toContain(fragment);
+  });
 });

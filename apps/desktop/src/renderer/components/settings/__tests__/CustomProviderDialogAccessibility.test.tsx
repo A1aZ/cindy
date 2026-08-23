@@ -459,4 +459,29 @@ describe('CustomProviderDialog accessibility', () => {
       codex: 'replacement-secret',
     });
   });
+
+  it('shows a configured-headers badge and never reveals plaintext for the active runtime', async () => {
+    const initial: CustomProviderConfig = {
+      id: 'configured-headers-provider',
+      name: 'Configured headers provider',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        codex: {
+          baseUrl: 'https://configured.example.test/v1',
+          models: [{ id: 'test-model', name: 'Test Model' }],
+          headersState: 'configured',
+        },
+      },
+    };
+    customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
+
+    render(<CustomProviderDialog initial={initial} onSaved={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
+
+    expect(
+      screen.queryByText('settings.providers.custom.runtimeFill.values.configured', { exact: true }),
+    ).not.toBeNull();
+    // 明文头值绝不允许出现在 renderer。
+    expect(document.body.textContent).not.toContain('configured-header-secret');
+  });
 });

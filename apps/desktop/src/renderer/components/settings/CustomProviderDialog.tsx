@@ -2413,7 +2413,22 @@ export function CustomProviderDialog({
 
                 {/* 请求头（可选） */}
                 <div className="flex flex-col gap-2">
-                  <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
+                  <div className="flex items-center gap-2">
+                    <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
+                    {/* 已存密文头时给明确徽标 —— 明文不回读进 renderer,无徽标会让人误以为没存上。 */}
+                    {initial?.runtimes[activeTab]?.headersState === 'configured' && (
+                      <span
+                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
+                        style={{
+                          backgroundColor: 'var(--settings-btn-secondary-bg)',
+                          color: 'var(--settings-section-desc)',
+                        }}
+                      >
+                        <Check size={11} strokeWidth={2.5} />
+                        {t('settings.providers.custom.runtimeFill.values.configured')}
+                      </span>
+                    )}
+                  </div>
                   {f.headers.map((h, i) => (
                     <div key={i} className="flex items-center gap-2">
                       <div className="flex-1">

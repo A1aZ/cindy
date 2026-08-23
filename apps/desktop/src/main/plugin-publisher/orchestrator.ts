@@ -55,6 +55,13 @@ export interface PluginPublisherOrchestratorDeps {
   inspectGate?: { acquire(signal: AbortSignal): Promise<void>; release(): void };
 }
 
+export interface PluginPublisherSourceBinding {
+  manifestId: string;
+  packageSha256: string;
+  /** Agent forge staging is released once this background transfer terminates. */
+  onTerminal?: () => void | Promise<void>;
+}
+
 interface TransferRecord {
   transferId: string;
   uploadId: string | null;
@@ -138,6 +145,7 @@ export class PluginPublisherOrchestrator {
     filePath: string,
     extras?: {
       confirm?: PluginPublisherOrchestratorDeps['confirm'];
+      sourceBinding?: PluginPublisherSourceBinding;
     },
   ): PluginPublisherStartResult {
     const transferId = randomUUID();
@@ -156,7 +164,11 @@ export class PluginPublisherOrchestrator {
       run: Promise.resolve(),
     };
     this.transfers.set(transferId, record);
-    record.run = this.run(record, extras?.confirm ?? this.deps.confirm).catch(() => undefined);
+    record.run = this.run(
+      record,
+      extras?.confirm ?? this.deps.confirm,
+      extras?.sourceBinding,
+    ).catch(() => undefined);
     this.emit(record);
     return { transferId, uploadId: null };
   }
@@ -224,6 +236,7 @@ export class PluginPublisherOrchestrator {
   private async run(
     record: TransferRecord,
     confirm: PluginPublisherOrchestratorDeps['confirm'],
+    sourceBinding?: PluginPublisherSourceBinding,
   ): Promise<void> {
     const signal = record.controller.signal;
     let handle: fsPromises.FileHandle | null = null;
@@ -244,6 +257,10 @@ export class PluginPublisherOrchestrator {
         inspected = await this.deps.inspectPackage(record.filePath);
       } finally {
         this.inspectGate.release();
+      }
+      if (sourceBinding && inspected.ghostId !== sourceBinding.manifestId) {
+        this.fail(record, 'PUBLISH_PACKAGE_ID_MISMATCH', '打包票据与待发布插件 id 不一致');
+        return;
       }
       handle = await fsPromises.open(record.filePath, fs.constants.O_RDONLY);
       const stat = await handle.stat();
@@ -296,12 +313,25 @@ export class PluginPublisherOrchestrator {
           this.fail(record, 'UPLOAD_SIZE_MISMATCH', '文件在校验期间被修改，请重新选择');
           return;
         }
+        if (sourceBinding && digest.sha256 !== sourceBinding.packageSha256) {
+          this.fail(record, 'PUBLISH_PACKAGE_SHA256_MISMATCH', '待发布插件字节已不是本次打包产物');
+          return;
+        }
 
         this.update(record, { stage: 'preparing', totalBytes: digest.sizeBytes });
-        const prepared = await this.deps.api.prepare({
-          sizeBytes: digest.sizeBytes,
-          sha256: digest.sha256,
-        });
+        let prepared: Awaited<ReturnType<PluginPublisherApi['prepare']>>;
+        try {
+          prepared = await this.deps.api.prepare({
+            sizeBytes: digest.sizeBytes,
+            sha256: digest.sha256,
+          });
+        } catch (error) {
+          if (isUnsupportedPrepareEndpoint(error)) {
+            this.fail(record, 'PUBLISH_UNSUPPORTED', '当前企业服务端不支持成员发布');
+            return;
+          }
+          throw error;
+        }
         this.update(record, { uploadId: prepared.uploadId, stage: 'uploading', bytesSent: 0 });
 
         const putFile = this.deps.putFile ?? putLocalFile;
@@ -360,6 +390,11 @@ export class PluginPublisherOrchestrator {
       this.fail(record, 'INTERNAL', '发布失败');
     } finally {
       await handle?.close().catch(() => undefined);
+      try {
+        await sourceBinding?.onTerminal?.();
+      } catch {
+        // Cleanup must never rewrite the already-final transfer outcome.
+      }
     }
   }
 
@@ -548,6 +583,14 @@ function mapPublisherApiMessage(error: PluginPublisherApiError): string {
   if (error.code === 'RATE_LIMITED') return '发布次数过多，请稍后再试';
   if (error.status === 403 || error.status === 404) return '找不到这次发布或无权查看';
   return '发布请求失败';
+}
+
+function isUnsupportedPrepareEndpoint(error: unknown): boolean {
+  if (!(error instanceof PluginPublisherApiError)) return false;
+  if (error.status === 404 || error.status === 405) return true;
+  // A legacy ingress without this route can surface an HTML 503. Redacted
+  // structured service failures retain their own business codes.
+  return error.status === 503 && error.code === 'INTERNAL_ERROR';
 }
 
 export function createPluginPublisherOrchestrator(

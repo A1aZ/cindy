@@ -18,7 +18,11 @@ import { createLogger } from '../logger.js';
 import { onQuit } from '../lifecycle.js';
 import { PluginPublisherApi } from './api.js';
 import { PluginPublisherConfirmBridge } from './confirmBridge.js';
-import { createPluginPublisherOrchestrator, PluginPublisherOrchestrator } from './orchestrator.js';
+import {
+  createPluginPublisherOrchestrator,
+  PluginPublisherOrchestrator,
+  type PluginPublisherSourceBinding,
+} from './orchestrator.js';
 import { PLUGIN_MEMBER_PUBLISHER_GHOST_ID, type PluginPublisherProgress } from './types.js';
 
 const log = createLogger('plugin-publisher');
@@ -150,13 +154,18 @@ function publisherIdentityKey(): string {
   return identity ? `${identity.membershipId}:${identity.orgSlug}` : '';
 }
 
-export function startPluginPublish(filePath: string, requester: WebContents | null = null) {
+export function startPluginPublish(
+  filePath: string,
+  requester: WebContents | null = null,
+  sourceBinding?: PluginPublisherSourceBinding,
+) {
   const identity = currentPublisherIdentity();
   if (!identity) {
     throw new Error('需要组织身份才能发布插件');
   }
   log.info('plugin publish started');
   return getPluginPublisherOrchestrator().start(filePath, {
+    ...(sourceBinding ? { sourceBinding } : {}),
     confirm: (facts) => {
       const ownerStamp = getActiveDataOwnerPushStamp();
       const requesterId = requester && !requester.isDestroyed() ? requester.id : 0;

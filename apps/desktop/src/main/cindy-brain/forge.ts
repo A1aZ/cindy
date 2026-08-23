@@ -1399,7 +1399,7 @@ export const FORGE_GUIDE = `# 意识(Ghost)编写手册
 主机叠加:AI 可调用的工具、常驻界面面板、模型代办能力。本手册教你(agent)替用户
 写一个意识。**流程:先取手册目录 → 按 §0 用提问卡片和用户对齐设计 → 按需用 section
 读透相关章(动手前至少读完 §2 卡槽总览、"沙箱红线"与"打包与测试"三章) → 在工作目录写源码文件 →
-ghost_forge_pack 打包 → 用户在弹窗上确认装入。**
+ghost_forge_pack 打包 → 用户在弹窗上确认装入；需要发布时改用 publish intent 取得一次性票据。**
 
 从零开始时优先调用 \`ghost_forge_scaffold\` 生成一份不会覆盖现有文件的骨架，再在
 骨架上修改。可选模板:\`plain\`(普通沙箱工具)、\`agent-action\`(卡片点击后让 Agent
@@ -4224,6 +4224,14 @@ const opened = await cindy.iosSimulator.request({
 4. 改代码后重新 pack:同 id 会弹"更新 vX → vY",唤醒状态与面板位置自动保留
    (记得 bump ghost.json 的 version);
 5. 验证:让用户 \`$<command> <内容>\` 试一单,看聊天图卡/面板是否符合预期。
+
+企业组织成员需要发布时，调用 \`ghost_forge_pack({ dir: '<绝对路径>', intent: 'publish' })\`。
+该意图不会弹装入确认，也不会返回可供自行拼接的 Host 路径；它只返回绑定本次包 id 与
+完整字节的一次性 \`publishToken\`。随后把该票据传给
+\`ghost_forge_publish({ token: '<publishToken>' })\`，工具会立即返回 \`transferId\`，发布在
+后台继续；用 \`ghost_forge_publish_status\` 查询传输与审核状态。发布确认屏仍由用户明确
+确认。成员发布仅企业组织成员可用，个人账号不可用；票据过期、换账号或重复使用后须重新
+以 publish intent 打包，不能改传文件路径绕过。
 
 ## 8. 发布签名与审核
 

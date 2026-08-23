@@ -4,6 +4,7 @@ import { GHOST_MANIFEST_SUMMARY_MAX_CHARS } from "@cindy/plugin-protocol";
 import {
   createCindyGhostsMcpServer,
   extractAgentToolUseId,
+  ghostForgePublishInputSchema,
   ghostSetupPlanInputSchema,
   handleForgeGuide,
   handleForgePack,
@@ -1451,8 +1452,9 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
       version: "1.0.0",
       cindyPath: "x-1.0.0.cindy",
     });
-    expect(parsePayload(okResult).cindyPath.includes("/")).toBe(false);
-    expect(parsePayload(okResult).cindyPath.includes("\\")).toBe(false);
+    const cindyPath = String(parsePayload(okResult).cindyPath);
+    expect(cindyPath.includes("/")).toBe(false);
+    expect(cindyPath.includes("\\")).toBe(false);
 
     const failed = await handleForgePack(
       fakeDeps({
@@ -1471,8 +1473,12 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
     });
   });
 
-  it("forge_pack 仅在传入时把 icon_source 映射给 host", async () => {
-    const requests: Array<{ dir: string; iconSource?: string }> = [];
+  it("forge_pack 仅在传入时把 icon_source / intent 映射给 host", async () => {
+    const requests: Array<{
+      dir: string;
+      iconSource?: string;
+      intent?: "install" | "publish";
+    }> = [];
     const deps = fakeDeps({
       forgePack: async (request) => {
         requests.push(request);
@@ -1492,6 +1498,7 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
       icon_source: `cindy-media://blobs/${"a".repeat(64)}.png`,
     });
     await handleForgePack(deps, { dir: "/src/default" });
+    await handleForgePack(deps, { dir: "/src/publish", intent: "publish" });
 
     expect(requests).toEqual([
       {
@@ -1499,12 +1506,14 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
         iconSource: `cindy-media://blobs/${"a".repeat(64)}.png`,
       },
       { dir: "/src/default" },
+      { dir: "/src/publish", intent: "publish" },
     ]);
   });
 
-  it("forge_publish 立即透传 transferId;失败标 isError", async () => {
+  it("forge_publish 只透传 opaque token 并立即返回 transferId;失败标 isError", async () => {
+    const requests: Array<{ token: string }> = [];
     const okResult = await handleForgePublish(fakeDeps(), {
-      file: "/tmp/x.cindy",
+      token: "publish-token-1",
     });
     expect(parsePayload(okResult)).toMatchObject({
       ok: true,
@@ -1513,19 +1522,39 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
 
     const failed = await handleForgePublish(
       fakeDeps({
-        forgePublish: async () => ({
-          ok: false,
-          errorCode: "NOT_ORG_MEMBER",
-          message: "需要组织身份",
-        }),
+        forgePublish: async (request) => {
+          requests.push(request);
+          return {
+            ok: false,
+            errorCode: "NOT_ORG_MEMBER",
+            message: "需要组织身份",
+          };
+        },
       }),
-      { file: "/tmp/x.cindy" },
+      { token: "publish-token-2" },
     );
     expect(failed.isError).toBe(true);
     expect(parsePayload(failed)).toMatchObject({
       ok: false,
       errorCode: "NOT_ORG_MEMBER",
     });
+    expect(requests).toEqual([{ token: "publish-token-2" }]);
+  });
+
+  it("forge_publish schema rejects the old file path shape before Host and accepts token only", () => {
+    // Excludes a runtime-only path rejection: the public MCP schema itself has no file field.
+    expect(
+      ghostForgePublishInputSchema.safeParse({ file: "/tmp/arbitrary.cindy" }).success,
+    ).toBe(false);
+    expect(
+      ghostForgePublishInputSchema.safeParse({
+        token: "publish-token-1",
+        file: "/tmp/arbitrary.cindy",
+      }).success,
+    ).toBe(false);
+    expect(
+      ghostForgePublishInputSchema.safeParse({ token: "publish-token-1" }),
+    ).toMatchObject({ success: true });
   });
 
   it("forge_publish_status 透传后台阶段", async () => {
@@ -1539,7 +1568,7 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
     });
   });
 
-  it("forge_pack 描述明确图片工具结果字段", () => {
+  it("forge_pack / publish 描述明确图片字段、发布意图与组织身份限制", () => {
     const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
       _registeredTools: Record<string, { description?: string } | undefined>;
     };
@@ -1547,6 +1576,11 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
     expect(description).toContain("xdt_image_url");
     expect(description).toContain("xdt_image_urls");
     expect(description).toContain("icon_source");
+    expect(description).toContain("intent=publish");
+    const publishDescription = server._registeredTools.ghost_forge_publish?.description ?? "";
+    expect(publishDescription).toContain("publishToken");
+    expect(publishDescription).toContain("仅企业组织成员可用");
+    expect(publishDescription).toContain("个人账号不可用");
   });
 });
 

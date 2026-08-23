@@ -237,19 +237,26 @@ export type CindyForgePackResult =
       ok: true;
       /**
        * 作者副本的文件名提示（如 `demo-1.0.0.cindy`），不可用于访问。
-       * 不是绝对路径，也不是 Host staging 路径；装入走确认框，不要拿这个字段去读盘。
+       * 不是绝对路径，也不是 Host staging 路径；不要拿这个字段去读盘或发布。
        */
       cindyPath: string;
       id: string;
       name: string;
       version: string;
-      /** 已弹出装入/更新确认框,等用户决定;装不装永远由用户点头。 */
+      /** 仅 intent=publish 返回；一次性、不可解析的 Host 发布票据。 */
+      publishToken?: string;
+      /** 下一步说明：install 等用户确认，publish 提示消费一次性票据。 */
       note: string;
     }
   | { ok: false; errorCode: CindyForgePackErrorCode; message: string };
 
 /** ghost_forge_publish 立即返回时的失败分类。传输开始后的失败走 status.errorCode。 */
-export type CindyForgePublishErrorCode = 'NOT_ORG_MEMBER' | 'INTERNAL';
+export type CindyForgePublishErrorCode =
+  | 'NOT_ORG_MEMBER'
+  | 'SESSION_BOUNDARY_PENDING'
+  | 'PUBLISH_TOKEN_INVALID'
+  | 'PUBLISH_TOKEN_OWNER_MISMATCH'
+  | 'INTERNAL';
 
 export type CindyForgePublishResult =
   | {
@@ -424,12 +431,12 @@ export interface CindyGhostsMcpDeps {
     description?: string;
   }): Promise<CindyForgeScaffoldResult>;
   /**
-   * 把一个源码目录校验 + 打包成 .cindy,并弹出与拖入/双击完全相同的
-   * 装入(同 id 已装则更新)确认框——装不装永远由用户决定,agent 只能
-   * 递到用户面前。
+   * 把一个源码目录校验 + 打包成 .cindy。缺省弹出与拖入/双击完全相同的
+   * 装入确认框；publish 意图只签发一次性发布票据，不触发装入。
    */
   forgePack(request: {
     dir: string;
+    intent?: 'install' | 'publish';
     /**
      * 用户明确选择 AI 图标后，由图片工具返回的 cindy-media 地址。Host
      * best-effort 把它嵌入包内；失败保留源码里的默认图标，不阻塞打包。
@@ -437,10 +444,10 @@ export interface CindyGhostsMcpDeps {
     iconSource?: string;
   }): Promise<CindyForgePackResult>;
   /**
-   * 把一个本机 .cindy 包提交到当前组织发布。立即返回 transferId / uploadId,
-   * 传输在后台跑；用 forgePublishStatus 查进度。
+   * 消费 forgePack(intent=publish) 签发的一次性票据，把该次打包的确切字节
+   * 提交到当前组织发布。立即返回 transferId / uploadId,传输在后台跑。
    */
-  forgePublish(request: { file: string }): Promise<CindyForgePublishResult>;
+  forgePublish(request: { token: string }): Promise<CindyForgePublishResult>;
   /** 查询一次后台发布传输的当前状态。 */
   forgePublishStatus(request: { transferId: string }): Promise<CindyForgePublishStatusResult>;
   logger?: {

@@ -1434,6 +1434,13 @@ describe('scaffoldGhostDir', () => {
 });
 
 describe('FORGE_GUIDE', () => {
+  it('documents the org-only token publish flow without exposing a file path handoff', () => {
+    expect(FORGE_GUIDE).toContain("intent: 'publish'");
+    expect(FORGE_GUIDE).toContain('一次性 `publishToken`');
+    expect(FORGE_GUIDE).toContain("ghost_forge_publish({ token: '<publishToken>' })");
+    expect(FORGE_GUIDE).toContain('仅企业组织成员可用，个人账号不可用');
+  });
+
   it('开场白必读口径与 createPrompt 一致:三章且卡槽总览带真实章号', () => {
     // 聊天里直接说"帮我做个插件"的路径只看到手册,看不到 createPrompt;
     // 两处必读口径分叉会让不同入口的 agent 走出不同的阅读深度。

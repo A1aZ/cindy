@@ -30,6 +30,30 @@ const logWarnMock = vi.fn();
 const logInfoMock = vi.fn();
 const grantAttachmentsMock = vi.fn();
 const { packGhostDirMock } = vi.hoisted(() => ({ packGhostDirMock: vi.fn() }));
+const { handleIncomingCindyFileMock, completeForgePackStagingMock } = vi.hoisted(() => ({
+  handleIncomingCindyFileMock: vi.fn(async () => undefined),
+  completeForgePackStagingMock: vi.fn(() => ({
+    ticket: 'publish-token-1',
+    installPath: '/host/staging/demo.cindy',
+    agentCindyPath: 'demo-1.0.0.cindy',
+    packageSha256: 'a'.repeat(64),
+  })),
+}));
+const {
+  publishTicketConsumeMock,
+  releaseForgePackStagingMock,
+  startPluginPublishMock,
+  currentPublisherIdentityMock,
+} = vi.hoisted(() => ({
+  publishTicketConsumeMock: vi.fn(),
+  releaseForgePackStagingMock: vi.fn(),
+  startPluginPublishMock: vi.fn(() => ({ transferId: 'transfer-1', uploadId: null })),
+  currentPublisherIdentityMock: vi.fn(() => ({
+    membershipId: 'member-1',
+    orgSlug: 'acme',
+    orgName: 'Acme',
+  })),
+}));
 const releaseMutationMock = vi.fn();
 const captureMutationOwnerMock = vi.fn(() => ({
   mode: 'local' as const,
@@ -80,6 +104,8 @@ const resolvedAttachmentOrigins: Array<'user' | 'tool' | undefined> = [];
 vi.mock('electron', () => ({ app: { getPath: () => tmpUserData } }));
 vi.mock('../../appSessionState.js', () => ({
   ownerScopedUserDataPath: (...parts: string[]) => path.join(tmpUserData, ...parts),
+  getActiveAppSession: () => ({ mode: 'cloud', dataOwnerId: 'member-1', generation: 7 }),
+  isAppSessionBoundaryPending: () => false,
 }));
 vi.mock('../../maker-host/logger-adapter.js', () => {
   const createMakerLogger = () => ({
@@ -175,9 +201,26 @@ vi.mock('../../cindy-brain/forge.js', () => ({
   packGhostDir: packGhostDirMock,
   scaffoldGhostDir: vi.fn(),
 }));
-vi.mock('../../cindy-brain/openFileInstall.js', () => ({ handleIncomingCindyFile: vi.fn() }));
+vi.mock('../../cindy-brain/forgePackStaging.js', () => ({
+  completeForgePackStaging: completeForgePackStagingMock,
+  getForgePackStagingController: () => ({
+    consume: publishTicketConsumeMock,
+    releaseStaging: releaseForgePackStagingMock,
+  }),
+  invalidateForgePackTicket: vi.fn(),
+  releaseForgePackStaging: releaseForgePackStagingMock,
+}));
+vi.mock('../../cindy-brain/openFileInstall.js', () => ({
+  handleIncomingCindyFile: handleIncomingCindyFileMock,
+}));
 vi.mock('../../localDb/ipc/sessions.js', () => ({
   getSessionFsSnapshot: sessionSnapshotMock,
+  getSessionTitle: vi.fn(async () => 'Test session'),
+}));
+vi.mock('../../plugin-publisher/host.js', () => ({
+  currentPublisherIdentity: currentPublisherIdentityMock,
+  getPluginPublisherOrchestrator: vi.fn(),
+  startPluginPublish: startPluginPublishMock,
 }));
 vi.mock('../../cindy-media/blobStore.js', () => ({ mimeForExt: () => 'image/png' }));
 vi.mock('../../cindy-media/ledger.js', () => ({
@@ -364,6 +407,20 @@ beforeEach(() => {
     errorCode: 'MANIFEST_INVALID',
     message: 'stop after gate assertion',
   });
+  handleIncomingCindyFileMock.mockClear();
+  completeForgePackStagingMock.mockClear();
+  publishTicketConsumeMock.mockReset();
+  publishTicketConsumeMock.mockReturnValue({
+    owner: { mode: 'cloud', dataOwnerId: 'member-1', generation: 7 },
+    operationKind: 'install',
+    stagingPath: '/host/staging/demo.cindy',
+    packageSha256: 'a'.repeat(64),
+    manifestId: 'demo',
+    packExpiresAt: Date.now() + 600_000,
+  });
+  releaseForgePackStagingMock.mockClear();
+  startPluginPublishMock.mockClear();
+  currentPublisherIdentityMock.mockClear();
   clearAllPrefs();
 });
 
@@ -383,6 +440,62 @@ describe('Forge session workdir gate', () => {
       sessionWorkdir: WORKDIR,
       forbiddenRootDirs: [],
     });
+  });
+
+  it('keeps default intent on the install-confirm path without exposing a publish token', async () => {
+    packGhostDirMock.mockResolvedValueOnce({
+      ok: true,
+      buf: Buffer.from('packed'),
+      cindyPath: path.join(WORKDIR, 'plugin-src', 'demo-1.0.0.cindy'),
+      manifest: { id: 'demo', name: 'Demo', version: '1.0.0' },
+    });
+    const result = await makeDeps().forgePack({ dir: path.join(WORKDIR, 'plugin-src') });
+    expect(result).toMatchObject({ ok: true, cindyPath: 'demo-1.0.0.cindy' });
+    expect(result).not.toHaveProperty('publishToken');
+    expect(handleIncomingCindyFileMock).toHaveBeenCalledWith(
+      '/host/staging/demo.cindy',
+      'ghost-forge',
+      expect.objectContaining({ kind: 'agent-forge' }),
+    );
+  });
+
+  it('returns the one-shot token for publish intent without opening install confirmation', async () => {
+    packGhostDirMock.mockResolvedValueOnce({
+      ok: true,
+      buf: Buffer.from('packed'),
+      cindyPath: path.join(WORKDIR, 'plugin-src', 'demo-1.0.0.cindy'),
+      manifest: { id: 'demo', name: 'Demo', version: '1.0.0' },
+    });
+    const result = await makeDeps().forgePack({
+      dir: path.join(WORKDIR, 'plugin-src'),
+      intent: 'publish',
+    });
+    expect(result).toMatchObject({ ok: true, publishToken: 'publish-token-1' });
+    expect(handleIncomingCindyFileMock).not.toHaveBeenCalled();
+  });
+
+  it('consumes the publish token and binds publisher input to ticket id, SHA and cleanup', async () => {
+    const result = await makeDeps().forgePublish({ token: 'publish-token-1' });
+    expect(result).toMatchObject({ ok: true, transferId: 'transfer-1', uploadId: null });
+    expect(publishTicketConsumeMock).toHaveBeenCalledWith('publish-token-1');
+    expect(startPluginPublishMock).toHaveBeenCalledWith(
+      '/host/staging/demo.cindy',
+      null,
+      expect.objectContaining({
+        manifestId: 'demo',
+        packageSha256: 'a'.repeat(64),
+        onTerminal: expect.any(Function),
+      }),
+    );
+    const binding = (
+      startPluginPublishMock.mock.calls as unknown as Array<[
+        string,
+        null,
+        { onTerminal: () => void },
+      ]>
+    )[0]?.[2];
+    binding?.onTerminal();
+    expect(releaseForgePackStagingMock).toHaveBeenCalledWith('/host/staging/demo.cindy');
   });
 
   it('rejects remote workdirs before touching local Forge fs', async () => {

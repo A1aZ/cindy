@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -30,6 +31,12 @@ async function packagePath(): Promise<string> {
   return filePath;
 }
 
+async function fileSha256(filePath: string): Promise<string> {
+  return createHash('sha256')
+    .update(await fs.readFile(filePath))
+    .digest('hex');
+}
+
 function waitFor(
   snapshots: PluginPublisherProgress[],
   predicate: (progress: PluginPublisherProgress) => boolean,
@@ -59,6 +66,25 @@ const prepared = {
 };
 
 describe('PluginPublisherOrchestrator', () => {
+  it('returns immediately while confirmation and transfer continue in the background', async () => {
+    const filePath = await packagePath();
+    let resolveConfirm!: (confirmed: boolean) => void;
+    const confirm = new Promise<boolean>((resolve) => {
+      resolveConfirm = resolve;
+    });
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare: vi.fn(), commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: () => confirm,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+    });
+    const started = orch.start(filePath);
+    expect(started.uploadId).toBeNull();
+    expect(orch.snapshot(started.transferId)?.stage).toBe('confirming');
+    resolveConfirm(false);
+    await vi.waitFor(() => expect(orch.snapshot(started.transferId)?.stage).toBe('failed'));
+  });
+
   it('keeps polling after commit until a terminal status', async () => {
     const filePath = await packagePath();
     const statuses = ['validating', 'publishing', 'succeeded'] as const;
@@ -326,5 +352,153 @@ describe('PluginPublisherOrchestrator', () => {
     const refreshed = await orch.refreshReviewStatus(started.transferId);
     expect(refreshed?.reviewStatus).toBe('approved');
     expect(statusCalls).toBe(2);
+  });
+
+  it('rejects an inspected manifest id that differs from the consumed pack ticket', async () => {
+    const filePath = await packagePath();
+    const prepare = vi.fn();
+    const confirm = vi.fn(async () => true);
+    const cleanup = vi.fn();
+    const snapshots: PluginPublisherProgress[] = [];
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare, commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'other-id', name: 'Other', version: '1.0.0' }),
+      confirm,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+    orch.start(filePath, {
+      sourceBinding: {
+        manifestId: 'demo',
+        packageSha256: await fileSha256(filePath),
+        onTerminal: cleanup,
+      },
+    });
+    const failed = await waitFor(snapshots, (progress) => progress.stage === 'failed');
+    expect(failed.errorCode).toBe('PUBLISH_PACKAGE_ID_MISMATCH');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+  });
+
+  it('rejects rewritten staging bytes before prepare or PUT', async () => {
+    const filePath = await packagePath();
+    const expectedSha256 = await fileSha256(filePath);
+    await fs.writeFile(filePath, Buffer.from('rewritten-staging-package'));
+    expect(await fileSha256(filePath)).not.toBe(expectedSha256);
+    const prepare = vi.fn();
+    const putFile = vi.fn();
+    const snapshots: PluginPublisherProgress[] = [];
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare, commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: async () => true,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      putFile,
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+    orch.start(filePath, {
+      sourceBinding: { manifestId: 'demo', packageSha256: expectedSha256 },
+    });
+    const failed = await waitFor(snapshots, (progress) => progress.stage === 'failed');
+    expect(failed.errorCode).toBe('PUBLISH_PACKAGE_SHA256_MISMATCH');
+    expect(prepare).not.toHaveBeenCalled();
+    expect(putFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'success', confirm: true, inspectFails: false, terminal: 'succeeded' },
+    { label: 'failure', confirm: true, inspectFails: true, terminal: 'failed' },
+  ])(
+    'releases forge staging at the $label terminal outcome',
+    async ({ confirm, inspectFails, terminal }) => {
+      const filePath = await packagePath();
+      const cleanup = vi.fn();
+      const snapshots: PluginPublisherProgress[] = [];
+      const orch = createPluginPublisherOrchestrator({
+        api: {
+          prepare: async () => prepared,
+          commit: async () => ({ uploadId: 'upload-1', status: 'validating' }),
+          status: async () => ({
+            uploadId: 'upload-1',
+            status: 'succeeded',
+            pluginId: `c${'a'.repeat(24)}`,
+            releaseId: 'rel-1',
+            ghostId: 'demo',
+            version: '1.0.0',
+            reviewStatus: 'pending',
+            failure: null,
+          }),
+        } as unknown as PluginPublisherApi,
+        inspectPackage: async () => {
+          if (inspectFails) throw new Error('inspect failed');
+          return { ghostId: 'demo', name: 'Demo', version: '1.0.0' };
+        },
+        confirm: async () => confirm,
+        identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+        putFile: async () => ({ bytesSent: 24 }),
+        sleep: async () => undefined,
+        onProgress: (progress) => snapshots.push({ ...progress }),
+      });
+      orch.start(filePath, {
+        sourceBinding: {
+          manifestId: 'demo',
+          packageSha256: await fileSha256(filePath),
+          onTerminal: cleanup,
+        },
+      });
+      await waitFor(snapshots, (progress) => progress.stage === terminal);
+      await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    },
+  );
+
+  it('releases forge staging when the background transfer is cancelled', async () => {
+    const filePath = await packagePath();
+    const cleanup = vi.fn();
+    const snapshots: PluginPublisherProgress[] = [];
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare: vi.fn(), commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: async () => true,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+    const started = orch.start(filePath, {
+      sourceBinding: {
+        manifestId: 'demo',
+        packageSha256: await fileSha256(filePath),
+        onTerminal: cleanup,
+      },
+    });
+    expect(orch.cancel(started.transferId)).toEqual({ cancelled: true });
+    await waitFor(snapshots, (progress) => progress.stage === 'cancelled');
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+  });
+
+  it.each([
+    { status: 404, code: 'INTERNAL_ERROR', expected: 'PUBLISH_UNSUPPORTED' },
+    { status: 405, code: 'INTERNAL_ERROR', expected: 'PUBLISH_UNSUPPORTED' },
+    { status: 503, code: 'INTERNAL_ERROR', expected: 'PUBLISH_UNSUPPORTED' },
+    { status: 503, code: 'RATE_LIMIT_UNAVAILABLE', expected: 'RATE_LIMIT_UNAVAILABLE' },
+    { status: 503, code: 'STORAGE_UNAVAILABLE', expected: 'STORAGE_UNAVAILABLE' },
+  ])('maps prepare $status/$code to $expected', async ({ status, code, expected }) => {
+    const filePath = await packagePath();
+    const snapshots: PluginPublisherProgress[] = [];
+    const orch = createPluginPublisherOrchestrator({
+      api: {
+        prepare: async () => {
+          throw new PluginPublisherApiError(code, status, 'redacted');
+        },
+        commit: vi.fn(),
+        status: vi.fn(),
+      } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: async () => true,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+    orch.start(filePath);
+    const failed = await waitFor(snapshots, (progress) => progress.stage === 'failed');
+    expect(failed.errorCode).toBe(expected);
   });
 });

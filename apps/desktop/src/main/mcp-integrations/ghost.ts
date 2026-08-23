@@ -11,8 +11,8 @@
  *   - callGhostTool:透传给管子派发器(pipeDispatcher),资格审/按需拉起/
  *     配对超时/崩溃收卷全在那边,错误码两侧同构直接原样交回;
  *   - forgeGuide / forgeScaffold / forgePack:意识锻造(agent 帮用户做意识)——
- *     手册、骨架与打包真身在 cindy-brain/forge.ts,打包成功后经双击转交
- *     通道弹装入确认框(与拖入/双击完全同一个弹窗,装不装永远由用户点头)。
+ *     手册、骨架与打包真身在 cindy-brain/forge.ts。缺省打包经双击转交
+ *     通道弹装入确认框；publish intent 改签一次性发布票据。
  *
  * cindy-tools 是意识系统工具集,包内零 Electron
  * 依赖,全部能力经本文件注入(设计规范规则 2)。
@@ -55,6 +55,7 @@ import {
 import { classifyLocalAttachmentPath } from '../cindy-brain/ghostLocalPathGrant.js';
 import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
 import { getSessionFsSnapshot, getSessionTitle } from '../localDb/ipc/sessions.js';
+import { getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
 import {
   deriveGhostSessionContext,
   type GhostSessionContextInjected,
@@ -81,8 +82,11 @@ import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir } from '../cindy-brain/forge.js';
 import {
   completeForgePackStaging,
+  getForgePackStagingController,
   invalidateForgePackTicket,
+  releaseForgePackStaging,
 } from '../cindy-brain/forgePackStaging.js';
+import { consumeForgePackForPublish } from '../cindy-brain/forgePackPublishConsume.js';
 import {
   currentPublisherIdentity,
   getPluginPublisherOrchestrator,
@@ -1717,7 +1721,7 @@ export function getCindyGhostsMcpDeps(
         return result;
       });
     },
-    async forgePack({ dir, iconSource }): Promise<CindyForgePackResult> {
+    async forgePack({ dir, iconSource, intent = 'install' }): Promise<CindyForgePackResult> {
       return withForgeOwnerLease(async () => {
         const gate = await getForgeSessionFsGate(resolveSessionContext());
         if (!gate.ok) return gate;
@@ -1805,6 +1809,18 @@ export function getCindyGhostsMcpDeps(
             message: err instanceof Error ? err.message : String(err),
           };
         }
+        if (intent === 'publish') {
+          log.info('ghost forge packed for publish', { dir, id: packed.manifest.id });
+          return {
+            ok: true,
+            cindyPath: staged.agentCindyPath,
+            id: packed.manifest.id,
+            name: packed.manifest.name,
+            version: packed.manifest.version,
+            publishToken: staged.ticket,
+            note: `${iconNote}已打包为待发布产物。仅企业组织成员可用 ghost_forge_publish 提交;个人账号不可用。`,
+          };
+        }
         try {
           // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
           // 自动转"更新 vX → vY"),用户点头才真装。lease 持到转交完成。带上 agent
@@ -1834,8 +1850,32 @@ export function getCindyGhostsMcpDeps(
         };
       });
     },
-    async forgePublish({ file }): Promise<CindyForgePublishResult> {
+    async forgePublish({ token }): Promise<CindyForgePublishResult> {
+      const boundaryPending = isAppSessionBoundaryPending();
+      const consumed = consumeForgePackForPublish(getForgePackStagingController(), {
+        token,
+        currentOwner: getActiveAppSession(),
+        boundaryPending,
+      });
+      if (consumed.kind === 'rejected') {
+        const errorCode =
+          consumed.reason === 'session-boundary-pending'
+            ? 'SESSION_BOUNDARY_PENDING'
+            : consumed.reason === 'owner-mismatch'
+              ? 'PUBLISH_TOKEN_OWNER_MISMATCH'
+              : 'PUBLISH_TOKEN_INVALID';
+        return {
+          ok: false,
+          errorCode,
+          message:
+            consumed.reason === 'session-boundary-pending'
+              ? '账号切换中，请稍后重试'
+              : '发布票据无效、已过期或已被使用，请重新打包',
+        };
+      }
+      const ticket = consumed.ticket;
       if (!currentPublisherIdentity()) {
+        releaseForgePackStaging(ticket.stagingPath);
         return {
           ok: false,
           errorCode: 'NOT_ORG_MEMBER',
@@ -1843,7 +1883,11 @@ export function getCindyGhostsMcpDeps(
         };
       }
       try {
-        const started = startPluginPublish(file);
+        const started = startPluginPublish(ticket.stagingPath, null, {
+          manifestId: ticket.manifestId,
+          packageSha256: ticket.packageSha256,
+          onTerminal: () => releaseForgePackStaging(ticket.stagingPath),
+        });
         return {
           ok: true,
           transferId: started.transferId,
@@ -1851,6 +1895,7 @@ export function getCindyGhostsMcpDeps(
           note: '已开始发布并弹出确认屏。用 ghost_forge_publish_status 查询进度;用户取消或确认后才会继续传输。',
         };
       } catch (err) {
+        releaseForgePackStaging(ticket.stagingPath);
         return {
           ok: false,
           errorCode: 'INTERNAL',

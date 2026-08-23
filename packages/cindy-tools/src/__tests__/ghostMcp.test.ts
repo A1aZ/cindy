@@ -1557,6 +1557,36 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
     ).toMatchObject({ success: true });
   });
 
+  it("registered forge_publish schema rejects file paths and accepts token only", () => {
+    const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
+      _registeredTools: Record<
+        string,
+        {
+          inputSchema?: {
+            safeParse: (input: unknown) => { success: boolean };
+          };
+        } | undefined
+      >;
+    };
+    const inputSchema = server._registeredTools.ghost_forge_publish?.inputSchema;
+    expect(inputSchema).toBeDefined();
+    if (!inputSchema) throw new Error("ghost_forge_publish input schema 未注册");
+
+    // Excludes wiring the registered tool to a permissive or stale schema.
+    expect(inputSchema.safeParse({ file: "/tmp/arbitrary.cindy" }).success).toBe(
+      false,
+    );
+    expect(
+      inputSchema.safeParse({
+        token: "publish-token-1",
+        file: "/tmp/arbitrary.cindy",
+      }).success,
+    ).toBe(false);
+    expect(inputSchema.safeParse({ token: "publish-token-1" }).success).toBe(
+      true,
+    );
+  });
+
   it("forge_publish_status 透传后台阶段", async () => {
     const result = await handleForgePublishStatus(fakeDeps(), {
       transferId: "transfer-1",
@@ -1581,6 +1611,20 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
     expect(publishDescription).toContain("publishToken");
     expect(publishDescription).toContain("仅企业组织成员可用");
     expect(publishDescription).toContain("个人账号不可用");
+  });
+
+  it("forge_publish_status 在上传成功后收口,不守着轮询人工审核", () => {
+    const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
+      _registeredTools: Record<string, { description?: string } | undefined>;
+    };
+    const description =
+      server._registeredTools.ghost_forge_publish_status?.description ?? "";
+
+    // Excludes guidance that keeps the Agent polling for an unbounded human review.
+    expect(description).toContain("status 变成 succeeded 即可");
+    expect(description).toContain("等待管理员审核并收口");
+    expect(description).toContain("等用户下次问起时再查一次");
+    expect(description).not.toContain("继续查到审核终态");
   });
 });
 

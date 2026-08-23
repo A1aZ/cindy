@@ -143,8 +143,8 @@ const D_GHOST_FORGE_PUBLISH = [
 
 const D_GHOST_FORGE_PUBLISH_STATUS = [
   "查询一次 ghost_forge_publish 后台传输的当前状态。transferId 来自 publish 的立即返回。",
-  "status 变成 succeeded 之后 reviewStatus 仍可能从 pending 变为 approved / rejected,",
-  "需要继续查到审核终态再向用户收口。errorCode / message 是自由字符串,读 message 向用户说明,",
+  "status 变成 succeeded 即可告知用户已提交、等待管理员审核并收口;不要守着轮询 reviewStatus,",
+  "等用户下次问起时再查一次。errorCode / message 是自由字符串,读 message 向用户说明,",
   "不要按固定枚举分支。",
 ].join("\n");
 

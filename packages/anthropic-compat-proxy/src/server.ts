@@ -3,7 +3,7 @@
  *
  * 设计要点 / 性能保证:
  *   1. 监听 127.0.0.1 随机端口,避开 Fetch 禁用端口,纯进程内 loopback,不暴露任何外部接口
- *   2. 响应路径: 字节级 pipe,完全不解析(SSE 流式响应低延迟的命脉)
+ *   2. 响应路径默认字节级 pipe；只有显式协议适配器会进入流式 Transform
  *   3. 请求路径:
  *      - 非 POST / Content-Type 不是 JSON → 整条字节透传
  *      - JSON POST → 缓冲到完整 body,跑 transform 链,re-serialize 后转发
@@ -16,6 +16,7 @@
 import { createServer, request as httpRequest, type ClientRequest, type IncomingMessage, type RequestOptions, type Server, type ServerResponse } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { Socket, TcpSocketConnectOpts } from 'node:net';
+import type { Transform } from 'node:stream';
 import { URL } from 'node:url';
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
 
@@ -49,6 +50,7 @@ import type {
   RequestTransformCtx,
   ResponseObserver,
   ResponseObserverSink,
+  ResponseTransform,
   RoutingDecision,
 } from './types.js';
 
@@ -563,7 +565,7 @@ function respondRequestTooLarge(opts: {
 }
 
 /**
- * 跑 transform 链。任一 transform 抛错 → 返回 null(走透传保命)。
+ * 跑 transform 链。transform 默认抛错时跳过；显式标记 reject-request 时中止请求。
  * 所有 transform 都返回 null → 也返回 null(透传)。
  * 至少一个 transform 改了 body → 返回最新的 body。
  *
@@ -600,6 +602,7 @@ async function runTransforms(
         mutated = true;
       }
     } catch (err) {
+      if (t.errorMode === 'reject-request') throw err;
       logger.warn?.('transform threw, skipping it', { err: String(err) });
     }
   }
@@ -765,6 +768,7 @@ function forward(
   // 转发前从 outbound headers 删除的字段(大小写不敏感)。在 headerOverride 合并之后应用。
   headerDelete?: readonly string[],
   responseObserver?: ResponseObserver,
+  transformResponse?: ResponseTransform,
   // 原始客户端 model id。provider transform 可能在出站前去掉命名空间；recovery
   // controller 必须记原值，才能和下一轮主动 strip 看到的入站 model 对上。
   clientModel = '',
@@ -877,6 +881,11 @@ function forward(
   // upstreamReq.error 或 upstreamRes.error。request 侧通过这个回调汇入当前
   // response 的终态处理,保证 observer 与下游收口语义不受事件先后影响。
   let failActiveResponse: ((err: unknown) => void) | null = null;
+  // upstreamRes emits `end` before a request-scoped response Transform finishes
+  // its _flush. Keep those downstream transforms pending so an async flush
+  // error can still fail the client instead of being mistaken for a harmless
+  // post-end event.
+  const pendingResponseTransforms = new Set<Transform>();
 
   const finishClientAfterUpstreamFailure = (
     err: Error,
@@ -1041,6 +1050,7 @@ function forward(
             headerOverride,
             headerDelete,
             responseObserver,
+            transformResponse,
             clientModel,
             outboundProxy,
             pathOverride,
@@ -1155,7 +1165,10 @@ function forward(
       reason: 'error' | 'aborted' | 'close',
       rawError?: unknown,
     ): void => {
-      if (upstreamResponseTerminal !== null) return;
+      const isPendingTransformFailure =
+        upstreamResponseTerminal === 'end' && pendingResponseTransforms.size > 0;
+      if (upstreamResponseTerminal !== null && !isPendingTransformFailure) return;
+      if (isPendingTransformFailure) pendingResponseTransforms.clear();
       upstreamResponseTerminal = reason;
       // 客户端主动停止是预期的取消路径,不应再通知 observer 为上游故障。
       if (clientAborted || clientRes.destroyed) return;
@@ -1180,6 +1193,33 @@ function forward(
       finishClientAfterUpstreamFailure(err);
     };
     failActiveResponse = (err) => failStreamingResponse('error', err);
+
+    let responseBodyTransform: Transform | null = null;
+    if (transformResponse && status >= 200 && status < 300) {
+      try {
+        responseBodyTransform = transformResponse({
+          reqId,
+          method,
+          url: path,
+          upstreamBase: formatUpstreamBase(actualTarget),
+          status,
+          requestHeaders: headers,
+          outboundHeaders: actualHeaders,
+          responseHeaders: flattenResponseHeaders(upstreamRes.headers),
+          requestBody: body,
+        }) ?? null;
+      } catch (err) {
+        const responseError = err instanceof Error ? err : new Error(String(err));
+        observerError(responseError);
+        upstreamRes.resume();
+        finishClientAfterUpstreamFailure(
+          responseError,
+          `upstream response cannot be adapted safely: ${String(err)}`,
+          'response_transform_unavailable',
+        );
+        return;
+      }
+    }
 
     // kimi 撞车 id 的响应流改名(仅当请求历史带铸造形态 id 且响应是 SSE 才接管;
     // 否则保持字节级 pipe,与扩展前一致)。observer 仍吃上游原始字节(计数/错误体
@@ -1239,6 +1279,10 @@ function forward(
       toolUseIdRewrite = new ToolUseIdRewriteTransform(rewriter);
       toolUseIdRewrite.on('error', (err) => failStreamingResponse('error', err));
     }
+    if (responseBodyTransform) {
+      delete respHeaders['content-length'];
+      responseBodyTransform.on('error', (err) => failStreamingResponse('error', err));
+    }
 
     // ── 流式请求的成功响应有效性门(#2242)──────────────────────────────
     // 请求显式声明 stream:true 时,2xx 响应不再「先 writeHead 再 pipe」:上游或
@@ -1262,18 +1306,26 @@ function forward(
       if (streamGateCommitted) return;
       streamGateCommitted = true;
       clientRes.writeHead(status, upstreamRes.statusMessage, respHeaders);
-      const dest = toolUseIdRewrite ?? clientRes;
+      const responseTransforms = [responseBodyTransform, toolUseIdRewrite]
+        .filter((value): value is Transform => value !== null);
+      for (const transform of responseTransforms) {
+        pendingResponseTransforms.add(transform);
+        const settle = () => pendingResponseTransforms.delete(transform);
+        transform.once('end', settle);
+      }
+      const dest = responseTransforms[0] ?? clientRes;
       // 门控期间积累的待发字节(非门控路径恒为空)先写出,再切回字节级 pipe ——
       // pipe 是 SSE 零延迟的命脉('data' 监听只做计数+错误体收集,不影响流)。
       for (const chunk of pendingChunks) dest.write(chunk);
       pendingChunks.length = 0;
       pendingText = '';
-      if (toolUseIdRewrite) {
+      if (responseTransforms.length > 0) {
         // 客户端断开 / 上游故障收口时把 transform 一并拆掉,避免上游继续灌进无消费者的流。
-        const rewriteStream = toolUseIdRewrite;
-        clientRes.on('close', () => rewriteStream.destroy());
-        upstreamRes.pipe(rewriteStream);
-        rewriteStream.pipe(clientRes);
+        clientRes.on('close', () => responseTransforms.forEach((transform) => transform.destroy()));
+        upstreamRes.pipe(responseTransforms[0]);
+        for (let index = 0; index < responseTransforms.length; index += 1) {
+          responseTransforms[index].pipe(responseTransforms[index + 1] ?? clientRes);
+        }
       } else {
         upstreamRes.pipe(clientRes);
       }
@@ -1606,7 +1658,29 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
   const server: Server = createServer(async (req, res) => {
     inflight++;
     const reqId = ++reqIdSeq;
-    res.on('close', () => { inflight--; });
+    let responseSettled = false;
+    let transformsCompleted = false;
+    let transformSettlementNotified = false;
+    const notifyTransformSettlement = (): void => {
+      if (!responseSettled || !transformsCompleted || transformSettlementNotified) return;
+      transformSettlementNotified = true;
+      for (const transform of transforms) {
+        try {
+          transform.onRequestSettled?.(reqId);
+        } catch (err) {
+          logger.warn?.('request transform settlement hook threw', { reqId, err: String(err) });
+        }
+      }
+    };
+    const markResponseSettled = (): void => {
+      responseSettled = true;
+      notifyTransformSettlement();
+    };
+    res.once('finish', markResponseSettled);
+    res.once('close', () => {
+      inflight--;
+      markResponseSettled();
+    });
 
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
@@ -1668,6 +1742,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
         route.headerOverride,
         route.headerDelete,
         opts.responseObserver,
+        opts.transformResponse,
         '',
         await resolveOutboundForTarget(route.target, reqId),
         route.pathOverride,
@@ -1780,7 +1855,24 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
       ...requestCtx,
       upstreamBase: formatUpstreamBase(route.target),
     };
-    const transformed = await runTransforms(rawBody, contentType, transforms, transformCtx, logger);
+    let transformed: Buffer | null;
+    try {
+      transformed = await runTransforms(rawBody, contentType, transforms, transformCtx, logger);
+    } catch (err) {
+      transformsCompleted = true;
+      notifyTransformSettlement();
+      logger.warn?.('request transform rejected request', { reqId, err: String(err) });
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          type: 'proxy_error',
+          message: 'request could not be transformed safely',
+        },
+      }));
+      return;
+    }
+    transformsCompleted = true;
+    notifyTransformSettlement();
     const outBody = transformed ?? rawBody;
 
     let parsedForRewrite: unknown = rawParsed;
@@ -1864,6 +1956,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
       route.headerOverride,
       route.headerDelete,
       opts.responseObserver,
+      opts.transformResponse,
       extractBodyModel(rawBody),
       await resolveOutboundForTarget(route.target, reqId),
       route.pathOverride,

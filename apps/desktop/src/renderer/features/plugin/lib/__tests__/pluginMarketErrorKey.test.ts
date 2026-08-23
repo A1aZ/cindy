@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import i18n from '../../../../i18n';
+import { GHOST_OFFICIAL_ID_PREFIXES } from '../../../../../shared/ghost';
 import { pluginMarketErrorKey } from '../pluginMarketErrorKey';
 
 function serializedIpcError(code: string): Error {
@@ -28,6 +29,31 @@ describe('pluginMarketErrorKey', () => {
       'settings.ghosts.market.errors.generic',
     );
   });
+
+  it('maps a reserved id to the actionable shared install copy instead of generic retry guidance', () => {
+    const key = pluginMarketErrorKey(serializedIpcError('GHOST_ID_RESERVED'));
+
+    // This excludes keeping the default branch that tells users to retry a permanently rejected id.
+    expect(key).toBe('settings.ghosts.errors.idReserved');
+    expect(key).not.toBe('settings.ghosts.market.errors.generic');
+  });
+
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja', 'ko'])(
+    'renders the complete reserved-prefix authority in the %s market toast',
+    (locale) => {
+      const key = pluginMarketErrorKey(serializedIpcError('GHOST_ID_RESERVED'));
+      const rawMessage = i18n.getResource(locale, 'common', key);
+      const message = i18n.getFixedT(locale)(key).toString();
+
+      // The raw resource check excludes a missing locale being hidden by English fallback.
+      expect(rawMessage).toEqual(expect.any(String));
+      // These assertions exclude a broken defaultVariables path leaving a literal placeholder.
+      expect(message).toContain(GHOST_OFFICIAL_ID_PREFIXES.join(' / '));
+      expect(message).not.toContain('{{');
+      // This excludes the market channel silently falling back to its generic retry toast.
+      expect(message).not.toBe(i18n.getFixedT(locale)('settings.ghosts.market.errors.generic'));
+    },
+  );
 
   it.each([
     { locale: 'zh-CN', publisherAction: '联系发布者' },

@@ -97,7 +97,8 @@ function isRoutableForOneshot(provider: Provider, agentKind: AgentKind): boolean
  *  更宽的判据会把 mode 缺省、group='image' 的网关条目放进钉档清单,钉死
  *  不回落 = 恒失败)。userProvider 标记镜像模型选择器的自定义供应商放行。 */
 function isChatModel(model: CatalogModel, provider: Provider): boolean {
-  return isAgentSelectableModel(model, { userProvider: provider.source === 'user' });
+  return model.disabled !== true
+    && isAgentSelectableModel(model, { userProvider: provider.source === 'user' });
 }
 
 const AGENT_LABEL: Record<(typeof ONESHOT_ROUTE_AGENTS)[number], string> = {
@@ -133,6 +134,8 @@ export interface TextOneshotPinOption {
   modelId: string;
   /** 模型展示名(CatalogModel.name)。 */
   modelName: string;
+  /** 模型选择器的目录默认可见性；缺省 = 可见。 */
+  defaultEnabled?: boolean;
   /** 模型展示图标 id(CatalogModel.icon;未设定时渲染层回落供应商标)。 */
   icon?: string;
   /** 折扣路由条目(classifyModel = gpt-budget)——渲染层据此亮「折扣」徽标。 */
@@ -234,6 +237,7 @@ export function buildTextOneshotPinOptions(
       agentKind: e.agentKind,
       modelId: e.model.id,
       modelName: e.model.name,
+      ...(e.model.defaultEnabled !== undefined ? { defaultEnabled: e.model.defaultEnabled } : {}),
       ...(e.model.icon !== undefined ? { icon: e.model.icon } : {}),
       budget: classifyModel(e.model) === 'gpt-budget',
       subscription: e.provider.access?.kind === 'subscription',

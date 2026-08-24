@@ -128,6 +128,29 @@ describe('buildTextOneshotPinOptions', () => {
     expect(options.map((o) => o.id)).toEqual(['cat:xd:codex:gpt-b']);
   });
 
+  it('过滤目录视图中已停用的模型并透传默认可见性', () => {
+    const options = buildTextOneshotPinOptions(
+      catalogOf(
+        provider({
+          id: 'xd',
+          models: {
+            codex: [
+              chat('disabled', { disabled: true }),
+              chat('hidden-by-default', { defaultEnabled: false }),
+            ],
+          },
+        }),
+      ),
+      undefined,
+    );
+
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      id: 'cat:xd:codex:hidden-by-default',
+      defaultEnabled: false,
+    });
+  });
+
   it('非聊天模型过滤:mode 非聊天能态、mode 缺省但 group 是已知非聊天分类', () => {
     const options = buildTextOneshotPinOptions(
       catalogOf(
@@ -395,5 +418,12 @@ describe('resolveOneshotCatalogModel', () => {
     expect(resolveOneshotCatalogModel(catalog, undefined, 'no-such-model')).toBeNull();
     expect(resolveOneshotCatalogModel(catalog, undefined, '   ')).toBeNull();
     expect(resolveOneshotCatalogModel(catalog, { disabledProviders: { xd: true } }, 'gpt-a')).toBeNull();
+  });
+
+  it('目录视图中已停用的模型不能作为声明路由', () => {
+    const catalog = catalogOf(
+      provider({ id: 'xd', models: { codex: [chat('gpt-disabled', { disabled: true })] } }),
+    );
+    expect(resolveOneshotCatalogModel(catalog, undefined, 'gpt-disabled')).toBeNull();
   });
 });

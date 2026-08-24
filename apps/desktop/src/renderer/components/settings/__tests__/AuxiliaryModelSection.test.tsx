@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   get: vi.fn(),
   set: vi.fn(),
   toastError: vi.fn(),
+  isModelEnabled: vi.fn(),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -26,23 +27,36 @@ vi.mock('@/lib/toast', () => ({
   toast: { error: h.toastError },
 }));
 
+vi.mock('@/state/modelVisibilityPrefs', () => ({
+  isModelEnabled: h.isModelEnabled,
+  useModelVisibilityVersion: () => 0,
+}));
+
 vi.mock('@/cindy-brain/OneshotModelPinPicker', () => ({
   OneshotModelPinPicker: ({
     value,
     onChange,
     ariaLabel,
     disabled,
+    options,
   }: {
     value?: string;
     onChange: (pin: string | null) => void;
     ariaLabel: string;
     disabled?: boolean;
+    options: Array<{ id: string; available?: boolean }>;
   }) => {
     const titleRow = ariaLabel.includes('sessionTitle');
     const pin = titleRow ? TITLE_PIN : RECOMMENDATION_PIN;
+    const displayedOptions = options.filter(
+      (option) => option.available !== false || option.id === value,
+    );
     return (
       <div>
         <span>{`${ariaLabel}:${value ?? 'automatic'}`}</span>
+        <span data-testid={`${ariaLabel}:options`}>
+          {displayedOptions.map((option) => `${option.id}:${option.available !== false}`).join('|')}
+        </span>
         <button
           type="button"
           aria-label={`${ariaLabel}:select`}
@@ -97,6 +111,7 @@ describe('AuxiliaryModelSection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     installApi();
+    h.isModelEnabled.mockReturnValue(true);
     h.get.mockResolvedValue(state());
     h.set.mockImplementation(async (patch: Partial<AuxiliaryModelSettingsState>) => state(patch));
   });
@@ -145,5 +160,91 @@ describe('AuxiliaryModelSection', () => {
       }),
     );
     await waitFor(() => expect(h.set).toHaveBeenCalledWith({ sessionTitleModel: null }));
+  });
+
+  it('does not offer models hidden from the regular model selector', async () => {
+    const hiddenPin = 'cat:xd:codex:claude-opus-5';
+    const visiblePin = 'cat:xd:codex:deepseek/deepseek-v4-flash';
+    h.isModelEnabled.mockImplementation(
+      (_agent: string, _providerId: string, model: { id: string }) =>
+        model.id !== 'claude-opus-5',
+    );
+    h.get.mockResolvedValue(
+      state({
+        options: [
+          {
+            id: hiddenPin,
+            label: 'Claude Opus 5 · XD Gateway',
+            group: 'XD Gateway',
+            providerId: 'xd',
+            agentKind: 'codex',
+            modelId: 'claude-opus-5',
+            modelName: 'Claude Opus 5',
+            budget: false,
+            subscription: false,
+            available: true,
+          },
+          {
+            id: visiblePin,
+            label: 'DeepSeek V4 Flash · XD Gateway',
+            group: 'XD Gateway',
+            providerId: 'xd',
+            agentKind: 'codex',
+            modelId: 'deepseek/deepseek-v4-flash',
+            modelName: 'DeepSeek V4 Flash',
+            budget: false,
+            subscription: false,
+            available: true,
+          },
+        ],
+      }),
+    );
+
+    render(<AuxiliaryModelSection />);
+
+    const titleOptions = await screen.findByTestId(
+      'settings.auxiliaryModels.sessionTitle.ariaLabel:options',
+    );
+    const recommendationOptions = screen.getByTestId(
+      'settings.auxiliaryModels.promptRecommendation.ariaLabel:options',
+    );
+    expect(titleOptions.textContent).toBe(`${visiblePin}:true`);
+    expect(recommendationOptions.textContent).toBe(`${visiblePin}:true`);
+  });
+
+  it('keeps a selected hidden model visible only as an unavailable value', async () => {
+    const hiddenPin = 'cat:xd:codex:claude-opus-5';
+    h.isModelEnabled.mockReturnValue(false);
+    h.get.mockResolvedValue(
+      state({
+        sessionTitleModel: hiddenPin,
+        options: [
+          {
+            id: hiddenPin,
+            label: 'Claude Opus 5 · XD Gateway',
+            group: 'XD Gateway',
+            providerId: 'xd',
+            agentKind: 'codex',
+            modelId: 'claude-opus-5',
+            modelName: 'Claude Opus 5',
+            defaultEnabled: false,
+            budget: false,
+            subscription: false,
+            available: true,
+          },
+        ],
+      }),
+    );
+
+    render(<AuxiliaryModelSection />);
+
+    expect(
+      (await screen.findByTestId('settings.auxiliaryModels.sessionTitle.ariaLabel:options'))
+        .textContent,
+    ).toBe(`${hiddenPin}:false`);
+    expect(
+      screen.getByTestId('settings.auxiliaryModels.promptRecommendation.ariaLabel:options')
+        .textContent,
+    ).toBe('');
   });
 });

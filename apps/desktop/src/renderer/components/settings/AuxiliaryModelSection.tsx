@@ -1,11 +1,12 @@
 /** Settings → Personalization: global models for short auxiliary text tasks. */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { OneshotModelPinPicker, type OneshotPinOption } from '@/cindy-brain/OneshotModelPinPicker';
 import { createLogger } from '@/lib/logger';
 import { toast } from '@/lib/toast';
+import { isModelEnabled, useModelVisibilityVersion } from '@/state/modelVisibilityPrefs';
 import type {
   AuxiliaryModelSettingsKey,
   AuxiliaryModelSettingsState,
@@ -18,6 +19,7 @@ export function AuxiliaryModelSection() {
   const [settings, setSettings] = useState<AuxiliaryModelSettingsState | null>(null);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
+  const modelVisibilityVersion = useModelVisibilityVersion();
 
   useEffect(() => {
     let disposed = false;
@@ -55,6 +57,20 @@ export function AuxiliaryModelSection() {
     [t],
   );
 
+  const options = useMemo<readonly OneshotPinOption[]>(
+    () =>
+      (settings?.options ?? []).map((option) => ({
+        ...option,
+        available:
+          option.available !== false
+          && isModelEnabled(option.agentKind, option.providerId, {
+            id: option.modelId,
+            defaultEnabled: option.defaultEnabled,
+          }),
+      })),
+    [modelVisibilityVersion, settings?.options],
+  );
+
   if (!settings) return null;
 
   const picker = (key: AuxiliaryModelSettingsKey, ariaLabel: string, automaticLabel: string) => (
@@ -62,7 +78,7 @@ export function AuxiliaryModelSection() {
       value={settings[key] ?? undefined}
       defaultLabel=""
       declaredLabel={null}
-      options={settings.options as readonly OneshotPinOption[]}
+      options={options}
       onChange={(pin) => {
         void persist(key, pin);
       }}

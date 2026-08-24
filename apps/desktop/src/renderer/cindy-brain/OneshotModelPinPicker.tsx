@@ -24,13 +24,14 @@ export interface OneshotPinOption {
   agentKind: string;
   modelId: string;
   modelName: string;
+  defaultEnabled?: boolean;
   icon?: string;
   budget: boolean;
   subscription: boolean;
   /** Provider['routing'](IPC 载荷;ProviderLogoMark 的厂牌图标判定用)。 */
   routing?: import('@cindy/model-providers').Provider['routing'];
   agentSuffix?: string;
-  /** False for a persisted route that is no longer credential/catalog ready. */
+  /** False for a persisted route that is no longer offered or currently usable. */
   available?: boolean;
 }
 

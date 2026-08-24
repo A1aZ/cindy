@@ -29,6 +29,8 @@ export interface AuxiliaryModelOption {
   agentKind: 'codex' | 'claude-code';
   modelId: string;
   modelName: string;
+  /** Follow the same default visibility as the regular model selector. */
+  defaultEnabled?: boolean;
   icon?: string;
   budget: boolean;
   subscription: boolean;

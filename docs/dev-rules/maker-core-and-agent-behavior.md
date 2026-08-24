@@ -71,6 +71,16 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
 - 打算用 prompt 解决某个问题前先自问：这件事用代码能不能做？能就用代码。
 - 把本应由代码保证的确定性逻辑（格式校验、字段抽取、流程跳转、是否调用某个工具等）
   交给模型自由发挥，会引入不可复现的行为漂移，属于本规则明确禁止的做法。
+- **产品 turn 未结算不得结束。** provider `turn/completed` 可以立刻给 SDK turn 落墓碑并
+  结算 usage；只有原子挂在该终态边界上的显式 continuation claim 才能挡住产品结束。
+  Codex `functions.exec` yield 没有协议级 execution handle（cell / wait 活在
+  `codex-rs` daemon），近期检测只能是 adapter 内、用真实 rollout fixture 锁死的启发式，
+  用来铸造有界 claim，再由宿主确定性开续段让模型 wait 同一 cell。同 turn 或续段里
+  后续 `wait` 输出 `Script completed` / `Script terminated` 后视为该 cell 已结算，不得
+  再铸 claim，也不得报 lost-handle。禁止把 `last_agent_message == null` 或开场白当结算
+  判据；cell 跨 turn 存活性未证实前，续段失败必须诚实报 lost-handle，不得 replay 原请求
+  或重跑已执行命令。Claude wake continuation 与 Codex yield continuation 先分账，不抽
+  公共模块。
 
 ## 3. 守住四项核心数据指标
 

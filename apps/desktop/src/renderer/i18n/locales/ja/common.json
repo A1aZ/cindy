@@ -131,6 +131,7 @@
       "chipMetrics": "使用量インジケーター",
       "memory": "メモリ",
       "subagentModels": "サブエージェント",
+      "auxiliaryModels": "補助モデル",
       "visionBridge": "ビジョンブリッジ",
       "compaction": "コンテキスト圧縮",
       "terminalShell": "デフォルトターミナルシェル",
@@ -2549,6 +2550,31 @@
         "saved": "サブエージェント設定を保存しました",
         "deferredSuffix": " — 実行中の Codex セッションには現在のタスク終了後に適用されます"
       }
+    },
+    "auxiliaryModels": {
+      "title": "補助モデル",
+      "description": "タスクの自動命名と入力欄のおすすめプロンプトに、それぞれ Agent とモデルの組み合わせを指定します。",
+      "sessionTitle": {
+        "label": "タスクの自動命名",
+        "description": "Claude Code、Codex、Pi のタスクと、AI による手動の名前変更に適用されます。",
+        "ariaLabel": "タスクの自動命名モデルを選択",
+        "automatic": "自動選択（現在のタスクに従う）"
+      },
+      "promptRecommendation": {
+        "label": "入力欄のおすすめプロンプト",
+        "description": "「ヒント」で入力欄のおすすめを有効にした場合のみ使用します。",
+        "ariaLabel": "入力欄のおすすめプロンプト用モデルを選択",
+        "automatic": "自動選択（現在のルーティングを維持）"
+      },
+      "chooseAgent": "Agent を選択",
+      "backToAgents": "Agent の選択に戻る",
+      "explicitRouteHint": "明示的に指定した場合は、その Agent とモデルだけを使用します。利用できなくても自動では切り替えません。",
+      "searchPlaceholder": "モデルまたはプロバイダーを検索",
+      "noResults": "利用可能なモデルがありません",
+      "unavailable": "現在利用不可",
+      "budget": "割引",
+      "subscription": "サブスクリプション",
+      "saveFailed": "補助モデル設定を保存できませんでした"
     },
     "compaction": {
       "title": "コンテキスト圧縮",

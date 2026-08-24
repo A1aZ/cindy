@@ -131,6 +131,7 @@
       "chipMetrics": "用量指示器",
       "memory": "記憶",
       "subagentModels": "Subagent",
+      "auxiliaryModels": "輔助模型",
       "visionBridge": "視覺橋",
       "compaction": "上下文壓縮",
       "terminalShell": "預設終端 shell",
@@ -2541,6 +2542,31 @@
         "saved": "Subagent 設定已儲存",
         "deferredSuffix": " — 執行中的 Codex 任務將在當前執行結束後應用"
       }
+    },
+    "auxiliaryModels": {
+      "title": "輔助模型",
+      "description": "為任務自動命名與輸入框推薦指令分別指定一組 Agent 和模型。",
+      "sessionTitle": {
+        "label": "任務自動命名",
+        "description": "適用於 Claude Code、Codex、Pi 任務，以及手動 AI 重新命名。",
+        "ariaLabel": "選擇任務自動命名模型",
+        "automatic": "自動選擇（跟隨目前任務）"
+      },
+      "promptRecommendation": {
+        "label": "輸入框推薦指令",
+        "description": "僅在「小技巧」中啟用輸入框推薦後呼叫。",
+        "ariaLabel": "選擇輸入框推薦指令模型",
+        "automatic": "自動選擇（維持目前規則）"
+      },
+      "chooseAgent": "選擇 Agent",
+      "backToAgents": "返回選擇 Agent",
+      "explicitRouteHint": "明確指定後只使用該 Agent 和模型；無法使用時不會自動切換。",
+      "searchPlaceholder": "搜尋模型或供應商",
+      "noResults": "沒有可用模型",
+      "unavailable": "目前無法使用",
+      "budget": "折扣",
+      "subscription": "訂閱",
+      "saveFailed": "儲存輔助模型設定失敗"
     },
     "compaction": {
       "title": "上下文壓縮",

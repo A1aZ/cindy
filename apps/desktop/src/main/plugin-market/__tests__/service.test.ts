@@ -1010,6 +1010,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     const rawManifest = setupKvManifest();
     const approvedManifest = normalizedManifest(rawManifest);
     const h = harness([item]);
+    runtime.inspectedManifest = approvedManifest;
     h.api.detail.mockResolvedValueOnce({
       ...item,
       currentRelease: { ...item.currentRelease, manifest: rawManifest },

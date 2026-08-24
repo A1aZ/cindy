@@ -28,6 +28,7 @@ import {
   ghostInstallApprovalToken,
   ghostNetworkAuthorizationWithinCap,
   ghostNodeSecretAuthorizationWithinCap,
+  ghostSetupAuthorizationWithinCap,
   ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
@@ -5676,6 +5677,7 @@ async function installOrUpdateMarketGhostPackageLocked(
           expected.manifestCap,
           inspected.canonicalManifest,
         ) ||
+        !ghostSetupAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
         !ghostSettingsUiWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
         !ghostSubscribeAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
         !ghostUnknownV3FieldsWithinCap(expected.manifestCap, inspected.canonicalManifest)

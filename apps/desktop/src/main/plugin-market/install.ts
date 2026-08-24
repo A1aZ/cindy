@@ -17,6 +17,7 @@ import { app } from 'electron';
 import {
   ghostNetworkAuthorizationWithinCap,
   ghostNodeSecretAuthorizationWithinCap,
+  ghostSetupAuthorizationWithinCap,
   ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
@@ -202,6 +203,7 @@ export async function installCustomMarketPlugin(input: {
         extraCapabilities.length > 0 ||
         !ghostNetworkAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostNodeSecretAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
+        !ghostSetupAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostSettingsUiWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostSubscribeAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostUnknownV3FieldsWithinCap(validated.manifest, inspected.canonicalManifest)

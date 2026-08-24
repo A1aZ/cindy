@@ -15,6 +15,7 @@ import {
   ghostLocalePathFor,
   ghostNetworkAuthorizationWithinCap,
   ghostNodeSecretAuthorizationWithinCap,
+  ghostSetupAuthorizationWithinCap,
   ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
@@ -4518,6 +4519,7 @@ describe('ghostPermissionProjectionFingerprint', () => {
     const fixedHeight = (height: number) =>
       validateGhostManifest({
         ...goodChipManifest(),
+        slots: ['panel', 'model', 'network'],
         settingsHtml: 'settings.html',
         settingsHeight: height,
       });
@@ -4537,6 +4539,86 @@ describe('ghostPermissionProjectionFingerprint', () => {
     expect(ghostSettingsUiWithinCap(reviewed.manifest, autoHeight.manifest)).toBe(false);
     expect(ghostSettingsUiWithinCap(autoHeight.manifest, reviewed.manifest)).toBe(true);
     expect(ghostSettingsUiWithinCap(autoHeight.manifest, withoutSettings.manifest)).toBe(true);
+  });
+
+  it('market cap only allows setup requirement groups to stay identical or be removed', () => {
+    const reviewed = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'setup-helper',
+      name: 'Setup helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['api.example.com'],
+        secrets: [
+          {
+            key: 'api_key',
+            label: 'API key',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+          },
+        ],
+        connections: [
+          {
+            key: 'account',
+            label: 'Account',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+          },
+        ],
+      },
+      setup: {
+        requires: [
+          { anyOf: ['secret:api_key', 'connection:account'] },
+          { anyOf: [{ kv: 'workspace', label: 'Workspace' }] },
+        ],
+      },
+    });
+    expect(reviewed.ok).toBe(true);
+    if (!reviewed.ok || !reviewed.manifest.setup) return;
+    const [credentials, workspace] = reviewed.manifest.setup.requires;
+    const withSetup = (requires: NonNullable<GhostManifest['setup']>['requires']): GhostManifest =>
+      ({ ...reviewed.manifest, setup: { requires } });
+    const { setup: _setup, ...implicit } = reviewed.manifest;
+    const explicitOptOut = withSetup([]);
+
+    expect(
+      ghostSetupAuthorizationWithinCap(
+        reviewed.manifest,
+        withSetup([
+          workspace!,
+          { anyOf: [...credentials!.anyOf].reverse() },
+        ]),
+      ),
+    ).toBe(true);
+    expect(ghostSetupAuthorizationWithinCap(reviewed.manifest, withSetup([credentials!]))).toBe(
+      true,
+    );
+    expect(
+      ghostSetupAuthorizationWithinCap(
+        reviewed.manifest,
+        withSetup([...reviewed.manifest.setup.requires, { anyOf: [workspace!.anyOf[0]!] }]),
+      ),
+    ).toBe(false);
+    expect(
+      ghostSetupAuthorizationWithinCap(
+        reviewed.manifest,
+        withSetup([{ anyOf: [credentials!.anyOf[0]!] }, workspace!]),
+      ),
+    ).toBe(false);
+    expect(
+      ghostSetupAuthorizationWithinCap(
+        reviewed.manifest,
+        withSetup([
+          credentials!,
+          { anyOf: [{ kind: 'kv', key: 'workspace', label: 'Account password' }] },
+        ]),
+      ),
+    ).toBe(false);
+    expect(ghostSetupAuthorizationWithinCap(implicit, implicit)).toBe(true);
+    expect(ghostSetupAuthorizationWithinCap(implicit, withSetup([credentials!]))).toBe(false);
+    expect(ghostSetupAuthorizationWithinCap(implicit, explicitOptOut)).toBe(true);
+    expect(ghostSetupAuthorizationWithinCap(explicitOptOut, implicit)).toBe(false);
   });
 
   it('same-key/different-labelArgs 同时作废 baseline、diff 与真实包复核', () => {

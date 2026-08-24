@@ -2641,6 +2641,45 @@ export function ghostSubscribeAuthorizationWithinCap(
   );
 }
 
+function ghostSetupGroupCapKey(group: GhostSetupGroup): string {
+  return group.anyOf
+    .map((requirement) =>
+      requirement.kind === 'kv'
+        ? `kv:${requirement.key}:${JSON.stringify(requirement.label)}`
+        : `${requirement.kind}:${requirement.key}`,
+    )
+    .sort()
+    .join('\0');
+}
+
+/**
+ * 市场清单对真实包 setup 运行门的上限。
+ *
+ * 两边都未显式声明时继续采用 Host 启发式；其引用只能来自已经单独受限的
+ * network/node 声明。市场未声明时，真实包只能显式 opt-out；市场已经声明时，
+ * 真实包只能删除完整需求组，不能退回启发式、增加组、收紧 anyOf，或换入新的
+ * 引用/kv 文案。
+ */
+export function ghostSetupAuthorizationWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  if (reviewed.setup === undefined && actual.setup === undefined) return true;
+  if (reviewed.setup === undefined) return actual.setup?.requires.length === 0;
+  if (actual.setup === undefined) return false;
+
+  const reviewedGroups = reviewed.setup.requires;
+  const actualGroups = actual.setup.requires;
+  const remainingReviewed = reviewedGroups.map(ghostSetupGroupCapKey);
+  for (const group of actualGroups) {
+    const key = ghostSetupGroupCapKey(group);
+    const index = remainingReviewed.indexOf(key);
+    if (index < 0) return false;
+    remainingReviewed.splice(index, 1);
+  }
+  return true;
+}
+
 function canonicalGhostExtensionValue(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalGhostExtensionValue).join(',')}]`;

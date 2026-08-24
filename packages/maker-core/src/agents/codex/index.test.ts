@@ -17417,6 +17417,61 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
+  it('inherits the origin turnPermissionPolicy on the yield continuation turn', async () => {
+    const agent = new CodexAgent(createDeps());
+    let turnSeq = 0;
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnSeq += 1;
+        return { turn: { id: `turn-${turnSeq}` } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-permission-policy',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted) {
+      throw new Error('expected item and turn handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    const policy: TurnPermissionPolicy = {
+      origin: { kind: 'im', channel: 'wechat', taskId: 'task-yield' },
+      confirmationSurface: 'desktop',
+      forceConfirmToolCall: (_toolName, input) => JSON.stringify(input).includes('rm -rf'),
+    };
+    await handle.send({ type: 'user', content: 'run typecheck' }, { turnPermissionPolicy: policy });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-policy',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(1);
+    });
+    const [, continuationParams] = yieldTurnStartCalls(host)[0] as [string, Record<string, unknown>];
+    expect(continuationParams).toMatchObject({
+      approvalPolicy: 'untrusted',
+      sandboxPolicy: { type: 'readOnly' },
+    });
+    expect(continuationParams).not.toHaveProperty('approvalsReviewer');
+    expect(events.some((event) => event.type === 'done' && event.turnContinuationId != null)).toBe(true);
+    await handle.close();
+  });
+
   it('detects Responses/proxy function_call(exec_command) yield output', async () => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;

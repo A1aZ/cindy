@@ -1183,6 +1183,7 @@ type YieldContinuationClaim = {
   retryCount: number;
   originTurnId: string;
   continuationTurnId: string | null;
+  permissionPolicy: TurnPermissionPolicy | null;
 };
 const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
   'no_listener_attached',
@@ -3246,6 +3247,7 @@ export class CodexAgent extends BaseAgent {
         retryCount,
         originTurnId,
         continuationTurnId: null,
+        permissionPolicy: activeTurnPermissionPolicy,
       };
       yieldContinuationClaims.set(claim.id, claim);
       activeYieldContinuationId = claim.id;
@@ -3376,6 +3378,9 @@ export class CodexAgent extends BaseAgent {
         [CODEX_INTERNAL_CONTINUATION]: true,
         throwOnStartFailure: true,
         signal: abort.signal,
+        ...(claim.permissionPolicy
+          ? { turnPermissionPolicy: claim.permissionPolicy }
+          : {}),
       };
       try {
         await handle.send(

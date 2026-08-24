@@ -89,6 +89,8 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   产品 `done`。同一产品 turn 上的
   ask_user／plan 内部续段必须等 yield 空闲后再 `turn/start`，不得并发；Stop／
   close 取消 yield 时，排队中的内部续段必须退出而不是被当成正常空闲继续发送。
+  续段必须继承铸造 claim 时的 `turnPermissionPolicy`，不得把无人值守只读边界
+  重置成普通 Auto。
   Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。
 
 ## 3. 守住四项核心数据指标

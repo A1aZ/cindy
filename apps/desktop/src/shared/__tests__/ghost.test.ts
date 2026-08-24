@@ -4739,28 +4739,36 @@ describe('ghostPermissionProjectionFingerprint', () => {
     );
   });
 
-  it('真实包收窄 preview hosts 不算扩权，新增或替换 host 仍拒绝', () => {
+  it('真实包按通配覆盖关系收窄 preview hosts 不算扩权，域外 host 仍拒绝', () => {
     const reviewed = validateGhostManifest({
       ...goodChipManifest(),
       slots: ['panel', 'preview'],
-      preview: { hosts: ['a.example.com', 'b.example.com'] },
+      preview: { hosts: ['*.example.com'] },
     });
     const narrowed = validateGhostManifest({
       ...goodChipManifest(),
       slots: ['panel', 'preview'],
-      preview: { hosts: ['a.example.com'] },
+      preview: { hosts: ['api.example.com'] },
+    });
+    const narrowerWildcard = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'preview'],
+      preview: { hosts: ['*.api.example.com'] },
     });
     const expanded = validateGhostManifest({
       ...goodChipManifest(),
       slots: ['panel', 'preview'],
-      preview: { hosts: ['a.example.com', 'c.example.com'] },
+      preview: { hosts: ['api.example.net'] },
     });
-    expect(reviewed.ok && narrowed.ok && expanded.ok).toBe(true);
-    if (!reviewed.ok || !narrowed.ok || !expanded.ok) return;
+    expect(reviewed.ok && narrowed.ok && narrowerWildcard.ok && expanded.ok).toBe(true);
+    if (!reviewed.ok || !narrowed.ok || !narrowerWildcard.ok || !expanded.ok) return;
 
     expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, narrowed.manifest)).toEqual(
       [],
     );
+    expect(
+      unreviewedGhostPermissionItems(reviewed.manifest, undefined, narrowerWildcard.manifest),
+    ).toEqual([]);
     expect(
       unreviewedGhostPermissionItems(reviewed.manifest, undefined, expanded.manifest),
     ).toEqual([expect.objectContaining({ key: 'preview' })]);

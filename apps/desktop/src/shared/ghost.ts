@@ -2489,10 +2489,16 @@ export function unreviewedGhostPermissionItems(
     approved.add(ghostPermissionProjectionKey(item));
     approvedKeys.add(item.key);
   }
-  const previewWithinCap = (cap: GhostManifest): boolean =>
-    actual.preview === undefined ||
-    (cap.preview !== undefined &&
-      actual.preview.hosts.every((host) => cap.preview?.hosts.includes(host)));
+  const previewWithinCap = (cap: GhostManifest): boolean => {
+    if (actual.preview === undefined) return true;
+    if (cap.preview === undefined) return false;
+    const reviewedHosts = cap.preview.hosts;
+    return actual.preview.hosts.every((actualPattern) =>
+      reviewedHosts.some((reviewedPattern) =>
+        ghostNetworkHostPatternWithinCap(actualPattern, reviewedPattern),
+      ),
+    );
+  };
   const previewApproved =
     previewWithinCap(reviewed) ||
     (previouslyInstalled !== undefined && previewWithinCap(previouslyInstalled));

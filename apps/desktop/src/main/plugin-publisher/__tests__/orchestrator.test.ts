@@ -66,6 +66,37 @@ const prepared = {
 };
 
 describe('PluginPublisherOrchestrator', () => {
+  it('hides status and cancel from a different active-session owner', async () => {
+    const filePath = await packagePath();
+    const owner = { mode: 'cloud' as const, dataOwnerId: 'member-1', generation: 7 };
+    let resolveConfirm!: (confirmed: boolean) => void;
+    const confirm = new Promise<boolean>((resolve) => {
+      resolveConfirm = resolve;
+    });
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare: vi.fn(), commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: () => confirm,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      owner: () => owner,
+    });
+    const started = orch.start(filePath);
+    const differentOwner = { ...owner, generation: owner.generation + 1 };
+
+    // Excludes leaking whether a transferId exists after an owner switch.
+    expect(orch.snapshotForOwner(started.transferId, differentOwner)).toBeNull();
+    expect(orch.cancelForOwner(started.transferId, differentOwner)).toEqual({
+      cancelled: false,
+    });
+    expect(orch.snapshotForOwner(started.transferId, owner)?.stage).toBe('confirming');
+    expect(orch.cancelForOwner(started.transferId, owner)).toEqual({ cancelled: true });
+
+    resolveConfirm(false);
+    await vi.waitFor(() =>
+      expect(orch.snapshotForOwner(started.transferId, owner)?.stage).toBe('cancelled'),
+    );
+  });
+
   it('returns immediately while confirmation and transfer continue in the background', async () => {
     const filePath = await packagePath();
     let resolveConfirm!: (confirmed: boolean) => void;

@@ -16,6 +16,11 @@ import {
   type PluginMemberUploadStatusResponse,
 } from '@cindy/plugin-protocol';
 
+import {
+  getActiveAppSession,
+  type ActiveAppSession,
+} from '../appSessionState.js';
+import { sameActiveAppSessionOwner } from '../cindy-brain/forgePackPublishConsume.js';
 import { PluginPublisherApi, PluginPublisherApiError } from './api.js';
 import { hashLocalFile, PluginPublisherHashCancelledError } from './hashFile.js';
 import { PluginPublisherPutError, putLocalFile } from './putObject.js';
@@ -48,6 +53,7 @@ export interface PluginPublisherOrchestratorDeps {
     sizeBytes: number;
   }): Promise<boolean>;
   identity(): { membershipId: string; orgSlug: string; orgName: string | null } | null;
+  owner?: () => ActiveAppSession;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   onProgress?: (progress: PluginPublisherProgress) => void;
@@ -66,6 +72,7 @@ interface TransferRecord {
   transferId: string;
   uploadId: string | null;
   filePath: string;
+  owner: ActiveAppSession;
   controller: AbortController;
   progress: PluginPublisherProgress;
   run: Promise<void>;
@@ -134,11 +141,13 @@ export class PluginPublisherOrchestrator {
   private readonly now: () => number;
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly inspectGate: { acquire(signal: AbortSignal): Promise<void>; release(): void };
+  private readonly owner: () => ActiveAppSession;
 
   constructor(private readonly deps: PluginPublisherOrchestratorDeps) {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? defaultSleep;
     this.inspectGate = deps.inspectGate ?? new SerialGate();
+    this.owner = deps.owner ?? getActiveAppSession;
   }
 
   start(
@@ -159,6 +168,7 @@ export class PluginPublisherOrchestrator {
       transferId,
       uploadId: null,
       filePath,
+      owner: this.owner(),
       controller,
       progress,
       run: Promise.resolve(),
@@ -177,6 +187,16 @@ export class PluginPublisherOrchestrator {
     return this.transfers.get(transferId)?.progress ?? null;
   }
 
+  snapshotForOwner(
+    transferId: string,
+    owner: ActiveAppSession,
+  ): PluginPublisherProgress | null {
+    const record = this.transfers.get(transferId);
+    return record && sameActiveAppSessionOwner(record.owner, owner)
+      ? record.progress
+      : null;
+  }
+
   listActive(): PluginPublisherProgress[] {
     return [...this.transfers.values()]
       .map((record) => record.progress)
@@ -188,6 +208,17 @@ export class PluginPublisherOrchestrator {
     if (!record || isTerminalStage(record.progress.stage)) return { cancelled: false };
     record.controller.abort();
     return { cancelled: true };
+  }
+
+  cancelForOwner(
+    transferId: string,
+    owner: ActiveAppSession,
+  ): { cancelled: boolean } {
+    const record = this.transfers.get(transferId);
+    if (!record || !sameActiveAppSessionOwner(record.owner, owner)) {
+      return { cancelled: false };
+    }
+    return this.cancel(transferId);
   }
 
   abortAll(): void {

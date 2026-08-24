@@ -57,12 +57,16 @@ describe('consumeForgePackForPublish', () => {
     ).toBe('accepted');
   });
 
-  it('rejects owner mismatch and deletes staging bytes', () => {
+  it.each([
+    { field: 'mode', currentOwner: { ...owner, mode: 'local' as const } },
+    { field: 'dataOwnerId', currentOwner: { ...owner, dataOwnerId: 'member-2' } },
+    { field: 'generation', currentOwner: { ...owner, generation: owner.generation + 1 } },
+  ])('rejects $field owner mismatch and deletes staging bytes', ({ currentOwner }) => {
     const { controller, staged } = harness();
     expect(
       consumeForgePackForPublish(controller, {
         token: staged.ticket,
-        currentOwner: { ...owner, generation: owner.generation + 1 },
+        currentOwner,
         boundaryPending: false,
       }),
     ).toEqual({ kind: 'rejected', reason: 'owner-mismatch' });

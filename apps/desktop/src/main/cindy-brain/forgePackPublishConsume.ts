@@ -15,7 +15,10 @@ export type ForgePackPublishConsume =
       reason: 'session-boundary-pending' | 'ticket-invalid' | 'owner-mismatch';
     };
 
-function sameOwner(a: ActiveAppSession, b: ActiveAppSession): boolean {
+export function sameActiveAppSessionOwner(
+  a: ActiveAppSession,
+  b: ActiveAppSession,
+): boolean {
   return a.mode === b.mode && a.dataOwnerId === b.dataOwnerId && a.generation === b.generation;
 }
 
@@ -32,7 +35,7 @@ export function consumeForgePackForPublish(
   }
   const ticket = controller.consume(input.token);
   if (!ticket) return { kind: 'rejected', reason: 'ticket-invalid' };
-  if (!sameOwner(ticket.owner, input.currentOwner)) {
+  if (!sameActiveAppSessionOwner(ticket.owner, input.currentOwner)) {
     controller.releaseStaging(ticket.stagingPath);
     return { kind: 'rejected', reason: 'owner-mismatch' };
   }

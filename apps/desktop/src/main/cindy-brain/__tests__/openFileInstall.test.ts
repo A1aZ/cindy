@@ -12,6 +12,9 @@
  * 「零窗口」这个具体场景把两者的绑定钉死。
  */
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const windows: { isDestroyed: () => boolean; webContents: { send: (ch: string) => void } }[] = [];
@@ -34,7 +37,7 @@ const AGENT_ORIGIN = {
 };
 
 /** 用本文件自身当"存在且可读的普通文件",避免造临时目录。 */
-const REAL_FILE = new URL(import.meta.url).pathname;
+const REAL_FILE = fileURLToPath(import.meta.url);
 
 beforeEach(() => {
   windows.length = 0;
@@ -86,7 +89,10 @@ describe('openFileInstall · origin 与路径同存同取', () => {
 
   it('路径不存在:不写缓冲、不广播(容错口径与 open-folder 一致)', async () => {
     addWindow();
-    await handleIncomingCindyFile('/definitely/not/here.cindy', 'open-file');
+    await handleIncomingCindyFile(
+      path.join(path.dirname(REAL_FILE), 'definitely-not-here.cindy'),
+      'open-file',
+    );
     expect(sent).toEqual([]);
     expect(takePendingCindyInstall()).toBeNull();
   });

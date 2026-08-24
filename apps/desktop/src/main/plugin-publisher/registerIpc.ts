@@ -1,5 +1,9 @@
 import { ipcMain } from 'electron';
 
+import {
+  getActiveAppSession,
+  isAppSessionBoundaryPending,
+} from '../appSessionState.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { PluginPublisherApi, PluginPublisherApiError } from './api.js';
@@ -8,7 +12,6 @@ import {
   getPluginPublisherConfirmBridge,
   getPluginPublisherOrchestrator,
   publisherAudience,
-  startPluginPublish,
   trackPublisherConfirmRequester,
 } from './host.js';
 import { getConnectionTokenProvider } from '../cindy-brain/index.js';
@@ -50,28 +53,34 @@ export function registerPluginPublisherIpc(): void {
   if (registered) return;
   registered = true;
 
-  ipcMain.handle('plugin-publisher:start', async (event, filePath: unknown) => {
+  ipcMain.handle('plugin-publisher:start', (event, _filePath: unknown) => {
     assertTrustedAppRendererEvent(event);
-    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-      throwIpcError('INVALID_PARAMS', 'filePath must be a non-empty string');
-    }
-    if (!currentPublisherIdentity()) {
-      throwIpcError('PERMISSION_DENIED', '需要组织身份才能发布插件');
-    }
-    trackPublisherConfirmRequester(event.sender);
-    return startPluginPublish(filePath, event.sender);
+    // 临时 fail closed:Renderer 自报绝对路径不构成用户授权(XSS 可伪造)。下期重新
+    // 开放“我的发布”前，必须先由 Main 文件选择器签发一次性 grant，再由 start 消费；
+    // 在 grant 落地前这个 IPC 入口不得恢复。
+    throwIpcError('INVALID_PARAMS', 'Renderer file path publishing is disabled');
   });
 
   ipcMain.handle('plugin-publisher:status', (event, transferId: unknown) => {
     assertTrustedAppRendererEvent(event);
     const id = requireString(transferId, 'transferId');
-    return { progress: getPluginPublisherOrchestrator().snapshot(id) };
+    if (isAppSessionBoundaryPending()) return { progress: null };
+    return {
+      progress: getPluginPublisherOrchestrator().snapshotForOwner(
+        id,
+        getActiveAppSession(),
+      ),
+    };
   });
 
   ipcMain.handle('plugin-publisher:cancel', (event, transferId: unknown) => {
     assertTrustedAppRendererEvent(event);
     const id = requireString(transferId, 'transferId');
-    return getPluginPublisherOrchestrator().cancel(id);
+    if (isAppSessionBoundaryPending()) return { cancelled: false };
+    return getPluginPublisherOrchestrator().cancelForOwner(
+      id,
+      getActiveAppSession(),
+    );
   });
 
   ipcMain.handle('plugin-publisher:list-mine', async (event, raw: unknown) => {

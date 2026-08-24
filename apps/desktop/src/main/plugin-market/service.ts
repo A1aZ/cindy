@@ -18,6 +18,7 @@ import {
   ghostSetupAuthorizationWithinCap,
   ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostToolParametersWithinCap,
   ghostUnknownV3FieldsWithinCap,
   ghostInstallApprovalToken,
   ghostIconMimeType,
@@ -1781,6 +1782,7 @@ export class PluginMarketService {
             !ghostSetupAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostSettingsUiWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
+            !ghostToolParametersWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostUnknownV3FieldsWithinCap(manifestCap, inspected.canonicalManifest)
           ) {
             throwIpcError(

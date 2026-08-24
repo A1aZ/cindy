@@ -2475,6 +2475,22 @@ function ghostOauthPermissionWithinCap(
   );
 }
 
+/** 市场清单对 Agent 可见工具参数 schema 的上限；对象键顺序不影响规范值。 */
+export function ghostToolParametersWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  const reviewedTools = new Map((reviewed.tools ?? []).map((tool) => [tool.name, tool]));
+  return (actual.tools ?? []).every((tool) => {
+    const cap = reviewedTools.get(tool.name);
+    return (
+      cap !== undefined &&
+      canonicalGhostExtensionValue(tool.parameters) ===
+        canonicalGhostExtensionValue(cap.parameters)
+    );
+  });
+}
+
 /** 返回真实包中超出市场声明与既有安装基线的 Host 能力。 */
 export function unreviewedGhostPermissionItems(
   reviewed: GhostManifest,

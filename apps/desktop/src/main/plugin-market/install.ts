@@ -20,6 +20,7 @@ import {
   ghostSetupAuthorizationWithinCap,
   ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostToolParametersWithinCap,
   ghostUnknownV3FieldsWithinCap,
   unreviewedGhostPermissionItems,
   validateGhostManifest,
@@ -206,6 +207,7 @@ export async function installCustomMarketPlugin(input: {
         !ghostSetupAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostSettingsUiWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostSubscribeAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
+        !ghostToolParametersWithinCap(validated.manifest, inspected.canonicalManifest) ||
         !ghostUnknownV3FieldsWithinCap(validated.manifest, inspected.canonicalManifest)
       ) {
         throwIpcError(

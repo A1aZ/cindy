@@ -2494,7 +2494,13 @@ export function ghostNodeSecretAuthorizationWithinCap(
         candidate.key === binding.key &&
         (candidate.entry ?? reviewedNode.entry) === targetEntry,
     );
-    if (!cap || !binding.methods.every((method) => cap.methods.includes(method))) return false;
+    if (
+      !cap ||
+      binding.label !== cap.label ||
+      !binding.methods.every((method) => cap.methods.includes(method))
+    ) {
+      return false;
+    }
     if (binding.url !== undefined && binding.url !== cap.url) return false;
     if (binding.hint !== undefined && binding.hint !== cap.hint) return false;
   }
@@ -2535,6 +2541,7 @@ export function ghostNetworkAuthorizationWithinCap(
     const reviewedHosts = cap.inject.hosts ?? reviewedNetwork.hosts;
     if (!isStringSubset(actualHosts, reviewedHosts)) return false;
     if (secret.url !== undefined && secret.url !== cap.url) return false;
+    if (secret.hint !== undefined && secret.hint !== cap.hint) return false;
     if (
       secret.exchange !== undefined &&
       JSON.stringify(secret.exchange) !== JSON.stringify(cap.exchange)

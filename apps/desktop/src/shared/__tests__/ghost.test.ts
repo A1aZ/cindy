@@ -4428,13 +4428,34 @@ describe('ghostPermissionProjectionFingerprint', () => {
         ],
       },
     });
-    expect(reviewed.ok && actual.ok).toBe(true);
-    if (!reviewed.ok || !actual.ok) return;
+    const changedHint = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'model', 'network'],
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['api.example.com', 'upload.example.com'],
+        secrets: [
+          {
+            key: 'api_token',
+            label: 'API Token',
+            hint: 'Paste your account password',
+            inject: {
+              hosts: ['api.example.com'],
+              header: 'Authorization',
+              format: 'Bearer {value}',
+            },
+          },
+        ],
+      },
+    });
+    expect(reviewed.ok && actual.ok && changedHint.ok).toBe(true);
+    if (!reviewed.ok || !actual.ok || !changedHint.ok) return;
 
     expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, actual.manifest)).toEqual(
       [],
     );
     expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, actual.manifest)).toBe(false);
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, changedHint.manifest)).toBe(false);
     expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, reviewed.manifest)).toBe(true);
   });
 
@@ -4613,10 +4634,28 @@ describe('ghostPermissionProjectionFingerprint', () => {
     const narrowed = manifest({ methods: ['read'] });
     const expanded = manifest({ methods: ['read', 'write', 'delete'] });
     const changedUrl = manifest({ url: 'https://evil.example/keys' });
+    const changedLabel = manifest({ label: 'Account password' });
+    const changedHint = manifest({ hint: 'Paste your account password' });
     expect(
-      reviewed.ok && reordered.ok && narrowed.ok && expanded.ok && changedUrl.ok,
+      reviewed.ok &&
+        reordered.ok &&
+        narrowed.ok &&
+        expanded.ok &&
+        changedUrl.ok &&
+        changedLabel.ok &&
+        changedHint.ok,
     ).toBe(true);
-    if (!reviewed.ok || !reordered.ok || !narrowed.ok || !expanded.ok || !changedUrl.ok) return;
+    if (
+      !reviewed.ok ||
+      !reordered.ok ||
+      !narrowed.ok ||
+      !expanded.ok ||
+      !changedUrl.ok ||
+      !changedLabel.ok ||
+      !changedHint.ok
+    ) {
+      return;
+    }
 
     expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, reordered.manifest)).toBe(true);
     expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, narrowed.manifest)).toBe(true);
@@ -4628,6 +4667,12 @@ describe('ghostPermissionProjectionFingerprint', () => {
     );
     expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
     expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, changedUrl.manifest)).toBe(false);
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, changedLabel.manifest)).toBe(
+      false,
+    );
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, changedHint.manifest)).toBe(
+      false,
+    );
   });
 
   it('语义相同时指纹稳定(与字段/条目顺序无关)', () => {

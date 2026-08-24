@@ -4857,7 +4857,10 @@ export function ChatInput({
     },
     [composerMutationLocked, editor, setSyntheticAtAnchor, trigger],
   );
-  const composerSuggestionFocusTarget = useCallback(() => editor?.view.dom ?? null, [editor]);
+  const composerSuggestionFocusTarget = useCallback(() => {
+    if (!editor || editor.isDestroyed) return null;
+    return editor.view.dom;
+  }, [editor]);
 
   // ── Send / Stop wiring ─────────────────────────────────────────────
   const dispatchSendInFlightKeysRef = useRef(new Set<string>());
@@ -8285,6 +8288,7 @@ export function ChatInput({
                     // composer 工具条(含新建对话框 create-agent)统一走脱身上浮 morph;
                     // settings/CreateWorker 不传该 prop → Radix 回退,不 morph。
                     useMorphPopover
+                    restoreFocusTarget={composerSuggestionFocusTarget}
                   />
                 </div>
                 <div

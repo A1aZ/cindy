@@ -8944,6 +8944,12 @@ export class CodexAgent extends BaseAgent {
       }
 
       if (turn.status === 'failed' || turn.status === 'interrupted') {
+        const claim = activeYieldContinuationClaim();
+        if (claim && !claimOwnsTurn(claim, turn.id)) {
+          latestPlanByTurn.delete(turn.id);
+          flushDeferredTerminalTurnCompletionsIfIdle();
+          return;
+        }
         // 失败 / 中断的 plan turn 不发审批 — 半截计划没有审批意义, 循环就此结束。
         proposedPlanText = null;
         planCycleActive = false;
@@ -8994,7 +9000,11 @@ export class CodexAgent extends BaseAgent {
       let yieldClaim: YieldContinuationClaim | null = null;
       let suppressSuccessfulYieldBoundary = false;
       if (existingYieldClaim && !claimOwnsTurn(existingYieldClaim, turn.id)) {
-        // A late foreign completed must not settle or retry the active claim.
+        // A late foreign completed must not settle the claim or emit an
+        // unclaimed product Done while the continuation is still running.
+        latestPlanByTurn.delete(turn.id);
+        flushDeferredTerminalTurnCompletionsIfIdle();
+        return;
       } else if (existingYieldClaim?.state === 'awaiting') {
         yieldClaim = existingYieldClaim;
         if (yieldedCells.length > 0) {

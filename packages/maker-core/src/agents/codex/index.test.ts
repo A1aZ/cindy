@@ -18569,6 +18569,8 @@ describe('CodexAgent yield continuation', () => {
       threadId: 'start-thread-id',
       turn: { id: 'old-foreign-turn', status: 'failed', error: { message: 'stale turn failed' } },
     });
+    expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
+    expect(events.find((event) => event.type === 'done' && event.turnContinuationId == null)).toBeUndefined();
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
     expect(handle.isTurnRunning?.()).toBe(true);
     await handle.close();
@@ -18626,6 +18628,8 @@ describe('CodexAgent yield continuation', () => {
       event.type === 'error'
       && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
     ))).toBe(false);
+    expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
+    expect(events.find((event) => event.type === 'done' && event.turnContinuationId == null)).toBeUndefined();
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
     expect(handle.isTurnRunning?.()).toBe(true);
     await handle.close();

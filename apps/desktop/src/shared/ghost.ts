@@ -646,6 +646,12 @@ export function ghostNetworkHostMatches(pattern: string, hostname: string): bool
   return hostname === pattern;
 }
 
+function ghostNetworkHostPatternWithinCap(actual: string, reviewed: string): boolean {
+  if (!actual.startsWith('*.')) return ghostNetworkHostMatches(reviewed, actual);
+  if (!reviewed.startsWith('*.')) return false;
+  return ghostNetworkHostMatches(reviewed, `cap-probe.${actual.slice(2)}`);
+}
+
 /**
  * 凭证注入声明:该凭证以什么形态、进哪些域名的请求头。绑定在 secret 上
  * (而非独立 auth 模板)是刻意的——结构上保证"key 只流向它声明的域名",
@@ -2494,6 +2500,15 @@ export function unreviewedGhostPermissionItems(
     ghostNodeSecretAuthorizationWithinCap(reviewed, actual) ||
     (previouslyInstalled !== undefined &&
       ghostNodeSecretAuthorizationWithinCap(previouslyInstalled, actual));
+  const networkHostApproved = (item: GhostPermissionItem): boolean => {
+    if (!item.key.startsWith('network:host:')) return false;
+    const actualPattern = item.key.slice('network:host:'.length);
+    return [reviewed, previouslyInstalled].some((cap) =>
+      cap?.network?.hosts.some((reviewedPattern) =>
+        ghostNetworkHostPatternWithinCap(actualPattern, reviewedPattern),
+      ),
+    );
+  };
   const oauthPermissionApproved = (item: GhostPermissionItem): boolean =>
     ghostOauthPermissionWithinCap(reviewed, actual, item) ||
     (previouslyInstalled !== undefined &&
@@ -2507,6 +2522,9 @@ export function unreviewedGhostPermissionItems(
       // preview 的展示 detail 包含完整 hosts；真实包删减 host 是收权，不应因
       // detail 字符串变化被反判成新增能力。新增或替换 host 仍会保留为未审查项。
       !(item.key === 'preview' && previewApproved) &&
+      // Network host 的展示 key 带声明模式；通配域收窄为具体域或更窄通配域
+      // 仍是收权，实际覆盖关系由专用上限比较守住。
+      !networkHostApproved(item) &&
       // Node secret 的展示 key 带完整 methods；换序或收窄是收权。URL/hint 与
       // entry 等 Host 实际消费字段由专用上限比较守住，不能依赖展示投影相等。
       !(item.key.startsWith('node:secret:') && nodeSecretsApproved) &&
@@ -2575,9 +2593,11 @@ export function ghostNetworkAuthorizationWithinCap(
   const reviewedNetwork = reviewed.network;
   if (!reviewedNetwork) return false;
 
-  const isStringSubset = (values: readonly string[], cap: readonly string[]): boolean =>
-    values.every((value) => cap.includes(value));
-  if (!isStringSubset(actualNetwork.hosts, reviewedNetwork.hosts)) return false;
+  const isHostPatternSubset = (values: readonly string[], cap: readonly string[]): boolean =>
+    values.every((value) =>
+      cap.some((reviewedPattern) => ghostNetworkHostPatternWithinCap(value, reviewedPattern)),
+    );
+  if (!isHostPatternSubset(actualNetwork.hosts, reviewedNetwork.hosts)) return false;
 
   const reviewedSecrets = new Map(
     (reviewedNetwork.secrets ?? []).map((secret) => [secret.key, secret] as const),
@@ -2590,7 +2610,7 @@ export function ghostNetworkAuthorizationWithinCap(
     }
     const actualHosts = secret.inject.hosts ?? actualNetwork.hosts;
     const reviewedHosts = cap.inject.hosts ?? reviewedNetwork.hosts;
-    if (!isStringSubset(actualHosts, reviewedHosts)) return false;
+    if (!isHostPatternSubset(actualHosts, reviewedHosts)) return false;
     if (secret.url !== undefined && secret.url !== cap.url) return false;
     if (secret.hint !== undefined && secret.hint !== cap.hint) return false;
     if (

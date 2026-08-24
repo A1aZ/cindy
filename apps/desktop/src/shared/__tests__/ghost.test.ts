@@ -4391,6 +4391,51 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
 });
 
 describe('ghostPermissionProjectionFingerprint', () => {
+  it('market cap accepts network wildcard hosts narrowed to covered host patterns', () => {
+    const manifest = (host: string) =>
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['panel', 'model', 'network'],
+        settingsHtml: 'settings.html',
+        network: {
+          hosts: [host],
+          secrets: [
+            {
+              key: 'api_token',
+              label: 'API Token',
+              inject: {
+                hosts: [host],
+                header: 'Authorization',
+                format: 'Bearer {value}',
+              },
+            },
+          ],
+        },
+      });
+    const reviewed = manifest('*.example.com');
+    const exact = manifest('api.example.com');
+    const narrowerWildcard = manifest('*.api.example.com');
+    const outside = manifest('api.example.net');
+    expect(reviewed.ok && exact.ok && narrowerWildcard.ok && outside.ok).toBe(true);
+    if (!reviewed.ok || !exact.ok || !narrowerWildcard.ok || !outside.ok) return;
+
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, exact.manifest)).toBe(true);
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, narrowerWildcard.manifest)).toBe(
+      true,
+    );
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, exact.manifest)).toEqual([]);
+    expect(
+      unreviewedGhostPermissionItems(reviewed.manifest, undefined, narrowerWildcard.manifest),
+    ).toEqual([]);
+    expect(ghostNetworkAuthorizationWithinCap(exact.manifest, narrowerWildcard.manifest)).toBe(
+      false,
+    );
+    expect(ghostNetworkAuthorizationWithinCap(narrowerWildcard.manifest, reviewed.manifest)).toBe(
+      false,
+    );
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, outside.manifest)).toBe(false);
+  });
+
   it('market cap compares network credential injection semantics, not only display items', () => {
     const reviewed = validateGhostManifest({
       ...goodChipManifest(),
@@ -4579,7 +4624,8 @@ describe('ghostPermissionProjectionFingerprint', () => {
     const [credentials, workspace] = reviewed.manifest.setup.requires;
     const withSetup = (requires: NonNullable<GhostManifest['setup']>['requires']): GhostManifest =>
       ({ ...reviewed.manifest, setup: { requires } });
-    const { setup: _setup, ...implicit } = reviewed.manifest;
+    const implicit = { ...reviewed.manifest };
+    delete implicit.setup;
     const explicitOptOut = withSetup([]);
 
     expect(

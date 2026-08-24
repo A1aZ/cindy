@@ -1181,6 +1181,8 @@ type YieldContinuationClaim = {
   pendingBoundaryEvents: number;
   settled: boolean;
   retryCount: number;
+  originTurnId: string;
+  continuationTurnId: string | null;
 };
 const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
   'no_listener_attached',
@@ -3133,6 +3135,7 @@ export class CodexAgent extends BaseAgent {
     let activeYieldContinuationId: number | null = null;
     let yieldContinuationInFlight = false;
     let yieldContinuationAbort: AbortController | null = null;
+    let yieldContinuationIdleWaiters: Array<() => void> = [];
     const emitYieldContinuationState = (
       continuationId: number,
       state: 'awaiting' | 'active' | 'cancelled',
@@ -3230,6 +3233,7 @@ export class CodexAgent extends BaseAgent {
     };
     const mintYieldContinuationClaim = (
       cells: YieldedExecCell[],
+      originTurnId: string,
       retryCount: number,
     ): YieldContinuationClaim => {
       const claim: YieldContinuationClaim = {
@@ -3240,15 +3244,39 @@ export class CodexAgent extends BaseAgent {
         pendingBoundaryEvents: 0,
         settled: false,
         retryCount,
+        originTurnId,
+        continuationTurnId: null,
       };
       yieldContinuationClaims.set(claim.id, claim);
       activeYieldContinuationId = claim.id;
       log.info('yield continuation claim created', {
         continuationId: claim.id,
+        originTurnId,
         cellIds: cells.map((cell) => cell.cellId),
         retryCount,
       });
       return claim;
+    };
+    const claimOwnsTurn = (claim: YieldContinuationClaim, turnId: string | null | undefined): boolean => {
+      if (!turnId) return false;
+      return claim.originTurnId === turnId || claim.continuationTurnId === turnId;
+    };
+    const bindYieldContinuationTurn = (turnId: string): void => {
+      const claim = activeYieldContinuationClaim();
+      if (!claim || claim.settled || claim.continuationTurnId) return;
+      claim.continuationTurnId = turnId;
+    };
+    const flushYieldContinuationIdleWaiters = (): void => {
+      if (activeYieldContinuationClaim() != null || yieldContinuationInFlight) return;
+      const waiters = yieldContinuationIdleWaiters;
+      yieldContinuationIdleWaiters = [];
+      for (const resolve of waiters) resolve();
+    };
+    const waitForYieldContinuationIdle = async (): Promise<void> => {
+      if (activeYieldContinuationClaim() == null && !yieldContinuationInFlight) return;
+      await new Promise<void>((resolve) => {
+        yieldContinuationIdleWaiters.push(resolve);
+      });
     };
     const cancelActiveYieldContinuation = (reason: string): YieldContinuationClaim | null => {
       const claim = activeYieldContinuationClaim();
@@ -3261,6 +3289,7 @@ export class CodexAgent extends BaseAgent {
       log.info('yield continuation cancelled', { reason, continuationId: claim.id });
       emitYieldContinuationState(claim.id, 'cancelled');
       releaseSettledYieldContinuationClaim(claim);
+      flushYieldContinuationIdleWaiters();
       return claim;
     };
     const discardYieldContinuationClaims = (reason: string): void => {
@@ -3279,6 +3308,7 @@ export class CodexAgent extends BaseAgent {
         releaseSettledYieldContinuationClaim(claim);
       }
       yieldContinuationClaims.clear();
+      flushYieldContinuationIdleWaiters();
     };
     const releaseYieldContinuationEvent = (event: AgentEvent): void => {
       if (event.turnContinuationId === undefined) return;
@@ -5957,6 +5987,8 @@ export class CodexAgent extends BaseAgent {
         );
         log.debug('plan review ◀ approved — starting implementation turn', { turnId, edited: Boolean(edited && edited !== plan.trim()) });
         try {
+          await waitForYieldContinuationIdle();
+          if (closed) return;
           await handle.send(
             { type: 'user', content: message },
             planFollowUpSendOptions(
@@ -5985,6 +6017,8 @@ export class CodexAgent extends BaseAgent {
       }
       log.debug('plan review ◀ revision requested — starting plan revision turn', { turnId });
       try {
+        await waitForYieldContinuationIdle();
+        if (closed) return;
         await handle.send(
           { type: 'user', content: feedback },
           // 修订轮同样带上原始审查意图快照:否则 send 会把 auto-review intent 覆盖成这条修改意见,
@@ -6290,6 +6324,8 @@ export class CodexAgent extends BaseAgent {
       autoReviewIntent?: string,
     ): Promise<void> {
       if (closed) return;
+      await waitForYieldContinuationIdle();
+      if (closed) return;
       const message = formatAskUserContinuationMessage(live.questions, answers);
       const sendOptions: CodexInternalSendOptions = {
         ...(live.permissionPolicy ? { turnPermissionPolicy: live.permissionPolicy } : {}),
@@ -6483,6 +6519,7 @@ export class CodexAgent extends BaseAgent {
       const isNewTurn = currentTurnId !== turnId;
       currentTurnId = turnId;
       isTurnInFlight = true;
+      bindYieldContinuationTurn(turnId);
       if (!isNewTurn) return;
 
       resetCodexGenerationTiming(translatorRt);
@@ -8778,7 +8815,10 @@ export class CodexAgent extends BaseAgent {
       } else {
         dismissPendingUserInputForTurn(turn.id, `turn_${turn.status}`);
         yieldedExecCellsByTurnId.delete(turn.id);
-        cancelActiveYieldContinuation(`turn_${turn.status}`);
+        const claim = activeYieldContinuationClaim();
+        if (claim && claimOwnsTurn(claim, turn.id)) {
+          cancelActiveYieldContinuation(`turn_${turn.status}`);
+        }
       }
       clearActiveToolContextsForTurn(turn.id);
       const overlapsActiveTurn = suppressTerminalUi && currentTurnId !== null && currentTurnId !== turn.id;
@@ -8971,17 +9011,19 @@ export class CodexAgent extends BaseAgent {
         if (outstandingCells.length === 0) {
           // Continuation waited the claimed cell(s) to completion. This is the
           // product terminal, not a lost handle.
+          flushYieldContinuationIdleWaiters();
         } else if (yieldedCells.length === 0 || retryCount >= YIELD_CONTINUATION_MAX_ATTEMPTS) {
           emitYieldContinuationLostHandle(
             outstandingCells,
             yieldedCells.length === 0 ? 'empty_completion' : 'retry_exhausted',
           );
           suppressSuccessfulYieldBoundary = true;
+          flushYieldContinuationIdleWaiters();
         } else {
-          yieldClaim = mintYieldContinuationClaim(outstandingCells, retryCount);
+          yieldClaim = mintYieldContinuationClaim(outstandingCells, turn.id, retryCount);
         }
       } else if (yieldedCells.length > 0) {
-        yieldClaim = mintYieldContinuationClaim(yieldedCells, 0);
+        yieldClaim = mintYieldContinuationClaim(yieldedCells, turn.id, 0);
       }
       if (!suppressSuccessfulYieldBoundary) {
         const idleStatusEvent: AgentEvent = {

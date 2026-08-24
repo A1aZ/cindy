@@ -84,6 +84,9 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   续段 `turn/start` 已被服务端接受后若本地取消，必须先凭响应里的 turn id 落墓碑并
   best-effort interrupt，再抛/返回取消；`wait` 仍输出 running marker 视为 cell
   存活证据，重试预算内继续等，不得当空续段报 lost-handle。
+  claim 只归属于铸造它的 origin turn 及其续段 turn；迟到的外族 `failed`／
+  `interrupted` 不得取消当前 claim。同一产品 turn 上的 ask_user／plan 内部续段
+  必须等 yield 空闲后再 `turn/start`，不得并发。
   Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。
 
 ## 3. 守住四项核心数据指标

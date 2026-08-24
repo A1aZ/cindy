@@ -13,6 +13,7 @@ import {
   MAX_TRANSPORT_PENDING_MESSAGES,
   MAX_TRANSPORT_WEBSOCKET_BUFFERED_BYTES,
   TRANSPORT_PENDING_PUSH_MAX_AGE_MS,
+  TRANSPORT_MAX_RETRY_ATTEMPTS,
   TRANSPORT_RETRY_PASS_BUDGET,
   encodeReliableFrames,
   makeTransportSkipPayload,
@@ -4848,11 +4849,11 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     const relay = new MemoryRelay();
     const host = makeRelayClient(relay, 'desktop', {
       transportRetryIntervalMs: 20,
-      transportMaxRetryAttempts: 3,
+      transportMaxRetryAttempts: TRANSPORT_MAX_RETRY_ATTEMPTS,
     });
     const controller = makeRelayClient(relay, 'ios', {
       transportRetryIntervalMs: 20,
-      transportMaxRetryAttempts: 3,
+      transportMaxRetryAttempts: TRANSPORT_MAX_RETRY_ATTEMPTS,
     });
     const receivedInvokes: Envelope[] = [];
     const offHost = host.onFrame((env) => {
@@ -4897,10 +4898,11 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     ));
     // 第一包确认被丢弃后，host 收到首个重试便会恢复发送；但在其首个可靠业务帧
     // 回到 controller、取消确认计时器之前，下一次 20ms 重试可能已经进入 relay。
-    // Windows runner 更容易命中这个合法竞态，因此这里只约束协议不变量：至少
-    // 有一次确认送达，且不会超过首包丢失后的剩余重试预算，也不跨 request 代际。
+    // Windows runner 会合并相邻的短 timer；这里沿用生产默认的有界重试次数，
+    // 避免测试专用的过窄确认窗口先于合法重试耗尽。断言仍只约束协议不变量：
+    // 至少有一次确认送达，且不会超过首包丢失后的剩余重试预算，也不跨 request 代际。
     expect(confirmationAcks.length).toBeGreaterThanOrEqual(1);
-    expect(confirmationAcks.length).toBeLessThanOrEqual(3);
+    expect(confirmationAcks.length).toBeLessThanOrEqual(TRANSPORT_MAX_RETRY_ATTEMPTS);
     expect(confirmationAcks.every((env) => (
       parseTransportAck(env)?.linkRequestId === linkRequestId
     ))).toBe(true);

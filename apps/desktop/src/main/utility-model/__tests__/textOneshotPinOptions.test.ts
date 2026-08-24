@@ -89,12 +89,13 @@ describe('buildTextOneshotPinOptions', () => {
     expect(options).toEqual([
       {
         id: 'cat:xd:codex:codex/gpt-5.5',
-        label: 'GPT 5.5 折扣 · Cindy Gateway',
+        label: 'GPT 5.5 折扣 · Cindy Gateway · Codex',
         group: 'Cindy Gateway',
         providerId: 'xd',
         agentKind: 'codex',
         modelId: 'codex/gpt-5.5',
         modelName: 'GPT 5.5 折扣',
+        agentSuffix: 'Codex',
         budget: true,
         subscription: false,
         routing: {
@@ -104,12 +105,13 @@ describe('buildTextOneshotPinOptions', () => {
       },
       {
         id: 'cat:openai:codex:gpt-5.5',
-        label: 'GPT 5.5 · OpenAI',
+        label: 'GPT 5.5 · OpenAI · Codex',
         group: 'OpenAI',
         providerId: 'openai',
         agentKind: 'codex',
         modelId: 'gpt-5.5',
         modelName: 'GPT 5.5',
+        agentSuffix: 'Codex',
         budget: false,
         subscription: true,
         routing: { codex: { upstream: 'https://api.example.com', authStrategy: 'oauth-token' } },
@@ -270,7 +272,7 @@ describe('buildTextOneshotPinOptions', () => {
     ]);
   });
 
-  it('内置供应商同一模型跨 agent 折叠成一行(agent 不影响出线);自定义保留两行补后缀', () => {
+  it('每个 Agent + Model 路由独立成行并始终标注 Agent', () => {
     const options = buildTextOneshotPinOptions(
       catalogOf(
         provider({
@@ -296,11 +298,37 @@ describe('buildTextOneshotPinOptions', () => {
       undefined,
     );
     expect(options.map((o) => [o.id, o.label])).toEqual([
-      // 内置:折叠成 codex 行,无后缀。
-      ['cat:xd:codex:gpt-5.5', 'GPT 5.5 · GW'],
-      // 自定义:两条真路由,都补 agent 后缀。
+      ['cat:xd:codex:gpt-5.5', 'GPT 5.5 · GW · Codex'],
+      ['cat:xd:claude-code:gpt-5.5', 'GPT 5.5 · GW · Claude Code'],
       ['cat:dual:codex:gpt-5.5', 'GPT 5.5 · Dual · Codex'],
       ['cat:dual:claude-code:gpt-5.5', 'GPT 5.5 · Dual · Claude Code'],
+    ]);
+    expect(options.map((o) => o.agentSuffix)).toEqual([
+      'Codex',
+      'Claude Code',
+      'Codex',
+      'Claude Code',
+    ]);
+  });
+
+  it('同一供应商下完全相同的 Agent + Model 路由只显示一次', () => {
+    const options = buildTextOneshotPinOptions(
+      catalogOf(
+        provider({
+          id: 'xd',
+          models: {
+            codex: [
+              chat('gpt-5.5', { name: 'GPT 5.5' }),
+              chat('gpt-5.5', { name: 'GPT 5.5 duplicate' }),
+            ],
+          },
+        }),
+      ),
+      undefined,
+    );
+
+    expect(options.map((o) => [o.id, o.label])).toEqual([
+      ['cat:xd:codex:gpt-5.5', 'GPT 5.5 · xd · Codex'],
     ]);
   });
 

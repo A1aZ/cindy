@@ -2531,7 +2531,7 @@
     },
     "auxiliaryModels": {
       "title": "Auxiliary models",
-      "description": "Choose separate models for automatic task naming and composer prompt suggestions.",
+      "description": "Choose one Agent and model pair for automatic task naming and another for composer prompt suggestions.",
       "sessionTitle": {
         "label": "Automatic task naming",
         "description": "Applies to Claude Code, Codex, and Pi tasks, plus manual AI renaming.",
@@ -2544,8 +2544,8 @@
         "ariaLabel": "Choose the composer prompt suggestion model",
         "automatic": "Automatic (keep current routing)"
       },
-      "explicitRouteHint": "An explicit selection uses only that model. If it is unavailable, Cindy will not switch providers.",
-      "searchPlaceholder": "Search models or providers",
+      "explicitRouteHint": "An explicit selection uses only that Agent and model. If unavailable, Cindy will not switch automatically.",
+      "searchPlaceholder": "Search Agents, models, or providers",
       "noResults": "No available models",
       "unavailable": "Currently unavailable",
       "budget": "Discount",

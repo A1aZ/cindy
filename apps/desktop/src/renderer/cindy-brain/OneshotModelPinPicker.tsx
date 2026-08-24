@@ -30,9 +30,19 @@ export interface OneshotPinOption {
   subscription: boolean;
   /** Provider['routing'](IPC 载荷;ProviderLogoMark 的厂牌图标判定用)。 */
   routing?: import('@cindy/model-providers').Provider['routing'];
+  /** Agent used by this exact route. Older snapshots may omit it. */
   agentSuffix?: string;
   /** False for a persisted route that is no longer offered or currently usable. */
   available?: boolean;
+}
+
+function optionAgentLabel(option: OneshotPinOption): string {
+  return option.agentSuffix
+    ?? (option.agentKind === 'claude-code'
+      ? 'Claude Code'
+      : option.agentKind === 'codex'
+        ? 'Codex'
+        : option.agentKind);
 }
 
 export function OneshotModelPinPicker({
@@ -95,12 +105,28 @@ export function OneshotModelPinPicker({
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const visible = options.filter((option) => option.available !== false || option.id === value);
+    const visible: OneshotPinOption[] = [];
+    const indexByRouteName = new Map<string, number>();
+    for (const option of options) {
+      if (option.available === false && option.id !== value) continue;
+      const routeName = `${option.providerId}\n${option.agentKind}\n${option.modelName.trim().toLowerCase()}`;
+      const existingIndex = indexByRouteName.get(routeName);
+      if (existingIndex === undefined) {
+        indexByRouteName.set(routeName, visible.length);
+        visible.push(option);
+        continue;
+      }
+      const existing = visible[existingIndex]!;
+      if (existing.id !== value && (option.id === value || existing.available === false)) {
+        visible[existingIndex] = option;
+      }
+    }
     if (!q) return visible;
     return visible.filter(
       (o) =>
         o.modelName.toLowerCase().includes(q)
         || o.modelId.toLowerCase().includes(q)
+        || optionAgentLabel(o).toLowerCase().includes(q)
         || o.group.toLowerCase().includes(q),
     );
   }, [options, query, value]);
@@ -249,11 +275,9 @@ export function OneshotModelPinPicker({
                             <span className="truncate text-14 font-medium leading-5 text-[var(--model-item-text)]">
                               {o.modelName}
                             </span>
-                            {o.agentSuffix && (
-                              <span className="shrink-0 text-13 font-normal text-[var(--text-tertiary)]">
-                                {o.agentSuffix}
-                              </span>
-                            )}
+                            <span className="shrink-0 text-13 font-normal text-[var(--text-tertiary)]">
+                              · {optionAgentLabel(o)}
+                            </span>
                             {unavailable && (
                               <span className="shrink-0 text-11 font-normal text-[var(--text-tertiary)]">
                                 {unavailableLabel ?? t('settings.auxiliaryModels.unavailable')}

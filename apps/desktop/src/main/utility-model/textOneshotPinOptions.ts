@@ -125,7 +125,7 @@ function routingForRenderer(routing: Provider['routing']): Provider['routing'] {
 export interface TextOneshotPinOption {
   /** 钉值(cat: 编码)。 */
   id: string;
-  /** 兜底行文案:`<模型名> · <供应商名>`(跨 agent 重复补 agent 后缀)。 */
+  /** 兜底行文案:`<模型名> · <供应商名> · <Agent>`。 */
   label: string;
   /** 分组(供应商显示名)。 */
   group: string;
@@ -144,8 +144,8 @@ export interface TextOneshotPinOption {
   subscription: boolean;
   /** 供应商路由描述(渲染层厂牌图标判定用,ProviderLogoMark)。 */
   routing?: Provider['routing'];
-  /** 同供应商同模型跨 agent 重复时的后缀('Codex' / 'Claude Code');不重复缺省。 */
-  agentSuffix?: string;
+  /** 该精确路由使用的 Agent('Codex' / 'Claude Code')。 */
+  agentSuffix: string;
 }
 
 /**
@@ -187,51 +187,29 @@ export function buildTextOneshotPinOptions(
   hasCredential?: OneshotCredentialProbe,
 ): TextOneshotPinOption[] {
   const entries: { provider: Provider; agentKind: (typeof ONESHOT_ROUTE_AGENTS)[number]; model: CatalogModel }[] = [];
+  const seenRoutes = new Set<string>();
   for (const provider of orderedProviders(catalog, providerOrder)) {
     if (isProviderDisabled(overrides, provider.id)) continue;
-    if (provider.source === 'builtin') {
-      // 内置四家的执行与凭证都与 agent 无关(xd 网关的请求连 agent 都不看;
-      // 订阅登录态是账号级)——同一模型只出一行,agent 取首个可路由且有凭证
-      // 的(codex 优先,与 resolveOneshotCatalogModel 同偏好)。
-      const seen = new Set<string>();
-      for (const agentKind of ONESHOT_ROUTE_AGENTS) {
-        if (!isRoutableForOneshot(provider, agentKind)) continue;
-        if (hasCredential && !hasCredential(provider, agentKind)) continue;
-        for (const model of displayOrderedModels(provider.models[agentKind] ?? [])) {
-          if (seen.has(model.id)) continue;
-          if (!isChatModel(model, provider)) continue;
-          if (isModelDisabled(overrides, provider.id, model.id)) continue;
-          seen.add(model.id);
-          entries.push({ provider, agentKind, model });
-        }
-      }
-      continue;
-    }
-    // 自定义供应商:agent 决定 wire / 凭证 / 上游,(供应商×模型) 跨 agent 是
-    // 两条真路由,各自成行(渲染层补 agent 后缀区分)。
+    // Agent 决定模型可见性和实际 wire。即使内置供应商的两条路由最终共享
+    // 凭证或上游，也分别展示并保存，让用户选择一组确定的 Agent + Model。
     for (const agentKind of ONESHOT_ROUTE_AGENTS) {
       if (!isRoutableForOneshot(provider, agentKind)) continue;
       if (hasCredential && !hasCredential(provider, agentKind)) continue;
       for (const model of displayOrderedModels(provider.models[agentKind] ?? [])) {
         if (!isChatModel(model, provider)) continue;
         if (isModelDisabled(overrides, provider.id, model.id)) continue;
+        const routeKey = `${provider.id}\n${agentKind}\n${model.id}`;
+        if (seenRoutes.has(routeKey)) continue;
+        seenRoutes.add(routeKey);
         entries.push({ provider, agentKind, model });
       }
     }
   }
-  // 同供应商同模型 id 跨 agent 重复时,两边都补 agent 后缀(否则两行同名选不中)。
-  // 键带分隔符:裸拼接 ('ab','cd') 与 ('a','bcd') 会撞键误判重复。
-  const counts = new Map<string, number>();
-  for (const e of entries) {
-    const key = `${e.provider.id}\n${e.model.id}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
   return entries.map((e) => {
     const base = `${e.model.name} · ${e.provider.name}`;
-    const dup = (counts.get(`${e.provider.id}\n${e.model.id}`) ?? 0) > 1;
     return {
       id: encodeCatalogPin(e.provider.id, e.agentKind, e.model.id),
-      label: dup ? `${base} · ${AGENT_LABEL[e.agentKind]}` : base,
+      label: `${base} · ${AGENT_LABEL[e.agentKind]}`,
       group: e.provider.name,
       providerId: e.provider.id,
       agentKind: e.agentKind,
@@ -242,7 +220,7 @@ export function buildTextOneshotPinOptions(
       budget: classifyModel(e.model) === 'gpt-budget',
       subscription: e.provider.access?.kind === 'subscription',
       ...(e.provider.routing !== undefined ? { routing: routingForRenderer(e.provider.routing) } : {}),
-      ...(dup ? { agentSuffix: AGENT_LABEL[e.agentKind] } : {}),
+      agentSuffix: AGENT_LABEL[e.agentKind],
     };
   });
 }

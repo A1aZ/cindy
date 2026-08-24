@@ -35,7 +35,8 @@ export interface AuxiliaryModelOption {
   budget: boolean;
   subscription: boolean;
   routing?: Provider['routing'];
-  agentSuffix?: string;
+  /** Agent used by this exact auxiliary route. */
+  agentSuffix: string;
   /** False only for a persisted selection that is no longer currently usable. */
   available: boolean;
 }

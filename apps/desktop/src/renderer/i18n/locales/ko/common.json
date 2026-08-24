@@ -2530,7 +2530,7 @@
     },
     "auxiliaryModels": {
       "title": "보조 모델",
-      "description": "작업 자동 이름 지정과 입력창 추천 프롬프트에 각각 다른 모델을 지정합니다.",
+      "description": "작업 자동 이름 지정과 입력창 추천 프롬프트에 각각 Agent와 모델 조합을 지정합니다.",
       "sessionTitle": {
         "label": "작업 자동 이름 지정",
         "description": "Claude Code, Codex, Pi 작업과 AI 수동 이름 바꾸기에 적용됩니다.",
@@ -2543,8 +2543,8 @@
         "ariaLabel": "입력창 추천 프롬프트 모델 선택",
         "automatic": "자동 선택(현재 라우팅 유지)"
       },
-      "explicitRouteHint": "명시적으로 지정하면 해당 모델만 사용합니다. 사용할 수 없어도 다른 제공자로 전환하지 않습니다.",
-      "searchPlaceholder": "모델 또는 제공자 검색",
+      "explicitRouteHint": "명시적으로 지정하면 해당 Agent와 모델만 사용합니다. 사용할 수 없어도 자동으로 전환하지 않습니다.",
+      "searchPlaceholder": "Agent, 모델 또는 제공자 검색",
       "noResults": "사용 가능한 모델이 없습니다",
       "unavailable": "현재 사용할 수 없음",
       "budget": "할인",

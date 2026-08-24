@@ -81,7 +81,7 @@ export function buildAuxiliaryModelOptions(args: {
     if (!decoded) continue;
     result.push({
       id: pin,
-      label: `${decoded.model} · ${decoded.providerId}`,
+      label: `${decoded.model} · ${decoded.providerId} · ${decoded.agentKind === 'codex' ? 'Codex' : 'Claude Code'}`,
       group: decoded.providerId,
       providerId: decoded.providerId,
       agentKind: decoded.agentKind,

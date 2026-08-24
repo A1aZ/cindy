@@ -2530,7 +2530,7 @@
     },
     "auxiliaryModels": {
       "title": "補助モデル",
-      "description": "タスクの自動命名と入力欄のおすすめプロンプトに、それぞれ別のモデルを指定します。",
+      "description": "タスクの自動命名と入力欄のおすすめプロンプトに、それぞれ Agent とモデルの組み合わせを指定します。",
       "sessionTitle": {
         "label": "タスクの自動命名",
         "description": "Claude Code、Codex、Pi のタスクと、AI による手動の名前変更に適用されます。",
@@ -2543,8 +2543,8 @@
         "ariaLabel": "入力欄のおすすめプロンプト用モデルを選択",
         "automatic": "自動選択（現在のルーティングを維持）"
       },
-      "explicitRouteHint": "明示的に指定した場合は、そのモデルだけを使用します。利用できなくても、別のプロバイダーには切り替えません。",
-      "searchPlaceholder": "モデルまたはプロバイダーを検索",
+      "explicitRouteHint": "明示的に指定した場合は、その Agent とモデルだけを使用します。利用できなくても自動では切り替えません。",
+      "searchPlaceholder": "Agent、モデル、プロバイダーを検索",
       "noResults": "利用可能なモデルがありません",
       "unavailable": "現在利用不可",
       "budget": "割引",

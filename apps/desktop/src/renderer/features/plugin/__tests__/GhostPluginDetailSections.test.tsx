@@ -700,17 +700,43 @@ describe('Ghost plugin detail sections', () => {
                   agentKind: 'codex',
                   modelId: 'codex/gpt-5.5',
                   modelName: 'GPT 5.5 折扣',
+                  agentSuffix: 'Codex',
                   budget: true,
                   subscription: false,
                 },
                 {
                   id: 'cat:openai:codex:gpt-5.5',
-                  label: 'GPT 5.5 · OpenAI',
+                  label: 'GPT 5.5 · OpenAI · Codex',
                   group: 'OpenAI',
                   providerId: 'openai',
                   agentKind: 'codex',
                   modelId: 'gpt-5.5',
                   modelName: 'GPT 5.5',
+                  agentSuffix: 'Codex',
+                  budget: false,
+                  subscription: true,
+                },
+                {
+                  id: 'cat:openai:codex:chatgpt/gpt-5.5',
+                  label: 'GPT 5.5 · OpenAI · Codex',
+                  group: 'OpenAI',
+                  providerId: 'openai',
+                  agentKind: 'codex',
+                  modelId: 'chatgpt/gpt-5.5',
+                  modelName: 'GPT 5.5',
+                  agentSuffix: 'Codex',
+                  budget: false,
+                  subscription: true,
+                },
+                {
+                  id: 'cat:openai:claude-code:chatgpt/gpt-5.5',
+                  label: 'GPT 5.5 · OpenAI · Claude Code',
+                  group: 'OpenAI',
+                  providerId: 'openai',
+                  agentKind: 'claude-code',
+                  modelId: 'chatgpt/gpt-5.5',
+                  modelName: 'GPT 5.5',
+                  agentSuffix: 'Claude Code',
                   budget: false,
                   subscription: true,
                 },
@@ -741,8 +767,14 @@ describe('Ghost plugin detail sections', () => {
     );
     // 折扣徽标只出现在预算行;订阅徽标只出现在订阅行。
     const budgetRow = within(listbox).getByText('GPT 5.5 折扣').closest('button')!;
+    expect(within(budgetRow).getByText(/Codex/)).toBeTruthy();
     expect(within(budgetRow).getByText('settings.ghosts.detail.cindyPrefs.budgetBadge')).toBeTruthy();
-    const plainRow = within(listbox).getByText('GPT 5.5', { exact: true }).closest('button')!;
+    const plainRows = within(listbox)
+      .getAllByText('GPT 5.5', { exact: true })
+      .map((modelName) => modelName.closest('button')!);
+    expect(plainRows).toHaveLength(2);
+    const plainRow = plainRows.find((row) => row.textContent?.includes('Codex'))!;
+    expect(plainRows.some((row) => row.textContent?.includes('Claude Code'))).toBe(true);
     expect(
       within(plainRow).queryByText('settings.ghosts.detail.cindyPrefs.budgetBadge'),
     ).toBeNull();

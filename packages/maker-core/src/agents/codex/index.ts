@@ -3150,6 +3150,14 @@ export class CodexAgent extends BaseAgent {
       if (!claim.settled || claim.pendingBoundaryEvents > 0) return;
       yieldContinuationClaims.delete(claim.id);
     };
+    const yieldItemLedgerKey = (record: Record<string, unknown> | null): string => {
+      if (!record) return '';
+      for (const key of ['id', 'call_id', 'callId'] as const) {
+        const value = record[key];
+        if (typeof value === 'string' && value.trim()) return value;
+      }
+      return '';
+    };
     const abortYieldContinuationSend = (): void => {
       const pending = yieldContinuationAbort;
       yieldContinuationAbort = null;
@@ -3185,15 +3193,16 @@ export class CodexAgent extends BaseAgent {
       const record = item && typeof item === 'object' && !Array.isArray(item)
         ? item as Record<string, unknown>
         : null;
-      const itemId = typeof record?.id === 'string' && record.id
-        ? record.id
-        : '';
+      const itemId = yieldItemLedgerKey(record);
       const cells = extractYieldedExecCellsFromCodexItem(item);
       const existing = yieldedExecCellsByTurnId.get(turnId) ?? new Map<string, YieldedExecCell[]>();
       if (cells.length === 0) {
-        if (phase === 'completed') existing.delete(itemId);
-      } else {
+        if (phase === 'completed' && itemId) existing.delete(itemId);
+      } else if (itemId) {
         existing.set(itemId, cells);
+      } else {
+        const anonymous = existing.get('') ?? [];
+        existing.set('', dedupeCells([...anonymous, ...cells]));
       }
       if (existing.size === 0) yieldedExecCellsByTurnId.delete(turnId);
       else yieldedExecCellsByTurnId.set(turnId, existing);

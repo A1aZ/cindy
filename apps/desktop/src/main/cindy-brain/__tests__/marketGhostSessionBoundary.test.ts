@@ -43,9 +43,13 @@ describe('market Ghost session boundary', () => {
     expect(installBody).toContain(
       'afterCommit: async (_installed, packagedManifest) => {',
     );
-    expect(installBody).toContain(
-      'requireSameMarketOwner(owner, { allowPendingBoundary: true });',
+    const afterCommitStart = installBody.indexOf(
+      'afterCommit: async (_installed, packagedManifest) => {',
     );
+    const afterCommitEnd = installBody.indexOf('\n          },\n        }).catch', afterCommitStart);
+    const afterCommitBody = installBody.slice(afterCommitStart, afterCommitEnd);
+    expect(afterCommitBody).toContain('this.withCapturedLedgerMutation(ledger, () => {');
+    expect(afterCommitBody).not.toContain('requireSameMarketOwner(');
     expect(automaticBody).toContain('          true,\n          owner,\n        );');
   });
 
@@ -66,9 +70,13 @@ describe('market Ghost session boundary', () => {
     expect(firstAfterCommit).toBeGreaterThan(-1);
     expect(updateAfterCommit).toBeGreaterThan(firstAfterCommit);
     expect(release).toBeGreaterThan(updateAfterCommit);
-    expect(marketServiceSource).toContain(
-      'afterCommitInLock: async (committed) => {\n          requireSameMarketOwner(owner, { allowPendingBoundary: true });',
+    const serverCommitStart = marketServiceSource.indexOf(
+      'afterCommitInLock: async (committed) => {',
     );
+    const serverCommitEnd = marketServiceSource.indexOf('\n        },\n      }).catch', serverCommitStart);
+    const serverCommitBody = marketServiceSource.slice(serverCommitStart, serverCommitEnd);
+    expect(serverCommitBody).toContain('this.withCapturedLedgerMutation(ledger, () => {');
+    expect(serverCommitBody).not.toContain('requireSameMarketOwner(');
   });
 
   it('requires the pre-approval session generation when acquiring the mutation lease', () => {

@@ -319,6 +319,11 @@ describe('outboundFetch', () => {
     const dispatchSpy = vi.spyOn(ProxyAgent.prototype, 'dispatch');
     const controller = {} as Dispatcher.DispatchController;
     const responseError = vi.fn();
+    let authorizeRetry!: () => void;
+    const retryAuthorization = new Promise<void>((resolve) => {
+      authorizeRetry = resolve;
+    });
+    const beforeRetry = vi.fn(() => retryAuthorization);
     try {
       dispatchSpy
         .mockImplementationOnce((_options, handler) => {
@@ -339,6 +344,7 @@ describe('outboundFetch', () => {
         },
         new URL('https://api.example.com/data'),
         ['203.0.113.10', '203.0.113.11'],
+        beforeRetry,
       );
 
       dispatcher.dispatch(
@@ -346,7 +352,10 @@ describe('outboundFetch', () => {
         { onRequestStart: vi.fn(), onResponseError: responseError },
       );
 
-      expect(dispatchSpy).toHaveBeenCalledTimes(2);
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(beforeRetry).toHaveBeenCalledTimes(1));
+      authorizeRetry();
+      await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(2));
       expect(dispatchSpy.mock.calls.map(([options]) => options.origin)).toEqual([
         'https://203.0.113.10',
         'https://203.0.113.11',
@@ -356,6 +365,43 @@ describe('outboundFetch', () => {
         controller,
         expect.objectContaining({ message: 'request failed after start' }),
       );
+      await dispatcher.close();
+    } finally {
+      dispatchSpy.mockRestore();
+    }
+  });
+
+  it('does not try another proxy target when retry authorization has expired', async () => {
+    const dispatchSpy = vi.spyOn(ProxyAgent.prototype, 'dispatch');
+    const controller = {} as Dispatcher.DispatchController;
+    const responseError = vi.fn();
+    const authorizationError = new Error('authorization expired');
+    try {
+      dispatchSpy.mockImplementationOnce((_options, handler) => {
+        handler.onResponseError?.(controller, new Error('first address unreachable'));
+        return true;
+      });
+      const dispatcher = createPinnedProxyDispatcher(
+        {
+          kind: 'http',
+          url: 'http://127.0.0.1:7890',
+          hostname: '127.0.0.1',
+          port: 7890,
+        },
+        new URL('https://api.example.com/data'),
+        ['203.0.113.10', '203.0.113.11'],
+        () => Promise.reject(authorizationError),
+      );
+
+      dispatcher.dispatch(
+        { origin: 'https://api.example.com', path: '/data', method: 'POST', body: 'payload' },
+        { onResponseError: responseError },
+      );
+
+      await vi.waitFor(() =>
+        expect(responseError).toHaveBeenCalledWith(controller, authorizationError),
+      );
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
       await dispatcher.close();
     } finally {
       dispatchSpy.mockRestore();

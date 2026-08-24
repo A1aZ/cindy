@@ -495,6 +495,7 @@ export function createPinnedProxyDispatcher(
   proxy: OutboundProxyTarget,
   upstream: URL,
   addresses: readonly string[],
+  beforeRetry: () => void | Promise<void>,
 ): Dispatcher {
   if (addresses.length === 0) throw new Error(`Unable to resolve hostname: ${upstream.hostname}`);
   const base = createProxyDispatcher(
@@ -508,67 +509,78 @@ export function createPinnedProxyDispatcher(
       options: Dispatcher.DispatchOptions,
       handler: Dispatcher.DispatchHandler,
     ): boolean {
-      const dispatchFrom = (startIndex: number): boolean => {
-        let lastError: unknown;
-        for (let index = startIndex; index < addresses.length; index += 1) {
-          const address = addresses[index]!;
-          let requestStarted = false;
-          const attemptHandler: Dispatcher.DispatchHandler = {
-            onRequestStart(controller, context) {
-              requestStarted = true;
-              handler.onRequestStart?.(controller, context);
-            },
-            onRequestUpgrade(controller, statusCode, headers, socket) {
-              handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
-            },
-            onResponseStart(controller, statusCode, headers, statusMessage) {
-              handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
-            },
-            onResponseData(controller, chunk) {
-              handler.onResponseData?.(controller, chunk);
-            },
-            onResponseEnd(controller, trailers) {
-              handler.onResponseEnd?.(controller, trailers);
-            },
-            onResponseError(controller, error) {
-              // HTTPS CONNECT / SOCKS5 握手失败发生在 onRequestStart 之前；一旦请求开始，
-              // 就不能为了换 IP 而重放可能产生副作用的 POST。
-              if (!requestStarted && !controller.aborted && index + 1 < addresses.length) {
-                try {
-                  dispatchFrom(index + 1);
-                } catch (nextError) {
-                  handler.onResponseError?.(
-                    controller,
-                    nextError instanceof Error ? nextError : new Error(String(nextError)),
-                  );
-                }
-                return;
-              }
-              handler.onResponseError?.(controller, error);
-            },
-            onResponseStarted() {
-              handler.onResponseStarted?.();
-            },
-            onBodySent(chunk) {
-              handler.onBodySent?.(chunk);
-            },
-            onRequestSent() {
-              handler.onRequestSent?.();
-            },
-          };
-          try {
-            return base.dispatch(
-              rewritePinnedProxyDispatchOptions(options, upstream, address),
-              attemptHandler,
-            );
-          } catch (error) {
-            lastError = error;
-          }
-        }
-        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      const dispatchAt = (index: number): boolean => {
+        const address = addresses[index]!;
+        let requestStarted = false;
+        const attemptHandler: Dispatcher.DispatchHandler = {
+          onRequestStart(controller, context) {
+            requestStarted = true;
+            handler.onRequestStart?.(controller, context);
+          },
+          onRequestUpgrade(controller, statusCode, headers, socket) {
+            handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
+          },
+          onResponseStart(controller, statusCode, headers, statusMessage) {
+            handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+          },
+          onResponseData(controller, chunk) {
+            handler.onResponseData?.(controller, chunk);
+          },
+          onResponseEnd(controller, trailers) {
+            handler.onResponseEnd?.(controller, trailers);
+          },
+          onResponseError(controller, error) {
+            // HTTPS CONNECT / SOCKS5 握手失败发生在 onRequestStart 之前；一旦请求开始，
+            // 就不能为了换 IP 而重放可能产生副作用的 POST。切换到下一个已审核 IP
+            // 也是一次新的真实派发，必须重新确认 callId 仍处于授权窗口。
+            if (!requestStarted && !controller.aborted && index + 1 < addresses.length) {
+              void Promise.resolve()
+                .then(beforeRetry)
+                .then(
+                  () => {
+                    if (controller.aborted) {
+                      handler.onResponseError?.(controller, error);
+                      return;
+                    }
+                    try {
+                      dispatchAt(index + 1);
+                    } catch (nextError) {
+                      handler.onResponseError?.(
+                        controller,
+                        nextError instanceof Error ? nextError : new Error(String(nextError)),
+                      );
+                    }
+                  },
+                  (authorizationError: unknown) => {
+                    handler.onResponseError?.(
+                      controller,
+                      authorizationError instanceof Error
+                        ? authorizationError
+                        : new Error(String(authorizationError)),
+                    );
+                  },
+                );
+              return;
+            }
+            handler.onResponseError?.(controller, error);
+          },
+          onResponseStarted() {
+            handler.onResponseStarted?.();
+          },
+          onBodySent(chunk) {
+            handler.onBodySent?.(chunk);
+          },
+          onRequestSent() {
+            handler.onRequestSent?.();
+          },
+        };
+        return base.dispatch(
+          rewritePinnedProxyDispatchOptions(options, upstream, address),
+          attemptHandler,
+        );
       };
 
-      return dispatchFrom(0);
+      return dispatchAt(0);
     }
 
     override async close(): Promise<void> {
@@ -602,7 +614,7 @@ export async function guardedOutboundFetch(
     ...(proxy
       ? {
           dispatcherFactory: ({ url: guardedUrl, pinned }) =>
-            createPinnedProxyDispatcher(proxy, guardedUrl, pinned.addresses),
+            createPinnedProxyDispatcher(proxy, guardedUrl, pinned.addresses, beforeDispatch),
         }
       : {}),
     beforeDispatch,

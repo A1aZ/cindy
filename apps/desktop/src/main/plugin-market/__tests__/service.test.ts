@@ -3235,7 +3235,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
   });
 
-  it('rejects provenance commit when the owner changes before the final callback', async () => {
+  it('commits provenance to the captured ledger after a terminal switch timeout', async () => {
     const item = summary();
     const installedGhost = {
       manifest: manifest(),
@@ -3253,10 +3253,14 @@ describe('PluginMarketService migration and defaultInstall', () => {
       return installedGhost;
     });
 
-    await expect(h.service.install(item.id, reviewedInstallOptions(item))).rejects.toThrow(
-      '[PRECONDITION_FAILED]',
-    );
-    expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
+    await expect(h.service.install(item.id, reviewedInstallOptions(item))).resolves.toMatchObject({
+      ghost: { manifest: { id: item.ghostId } },
+    });
+    expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({
+      pluginId: item.id,
+      releaseId: item.currentRelease.id,
+      installed: true,
+    });
   });
 
   it('reports a successful market uninstall when the owner changes during cleanup', async () => {

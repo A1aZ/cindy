@@ -1428,15 +1428,14 @@ export class PluginMarketService {
           // 放到锁外时,本地装入能插在"包已落位"与"写下溯源"之间换掉同 id 的包。
           // 锁序:pluginId → SOURCE_MUTATION_KEY → ghostId → ledgerMutation。
           afterCommit: async (_installed, packagedManifest) => {
-            // owner mutation lease 已阻止切号提交新 generation；boundary 可能已进入
-            // pending 并等待本 lease 收尾，此时仍必须把包与原 owner 账本一起提交。
-            requireSameMarketOwner(owner, { allowPendingBoundary: true });
+            // 这里已在 owner mutation lease 与同 id 安装锁内，且 ledger 绑定的是操作
+            // 开始时捕获的 owner。切号终止等待超时后当前 generation 可能已经推进，
+            // 但包既已落位，就仍须把溯源写回旧 owner；不能再读取当前 session 拒绝。
             // packGhostDirToFile 返回的是写入真实临时包的 canonical manifest；
             // Main 随后复验并用包 SHA 钉死同一文件，因此无需在包已经落位后
             // 再读一次目录。后置 I/O 失败不应把成功安装误报成失败或漏写来源。
             const manifestDigest = ghostManifestDigest(packagedManifest);
             await this.withCapturedLedgerMutation(ledger, () => {
-              requireSameMarketOwner(owner, { allowPendingBoundary: true });
               ledger.upsertInstallation({
                 pluginId,
                 ghostId: plugin.ghostId,
@@ -1913,9 +1912,9 @@ export class PluginMarketService {
             }
           : {}),
         afterCommitInLock: async (committed) => {
-          requireSameMarketOwner(owner, { allowPendingBoundary: true });
+          // 包已落位且仍持原 owner mutation lease；即使切号终止等待超时推进了
+          // 当前 generation，也必须把来源写进操作开始时捕获的旧 owner 账本。
           await this.withCapturedLedgerMutation(ledger, () => {
-            requireSameMarketOwner(owner, { allowPendingBoundary: true });
             ledger.upsertInstallation(recordFrom(plugin, 'market', committed));
           });
         },

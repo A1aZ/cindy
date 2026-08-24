@@ -1421,6 +1421,35 @@ describe('PluginMarketService 自定义市场 detail/install', () => {
     runtime.session = { mode: 'cloud', dataOwnerId: 'user-1', generation: 1 };
   });
 
+  it('commits custom provenance to the captured ledger after a terminal switch timeout', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-custom-fixture-'));
+    roots.push(root);
+    const dir = writeLocalMarket(root, 'team-lib', [{ rel: 'plugins/alpha', id: 'alpha' }]);
+    const h = harness([], [{ name: 'team-lib', dir }]);
+    const pluginId = customMarketPluginId('team-lib', 'alpha');
+    const detail = await h.service.detail(pluginId);
+    runtime.install.mockImplementationOnce(async () => {
+      const installed = installedGhost(root, 'alpha');
+      // 真实路径中包已经落位且仍持原 owner lease；这里只模拟切号终止等待超时后
+      // volatile session 已推进，但旧 owner 的溯源提交尚未执行。
+      runtime.session = { mode: 'cloud', dataOwnerId: 'user-2', generation: 2 };
+      return installed;
+    });
+
+    await expect(
+      h.service.install(pluginId, {
+        expectedReleaseId: detail.releaseId,
+        expectedManifest: detail.manifest,
+      }),
+    ).resolves.toMatchObject({ ghost: { manifest: { id: 'alpha' } } });
+    expect(h.ledger.installationForGhost('alpha')).toMatchObject({
+      pluginId,
+      releaseId: detail.releaseId,
+      source: 'local-market',
+      installed: true,
+    });
+  });
+
   it('rejects install when the plugin is uninstalled during packaging (runtime 复核)', async () => {
     // F1:审阅时 alpha 已装(existing 存在),打包窗口内本地页把它卸载。
     // beforeCommit 的 runtime 复核必须发现 existing→缺失并拒,避免"更新"被

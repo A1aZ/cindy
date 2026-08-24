@@ -66,6 +66,11 @@ export interface GhostInstallReceipt {
    */
   packageSha256?: string;
   /**
+   * 旧版 Forge 安装写入的来源标记。新安装不再写入；保留只读是为了让升级前
+   * 已获 Broker 资格的存量插件不会在客户端升级后突然失效。
+   */
+  installOrigin?: string;
+  /**
    * 按 skill item 目录钉住的固化字节指纹(`item.dir` → sha256)。声明了 skill 能力
    * 时逐项必填，没声明时是空对象。
    *
@@ -1020,7 +1025,11 @@ export function createGhostInstallReceipt(input: {
   packageSha256?: string;
   revision?: string;
   iconDataUrl?: string;
+  installOrigin?: string;
 }): GhostInstallReceipt {
+  if (input.installOrigin !== undefined && !isPersistableInstallOrigin(input.installOrigin)) {
+    throw new Error('receipt installOrigin 不合法');
+  }
   return {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     id: input.manifest.id,
@@ -1032,7 +1041,26 @@ export function createGhostInstallReceipt(input: {
     skillContentSha256: input.skillContentSha256,
     ...(input.packageSha256 ? { packageSha256: input.packageSha256 } : {}),
     ...(input.iconDataUrl ? { iconDataUrl: input.iconDataUrl } : {}),
+    ...(input.installOrigin !== undefined ? { installOrigin: input.installOrigin } : {}),
   };
+}
+
+const MAX_INSTALL_ORIGIN_CHARS = 64;
+const INSTALL_ORIGIN_PATTERN = /^[a-z0-9-]+$/;
+
+function isPersistableInstallOrigin(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_INSTALL_ORIGIN_CHARS &&
+    INSTALL_ORIGIN_PATTERN.test(value)
+  );
+}
+
+/** 旧 receipt 的授权视图：只有历史 agent-forge 值有效，其余一律降级。 */
+export function effectiveInstallOrigin(
+  receipt: Pick<GhostInstallReceipt, 'installOrigin'>,
+): 'manual' | 'agent-forge' {
+  return receipt.installOrigin === 'agent-forge' ? 'agent-forge' : 'manual';
 }
 
 /**
@@ -1164,6 +1192,16 @@ function validateReceipt(
     if (!validated.ok) return { ok: false, reason: `receipt locale 不合法:${localePath}` };
     localeResources[localePath] = validated.resource;
   }
+  let installOrigin: string | undefined;
+  if (value.installOrigin !== undefined) {
+    if (
+      typeof value.installOrigin !== 'string' ||
+      !isPersistableInstallOrigin(value.installOrigin)
+    ) {
+      return { ok: false, reason: 'receipt installOrigin 不合法' };
+    }
+    installOrigin = value.installOrigin;
+  }
   return {
     ok: true,
     receipt: {
@@ -1177,6 +1215,7 @@ function validateReceipt(
       skillContentSha256,
       ...(typeof value.packageSha256 === 'string' ? { packageSha256: value.packageSha256 } : {}),
       ...(typeof value.iconDataUrl === 'string' ? { iconDataUrl: value.iconDataUrl } : {}),
+      ...(installOrigin !== undefined ? { installOrigin } : {}),
     },
   };
 }

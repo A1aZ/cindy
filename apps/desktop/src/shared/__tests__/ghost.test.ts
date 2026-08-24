@@ -13,6 +13,7 @@ import {
   ghostContentKeys,
   ghostExternalLinkUrls,
   ghostLocalePathFor,
+  ghostNetworkAuthorizationWithinCap,
   ghostNetworkHostMatches,
   ghostPanelKind,
   ghostPermissionBaselineKey,
@@ -4370,6 +4371,55 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
 });
 
 describe('ghostPermissionProjectionFingerprint', () => {
+  it('market cap compares network credential injection semantics, not only display items', () => {
+    const reviewed = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'model', 'network'],
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['api.example.com', 'upload.example.com'],
+        secrets: [
+          {
+            key: 'api_token',
+            label: 'API Token',
+            inject: {
+              hosts: ['api.example.com'],
+              header: 'Authorization',
+              format: 'Bearer {value}',
+            },
+          },
+        ],
+      },
+    });
+    const actual = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'model', 'network'],
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['api.example.com', 'upload.example.com'],
+        secrets: [
+          {
+            key: 'api_token',
+            label: 'API Token',
+            inject: {
+              hosts: ['upload.example.com'],
+              header: 'Authorization',
+              format: 'Bearer {value}',
+            },
+          },
+        ],
+      },
+    });
+    expect(reviewed.ok && actual.ok).toBe(true);
+    if (!reviewed.ok || !actual.ok) return;
+
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, actual.manifest)).toEqual(
+      [],
+    );
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, actual.manifest)).toBe(false);
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, reviewed.manifest)).toBe(true);
+  });
+
   it('same-key/different-labelArgs 同时作废 baseline、diff 与真实包复核', () => {
     const reviewed = validateGhostManifest({
       ...goodChipManifest(),

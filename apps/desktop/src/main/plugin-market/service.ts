@@ -13,6 +13,7 @@ import { app, dialog } from 'electron';
 
 import {
   GHOST_ICON_MAX_BYTES,
+  ghostNetworkAuthorizationWithinCap,
   ghostInstallApprovalToken,
   ghostIconMimeType,
   isSafeGhostRelativePath,
@@ -1248,6 +1249,7 @@ export class PluginMarketService {
     ref: { marketName: string; ghostId: string },
     options: PluginMarketInstallOptions,
     automatic = false,
+    owner = captureMarketOwner(),
   ): Promise<PluginMarketInstallResult> {
     if (options.expectedManifest === undefined) {
       throwIpcError(
@@ -1255,7 +1257,6 @@ export class PluginMarketService {
         'Custom Plugin install must be bound to the selected manifest',
       );
     }
-    const owner = captureMarketOwner();
     const ledger = this.ledgerForOwner(owner);
     const manager = this.sourceManagerForOwner(owner);
     // 互斥键与 uninstall 一致使用规范化 pluginId，保证同插件的安装/更新/卸载串行。
@@ -1747,7 +1748,10 @@ export class PluginMarketService {
             undefined,
             inspected.canonicalManifest,
           );
-          if (extraCapabilities.length > 0) {
+          if (
+            extraCapabilities.length > 0 ||
+            !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest)
+          ) {
             throwIpcError(
               'GHOST_FILE_INVALID',
               'Downloaded Plugin package capabilities exceed the market manifest',
@@ -2474,6 +2478,7 @@ export class PluginMarketService {
             allowSourceReplacement: false,
           },
           true,
+          owner,
         );
         local = this.localInstallSnapshot(ledger);
         this.clearAutomaticUpgradeFailure(retryKey, releaseKey);

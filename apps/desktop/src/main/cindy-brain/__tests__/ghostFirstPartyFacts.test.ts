@@ -60,6 +60,7 @@ function loader(overrides: Partial<LoadGhostFirstPartyFactsLoaderOptions> = {}) 
     readMarketInstallation: () => null,
     readApprovedPackageSha256: () => null,
     lookupOrganizationPrefix: () => ({ kind: 'absent' }),
+    readInstallOrigin: () => 'manual',
     ...overrides,
   });
 }
@@ -82,6 +83,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
         builtin: true,
         marketRecord: null,
         currentOrganization: null,
+        installOrigin: 'manual',
       });
       expect(resolveGhostFirstPartyPrivilege(loaded.facts)).toEqual({
         brokerEligible: true,
@@ -163,6 +165,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
         builtin: false,
         marketRecord: null,
         currentOrganization: null,
+        installOrigin: 'manual',
       },
     });
   });
@@ -210,6 +213,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
         builtin: false,
         marketRecord: null,
         currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        installOrigin: 'manual',
       },
     });
   });
@@ -235,6 +239,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
           approvedPackageSha256: MARKET_ROW.sha256,
         },
         currentOrganization: { organizationId: 'org-a', pluginPrefix: null },
+        installOrigin: 'manual',
       },
     });
   });
@@ -285,6 +290,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
           inspectedPackageSha256,
         ),
         currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        installOrigin: 'manual' as const,
       },
     });
 
@@ -308,4 +314,25 @@ describe('loadGhostFirstPartyFactsLoader', () => {
     });
   });
 
+  it('copies only the legacy Forge origin and fails closed when it cannot be read', () => {
+    const forged = loader({
+      readInstallOrigin: () => 'agent-forge',
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+    }).load('acme-tool', 'runtime', ORG_A);
+    expect(forged).toMatchObject({
+      kind: 'ready',
+      facts: { installOrigin: 'agent-forge' },
+    });
+
+    const unreadable = loader({
+      readInstallOrigin: () => {
+        throw new Error('EACCES');
+      },
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+    }).load('acme-tool', 'runtime', ORG_A);
+    expect(unreadable).toMatchObject({
+      kind: 'ready',
+      facts: { installOrigin: 'manual' },
+    });
+  });
 });

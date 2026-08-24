@@ -14,6 +14,31 @@ describe('market Ghost session boundary', () => {
     resolve(process.cwd(), 'src/main/cindy-brain/index.ts'),
     'utf8',
   ).replace(/\r\n/g, '\n');
+  const marketServiceSource = readFileSync(
+    resolve(process.cwd(), 'src/main/plugin-market/service.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
+
+  it('keeps automatic custom updates bound to the owner captured by synchronization', () => {
+    const installStart = marketServiceSource.indexOf('  private async customInstall(');
+    const installEnd = marketServiceSource.indexOf(
+      '\n  private async installDetail(',
+      installStart,
+    );
+    const installBody = marketServiceSource.slice(installStart, installEnd);
+    const automaticStart = marketServiceSource.indexOf('  private async applyAutomaticUpgrades(');
+    const automaticEnd = marketServiceSource.indexOf(
+      '\n  private localInstallSnapshot(',
+      automaticStart,
+    );
+    const automaticBody = marketServiceSource.slice(automaticStart, automaticEnd);
+
+    expect(installBody).toContain('owner = captureMarketOwner(),');
+    expect(installBody).toContain('const ledger = this.ledgerForOwner(owner);');
+    expect(installBody).toContain('const manager = this.sourceManagerForOwner(owner);');
+    expect(installBody).toContain('requireSameMarketOwner(owner);');
+    expect(automaticBody).toContain('          true,\n          owner,\n        );');
+  });
 
   it('requires the pre-approval session generation when acquiring the mutation lease', () => {
     const captureStart = source.indexOf(

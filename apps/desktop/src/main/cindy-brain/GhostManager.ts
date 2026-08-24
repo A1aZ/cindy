@@ -43,6 +43,7 @@ import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
   createGhostInstallReceipt,
+  effectiveInstallOrigin,
   GhostInstallReceiptStore,
   hashApprovedSkillContent,
   readLegacyInstallTrust,
@@ -1020,6 +1021,18 @@ export class GhostManager {
 
   approvalStateRoot(): string {
     return this.receiptStore.rootDir();
+  }
+
+  /** 新安装不再写来源；这里只识别旧 receipt，避免存量 Forge Broker 资格断裂。 */
+  readEffectiveInstallOrigin(id: string): 'manual' | 'agent-forge' {
+    this.ensureCurrentOwnerContextSync();
+    try {
+      const approval = this.readApproval(id);
+      if (approval.state !== 'approved') return 'manual';
+      return effectiveInstallOrigin(approval.receipt);
+    } catch {
+      return 'manual';
+    }
   }
 
   /**
@@ -2831,6 +2844,11 @@ export class GhostManager {
         },
       };
     }
+    const legacyInstallOrigin =
+      approvalResult.state === 'approved' &&
+      effectiveInstallOrigin(approvalResult.receipt) === 'agent-forge'
+        ? 'agent-forge'
+        : undefined;
     // 延续当前唤醒/沉睡状态。旧安装尚无 receipt 时，重新安装仍采用原
     // `.disabled` 镜像；损坏 receipt 一律保持停用。
     const enabled =
@@ -3005,6 +3023,7 @@ export class GhostManager {
         packageSha256,
         revision: receiptRevision,
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+        ...(legacyInstallOrigin ? { installOrigin: legacyInstallOrigin } : {}),
       });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
     } catch (err) {

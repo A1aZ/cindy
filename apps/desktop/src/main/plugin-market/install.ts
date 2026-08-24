@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { app } from 'electron';
 
 import {
+  ghostNetworkAuthorizationWithinCap,
   unreviewedGhostPermissionItems,
   validateGhostManifest,
   type GhostManifest,
@@ -193,7 +194,10 @@ export async function installCustomMarketPlugin(input: {
         undefined,
         inspected.canonicalManifest,
       );
-      if (extraCapabilities.length > 0) {
+      if (
+        extraCapabilities.length > 0 ||
+        !ghostNetworkAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest)
+      ) {
         throwIpcError(
           'GHOST_FILE_INVALID',
           'The packaged Plugin capabilities exceed the selected market manifest',

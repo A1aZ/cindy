@@ -26,6 +26,7 @@ import {
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   ghostInstallApprovalToken,
+  ghostNetworkAuthorizationWithinCap,
   isGhostInstallApprovalToken,
   ghostAppContextLocale,
   unreviewedGhostPermissionItems,
@@ -2586,6 +2587,7 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
         createOrganizationPrefixStore(
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
         ).lookup(orgId),
+      readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
     });
   }
   return ghostFirstPartyFactsLoaderSingleton;
@@ -5642,7 +5644,10 @@ async function installOrUpdateMarketGhostPackageLocked(
         undefined,
         inspected.canonicalManifest,
       );
-      if (undeclaredCapabilities.length > 0) {
+      if (
+        undeclaredCapabilities.length > 0 ||
+        !ghostNetworkAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest)
+      ) {
         log.warn('market package exceeds catalog manifest capabilities', {
           ghostId: expected.ghostId,
           keys: undeclaredCapabilities.map((item) => item.key),

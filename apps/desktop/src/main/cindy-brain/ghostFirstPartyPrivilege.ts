@@ -47,6 +47,7 @@ export type GhostFirstPartyBasis =
   | 'builtin-official'
   | 'market-public'
   | 'market-organization-current'
+  | 'legacy-forge-current-org-prefix'
   | 'denied-alias'
   | 'denied-foreign-org'
   | 'denied-unknown-origin';
@@ -79,6 +80,8 @@ export interface GhostFirstPartyFacts {
   builtin: boolean;
   marketRecord: GhostFirstPartyMarketRecord | null;
   currentOrganization: GhostFirstPartyCurrentOrganization | null;
+  /** 仅来自升级前 receipt；新安装恒为 manual。 */
+  installOrigin: 'manual' | 'agent-forge';
 }
 
 function matchesCurrentOrgPrefix(
@@ -185,7 +188,21 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
       }
       return allow('market-organization-current', false);
     }
+    if (
+      facts.installOrigin === 'agent-forge' &&
+      (record.source === 'git-market' || record.source === 'local-market') &&
+      matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)
+    ) {
+      return allow('legacy-forge-current-org-prefix', false);
+    }
     return deny('denied-unknown-origin');
+  }
+
+  if (
+    facts.installOrigin === 'agent-forge' &&
+    matchesCurrentOrgPrefix(facts.ghostId, facts.currentOrganization)
+  ) {
+    return allow('legacy-forge-current-org-prefix', false);
   }
 
   return deny('denied-unknown-origin');

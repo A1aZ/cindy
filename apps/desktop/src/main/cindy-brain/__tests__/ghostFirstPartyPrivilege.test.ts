@@ -30,6 +30,7 @@ function facts(partial: Partial<GhostFirstPartyFacts> & Pick<GhostFirstPartyFact
     builtin: false,
     marketRecord: null,
     currentOrganization: null,
+    installOrigin: 'manual',
     ...partial,
   };
 }
@@ -311,6 +312,45 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       hostPrimitiveEligible: false,
       basis: 'denied-unknown-origin',
     });
+  });
+
+  it('keeps Broker only for a legacy Forge receipt under the current organization prefix', () => {
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'acme-feishu',
+          currentOrganization: CURRENT_ORG,
+          installOrigin: 'agent-forge',
+        }),
+      ),
+    ).toEqual({
+      brokerEligible: true,
+      hostPrimitiveEligible: false,
+      basis: 'legacy-forge-current-org-prefix',
+    });
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'acme-feishu',
+          marketRecord: market({
+            scope: 'personal',
+            organizationId: null,
+            source: 'local-market',
+          }),
+          currentOrganization: CURRENT_ORG,
+          installOrigin: 'agent-forge',
+        }),
+      ).brokerEligible,
+    ).toBe(true);
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'other-feishu',
+          currentOrganization: CURRENT_ORG,
+          installOrigin: 'agent-forge',
+        }),
+      ).brokerEligible,
+    ).toBe(false);
   });
 
   // 台账里有这条 id 但 installed 为 false 时,曾经会整段跳过市场分支、落到末尾那条

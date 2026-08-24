@@ -2460,6 +2460,69 @@ export function unreviewedGhostPermissionItems(
 }
 
 /**
+ * 市场清单对真实包的 network 授权语义上限。
+ *
+ * `ghostPermissionItems` 是给人看的能力投影，不能作为凭证流向的安全判据：
+ * 同一 secret 改写 inject.hosts、header、exchange 或 OAuth 目标时，展示项可能
+ * 完全相同。这里单独比较 Host 真正消费的字段；允许真实包少声明 host/secret/
+ * connection，但不能扩大任何一项。
+ */
+export function ghostNetworkAuthorizationWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  const actualNetwork = actual.network;
+  if (!actualNetwork) return true;
+  const reviewedNetwork = reviewed.network;
+  if (!reviewedNetwork) return false;
+
+  const isStringSubset = (values: readonly string[], cap: readonly string[]): boolean =>
+    values.every((value) => cap.includes(value));
+  if (!isStringSubset(actualNetwork.hosts, reviewedNetwork.hosts)) return false;
+
+  const reviewedSecrets = new Map(
+    (reviewedNetwork.secrets ?? []).map((secret) => [secret.key, secret] as const),
+  );
+  for (const secret of actualNetwork.secrets ?? []) {
+    const cap = reviewedSecrets.get(secret.key);
+    if (!cap || (secret.source ?? 'user') !== (cap.source ?? 'user')) return false;
+    if (secret.inject.header !== cap.inject.header || secret.inject.format !== cap.inject.format) {
+      return false;
+    }
+    const actualHosts = secret.inject.hosts ?? actualNetwork.hosts;
+    const reviewedHosts = cap.inject.hosts ?? reviewedNetwork.hosts;
+    if (!isStringSubset(actualHosts, reviewedHosts)) return false;
+    if (secret.url !== undefined && secret.url !== cap.url) return false;
+    if (
+      secret.exchange !== undefined &&
+      JSON.stringify(secret.exchange) !== JSON.stringify(cap.exchange)
+    ) {
+      return false;
+    }
+    if (secret.oauth !== undefined && JSON.stringify(secret.oauth) !== JSON.stringify(cap.oauth)) {
+      return false;
+    }
+  }
+
+  const reviewedConnections = new Map(
+    (reviewedNetwork.connections ?? []).map((connection) => [connection.key, connection] as const),
+  );
+  for (const connection of actualNetwork.connections ?? []) {
+    const cap = reviewedConnections.get(connection.key);
+    if (!cap) return false;
+    if (
+      connection.inject.header !== cap.inject.header ||
+      connection.inject.format !== cap.inject.format ||
+      (connection.maxConnections ?? GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL) >
+        (cap.maxConnections ?? GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * icon 允许的图片扩展名 → mime(校验与 main 读盘供图共用同一口径)。
  * 不收 svg:svg 可携带脚本,虽经 <img> 渲染不执行,仍不给这个面。
  */

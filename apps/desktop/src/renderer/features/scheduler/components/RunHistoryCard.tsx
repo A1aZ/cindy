@@ -158,7 +158,7 @@ export function RunHistoryCard({
 
   const metaText =
     run.status === 'running'
-      ? formatStartedAgo(run.firedAt)
+      ? formatStartedAgo(run.firedAt, Date.now(), t)
       : t('scheduler.runs.took', { duration: formatDuration(run.firedAt, run.finishedAt) });
   const costText = run.status === 'running'
     ? null
@@ -281,7 +281,7 @@ export function RunHistoryCard({
             )}
           </span>
           <span className="truncate text-14 font-medium text-[var(--msg-assistant-text)]">
-            {formatRunTimestamp(run.firedAt)}
+            {formatRunTimestamp(run.firedAt, Date.now(), t)}
           </span>
         </div>
         <StatusChip status={run.status} />

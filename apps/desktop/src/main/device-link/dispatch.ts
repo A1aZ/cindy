@@ -74,7 +74,7 @@ import { fetchLocalMediaToOss } from './mediaFetch';
 import { transcribeRemoteVoiceInput } from './voiceTranscribe';
 import { readTelegramRemoteStatus, setTelegramRemoteOnline } from './telegramRemoteControl';
 import { adviseAndRecordVoiceInputDictionaryLearning } from '../voice-input/index.js';
-import { readDictionaryProjectionForMobile } from '../voice-input/dictionarySyncDriver.js';
+import { buildMobileDictionarySnapshot } from '../voice-input/dictionarySyncDriver.js';
 import {
   setBroadcastTapListener,
 } from './broadcast-tap';
@@ -84,7 +84,10 @@ import * as subscriptions from './subscriptions';
 import { LEGACY_TOPIC, type ActiveController } from './subscriptions';
 import { MAKER_PUSH } from '../maker-ipc/channels.js';
 import { RECOVERY_CHECKPOINT_MARKER } from '../maker-ipc/recoveryCoordinator.js';
-import { projectInteractionRequestForRemote } from '../cindy-brain/ghostSetupInteractionBridge.js';
+import {
+  projectInteractionDismissedForRemote,
+  projectInteractionRequestForRemote,
+} from '../cindy-brain/ghostSetupInteractionBridge.js';
 import {
   remoteWorkingDirRejectionToIpcError,
   type RemoteWorkingDirCheckResult,
@@ -1278,6 +1281,9 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
     );
     if (request === null) return;
     remotePayload = { ...payload, request };
+  }
+  if (channel === MAKER_PUSH.INTERACTION_DISMISSED) {
+    remotePayload = projectInteractionDismissedForRemote(remotePayload);
   }
   const dsts = subscriptions.getControllersForTopic(topic);
   // The active registry describes peer topic intent, not whether this host can
@@ -2809,7 +2815,7 @@ export async function runInvoke(
   // 不参与合并,避免移动端维护一份会分叉的词典。
   if (payload.channel === DL_VOICE_DICTIONARY_GET_CHANNEL) {
     try {
-      return { ok: true, result: { ok: true, ...readDictionaryProjectionForMobile() } };
+      return { ok: true, result: buildMobileDictionarySnapshot() };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`voice:dictionary:get failed from ${shortId(src)}: ${message}`);

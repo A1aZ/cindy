@@ -1,4 +1,8 @@
 import type {
+  ConversationSearchRequest,
+  ConversationSearchResponse,
+} from '@cindy/maker-shared/conversation-search';
+import type {
   InputProjection,
   PendingInteraction,
   QueuedRemoteMessage,
@@ -412,6 +416,7 @@ export interface MobileMakerTransport {
   /** 被控端全局偏好:是否显示自定义 Provider 的 SDK 自报费用估算。 */
   getCustomProviderBillingSettings(): Promise<MobileCustomProviderBillingSettingsState>;
   getSession(sessionId: string): Promise<RemoteSession>;
+  searchConversations(request: ConversationSearchRequest): Promise<ConversationSearchResponse>;
   patchSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<RemoteSession>;
   /**
    * error-tail「忽略」:被控端把该 role='error' 行的 content merge dismissed:true
@@ -689,6 +694,7 @@ export function createMobileMakerTransport({
     }]),
     getCustomProviderBillingSettings: () => call('maker:custom-provider-billing:get'),
     getSession: (sessionId) => call('local-db:sessions:get', [sessionId]),
+    searchConversations: (request) => call('local-db:conversations:search', [request]),
     patchSessionMeta: (sessionId, patch) => call('local-db:sessions:patch-meta', [sessionId, patch]),
     dismissErrorMessage: (sessionId, clientId) =>
       call('local-db:messages:dismiss-error', [sessionId, clientId]),

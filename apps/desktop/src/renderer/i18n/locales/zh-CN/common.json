@@ -2543,8 +2543,10 @@
         "ariaLabel": "选择输入框推荐指令模型",
         "automatic": "自动选择（保持当前规则）"
       },
+      "chooseAgent": "选择 Agent",
+      "backToAgents": "返回选择 Agent",
       "explicitRouteHint": "显式指定后只使用该 Agent 和模型；不可用时不会自动切换。",
-      "searchPlaceholder": "搜索 Agent、模型或供应商",
+      "searchPlaceholder": "搜索模型或供应商",
       "noResults": "没有可用模型",
       "unavailable": "当前不可用",
       "budget": "折扣",

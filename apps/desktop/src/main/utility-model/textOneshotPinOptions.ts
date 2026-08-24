@@ -125,7 +125,7 @@ function routingForRenderer(routing: Provider['routing']): Provider['routing'] {
 export interface TextOneshotPinOption {
   /** 钉值(cat: 编码)。 */
   id: string;
-  /** 兜底行文案:`<模型名> · <供应商名> · <Agent>`。 */
+  /** 兜底行文案:`<Agent> · <模型名> · <供应商名>`。 */
   label: string;
   /** 分组(供应商显示名)。 */
   group: string;
@@ -209,7 +209,7 @@ export function buildTextOneshotPinOptions(
     const base = `${e.model.name} · ${e.provider.name}`;
     return {
       id: encodeCatalogPin(e.provider.id, e.agentKind, e.model.id),
-      label: `${base} · ${AGENT_LABEL[e.agentKind]}`,
+      label: `${AGENT_LABEL[e.agentKind]} · ${base}`,
       group: e.provider.name,
       providerId: e.provider.id,
       agentKind: e.agentKind,

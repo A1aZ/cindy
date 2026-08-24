@@ -2544,8 +2544,10 @@
         "ariaLabel": "Choose the composer prompt suggestion model",
         "automatic": "Automatic (keep current routing)"
       },
+      "chooseAgent": "Choose an Agent",
+      "backToAgents": "Back to Agent selection",
       "explicitRouteHint": "An explicit selection uses only that Agent and model. If unavailable, Cindy will not switch automatically.",
-      "searchPlaceholder": "Search Agents, models, or providers",
+      "searchPlaceholder": "Search models or providers",
       "noResults": "No available models",
       "unavailable": "Currently unavailable",
       "budget": "Discount",

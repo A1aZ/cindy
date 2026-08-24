@@ -694,7 +694,7 @@ describe('Ghost plugin detail sections', () => {
               options: [
                 {
                   id: 'cat:xd:codex:codex/gpt-5.5',
-                  label: 'GPT 5.5 折扣 · GW',
+                  label: 'Codex · GPT 5.5 折扣 · GW',
                   group: 'GW',
                   providerId: 'xd',
                   agentKind: 'codex',
@@ -706,7 +706,7 @@ describe('Ghost plugin detail sections', () => {
                 },
                 {
                   id: 'cat:openai:codex:gpt-5.5',
-                  label: 'GPT 5.5 · OpenAI · Codex',
+                  label: 'Codex · GPT 5.5 · OpenAI',
                   group: 'OpenAI',
                   providerId: 'openai',
                   agentKind: 'codex',
@@ -718,7 +718,7 @@ describe('Ghost plugin detail sections', () => {
                 },
                 {
                   id: 'cat:openai:codex:chatgpt/gpt-5.5',
-                  label: 'GPT 5.5 · OpenAI · Codex',
+                  label: 'Codex · GPT 5.5 · OpenAI',
                   group: 'OpenAI',
                   providerId: 'openai',
                   agentKind: 'codex',
@@ -730,7 +730,7 @@ describe('Ghost plugin detail sections', () => {
                 },
                 {
                   id: 'cat:openai:claude-code:chatgpt/gpt-5.5',
-                  label: 'GPT 5.5 · OpenAI · Claude Code',
+                  label: 'Claude Code · GPT 5.5 · OpenAI',
                   group: 'OpenAI',
                   providerId: 'openai',
                   agentKind: 'claude-code',
@@ -757,24 +757,41 @@ describe('Ghost plugin detail sections', () => {
       screen.getByRole('button', { name: 'settings.ghosts.detail.cindyPrefs.cap.text.oneshot' }),
     );
 
-    const listbox = await screen.findByRole('listbox');
-    // 分组标题 + 首行是声明版"跟随默认"(i18n mock 透传 key)。
-    expect(within(listbox).getByText('GW')).toBeTruthy();
-    expect(within(listbox).getByText('OpenAI')).toBeTruthy();
-    const defaultRow = within(listbox).getAllByRole('option')[0]!;
+    const agentList = await screen.findByRole('listbox');
+    // 第一层只显示自动选择和 Agent，不混入模型排列组合。
+    expect(within(agentList).queryByText('GW')).toBeNull();
+    expect(within(agentList).queryByText('OpenAI')).toBeNull();
+    const defaultRow = within(agentList).getAllByRole('option')[0]!;
     expect(defaultRow.textContent).toContain(
       'settings.ghosts.detail.cindyPrefs.defaultOptionDeclared',
     );
-    // 折扣徽标只出现在预算行;订阅徽标只出现在订阅行。
-    const budgetRow = within(listbox).getByText('GPT 5.5 折扣').closest('button')!;
-    expect(within(budgetRow).getByText(/Codex/)).toBeTruthy();
+    fireEvent.click(agentList.querySelector('[data-agent-kind="codex"]')!);
+
+    let codexModels = await screen.findByRole('listbox');
+    expect(within(codexModels).getByText('GW')).toBeTruthy();
+    expect(within(codexModels).getByText('OpenAI')).toBeTruthy();
+    expect(codexModels.querySelector('[data-pin-id*="claude-code"]')).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'settings.auxiliaryModels.backToAgents' }),
+    );
+    const agentListAgain = await screen.findByRole('listbox');
+    fireEvent.click(agentListAgain.querySelector('[data-agent-kind="claude-code"]')!);
+    const claudeModels = await screen.findByRole('listbox');
+    expect(claudeModels.querySelector('[data-pin-id*="claude-code"]')).toBeTruthy();
+    expect(claudeModels.querySelector('[data-pin-id*="openai:codex:"]')).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'settings.auxiliaryModels.backToAgents' }),
+    );
+    fireEvent.click(
+      (await screen.findByRole('listbox')).querySelector('[data-agent-kind="codex"]')!,
+    );
+    codexModels = await screen.findByRole('listbox');
+    // 同 Agent 的同名别名折叠；另一个 Agent 的同名模型不混在本层。
+    const budgetRow = within(codexModels).getByText('GPT 5.5 折扣').closest('button')!;
     expect(within(budgetRow).getByText('settings.ghosts.detail.cindyPrefs.budgetBadge')).toBeTruthy();
-    const plainRows = within(listbox)
-      .getAllByText('GPT 5.5', { exact: true })
-      .map((modelName) => modelName.closest('button')!);
-    expect(plainRows).toHaveLength(2);
-    const plainRow = plainRows.find((row) => row.textContent?.includes('Codex'))!;
-    expect(plainRows.some((row) => row.textContent?.includes('Claude Code'))).toBe(true);
+    const plainRow = within(codexModels).getByText('GPT 5.5', { exact: true }).closest('button')!;
     expect(
       within(plainRow).queryByText('settings.ghosts.detail.cindyPrefs.budgetBadge'),
     ).toBeNull();
@@ -814,7 +831,7 @@ describe('Ghost plugin detail sections', () => {
               options: [
                 {
                   id: 'cat:xd:codex:codex/gpt-5.5',
-                  label: 'GPT 5.5 折扣 · GW',
+                  label: 'Codex · GPT 5.5 折扣 · GW',
                   group: 'GW',
                   providerId: 'xd',
                   agentKind: 'codex',
@@ -870,7 +887,7 @@ describe('Ghost plugin detail sections', () => {
               options: [
                 {
                   id: 'cat:xd:codex:codex/gpt-5.5',
-                  label: 'GPT 5.5 折扣 · GW',
+                  label: 'Codex · GPT 5.5 折扣 · GW',
                   group: 'GW',
                   providerId: 'xd',
                   agentKind: 'codex',
@@ -895,6 +912,8 @@ describe('Ghost plugin detail sections', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'settings.ghosts.detail.cindyPrefs.cap.text.oneshot' }),
     );
+    const agentList = await screen.findByRole('listbox');
+    fireEvent.click(agentList.querySelector('[data-agent-kind="codex"]')!);
     const listbox = await screen.findByRole('listbox');
     // stale 行如实显示原值且为当前选中;点它不回写。
     const staleRow = within(listbox).getByText('cat:gone:codex:retired-model').closest('button')!;

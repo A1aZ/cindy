@@ -2543,8 +2543,10 @@
         "ariaLabel": "入力欄のおすすめプロンプト用モデルを選択",
         "automatic": "自動選択（現在のルーティングを維持）"
       },
+      "chooseAgent": "Agent を選択",
+      "backToAgents": "Agent の選択に戻る",
       "explicitRouteHint": "明示的に指定した場合は、その Agent とモデルだけを使用します。利用できなくても自動では切り替えません。",
-      "searchPlaceholder": "Agent、モデル、プロバイダーを検索",
+      "searchPlaceholder": "モデルまたはプロバイダーを検索",
       "noResults": "利用可能なモデルがありません",
       "unavailable": "現在利用不可",
       "budget": "割引",

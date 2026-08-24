@@ -89,6 +89,22 @@ export function advanceViewedPriorityHold(
 }
 
 /**
+ * 详情页打开期间首页仍会收到任务状态更新。自然档变化时推进当前查看 hold,
+ * 返回值只表示档位是否真的变化,供首页决定是否重算排序。
+ */
+export function advanceCurrentViewedPriorityHold(
+  state: ViewedPriorityHoldState,
+  ctx: Pick<HomeListPriorityContext, 'runningSessionIds' | 'unreadSessionIds' | 'waitingSessionIds'>,
+  nowMs: number,
+): boolean {
+  const viewedSessionId = state.prevViewedId;
+  if (!viewedSessionId) return false;
+  const previousRank = state.heldPriorityRanks.get(viewedSessionId);
+  advanceViewedPriorityHold(state, viewedSessionId, ctx, nowMs);
+  return state.heldPriorityRanks.get(viewedSessionId) !== previousRank;
+}
+
+/**
  * 点击进任务会先于路由更新清掉 attention。必须在那之前按当前档位钉住,
  * 否则首次 hold 只能读到 rest,刚打开的完成未读仍会立刻沉底。
  */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LIVE_TASK_PRIORITY } from '@cindy/maker-shared/live-task-priority';
 import {
+  advanceCurrentViewedPriorityHold,
   advanceViewedPriorityHold,
   collectHomePriorityContext,
   createViewedPriorityHoldState,
@@ -98,13 +99,14 @@ describe('homeListPriority hold', () => {
       waitingSessionIds: new Set<string>(),
     };
     holdViewedPriorityRank(state, 'task-1', unread);
+    advanceViewedPriorityHold(state, 'task-1', unread, 0);
 
     const running = {
       runningSessionIds: new Set(['task-1']),
       unreadSessionIds: new Set<string>(),
       waitingSessionIds: new Set<string>(),
     };
-    advanceViewedPriorityHold(state, 'task-1', running, 10);
+    expect(advanceCurrentViewedPriorityHold(state, running, 10)).toBe(true);
     expect(state.heldPriorityRanks.get('task-1')).toBe(LIVE_TASK_PRIORITY.running);
     expect(sessionPriorityRank('task-1', { ...running, heldPriorityRanks: state.heldPriorityRanks }))
       .toBe(LIVE_TASK_PRIORITY.running);
@@ -114,6 +116,7 @@ describe('homeListPriority hold', () => {
       runningSessionIds: new Set<string>(),
       heldPriorityRanks: state.heldPriorityRanks,
     };
+    expect(advanceCurrentViewedPriorityHold(state, finished, 15)).toBe(false);
     expect(sessionPriorityRank('task-1', finished)).toBe(LIVE_TASK_PRIORITY.running);
 
     advanceViewedPriorityHold(state, undefined, finished, 20);

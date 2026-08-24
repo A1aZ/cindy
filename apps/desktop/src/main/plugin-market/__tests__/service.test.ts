@@ -631,7 +631,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.api.listAll).not.toHaveBeenCalled();
   });
 
-  it('adopts one exact official legacy install without downloading or changing enable state', async () => {
+  it('adopts and verifies one exact official legacy install without changing enable state', async () => {
     runtime.ghosts = [
       {
         manifest: manifest(),
@@ -640,23 +640,32 @@ describe('PluginMarketService migration and defaultInstall', () => {
       },
     ];
     const h = harness([summary()]);
+    runtime.install.mockImplementation(async () => {
+      const ghost = {
+        manifest: manifest(),
+        dir: '/userData/cindy-brain/cindy-test',
+        enabled: true,
+      };
+      runtime.ghosts = [ghost];
+      return ghost;
+    });
 
     const snapshot = await h.service.snapshot();
 
     expect(snapshot.items[0]).toMatchObject({
-      installState: 'update-available',
+      installState: 'installed',
       enabled: true,
     });
     expect(h.ledger.installationForGhost('cindy-test')).toMatchObject({
-      source: 'legacy-adopted',
+      source: 'market',
       pluginId: PLUGIN_ID,
-      releaseId: 'legacy-unresolved:1.0.0',
-      sha256: 'legacy-unverified',
+      releaseId: 'release-1',
+      sha256: 'a'.repeat(64),
     });
-    expect(runtime.install).not.toHaveBeenCalled();
+    expect(runtime.install).toHaveBeenCalledTimes(1);
   });
 
-  it('adopts an older official legacy install as update-available without rendering a duplicate', async () => {
+  it('adopts and automatically updates an older official legacy install without rendering a duplicate', async () => {
     runtime.ghosts = [
       {
         manifest: manifest('cindy-test', '0.9.0'),
@@ -665,23 +674,32 @@ describe('PluginMarketService migration and defaultInstall', () => {
       },
     ];
     const h = harness([summary()]);
+    runtime.install.mockImplementation(async () => {
+      const ghost = {
+        manifest: manifest(),
+        dir: '/userData/cindy-brain/cindy-test',
+        enabled: false,
+      };
+      runtime.ghosts = [ghost];
+      return ghost;
+    });
 
     const snapshot = await h.service.snapshot();
 
     expect(snapshot.items).toHaveLength(1);
     expect(snapshot.items[0]).toMatchObject({
       ghostId: 'cindy-test',
-      installState: 'update-available',
+      installState: 'installed',
       enabled: false,
     });
     expect(h.ledger.installationForGhost('cindy-test')).toMatchObject({
-      source: 'legacy-adopted',
+      source: 'market',
       pluginId: PLUGIN_ID,
-      releaseId: 'legacy-unresolved:0.9.0',
-      version: '0.9.0',
-      sha256: 'legacy-unverified',
+      releaseId: 'release-1',
+      version: '1.0.0',
+      sha256: 'a'.repeat(64),
     });
-    expect(runtime.install).not.toHaveBeenCalled();
+    expect(runtime.install).toHaveBeenCalledTimes(1);
   });
 
   it('silently reconnects an unchanged approved package to its historical market release', async () => {
@@ -1468,7 +1486,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(runtime.install).not.toHaveBeenCalled();
   });
 
-  it('legacy-adopted 记录不能成为开发版冒充 cindy-github 的官方 trust 来源', async () => {
+  it('legacy-adopted cindy-github 只通过当前市场更新获得官方 trust', async () => {
     const item = summary({ ghostId: 'cindy-github' });
     const rawManifest = manifest('cindy-github');
     const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-github-'));
@@ -1489,11 +1507,27 @@ describe('PluginMarketService migration and defaultInstall', () => {
       updatedAt: '2026-08-07T00:00:00.000Z',
       manifestDigest: ghostManifestDigest(rawManifest),
     });
+    runtime.install.mockImplementation(async () => {
+      const ghost = { manifest: rawManifest, dir: installDir, enabled: true };
+      runtime.ghosts = [ghost];
+      return ghost;
+    });
 
     await h.service.snapshot();
 
-    expect(h.api.download).not.toHaveBeenCalled();
-    expect(runtime.install).not.toHaveBeenCalled();
+    expect(h.api.download).toHaveBeenCalledTimes(1);
+    expect(h.api.download).toHaveBeenCalledWith(item.id, item.currentRelease.id);
+    expect(runtime.install).toHaveBeenCalledWith(
+      expect.stringMatching(/\.cindy$/),
+      expect.objectContaining({
+        ghostId: 'cindy-github',
+        officialCindyGithub: true,
+      }),
+    );
+    expect(h.ledger.installationForGhost('cindy-github')).toMatchObject({
+      source: 'market',
+      releaseId: item.currentRelease.id,
+    });
   });
 
   it('旧 market trust 回填遇到下载 SHA 漂移时 fail-closed', async () => {

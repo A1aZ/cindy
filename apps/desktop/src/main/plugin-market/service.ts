@@ -227,8 +227,8 @@ function assertDetailMatchesSummary(
 /**
  * Claims a trusted legacy install without pretending its bytes came from the
  * current market release. A synthetic release id keeps the local version
- * visible as update-available until the user explicitly installs the market
- * release; the normal update path then replaces this with verified provenance.
+ * visible as update-available until the automatic market update replaces it
+ * with verified provenance.
  */
 function legacyRecordFrom(
   plugin: VisiblePluginSummary,
@@ -2415,7 +2415,7 @@ export class PluginMarketService {
       const releaseKey = summary.currentRelease.id;
       const record = local.installations[summary.ghostId];
       if (
-        record?.source !== 'market' ||
+        (record?.source !== 'market' && record?.source !== 'legacy-adopted') ||
         this.toItem(summary, local).installState !== 'update-available' ||
         isGhostBusy(summary.ghostId) ||
         this.shouldDeferAutomaticUpgrade(retryKey, releaseKey)
@@ -2430,7 +2430,8 @@ export class PluginMarketService {
           }
           const freshLocal = this.localInstallSnapshot(ledger);
           if (
-            freshLocal.installations[summary.ghostId]?.source !== 'market' ||
+            (freshLocal.installations[summary.ghostId]?.source !== 'market' &&
+              freshLocal.installations[summary.ghostId]?.source !== 'legacy-adopted') ||
             this.toItem(summary, freshLocal).installState !== 'update-available'
           ) {
             log.debug?.('Plugin update already reconciled', { pluginId: summary.id });

@@ -109,7 +109,10 @@ export interface NetworkSlotDeps {
     body?: string | Uint8Array;
     signal: AbortSignal;
     redirect: 'manual';
-  }): Promise<{ response: Response; release: () => Promise<void> }>;
+  }, beforeDispatch: () => void | Promise<void>): Promise<{
+    response: Response;
+    release: () => Promise<void>;
+  }>;
   /**
    * 上传通道:按指纹读"该意识名下"的总仓媒体字节(生产实现内做归属查账
    * ghostCanRead——出生自它 / 挂它画廊 / 用户显式过户;越权与不存在统一
@@ -1259,7 +1262,15 @@ export class GhostNetworkSlot {
             return { ok: false, message: '当前 Agent 调用已结束，未声明目标不再允许访问' };
           }
           if (hopAgentMediated) {
-            const guarded = await this.deps.fetchPublicImpl(currentUrl.toString(), fetchInit);
+            const guarded = await this.deps.fetchPublicImpl(
+              currentUrl.toString(),
+              fetchInit,
+              () => {
+                if (!hasLiveAgentAuthorization()) {
+                  throw new Error('当前 Agent 调用已结束，未声明目标不再允许访问');
+                }
+              },
+            );
             guardedFetchReleases.push(guarded.release);
             response = guarded.response;
           } else {

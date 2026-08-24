@@ -50,6 +50,10 @@ import {
   TunnelingHttpsAgent,
   type OutboundProxyTarget,
 } from '@cindy/anthropic-compat-proxy';
+import {
+  fetchSingleHopWithSsrFGuard,
+  type SsrFPolicy,
+} from '@cindy/browser-control-runtime/ssrf-runtime';
 
 import { createMakerLogger } from './logger-adapter.js';
 import { resolveDesktopOutboundProxy } from './outbound-proxy-resolver.js';
@@ -415,6 +419,7 @@ function createProxyDispatcher(
   proxy: OutboundProxyTarget,
   protocol: 'http:' | 'https:',
   agentOptions: UndiciAgent.Options | undefined,
+  targetServername?: string,
 ): Dispatcher {
   log.debug('creating outbound proxy dispatcher', { proxy: proxy.url, protocol });
   const connect = resolveConnectOptions(agentOptions);
@@ -424,7 +429,10 @@ function createProxyDispatcher(
     const tlsOptions =
       typeof connect === 'function'
         ? { autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_TIMEOUT_MS }
-        : ((connect ?? {}) as Record<string, unknown>);
+        : {
+            ...((connect ?? {}) as Record<string, unknown>),
+            ...(targetServername ? { servername: targetServername } : {}),
+          };
     return new UndiciAgent({
       ...agentOptions,
       connect: createSocks5Connector(proxy, tlsOptions),
@@ -435,6 +443,120 @@ function createProxyDispatcher(
     uri: proxy.url,
     ...(proxy.authHeader ? { token: proxy.authHeader } : {}),
     connect,
+    ...(targetServername ? { requestTls: { servername: targetServername } } : {}),
+  });
+}
+
+function pinnedOrigin(address: string, upstream: URL): string {
+  const host = address.includes(':') ? `[${address}]` : address;
+  return `${upstream.protocol}//${host}${upstream.port ? `:${upstream.port}` : ''}`;
+}
+
+function withOriginalHost(
+  headers: Dispatcher.DispatchOptions['headers'],
+  host: string,
+): Dispatcher.DispatchOptions['headers'] {
+  if (Array.isArray(headers)) {
+    const next = [...headers];
+    for (let i = 0; i < next.length; i += 2) {
+      if (String(next[i]).toLowerCase() === 'host') {
+        next[i + 1] = host;
+        return next;
+      }
+    }
+    next.push('host', host);
+    return next;
+  }
+  const next = { ...(headers ?? {}) } as Record<string, string | string[] | undefined>;
+  for (const key of Object.keys(next)) {
+    if (key.toLowerCase() === 'host') delete next[key];
+  }
+  next.host = host;
+  return next;
+}
+
+/** @internal 导出供安全回归测试断言代理实际拨号目标与 Host 分离。 */
+export function rewritePinnedProxyDispatchOptions(
+  options: Dispatcher.DispatchOptions,
+  upstream: URL,
+  address: string,
+): Dispatcher.DispatchOptions {
+  return {
+    ...options,
+    origin: pinnedOrigin(address, upstream),
+    headers: withOriginalHost(options.headers, upstream.host),
+  };
+}
+
+/**
+ * 代理出口不能让代理再次解析插件提供的域名，否则 DNS 守门与实际连接之间仍有
+ * rebinding 窗口。包装层把下游连接目标改成已审核 IP，同时保留原始 Host 与 TLS SNI。
+ * dispatcher 为单次请求所有，响应消费完由 SSRF shell 统一关闭。
+ */
+function createPinnedProxyDispatcher(
+  proxy: OutboundProxyTarget,
+  upstream: URL,
+  addresses: readonly string[],
+): Dispatcher {
+  const address = addresses[0];
+  if (!address) throw new Error(`Unable to resolve hostname: ${upstream.hostname}`);
+  const base = createProxyDispatcher(
+    proxy,
+    upstreamProtocol(upstream),
+    undefined,
+    upstream.hostname,
+  );
+  return new (class extends Dispatcher {
+    override dispatch(
+      options: Dispatcher.DispatchOptions,
+      handler: Dispatcher.DispatchHandler,
+    ): boolean {
+      return base.dispatch(rewritePinnedProxyDispatchOptions(options, upstream, address), handler);
+    }
+
+    override async close(): Promise<void> {
+      await base.close();
+    }
+
+    override async destroy(): Promise<void> {
+      await base.destroy();
+    }
+  })();
+}
+
+const PROXIED_PUBLIC_SSRF_POLICY: SsrFPolicy = {
+  // Clash / sing-box / Surge 的 fake-IP DNS 只在已经确定走代理时放行；其它
+  // RFC1918、loopback、link-local 与 metadata 地址仍由默认策略阻断。
+  allowRfc2544BenchmarkRange: true,
+  allowIpv6UniqueLocalRange: true,
+};
+
+/**
+ * Agent 在途访问未声明公网目标的单跳出口：沿用 Desktop 的系统/PAC/env 代理判定，
+ * 但无论直连还是代理都只连接 SSRF 守门已确认的地址。beforeDispatch 在代理解析与
+ * DNS await 之后执行，避免已经结束的 callId 继续真正发包。
+ */
+export async function guardedOutboundFetch(
+  url: string,
+  init: RequestInit,
+  beforeDispatch: () => void | Promise<void>,
+): Promise<{ response: Response; release: () => Promise<void> }> {
+  const upstream = new URL(url);
+  const signal = init.signal ?? undefined;
+  const proxy = await resolveProxyTarget(upstream, signal);
+  return fetchSingleHopWithSsrFGuard({
+    url,
+    init,
+    signal,
+    requireHttps: true,
+    ...(proxy
+      ? {
+          policy: PROXIED_PUBLIC_SSRF_POLICY,
+          dispatcherFactory: ({ url: guardedUrl, pinned }) =>
+            createPinnedProxyDispatcher(proxy, guardedUrl, pinned.addresses),
+        }
+      : {}),
+    beforeDispatch,
   });
 }
 

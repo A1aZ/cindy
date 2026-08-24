@@ -342,7 +342,6 @@ import {
   hasGrokOAuthLogin,
 } from '../maker-host/grok-oauth-login.js';
 import { invalidateXaiBridgeAuth } from '../maker-host/xai-auth-invalidation-host.js';
-import { fetchSingleHopWithSsrFGuard } from '@cindy/browser-control-runtime/ssrf-runtime';
 import {
   isModelDisabled,
   isModelDisabledWithUniqueLegacyBasename,
@@ -351,7 +350,7 @@ import {
 } from '@cindy/model-providers';
 import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
 import { readProviderOrder } from '../maker-host/provider-order-store.js';
-import { outboundFetch } from '../maker-host/outbound-fetch.js';
+import { guardedOutboundFetch, outboundFetch } from '../maker-host/outbound-fetch.js';
 import { getSharedGhCliTokenSource } from '../git-context/ghCliTokenSource.js';
 import { hasCodexOAuthLoginReadOnly } from '../maker-host/codex-oauth-readiness.js';
 import { getUtilityModelChainProfiles } from '../utility-model/UtilityModelSelection.js';
@@ -4851,12 +4850,8 @@ export function getGhostNetworkSlot(): GhostNetworkSlot {
       // 未在 manifest / 连接白名单声明的 Agent 在途目标不能复用普通
       // outboundFetch：它会重新解析 hostname，留下 DNS rebinding 窗口。
       // 这里每跳都以复核后的 DNS 地址建立 pinned dispatcher。
-      fetchPublicImpl: (url, init) => fetchSingleHopWithSsrFGuard({
-        url,
-        init: init as RequestInit,
-        signal: init.signal,
-        requireHttps: true,
-      }),
+      fetchPublicImpl: (url, init, beforeDispatch) =>
+        guardedOutboundFetch(url, init as RequestInit, beforeDispatch),
       // 媒体模式(as:'media'):字节直落总仓 + ghost-gallery 记账(出生=该
       // 意识,与 cindy 槽产物同一记账口径),走统一入库助手 ingestMedia
       // (规则 25)。mime 白名单同一来源(blobStore),槽内归一化后再判。

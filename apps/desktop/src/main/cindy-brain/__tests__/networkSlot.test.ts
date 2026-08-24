@@ -266,6 +266,36 @@ describe('networkSlot · 能力资格审', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('Agent 在 DNS 等待期间交卷时，dispatch 前最后一次复核会阻断请求', async () => {
+    let live = true;
+    const guardedFetch: NetworkSlotDeps['fetchPublicImpl'] = vi.fn(
+      async (_url, _init, beforeDispatch) => {
+        // 模拟代理选择 / DNS 守门 await 期间外层 ghost_call 已经交卷。
+        live = false;
+        await beforeDispatch();
+        throw new Error('unreachable');
+      },
+    );
+    const { slot, fetchImpl } = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo: () =>
+        live
+          ? { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }
+          : null,
+      fetchPublicImpl: guardedFetch,
+    });
+
+    const result = await slot.handleFetchRequest('web-search', {
+      url: 'https://example.com/data',
+      callId: 'call-agent',
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.message).toContain('Agent 调用已结束');
+    expect(guardedFetch).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('Agent 访问已声明目标仍使用声明边界，不额外阻断私有服务', async () => {
     const { slot, fetchImpl, fetchPublicImpl } = makeSlot({
       getGhost: () => fakeGhost({ network: { hosts: ['127.0.0.1'], secrets: [] } }),

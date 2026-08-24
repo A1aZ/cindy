@@ -53,9 +53,11 @@ vi.mock('undici', async (importOriginal) => {
 
 import {
   createOutboundHttpAgent,
+  guardedOutboundFetch,
   outboundFetch,
   outboundUndiciFetch,
   resetOutboundFetchStateForTest,
+  rewritePinnedProxyDispatchOptions,
   resolveConnectOptions,
   resolveOutboundDispatcher,
 } from '../outbound-fetch.js';
@@ -291,6 +293,49 @@ describe('resolveOutboundDispatcher', () => {
 });
 
 describe('outboundFetch', () => {
+  it('rewrites proxy dial origin to the vetted IP while preserving the original Host', () => {
+    const rewritten = rewritePinnedProxyDispatchOptions(
+      {
+        origin: 'https://api.example.com',
+        path: '/data',
+        method: 'GET',
+        headers: ['accept', 'application/json'],
+      },
+      new URL('https://api.example.com/data'),
+      '2001:db8::1',
+    );
+
+    expect(rewritten.origin).toBe('https://[2001:db8::1]');
+    expect(rewritten.headers).toEqual([
+      'accept',
+      'application/json',
+      'host',
+      'api.example.com',
+    ]);
+  });
+
+  it.each([
+    'http://127.0.0.1:7890',
+    'socks5://127.0.0.1:7891',
+  ])('keeps the pinned public-target guard on the %s proxy path', async (proxyUrl) => {
+    resolverState.resolve.mockResolvedValue(proxyUrl);
+    const beforeDispatch = vi.fn(() => {
+      throw new Error('authorization expired');
+    });
+
+    await expect(
+      guardedOutboundFetch('https://93.184.216.34/data', { method: 'GET' }, beforeDispatch),
+    ).rejects.toThrow('authorization expired');
+
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://93.184.216.34/data');
+    expect(loggerState.debug).toHaveBeenCalledWith(
+      'creating outbound proxy dispatcher',
+      expect.objectContaining({ protocol: 'https:' }),
+    );
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(undiciState.fetch).not.toHaveBeenCalled();
+  });
+
   it('passes the proxy dispatcher through to undici fetch', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     await outboundFetch('https://platform.claude.com/v1/oauth/token', { method: 'POST' });

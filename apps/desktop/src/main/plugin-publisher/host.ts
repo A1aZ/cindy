@@ -113,11 +113,17 @@ export function getPluginPublisherOrchestrator(): PluginPublisherOrchestrator {
           version: inspected.canonicalManifest.version,
         };
       },
-      confirm(facts) {
+      confirm(facts, signal) {
         const ownerStamp = getActiveDataOwnerPushStamp();
-        return confirmBridge.request(0, facts, ownerStamp, (request) => {
-          return sendToTrustedAppWindows(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request) > 0;
-        });
+        return confirmBridge.request(
+          0,
+          facts,
+          ownerStamp,
+          (request) => {
+            return sendToTrustedAppWindows(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request) > 0;
+          },
+          signal,
+        );
       },
       onProgress(progress: PluginPublisherProgress) {
         sendToTrustedAppWindows(PLUGIN_PUBLISHER_PROGRESS_CHANNEL, progress);
@@ -166,17 +172,23 @@ export function startPluginPublish(
   log.info('plugin publish started');
   return getPluginPublisherOrchestrator().start(filePath, {
     ...(sourceBinding ? { sourceBinding } : {}),
-    confirm: (facts) => {
+    confirm: (facts, signal) => {
       const ownerStamp = getActiveDataOwnerPushStamp();
       const requesterId = requester && !requester.isDestroyed() ? requester.id : 0;
       if (requester && !requester.isDestroyed()) trackPublisherConfirmRequester(requester);
-      return confirmBridge.request(requesterId, facts, ownerStamp, (request) => {
-        if (requester && !requester.isDestroyed()) {
-          requester.send(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request);
-          return true;
-        }
-        return sendToTrustedAppWindows(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request) > 0;
-      });
+      return confirmBridge.request(
+        requesterId,
+        facts,
+        ownerStamp,
+        (request) => {
+          if (requester && !requester.isDestroyed()) {
+            requester.send(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request);
+            return true;
+          }
+          return sendToTrustedAppWindows(PLUGIN_PUBLISHER_CONFIRM_CHANNEL, request) > 0;
+        },
+        signal,
+      );
     },
   });
 }

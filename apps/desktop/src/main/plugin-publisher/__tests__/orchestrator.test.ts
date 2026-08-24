@@ -37,6 +37,20 @@ async function fileSha256(filePath: string): Promise<string> {
     .digest('hex');
 }
 
+function deferredBoolean(): {
+  promise: Promise<boolean>;
+  resolve: (value: boolean) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: boolean) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<boolean>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function waitFor(
   snapshots: PluginPublisherProgress[],
   predicate: (progress: PluginPublisherProgress) => boolean,
@@ -61,11 +75,121 @@ const prepared = {
     'Content-Type': 'application/octet-stream',
     'x-oss-forbid-overwrite': 'true',
   },
-  expiresAt: '2026-08-19T08:15:00.000Z',
+  expiresAt: '2099-08-19T08:15:00.000Z',
   status: 'awaiting_upload' as const,
 };
 
 describe('PluginPublisherOrchestrator', () => {
+  it('caps pending confirmations per owner before opening another package', async () => {
+    const filePath = await packagePath();
+    const snapshots: PluginPublisherProgress[] = [];
+    const confirmations: Array<ReturnType<typeof deferredBoolean>> = [];
+    const openFile = vi.fn(async (candidate: string, flags: string | number) =>
+      fs.open(candidate, flags),
+    );
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare: vi.fn(), commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: () => {
+        const confirmation = deferredBoolean();
+        confirmations.push(confirmation);
+        return confirmation.promise;
+      },
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      openFile: openFile as typeof fs.open,
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+
+    orch.start(filePath);
+    orch.start(filePath);
+    await vi.waitFor(() => expect(confirmations).toHaveLength(2));
+    const rejected = orch.start(filePath);
+    const failed = await waitFor(
+      snapshots,
+      (progress) => progress.transferId === rejected.transferId && progress.stage === 'failed',
+    );
+
+    // Excludes both an unbounded confirmation map and a quota placed after open().
+    expect(failed.errorCode).toBe('SERVER_BUSY');
+    expect(openFile).toHaveBeenCalledTimes(2);
+    expect(confirmations).toHaveLength(2);
+
+    orch.abortAll();
+  });
+
+  it('keeps the pending-confirmation quota isolated by active-session owner', async () => {
+    const filePath = await packagePath();
+    const confirmations: Array<ReturnType<typeof deferredBoolean>> = [];
+    let owner = { mode: 'cloud' as const, dataOwnerId: 'member-a', generation: 1 };
+    const orch = createPluginPublisherOrchestrator({
+      api: { prepare: vi.fn(), commit: vi.fn(), status: vi.fn() } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: () => {
+        const confirmation = deferredBoolean();
+        confirmations.push(confirmation);
+        return confirmation.promise;
+      },
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      owner: () => owner,
+    });
+
+    orch.start(filePath);
+    orch.start(filePath);
+    await vi.waitFor(() => expect(confirmations).toHaveLength(2));
+    owner = { ...owner, dataOwnerId: 'member-b' };
+    const otherOwner = orch.start(filePath);
+
+    // Excludes a global cap that lets one owner exhaust another owner's allowance.
+    await vi.waitFor(() => expect(confirmations).toHaveLength(3));
+    expect(orch.snapshot(otherOwner.transferId)?.stage).toBe('confirming');
+    orch.abortAll();
+  });
+
+  it.each(['accepted', 'rejected', 'aborted', 'failed'] as const)(
+    'releases pending-confirmation capacity after a confirmation is %s',
+    async (outcome) => {
+      const filePath = await packagePath();
+      const confirmations: Array<ReturnType<typeof deferredBoolean>> = [];
+      const orch = createPluginPublisherOrchestrator({
+        api: {
+          prepare: vi.fn(async () => {
+            throw new Error('stop after confirmation');
+          }),
+          commit: vi.fn(),
+          status: vi.fn(),
+        } as unknown as PluginPublisherApi,
+        inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+        confirm: () => {
+          const confirmation = deferredBoolean();
+          confirmations.push(confirmation);
+          return confirmation.promise;
+        },
+        identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      });
+
+      const first = orch.start(filePath);
+      orch.start(filePath);
+      await vi.waitFor(() => expect(confirmations).toHaveLength(2));
+      if (outcome === 'accepted') confirmations[0].resolve(true);
+      else if (outcome === 'rejected') confirmations[0].resolve(false);
+      else if (outcome === 'aborted') {
+        expect(orch.cancel(first.transferId)).toEqual({ cancelled: true });
+      } else confirmations[0].reject(new Error('confirmation failed'));
+      await vi.waitFor(() =>
+        expect(orch.snapshot(first.transferId)?.stage).toMatch(/^(failed|cancelled)$/),
+      );
+
+      const next = orch.start(filePath);
+      // Excludes a leaked counter on the accept, reject, and abort exits respectively.
+      await vi.waitFor(() => expect(confirmations).toHaveLength(3));
+      expect(orch.snapshot(next.transferId)?.stage).toBe('confirming');
+
+      confirmations[1].resolve(false);
+      confirmations[2].resolve(false);
+      await vi.waitFor(() => expect(orch.snapshot(next.transferId)?.stage).toBe('failed'));
+    },
+  );
+
   it('hides status and cancel from a different active-session owner', async () => {
     const filePath = await packagePath();
     const owner = { mode: 'cloud' as const, dataOwnerId: 'member-1', generation: 7 };
@@ -280,8 +404,52 @@ describe('PluginPublisherOrchestrator', () => {
     expect(commit3).toHaveBeenCalledTimes(1);
   });
 
+  it('recomputes the remaining absolute PUT budget before a retry', async () => {
+    const filePath = await packagePath();
+    const snapshots: PluginPublisherProgress[] = [];
+    let now = Date.parse('2026-08-19T07:15:00.000Z');
+    const expiresAt = new Date(now + PLUGIN_PUBLISHER_COMMIT_MARGIN_MS + 5_000).toISOString();
+    const budgets: number[] = [];
+    const orch = createPluginPublisherOrchestrator({
+      api: {
+        prepare: async () => ({ ...prepared, expiresAt }),
+        commit: async () => ({ uploadId: 'upload-1', status: 'validating' }),
+        status: async () => ({
+          uploadId: 'upload-1',
+          status: 'succeeded',
+          pluginId: `c${'a'.repeat(24)}`,
+          releaseId: 'rel-1',
+          ghostId: 'demo',
+          version: '1.0.0',
+          reviewStatus: 'pending',
+          failure: null,
+        }),
+      } as unknown as PluginPublisherApi,
+      inspectPackage: async () => ({ ghostId: 'demo', name: 'Demo', version: '1.0.0' }),
+      confirm: async () => true,
+      identity: () => ({ membershipId: 'm1', orgSlug: 'acme', orgName: 'Acme' }),
+      now: () => now,
+      putFile: async (_handle, options) => {
+        if (options.maxTotalMs === undefined) throw new Error('missing PUT budget');
+        budgets.push(options.maxTotalMs);
+        if (budgets.length === 1) {
+          now += 3_000;
+          throw new PluginPublisherPutError('timeout', 'retry_same_url');
+        }
+        return { bytesSent: 24 };
+      },
+      sleep: async () => undefined,
+      onProgress: (progress) => snapshots.push({ ...progress }),
+    });
+
+    orch.start(filePath);
+    await waitFor(snapshots, (progress) => progress.stage === 'succeeded');
+    // Excludes restarting the original five-second relative timeout on retry.
+    expect(budgets).toEqual([5_000, 2_000]);
+  });
+
   it('derives the PUT deadline from expiresAt minus a commit margin', () => {
-    const now = Date.parse('2026-08-19T07:15:00.000Z');
+    const now = Date.parse('2099-08-19T07:15:00.000Z');
     const budget = remainingPutBudgetMs(prepared.expiresAt, now);
     const sessionLeft = Date.parse(prepared.expiresAt) - now;
     expect(budget).toBe(sessionLeft - PLUGIN_PUBLISHER_COMMIT_MARGIN_MS);

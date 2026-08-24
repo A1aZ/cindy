@@ -402,6 +402,34 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(store.lookup('org-acme')).toEqual({ kind: 'known', pluginPrefix: 'acme' });
   });
 
+  it('still returns the market snapshot when the organization prefix cache write fails', async () => {
+    const item = summary();
+    const h = harness([item]);
+    h.api.listAll.mockResolvedValue({
+      plugins: [item],
+      removals: [],
+      currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+    });
+    const realRenameSync = fs.renameSync;
+    const renameSync = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to).endsWith(path.join('plugin-market', 'organization.v1.json'))) {
+        throw Object.assign(new Error('simulated cache rename failure'), { code: 'EPERM' });
+      }
+      return realRenameSync(from, to);
+    });
+
+    try {
+      // Excludes allowing a reconstructable cache write failure to reject the whole catalog.
+      await expect(h.service.snapshot()).resolves.toMatchObject({
+        items: [{ pluginId: item.id }],
+        unavailableReason: null,
+      });
+      expect(renameSync).toHaveBeenCalled();
+    } finally {
+      renameSync.mockRestore();
+    }
+  });
+
   it('passes the optional release icon metadata to renderer-safe market items', async () => {
     const icon = {
       mimeType: 'image/png',

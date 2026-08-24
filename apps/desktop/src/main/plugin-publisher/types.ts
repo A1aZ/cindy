@@ -55,13 +55,18 @@ export const PLUGIN_PUBLISHER_MAX_CONCURRENT = 2;
 export const PLUGIN_PUBLISHER_UPLOAD_TTL_MS = 60 * 60_000;
 /** Leave this much of the session TTL for commit after PUT. */
 export const PLUGIN_PUBLISHER_COMMIT_MARGIN_MS = 90_000;
+/** Do not start a PUT that cannot receive at least one second of network time. */
+export const PLUGIN_PUBLISHER_MIN_PUT_BUDGET_MS = 1_000;
 export const PLUGIN_PUBLISHER_POLL_MAX_TRANSIENT_RETRIES = 8;
 export const PLUGIN_PUBLISHER_POLL_TRANSIENT_BACKOFF_MS = 2_000;
 
-export function remainingPutBudgetMs(expiresAt: string, now: number): number {
+export function putDeadlineAtMs(expiresAt: string, now: number): number {
   const expiresAtMs = Date.parse(expiresAt);
-  const remaining = Number.isFinite(expiresAtMs)
-    ? expiresAtMs - now - PLUGIN_PUBLISHER_COMMIT_MARGIN_MS
-    : PLUGIN_PUBLISHER_UPLOAD_TTL_MS - PLUGIN_PUBLISHER_COMMIT_MARGIN_MS;
-  return Math.max(1_000, remaining);
+  return Number.isFinite(expiresAtMs)
+    ? expiresAtMs - PLUGIN_PUBLISHER_COMMIT_MARGIN_MS
+    : now + PLUGIN_PUBLISHER_UPLOAD_TTL_MS - PLUGIN_PUBLISHER_COMMIT_MARGIN_MS;
+}
+
+export function remainingPutBudgetMs(expiresAt: string, now: number): number {
+  return Math.max(PLUGIN_PUBLISHER_MIN_PUT_BUDGET_MS, putDeadlineAtMs(expiresAt, now) - now);
 }

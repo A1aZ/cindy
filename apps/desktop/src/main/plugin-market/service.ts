@@ -2703,9 +2703,17 @@ export class PluginMarketService {
     currentOrganization: PluginCurrentOrganization | null | undefined,
   ): void {
     if (!currentOrganization) return;
-    createOrganizationPrefixStore(
-      ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
-    ).remember(currentOrganization.organizationId, currentOrganization.pluginPrefix);
+    try {
+      createOrganizationPrefixStore(
+        ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
+      ).remember(currentOrganization.organizationId, currentOrganization.pluginPrefix);
+    } catch (error) {
+      // This is a reconstructable cache. A failed write must not hide the market;
+      // a later lookup still fails closed as unavailable/absent.
+      log.warn('organization prefix cache write failed', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    }
   }
 
   private withLedgerMutation<T>(

@@ -44,4 +44,26 @@ describe('PluginPublisherConfirmBridge', () => {
     bridge.cancelAll();
     await expect(pending).resolves.toBe(false);
   });
+
+  it('drops a pending confirm when its transfer is aborted', async () => {
+    const bridge = new PluginPublisherConfirmBridge();
+    const controller = new AbortController();
+    let requestId = '';
+    const pending = bridge.request(
+      0,
+      facts,
+      ownerStamp,
+      (request) => {
+        requestId = request.requestId;
+        return true;
+      },
+      controller.signal,
+    );
+
+    controller.abort();
+
+    await expect(pending).resolves.toBe(false);
+    // Excludes leaving an unreachable entry behind after the quota is released.
+    expect(bridge.resolve(1, requestId, true)).toBe(false);
+  });
 });

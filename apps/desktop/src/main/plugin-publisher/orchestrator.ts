@@ -26,10 +26,11 @@ import { hashLocalFile, PluginPublisherHashCancelledError } from './hashFile.js'
 import { PluginPublisherPutError, putLocalFile } from './putObject.js';
 import {
   PLUGIN_PUBLISHER_MAX_CONCURRENT,
+  PLUGIN_PUBLISHER_MIN_PUT_BUDGET_MS,
   PLUGIN_PUBLISHER_POLL_INTERVAL_MS,
   PLUGIN_PUBLISHER_POLL_MAX_TRANSIENT_RETRIES,
   PLUGIN_PUBLISHER_POLL_TRANSIENT_BACKOFF_MS,
-  remainingPutBudgetMs,
+  putDeadlineAtMs,
   type PluginPublisherProgress,
   type PluginPublisherStage,
   type PluginPublisherStartResult,
@@ -44,20 +45,24 @@ export interface PluginPublisherOrchestratorDeps {
     name: string;
     version: string;
   }>;
-  confirm(facts: {
-    orgSlug: string;
-    orgName: string | null;
-    ghostId: string;
-    name: string;
-    version: string;
-    sizeBytes: number;
-  }): Promise<boolean>;
+  confirm(
+    facts: {
+      orgSlug: string;
+      orgName: string | null;
+      ghostId: string;
+      name: string;
+      version: string;
+      sizeBytes: number;
+    },
+    signal: AbortSignal,
+  ): Promise<boolean>;
   identity(): { membershipId: string; orgSlug: string; orgName: string | null } | null;
   owner?: () => ActiveAppSession;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   onProgress?: (progress: PluginPublisherProgress) => void;
   putFile?: typeof putLocalFile;
+  openFile?: typeof fsPromises.open;
   inspectGate?: { acquire(signal: AbortSignal): Promise<void>; release(): void };
 }
 
@@ -102,6 +107,33 @@ function isPathSafeForPublish(filePath: string): boolean {
   return path.extname(filePath).toLowerCase() === '.cindy';
 }
 
+class PluginPublisherPutDeadlineExpiredError extends Error {}
+
+async function waitForConfirmationOrAbort(
+  confirmation: Promise<boolean>,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  return new Promise<boolean>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup();
+      resolve(false);
+    };
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    confirmation.then(
+      (confirmed) => {
+        cleanup();
+        resolve(confirmed);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 class SerialGate {
   private active = false;
   private readonly waiters: Array<() => void> = [];
@@ -142,12 +174,15 @@ export class PluginPublisherOrchestrator {
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly inspectGate: { acquire(signal: AbortSignal): Promise<void>; release(): void };
   private readonly owner: () => ActiveAppSession;
+  private readonly openFile: typeof fsPromises.open;
+  private readonly pendingConfirmations: Array<{ owner: ActiveAppSession; count: number }> = [];
 
   constructor(private readonly deps: PluginPublisherOrchestratorDeps) {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? defaultSleep;
     this.inspectGate = deps.inspectGate ?? new SerialGate();
     this.owner = deps.owner ?? getActiveAppSession;
+    this.openFile = deps.openFile ?? fsPromises.open;
   }
 
   start(
@@ -264,6 +299,31 @@ export class PluginPublisherOrchestrator {
     next?.();
   }
 
+  private tryAcquirePendingConfirmation(owner: ActiveAppSession): boolean {
+    const entry = this.pendingConfirmations.find((candidate) =>
+      sameActiveAppSessionOwner(candidate.owner, owner),
+    );
+    if (entry) {
+      // Align the pending-confirmation cap with the upload concurrency cap: more
+      // than two simultaneous confirmations is not a normal publishing flow.
+      if (entry.count >= PLUGIN_PUBLISHER_MAX_CONCURRENT) return false;
+      entry.count += 1;
+      return true;
+    }
+    this.pendingConfirmations.push({ owner, count: 1 });
+    return true;
+  }
+
+  private releasePendingConfirmation(owner: ActiveAppSession): void {
+    const index = this.pendingConfirmations.findIndex((candidate) =>
+      sameActiveAppSessionOwner(candidate.owner, owner),
+    );
+    if (index < 0) return;
+    const entry = this.pendingConfirmations[index];
+    if (entry.count <= 1) this.pendingConfirmations.splice(index, 1);
+    else entry.count -= 1;
+  }
+
   private async run(
     record: TransferRecord,
     confirm: PluginPublisherOrchestratorDeps['confirm'],
@@ -271,6 +331,7 @@ export class PluginPublisherOrchestrator {
   ): Promise<void> {
     const signal = record.controller.signal;
     let handle: fsPromises.FileHandle | null = null;
+    let pendingConfirmationHeld = false;
     try {
       if (!isPathSafeForPublish(record.filePath)) {
         this.fail(record, 'INVALID_PARAMS', '只能发布 .cindy 插件包');
@@ -293,7 +354,14 @@ export class PluginPublisherOrchestrator {
         this.fail(record, 'PUBLISH_PACKAGE_ID_MISMATCH', '打包票据与待发布插件 id 不一致');
         return;
       }
-      handle = await fsPromises.open(record.filePath, fs.constants.O_RDONLY);
+      // Inspect is serialized and short-lived. Reserve the durable open-fd / confirmation
+      // resource only after inspect succeeds, but before opening the package.
+      if (!this.tryAcquirePendingConfirmation(record.owner)) {
+        this.fail(record, 'SERVER_BUSY', '待确认的发布任务过多，请先处理已有确认');
+        return;
+      }
+      pendingConfirmationHeld = true;
+      handle = await this.openFile(record.filePath, fs.constants.O_RDONLY);
       const stat = await handle.stat();
       if (!stat.isFile()) {
         this.fail(record, 'INVALID_PARAMS', '只能发布普通文件');
@@ -312,14 +380,22 @@ export class PluginPublisherOrchestrator {
         orgSlug: identity.orgSlug,
         totalBytes: stat.size,
       });
-      const confirmed = await confirm({
-        orgSlug: identity.orgSlug,
-        orgName: identity.orgName,
-        ghostId: inspected.ghostId,
-        name: inspected.name,
-        version: inspected.version,
-        sizeBytes: stat.size,
-      });
+      const confirmed = await waitForConfirmationOrAbort(
+        confirm(
+          {
+            orgSlug: identity.orgSlug,
+            orgName: identity.orgName,
+            ghostId: inspected.ghostId,
+            name: inspected.name,
+            version: inspected.version,
+            sizeBytes: stat.size,
+          },
+          signal,
+        ),
+        signal,
+      );
+      this.releasePendingConfirmation(record.owner);
+      pendingConfirmationHeld = false;
       if (!confirmed || signal.aborted) {
         this.update(record, {
           stage: signal.aborted ? 'cancelled' : 'failed',
@@ -367,19 +443,37 @@ export class PluginPublisherOrchestrator {
 
         const putFile = this.deps.putFile ?? putLocalFile;
         const openHandle = handle;
-        const putDeadlineMs = remainingPutBudgetMs(prepared.expiresAt, this.now());
-        const putOnce = () =>
-          putFile(openHandle, {
+        const putDeadline = putDeadlineAtMs(prepared.expiresAt, this.now());
+        const putOnce = () => {
+          const remainingBudgetMs = putDeadline - this.now();
+          if (remainingBudgetMs < PLUGIN_PUBLISHER_MIN_PUT_BUDGET_MS) {
+            throw new PluginPublisherPutDeadlineExpiredError();
+          }
+          return putFile(openHandle, {
             putUrl: prepared.putUrl,
             headers: prepared.headers,
             sizeBytes: digest.sizeBytes,
             signal,
-            maxTotalMs: putDeadlineMs,
+            maxTotalMs: remainingBudgetMs,
             onBytes: (bytesSent) => {
               this.update(record, { stage: 'uploading', bytesSent, totalBytes: digest.sizeBytes });
             },
           });
-        const putOutcome = await this.putWithRecovery(putOnce);
+        };
+        let putOutcome: Awaited<ReturnType<PluginPublisherOrchestrator['putWithRecovery']>>;
+        try {
+          putOutcome = await this.putWithRecovery(putOnce);
+        } catch (error) {
+          if (error instanceof PluginPublisherPutDeadlineExpiredError) {
+            this.update(record, {
+              stage: 'expired',
+              status: 'expired',
+              message: '上传会话已过期',
+            });
+            return;
+          }
+          throw error;
+        }
         if (putOutcome === 'cancelled_incomplete' || putOutcome === 'cancelled_uncertain') {
           this.update(record, {
             stage: 'cancelled',
@@ -420,6 +514,7 @@ export class PluginPublisherOrchestrator {
       }
       this.fail(record, 'INTERNAL', '发布失败');
     } finally {
+      if (pendingConfirmationHeld) this.releasePendingConfirmation(record.owner);
       await handle?.close().catch(() => undefined);
       try {
         await sourceBinding?.onTerminal?.();

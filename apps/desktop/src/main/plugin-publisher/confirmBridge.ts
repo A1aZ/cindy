@@ -17,6 +17,8 @@ export interface PluginPublisherConfirmRequest {
 interface PendingConfirm {
   requesterId: number;
   resolve: (confirmed: boolean) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 export class PluginPublisherConfirmBridge {
@@ -27,10 +29,14 @@ export class PluginPublisherConfirmBridge {
     facts: PluginPublisherConfirmFacts,
     ownerStamp: DataOwnerPushStamp,
     send: (request: PluginPublisherConfirmRequest) => boolean,
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false);
     const requestId = randomUUID();
     return new Promise<boolean>((resolve) => {
-      this.pending.set(requestId, { requesterId, resolve });
+      const onAbort = (): void => this.settle(requestId, false);
+      this.pending.set(requestId, { requesterId, resolve, signal, onAbort });
+      signal?.addEventListener('abort', onAbort, { once: true });
       let delivered = false;
       try {
         delivered = send({ requestId, ownerStamp, facts });
@@ -65,6 +71,9 @@ export class PluginPublisherConfirmBridge {
     const pending = this.pending.get(requestId);
     if (!pending) return;
     this.pending.delete(requestId);
+    if (pending.signal && pending.onAbort) {
+      pending.signal.removeEventListener('abort', pending.onAbort);
+    }
     pending.resolve(confirmed);
   }
 }

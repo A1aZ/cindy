@@ -44,7 +44,7 @@ interface HarnessOverrides {
   /** 条目通道;缺省按 callSessionId 推导(null ⇒ script,否则 session)。 */
   callChannel?: 'session' | 'script';
   /** 严格在途查询结果:false = 模拟已交卷/已清扫(返回 null)。缺省 true。 */
-  inFlight?: boolean;
+  inFlight?: boolean | (() => boolean);
 }
 
 function makeHarness(dataRoot: string, overrides: HarnessOverrides = {}) {
@@ -63,7 +63,12 @@ function makeHarness(dataRoot: string, overrides: HarnessOverrides = {}) {
     getGhost: (id) => (id === GHOST_ID ? makeGhost(overrides.fs ?? true) : null),
     dataRootDir: () => dataRoot,
     callInfo: entryFor,
-    inFlightCallInfo: (callId) => (overrides.inFlight === false ? null : entryFor(callId)),
+    inFlightCallInfo: (callId) => {
+      const isInFlight = typeof overrides.inFlight === 'function'
+        ? overrides.inFlight()
+        : overrides.inFlight !== false;
+      return isInFlight ? entryFor(callId) : null;
+    },
     getSessionSnapshot: async () => (overrides.session === undefined ? null : overrides.session),
     requestWriteConfirm: async (sessionId) => {
       confirmCalls.push(sessionId);
@@ -162,6 +167,45 @@ describe('GhostFsSlot', () => {
     });
     expect(r).toMatchObject({ ok: true, op: 'write' });
     expect(await fs.promises.readFile(path.join(workdir, 'agent/output.txt'), 'utf8')).toBe('ok');
+  });
+
+  it('未声明 fs 时，确认期间交卷会让 workdir 写盘授权失效且不记住确认', async () => {
+    let inFlight = true;
+    let confirmations = 0;
+    const { slot, confirmCalls } = makeHarness(dataRoot, {
+      fs: false,
+      inFlight: () => inFlight,
+      session: {
+        workingDir: workdir,
+        permissionMode: 'default',
+        planModeEnabled: false,
+        remoteHostId: null,
+      },
+      confirm: async () => {
+        confirmations += 1;
+        if (confirmations === 1) inFlight = false;
+        return { confirmed: true };
+      },
+    });
+    const request = {
+      type: 'fs-request',
+      op: 'write',
+      root: 'workdir',
+      path: 'agent/late.txt',
+      content: 'blocked',
+      callId: 'call-1',
+    };
+
+    const denied = await slot.handleFsRequest(GHOST_ID, request);
+    expect(denied).toMatchObject({ ok: false });
+    expect((denied as { message: string }).message).toContain('授权已失效');
+    expect(fs.existsSync(path.join(workdir, 'agent', 'late.txt'))).toBe(false);
+
+    inFlight = true;
+    const allowed = await slot.handleFsRequest(GHOST_ID, request);
+    expect(allowed).toMatchObject({ ok: true, op: 'write' });
+    expect(confirmCalls).toHaveLength(2);
+    expect(await fs.promises.readFile(path.join(workdir, 'agent', 'late.txt'), 'utf8')).toBe('blocked');
   });
 
   it('未声明 fs 时，脚本通道不能复用 Agent 的 workdir 授权', async () => {

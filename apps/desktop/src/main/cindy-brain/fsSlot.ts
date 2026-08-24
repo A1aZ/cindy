@@ -12,7 +12,9 @@
  *                 cardService 严格反查当前 Agent 调用与 session,不信意识
  *                 自报);当前 Agent 调用无需插件自主 fs 声明;**跟随会话
  *                 permission 模式**(映射表见 workdirWriteVerdict:免批模式
- *                 直写、逐条模式弹 fs_write 确认卡、plan 拒);远程工作区
+ *                 直写、逐条模式弹 fs_write 确认卡、plan 拒)。未声明 fs
+ *                 而复用 Agent 授权时,每个实际落盘动作前还要重新确认同一
+ *                 callId 仍严格在途并绑定该插件和会话;远程工作区
  *                 (remoteHostId 非空)明确拒——路径在远端机器,本地代写
  *                 写不到(规则 26,首期不支持不静默坏)。
  *                 例外分支(2026-08-04):callId 属于「仅运行脚本」通道的
@@ -601,6 +603,7 @@ export class GhostFsSlot {
     if (verdict === 'deny') {
       return fail('当前会话处于计划/只读模式,不允许写工作目录');
     }
+    let confirmedMemoryKey: string | null = null;
     if (verdict === 'confirm') {
       const parentDir = path.dirname(target);
       const memoryKey = `${info.sessionId} ${ghostId} ${foldCase(parentDir)}`;
@@ -618,12 +621,30 @@ export class GhostFsSlot {
           if (decision.reason === 'cancelled') return fail('用户拒绝了本次工作目录写入');
           return fail('确认通道未就绪或会话已关闭,本次工作目录写入未执行');
         }
-        this.workdirGrants.add(memoryKey);
+        confirmedMemoryKey = memoryKey;
       }
     }
 
+    // 未声明 fs 的插件只是在当前 Agent 调用期间借用会话文件权限。前面的
+    // session/path/confirm await 都可能给调用留下交卷窗口，不能把入口处的
+    // 在途结果缓存到真正落盘时；mkdir 与 writeFile 各自都是文件副作用，
+    // 因此分别在调用前复核同一 callId 仍绑定当前插件和会话。
+    const stillHasLiveAgentWorkdirAuthorization = (): boolean => {
+      if (ghost.manifest.fs === true) return true;
+      const inFlight = this.deps.inFlightCallInfo(callId);
+      return inFlight?.ghostId === ghostId
+        && inFlight.channel === 'session'
+        && inFlight.sessionId === info.sessionId;
+    };
+    if (!stillHasLiveAgentWorkdirAuthorization()) {
+      return fail('调用已交卷或已过期,工作目录写盘授权已失效');
+    }
     await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    if (!stillHasLiveAgentWorkdirAuthorization()) {
+      return fail('调用已交卷或已过期,工作目录写盘授权已失效');
+    }
     await fs.promises.writeFile(target, decoded.bytes);
+    if (confirmedMemoryKey) this.workdirGrants.add(confirmedMemoryKey);
     this.deps.log?.info('ghost fs write (workdir)', {
       ghostId,
       sessionId: info.sessionId,

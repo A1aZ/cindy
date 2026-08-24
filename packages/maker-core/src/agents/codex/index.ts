@@ -3349,6 +3349,9 @@ export class CodexAgent extends BaseAgent {
         data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
         source: 'codex',
       });
+      // Failure is a product terminal. Queued ask_user / plan waiters must exit
+      // rather than treat this as idle success and start another turn.
+      flushYieldContinuationIdleWaiters(true);
     };
     const emitYieldContinuationStartFailure = (error: unknown, cells: YieldedExecCell[]): void => {
       emitYieldContinuationFailure({
@@ -9035,7 +9038,6 @@ export class CodexAgent extends BaseAgent {
             yieldedCells.length === 0 ? 'empty_completion' : 'retry_exhausted',
           );
           suppressSuccessfulYieldBoundary = true;
-          flushYieldContinuationIdleWaiters();
         } else {
           yieldClaim = mintYieldContinuationClaim(outstandingCells, turn.id, retryCount);
         }
@@ -11021,16 +11023,20 @@ export class CodexAgent extends BaseAgent {
           rejectIfCancelled(sendOpts, 'send');
           const message = `Failed to restore Codex read-only reference permissions: ${String(e)}`;
           log.error('read-only reference profile refresh failed', { error: String(e), threadId });
-          eventQueue.push({
-            type: 'error',
-            data: { message, isTerminal: true },
-            source: 'codex',
-          });
-          eventQueue.push({
-            type: 'status',
-            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
-            source: 'codex',
-          });
+          // Yield continuation owns its product terminal. Emitting here would
+          // duplicate the later yield-continuation-start-failed events.
+          if (yieldAttempt == null) {
+            eventQueue.push({
+              type: 'error',
+              data: { message, isTerminal: true },
+              source: 'codex',
+            });
+            eventQueue.push({
+              type: 'status',
+              data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+              source: 'codex',
+            });
+          }
           if (sendOpts?.throwOnStartFailure) throw new Error(message);
           return;
         }
@@ -11635,7 +11641,7 @@ export class CodexAgent extends BaseAgent {
             log.info('turn/start failure suppressed — this send was already settled by cancel', {
               threadId,
             });
-          } else {
+          } else if (yieldAttempt == null) {
             eventQueue.push({
               type: 'error',
               data: { message: `turn/start failed: ${String(finalErr)}`, isTerminal: true },

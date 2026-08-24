@@ -17974,11 +17974,17 @@ describe('CodexAgent yield continuation', () => {
       turn: { id: 'turn-1', status: 'completed' },
     });
     await waitForExpectation(() => {
-      expect(events.some((event) => (
+      expect(events.filter((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '').includes('yield-continuation-start-failed')
-      ))).toBe(true);
+        && (event.data as { isTerminal?: boolean }).isTerminal === true
+      ))).toHaveLength(1);
     });
+    const terminalErrors = events.filter((event) => (
+      event.type === 'error'
+      && (event.data as { isTerminal?: boolean }).isTerminal === true
+    ));
+    expect(String((terminalErrors[0]?.data as { reason?: string }).reason ?? ''))
+      .toBe('yield-continuation-start-failed');
     expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
@@ -18238,11 +18244,21 @@ describe('CodexAgent yield continuation', () => {
       turn: { id: 'turn-1', status: 'completed' },
     });
     await waitForExpectation(() => {
-      expect(events.some((event) => (
+      expect(events.filter((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '').includes('yield-continuation-start-failed')
-      ))).toBe(true);
+        && (event.data as { isTerminal?: boolean }).isTerminal === true
+      ))).toHaveLength(1);
     });
+    const terminalErrors = events.filter((event) => (
+      event.type === 'error'
+      && (event.data as { isTerminal?: boolean }).isTerminal === true
+    ));
+    expect(String((terminalErrors[0]?.data as { reason?: string }).reason ?? ''))
+      .toBe('yield-continuation-start-failed');
+    expect(events.some((event) => (
+      event.type === 'error'
+      && /^turn\/start failed:/.test(String((event.data as { message?: string }).message ?? ''))
+    ))).toBe(false);
     expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
@@ -18758,6 +18774,90 @@ describe('CodexAgent yield continuation', () => {
       event.type === 'error'
       && String((event.data as { message?: string }).message ?? '').includes('ask_user continuation turn failed to start')
     ))).toBe(false);
+    await handle.close();
+  });
+
+  it('does not start a queued ask_user continuation after lost-handle', async () => {
+    const agent = new CodexAgent(createDeps());
+    let turnSeq = 0;
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnSeq += 1;
+        return { turn: { id: `turn-${turnSeq}` } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-lost-handle-drops-ask-user',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.requestUserInput) {
+      throw new Error('expected item, turn, and user-input handlers');
+    }
+    const ownerDecision = deferred<InteractionDecision>();
+    handle.setInteractionResolver(async () => ownerDecision.promise);
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'run typecheck' });
+    void handlers.requestUserInput({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      itemId: 'item-ask-lost',
+      questions: [{
+        id: 'native-q1',
+        header: 'Question',
+        question: 'Pick one',
+        isOther: false,
+        isSecret: false,
+        options: [{ label: 'A', description: null }],
+      }],
+    }, { requestId: 'req-ask-lost' });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-ask-lost',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(1);
+    });
+    ownerDecision.resolve({
+      kind: 'ask_user_question',
+      answers: { 'Pick one': 'A' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(host.request.mock.calls.filter(([method]) => method === Method.TurnStart)).toHaveLength(2);
+    handlers.turnStarted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'inProgress' },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.some((event) => (
+        event.type === 'error'
+        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+      ))).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(host.request.mock.calls.filter(([method]) => method === Method.TurnStart)).toHaveLength(2);
+    expect(events.some((event) => (
+      event.type === 'error'
+      && String((event.data as { message?: string }).message ?? '').includes('ask_user continuation turn failed to start')
+    ))).toBe(false);
+    expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
 });

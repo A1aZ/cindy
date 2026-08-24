@@ -18314,6 +18314,63 @@ describe('CodexAgent yield continuation', () => {
     });
     await handle.close();
   });
+
+  it('releases a yield claim on a non-transport terminal error so the session is not permanently busy', async () => {
+    const agent = new CodexAgent(createDeps());
+    let turnSeq = 0;
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnSeq += 1;
+        return { turn: { id: `turn-${turnSeq}` } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-terminal-error',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.error) {
+      throw new Error('expected item, turn, and error handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'run typecheck' });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-terminal',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.some((event) => event.type === 'done' && event.turnContinuationId != null)).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(1);
+    });
+    expect(handle.isTurnRunning?.()).toBe(true);
+    // 原 turn 已落墓碑: 非 transport 的 turn-1 error 会被 stale guard 丢掉。
+    // 必须打到续段 turn, 才能覆盖「只在 transport 路径结算 claim」的旧修法。
+    handlers.error({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      willRetry: false,
+      error: { message: 'model request failed' },
+    });
+    await waitForExpectation(() => {
+      expect(handle.isTurnRunning?.()).toBe(false);
+    });
+    await handle.close();
+  });
 });
 
 describe('CodexAgent steer', () => {

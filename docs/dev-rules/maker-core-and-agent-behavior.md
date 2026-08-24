@@ -79,8 +79,9 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   后续 `wait` 输出 `Script completed` / `Script terminated` 后视为该 cell 已结算，不得
   再铸 claim，也不得报 lost-handle。禁止把 `last_agent_message == null` 或开场白当结算
   判据；cell 跨 turn 存活性未证实前，续段失败必须诚实报 lost-handle，不得 replay 原请求
-  或重跑已执行命令。Claude wake continuation 与 Codex yield continuation 先分账，不抽
-  公共模块。
+  或重跑已执行命令。续段 claim 一旦挡住产品结束，所有非重试终态错误路径（不限
+  transport）都必须同步结算它，不能只推 Done 而让 `isTurnRunning()` 仍为 true。
+  Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。
 
 ## 3. 守住四项核心数据指标
 

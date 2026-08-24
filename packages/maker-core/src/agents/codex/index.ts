@@ -10736,6 +10736,10 @@ export class CodexAgent extends BaseAgent {
         // 没接管(预算耗尽 / 已有产出 / 非容量错误)且这一轮确实在跑 → 下面推 Done 收口。
         // 同上: 收口即撤销重投资格, 否则延后标记会在别的 start settle 时补排。
         revokeOverloadRetryOnTerminalSettle('terminal error notification');
+        // yield claim 让 isTurnRunning() 在 SDK turn 结束后仍为 true。transport
+        // 路径在订阅作废时已经结算；非 transport 的终态 error 同样会推 Done,
+        // 若不在这里同步取消, UI 已失败而后续 send 仍被 SESSION_RUNNING 拒绝。
+        cancelActiveYieldContinuation('terminal error');
         eventQueue.push({
           type: 'status',
           data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },

@@ -3466,6 +3466,7 @@ interface ElectronAPI {
   cindyMediaStorage: {
     /** 本窗口草稿附件 URL 变化时上报(fire-and-forget;多窗口防误删取证)。 */
     reportDraftUrls: (urls: string[]) => void;
+    openLegacyImagesDir: () => Promise<{ opened: boolean }>;
     stats: () => Promise<{
       success: boolean;
       error?: string;

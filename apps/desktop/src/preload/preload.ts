@@ -3871,6 +3871,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.send('cindy-media:report-draft-urls', urls);
     },
 
+    openLegacyImagesDir: (): Promise<{ opened: boolean }> =>
+      ipcRenderer.invoke('cindy-media:legacy-images-open-dir'),
+
     stats: (): Promise<{
       success: boolean;
       error?: string;

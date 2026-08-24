@@ -18,6 +18,9 @@ export type WindowsProcessScanWorkerResponse =
       };
     };
 
+export type WindowsProcessScanWorkerMessage =
+  { type: 'started'; pid: number } | { type: 'result'; response: WindowsProcessScanWorkerResponse };
+
 export function isWindowsProcessScanWorkerResponse(
   value: unknown,
 ): value is WindowsProcessScanWorkerResponse {
@@ -34,4 +37,15 @@ export function isWindowsProcessScanWorkerResponse(
     (response.error.code === undefined || typeof response.error.code === 'string') &&
     (response.error.syscall === undefined || typeof response.error.syscall === 'string')
   );
+}
+
+export function isWindowsProcessScanWorkerMessage(
+  value: unknown,
+): value is WindowsProcessScanWorkerMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const message = value as { type?: unknown; pid?: unknown; response?: unknown };
+  if (message.type === 'started') {
+    return Number.isSafeInteger(message.pid) && Number(message.pid) > 0;
+  }
+  return message.type === 'result' && isWindowsProcessScanWorkerResponse(message.response);
 }

@@ -3135,7 +3135,7 @@ export class CodexAgent extends BaseAgent {
     let activeYieldContinuationId: number | null = null;
     let yieldContinuationInFlight = false;
     let yieldContinuationAbort: AbortController | null = null;
-    let yieldContinuationIdleWaiters: Array<() => void> = [];
+    let yieldContinuationIdleWaiters: Array<(cancelled: boolean) => void> = [];
     const emitYieldContinuationState = (
       continuationId: number,
       state: 'awaiting' | 'active' | 'cancelled',
@@ -3266,15 +3266,15 @@ export class CodexAgent extends BaseAgent {
       if (!claim || claim.settled || claim.continuationTurnId) return;
       claim.continuationTurnId = turnId;
     };
-    const flushYieldContinuationIdleWaiters = (): void => {
-      if (activeYieldContinuationClaim() != null || yieldContinuationInFlight) return;
+    const flushYieldContinuationIdleWaiters = (cancelled = false): void => {
+      if (!cancelled && (activeYieldContinuationClaim() != null || yieldContinuationInFlight)) return;
       const waiters = yieldContinuationIdleWaiters;
       yieldContinuationIdleWaiters = [];
-      for (const resolve of waiters) resolve();
+      for (const resolve of waiters) resolve(cancelled);
     };
-    const waitForYieldContinuationIdle = async (): Promise<void> => {
-      if (activeYieldContinuationClaim() == null && !yieldContinuationInFlight) return;
-      await new Promise<void>((resolve) => {
+    const waitForYieldContinuationIdle = async (): Promise<boolean> => {
+      if (activeYieldContinuationClaim() == null && !yieldContinuationInFlight) return false;
+      return await new Promise<boolean>((resolve) => {
         yieldContinuationIdleWaiters.push(resolve);
       });
     };
@@ -3289,7 +3289,7 @@ export class CodexAgent extends BaseAgent {
       log.info('yield continuation cancelled', { reason, continuationId: claim.id });
       emitYieldContinuationState(claim.id, 'cancelled');
       releaseSettledYieldContinuationClaim(claim);
-      flushYieldContinuationIdleWaiters();
+      flushYieldContinuationIdleWaiters(true);
       return claim;
     };
     const discardYieldContinuationClaims = (reason: string): void => {
@@ -3308,7 +3308,7 @@ export class CodexAgent extends BaseAgent {
         releaseSettledYieldContinuationClaim(claim);
       }
       yieldContinuationClaims.clear();
-      flushYieldContinuationIdleWaiters();
+      flushYieldContinuationIdleWaiters(true);
     };
     const releaseYieldContinuationEvent = (event: AgentEvent): void => {
       if (event.turnContinuationId === undefined) return;
@@ -5987,7 +5987,7 @@ export class CodexAgent extends BaseAgent {
         );
         log.debug('plan review ◀ approved — starting implementation turn', { turnId, edited: Boolean(edited && edited !== plan.trim()) });
         try {
-          await waitForYieldContinuationIdle();
+          if (await waitForYieldContinuationIdle()) return;
           if (closed) return;
           await handle.send(
             { type: 'user', content: message },
@@ -6017,7 +6017,7 @@ export class CodexAgent extends BaseAgent {
       }
       log.debug('plan review ◀ revision requested — starting plan revision turn', { turnId });
       try {
-        await waitForYieldContinuationIdle();
+        if (await waitForYieldContinuationIdle()) return;
         if (closed) return;
         await handle.send(
           { type: 'user', content: feedback },
@@ -6324,7 +6324,7 @@ export class CodexAgent extends BaseAgent {
       autoReviewIntent?: string,
     ): Promise<void> {
       if (closed) return;
-      await waitForYieldContinuationIdle();
+      if (await waitForYieldContinuationIdle()) return;
       if (closed) return;
       const message = formatAskUserContinuationMessage(live.questions, answers);
       const sendOptions: CodexInternalSendOptions = {
@@ -8993,7 +8993,9 @@ export class CodexAgent extends BaseAgent {
       yieldedExecCellsByTurnId.delete(turn.id);
       let yieldClaim: YieldContinuationClaim | null = null;
       let suppressSuccessfulYieldBoundary = false;
-      if (existingYieldClaim?.state === 'awaiting') {
+      if (existingYieldClaim && !claimOwnsTurn(existingYieldClaim, turn.id)) {
+        // A late foreign completed must not settle or retry the active claim.
+      } else if (existingYieldClaim?.state === 'awaiting') {
         yieldClaim = existingYieldClaim;
         if (yieldedCells.length > 0) {
           yieldClaim.cells = dedupeCells([...yieldClaim.cells, ...yieldedCells]);

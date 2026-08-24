@@ -334,6 +334,9 @@ export async function generatePromptPrediction(
       model: auxiliarySelection.model,
       maxTokens: 96,
       timeoutMs: 12_000,
+      // Recommendation outputs share a short token budget with provider-native
+      // thinking. Disable it so reasoning-first models still return body text.
+      disableReasoning: true,
       systemPrompt,
       responseInstructions:
         'Output only the predicted next user message — no quotes, markdown, or commentary.',

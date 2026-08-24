@@ -235,6 +235,7 @@ describe('prompt prediction completion revision guard', () => {
         providerId: 'openrouter',
         agentKind: 'codex',
         model: 'openai/gpt-5-mini',
+        disableReasoning: true,
         systemPrompt: expect.any(String),
       }),
     );

@@ -444,6 +444,39 @@ describe('networkSlot · 重定向逐跳守门', () => {
     expect(release).toHaveBeenCalledTimes(2);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it('Agent 交卷后不再跟进未声明目标的后续重定向', async () => {
+    const liveCall = { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' as const };
+    const inFlightCallInfo = vi.fn()
+      // 入口资格、首跳资格与重定向目标预检仍在途。
+      .mockReturnValueOnce(liveCall)
+      .mockReturnValueOnce(liveCall)
+      .mockReturnValueOnce(liveCall)
+      .mockReturnValueOnce(liveCall)
+      // 真正发起第二跳前已经交卷。
+      .mockReturnValue(null);
+    const release = vi.fn(async () => undefined);
+    const guardedFetch = vi.fn(async () => ({
+      response: redirectTo('https://cdn.example.com/next'),
+      release,
+    }));
+    const { slot, fetchImpl } = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo,
+      fetchPublicImpl: guardedFetch,
+    });
+
+    const result = await slot.handleFetchRequest('web-search', {
+      url: 'https://example.com/start',
+      callId: 'call-agent',
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.message).toContain('Agent 调用已结束');
+    expect(guardedFetch).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe('networkSlot · 响应收敛', () => {

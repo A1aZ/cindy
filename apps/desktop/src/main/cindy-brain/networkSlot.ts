@@ -1036,13 +1036,15 @@ export class GhostNetworkSlot {
       return { ok: false, message: '意识不在可用状态' };
     }
     const net = ghost.manifest.network;
-    const callInfo = requestCallId
-      ? this.deps.inFlightCallInfo?.(requestCallId) ?? null
-      : null;
-    const agentMediated =
-      callInfo?.ghostId === ghostId
-      && callInfo.channel === 'session'
-      && callInfo.sessionId !== null;
+    const hasLiveAgentAuthorization = (): boolean => {
+      const callInfo = requestCallId
+        ? this.deps.inFlightCallInfo?.(requestCallId) ?? null
+        : null;
+      return callInfo?.ghostId === ghostId
+        && callInfo.channel === 'session'
+        && callInfo.sessionId !== null;
+    };
+    const agentMediated = hasLiveAgentAuthorization();
     // 静态 hosts 与动态连接地址(network.connections,用户在设置页添加、
     // 逐条过主机受信确认)至少有其一,才算"声明过白名单"。
     const connectionDecls = net?.connections ?? [];
@@ -1068,7 +1070,8 @@ export class GhostNetworkSlot {
     const hostDeclared = (hostname: string): boolean =>
       declaredHosts.some((pattern) => ghostNetworkHostMatches(pattern, hostname)) ||
       connectionHosts.includes(hostname);
-    const hostAllowed = (hostname: string): boolean => agentMediated || hostDeclared(hostname);
+    const hostAllowed = (hostname: string): boolean =>
+      hostDeclared(hostname) || hasLiveAgentAuthorization();
     if (!hostAllowed(url.hostname)) {
       const declared = [...declaredHosts, ...connectionHosts];
       return {
@@ -1250,7 +1253,12 @@ export class GhostNetworkSlot {
             signal: controller.signal,
             redirect: 'manual' as const,
           };
-          if (agentMediated && !hostDeclared(currentUrl.hostname)) {
+          const hopHostDeclared = hostDeclared(currentUrl.hostname);
+          const hopAgentMediated = !hopHostDeclared && hasLiveAgentAuthorization();
+          if (!hopHostDeclared && !hopAgentMediated) {
+            return { ok: false, message: '当前 Agent 调用已结束，未声明目标不再允许访问' };
+          }
+          if (hopAgentMediated) {
             const guarded = await this.deps.fetchPublicImpl(currentUrl.toString(), fetchInit);
             guardedFetchReleases.push(guarded.release);
             response = guarded.response;

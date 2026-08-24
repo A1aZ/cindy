@@ -719,6 +719,13 @@
         "item2": "큰 작업은 여러 턴으로 나누세요. 먼저 이해하고, 다음에 수정하고, 마지막에 검증하세요.",
         "item3": "독립적인 문제는 한 스레드에 섞지 말고 새 세션을 만들어 처리하세요."
       },
+      "linuxUpdates": {
+        "title": "Linux 설치와 업데이트",
+        "description": "Linux는 현재 Ubuntu 22.04 / 24.04용 .deb로 제공됩니다. 새 빌드가 있으면 앱이 다운로드하고, 설치할 때 시스템 비밀번호를 묻습니다.",
+        "item1": "처음 설치할 때는 sudo apt install ./cindy-<버전>-<아키텍처>.deb 를 사용하세요(x64는 amd64, arm64는 arm64).",
+        "item2": "앱 안 업데이트는 .deb를 다운로드합니다. 업데이트를 선택하면 시스템 권한 확인 후 덮어써 설치합니다.",
+        "item3": "설치에 비밀번호가 필요하므로 Linux에서는 Beta 채널과 유휴 상태 자동 설치를 제공하지 않습니다."
+      },
       "qnaTitle": "바로 질문하기",
       "qnaDescription": "overview 에 없는 내용이라도 하고 싶은 일을 물어보면 다음에 열어야 할 곳이나 진행 방법을 안내합니다.",
       "qnaPlaceholder": "예: Codex 세션을 어떻게 가져오나요?",
@@ -777,6 +784,7 @@
       "openLogsDirError": "로그 디렉터리를 열지 못했습니다",
       "autoUpdateLabel": "유휴 상태일 때 업데이트 설치",
       "autoUpdateDescription": "업데이트 다운로드가 완료된 뒤, 이 컴퓨터가 10분 동안 조작되지 않았고 실행 중인 작업이 없으면 앱을 자동으로 다시 시작해 설치합니다.",
+      "linuxUpdateDescription": "새 빌드가 있으면 앱에서 .deb를 다운로드합니다. 설치할 때 시스템 비밀번호가 필요하므로 유휴 상태에서는 자동 설치하지 않습니다.",
       "autoUpdateEnabledToast": "유휴 상태 자동 업데이트 설치가 켜졌습니다",
       "autoUpdateDisabledToast": "유휴 상태 자동 업데이트 설치가 꺼졌습니다",
       "autoUpdateSaveFailed": "자동 업데이트 설정을 저장하지 못했습니다",
@@ -1049,6 +1057,13 @@
           "cancel": "취소",
           "edit": "편집",
           "delete": "삭제",
+          "termLabel": "사전 단어",
+          "aliasSeparator": ", ",
+          "aliases": "자주 잘못 인식됨: {{aliases}}",
+          "aliasesEditLabel": "자주 잘못 인식되는 표현",
+          "aliasesEditAriaLabel": "자주 잘못 인식되는 표현 편집",
+          "aliasesPlaceholder": "한 줄에 하나씩 입력",
+          "aliasesEditHint": "한 줄에 하나씩 입력하세요. 모두 삭제하려면 비워 두세요.",
           "searchAriaLabel": "사전 검색",
           "closeSearch": "검색 접기",
           "searchPlaceholder": "사전 검색",
@@ -1777,13 +1792,21 @@
         "invalidLibraryName": "Ollama 라이브러리 이름을 입력하거나 huggingface.co 모델 페이지 URL을 붙여넣으세요",
         "advancedExactName": "고급: 정확한 라이브러리 이름",
         "models": {
-          "qwen38-27b": { "blurb": "로컬에서 돌릴 수 있는 가장 강한 밀집 모델. 코딩과 긴 작업에 적합합니다." },
+          "qwen38-27b": {
+            "blurb": "로컬에서 돌릴 수 있는 가장 강한 밀집 모델. 코딩과 긴 작업에 적합합니다."
+          },
           "gpt-oss-20b": { "blurb": "OpenAI 오픈 20B. 16GB급 기기에서 가장 무난한 선택." },
-          "gemma4-e2b": { "blurb": "Gemma 4 최소형. 가벼운 기기에서도 돌아가며 비전을 지원합니다." },
+          "gemma4-e2b": {
+            "blurb": "Gemma 4 최소형. 가벼운 기기에서도 돌아가며 비전을 지원합니다."
+          },
           "gemma4-e4b": { "blurb": "Google Gemma 4 소형. 가벼운 일상용이며 비전을 지원합니다." },
           "gemma4-12b": { "blurb": "Gemma 4 중형. 일상 대화와 멀티모달에 더 안정적입니다." },
-          "gemma4-31b": { "blurb": "Gemma 4 대형. 대화와 멀티모달이 더 강하고, 메모리도 더 듭니다." },
-          "gemma4-26b": { "blurb": "Gemma 4 중대형 MoE. 활성 파라미터가 적어 중고사양에 맞습니다." },
+          "gemma4-31b": {
+            "blurb": "Gemma 4 대형. 대화와 멀티모달이 더 강하고, 메모리도 더 듭니다."
+          },
+          "gemma4-26b": {
+            "blurb": "Gemma 4 중대형 MoE. 활성 파라미터가 적어 중고사양에 맞습니다."
+          },
           "ornith15-35b": { "blurb": "Ornith 1.5 중형 MoE. 로컬 코딩과 에이전트 대안." },
           "glm-47-flash": { "blurb": "Zhipu의 최신 코딩 모델. 30B MoE로 코드와 에이전트에 맞음." }
         },
@@ -3518,6 +3541,12 @@
     },
     "shortcuts": {
       "title": "키보드 단축키",
+      "accessories": {
+        "title": "액세서리",
+        "description": "키보드, 게임패드 등 입력 장치",
+        "openAria": "액세서리 열기",
+        "back": "뒤로"
+      },
       "resetAll": "모두 기본값으로 재설정",
       "reset": "기본값으로 재설정",
       "recording": "새 단축키를 누르세요…",
@@ -3554,7 +3583,7 @@
           },
           "composer.submit": {
             "name": "메시지 보내기",
-            "description": "입력창의 메시지를 보냅니다"
+            "description": "입력창의 메시지를 보내거나, 대기 중인 요청이 있으면 승인합니다"
           },
           "feedback": {
             "name": "피드백 보내기",
@@ -3637,7 +3666,11 @@
           },
           "navigateBack": {
             "name": "뒤로",
-            "description": "탐색 기록에서 뒤로 이동합니다"
+            "description": "이전 화면으로 돌아가거나, 대기 중인 요청이 있으면 거절합니다"
+          },
+          "toggleFullscreen": {
+            "name": "전체 화면 전환",
+            "description": "전체 화면을 시작하거나 종료합니다"
           },
           "composer.focus": {
             "name": "입력창에 포커스",
@@ -3657,7 +3690,6 @@
           }
         },
         "title": "Work Louder Codex Micro",
-        "beta": "Beta",
         "entryDescription": "Agent 키로 작업을 열고 조명으로 상태를 표시합니다.",
         "openAria": "Work Louder Codex Micro 설정 열기",
         "back": "키보드 단축키로 돌아가기",
@@ -3958,7 +3990,113 @@
       "edit": "편집",
       "delete": "삭제",
       "deleteAria": "{{name}} 단축키 삭제",
-      "cancel": "취소"
+      "cancel": "취소",
+      "xboxGamepad": {
+        "title": "Xbox 컨트롤러",
+        "openAria": "Xbox 컨트롤러 설정 열기",
+        "entryDescription": "컨트롤러로 스크롤, 말하기, 보내기, 작업 전환",
+        "back": "뒤로",
+        "retry": "다시 시도",
+        "layout": {
+          "title": "컨트롤러",
+          "description": "버튼을 눌러 동작을 바꿀 수 있습니다. 패드를 누르면 그림의 같은 위치가 켜집니다.",
+          "clickToEdit": "눌러서 설정",
+          "editor": {
+            "title": "버튼",
+            "description": "이 버튼에 Cindy 기능을 지정합니다. 지정하지 않은 버튼은 아무 것도 하지 않습니다.",
+            "done": "완료",
+            "assigned": "기능",
+            "assignedDescription": "누르면 실행됩니다. 눌러서 말하기는 떼면 끝납니다."
+          },
+          "reset": {
+            "title": "기본 키 배치 복원",
+            "description": "각 버튼의 기능만 되돌리며, 컨트롤러는 꺼지지 않습니다.",
+            "button": "기본 키 배치 복원"
+          }
+        },
+        "stick": {
+          "description": "스틱으로 대화를 스크롤하거나, 방향마다 다른 기능을 지정할 수 있습니다.",
+          "customDescription": "스틱이 이 방향으로 들어갈 때 한 번 실행됩니다.",
+          "mode": {
+            "label": "스틱 용도",
+            "description": "대화 스크롤은 기울인 정도에 따라 연속됩니다. 사용자 지정은 방향마다 기능을 정합니다.",
+            "options": {
+              "conversation-scroll": "대화 스크롤",
+              "custom": "방향 사용자 지정"
+            }
+          }
+        },
+        "directions": {
+          "up": "위",
+          "right": "오른쪽",
+          "down": "아래",
+          "left": "왼쪽"
+        },
+        "controls": {
+          "a": "A",
+          "b": "B",
+          "x": "X",
+          "y": "Y",
+          "lb": "LB",
+          "rb": "RB",
+          "lt": "LT",
+          "rt": "RT",
+          "view": "View",
+          "menu": "Menu",
+          "xbox": "Xbox",
+          "ls": "왼쪽 스틱 클릭",
+          "rs": "오른쪽 스틱 클릭",
+          "dpadUp": "십자키 위",
+          "dpadDown": "십자키 아래",
+          "dpadLeft": "십자키 왼쪽",
+          "dpadRight": "십자키 오른쪽",
+          "leftStick": "왼쪽 스틱",
+          "rightStick": "오른쪽 스틱"
+        },
+        "actions": {
+          "none": "지정 안 함",
+          "voice": "음성 입력",
+          "voiceDescription": "누르고 있는 동안 음성 입력하고, 떼면 끝납니다.",
+          "commands": "명령",
+          "skills": "스킬",
+          "choose": "기능 선택"
+        },
+        "errors": {
+          "load": "컨트롤러 설정을 불러올 수 없습니다",
+          "save": "컨트롤러 설정을 저장할 수 없습니다"
+        },
+        "connection": {
+          "label": "연결",
+          "toggle": {
+            "label": "사용",
+            "aria": "Cindy가 앞에 있을 때 Xbox 컨트롤러를 사용합니다"
+          },
+          "status": {
+            "connecting": "연결 중",
+            "connected": "연결됨",
+            "not-detected": "감지되지 않음",
+            "present": "연결됨",
+            "disabled": "꺼짐",
+            "error": "연결 오류",
+            "unavailable": "이 시스템에서는 지원되지 않음"
+          },
+          "descriptions": {
+            "connecting": "Cindy가 Xbox 컨트롤러를 찾고 있습니다.",
+            "connected": "Cindy가 앞에 있을 때 이 컨트롤러를 듣습니다.",
+            "disabled": "켜면 Cindy가 앞에 있을 때 컨트롤러를 듣습니다.",
+            "present": "켜면 Cindy가 앞에 있을 때 컨트롤러를 듣습니다.",
+            "not-detected": "USB 또는 Bluetooth로 Xbox 컨트롤러를 연결하세요.",
+            "error": "Cindy가 컨트롤러를 읽지 못해 다시 시도하고 있습니다.",
+            "unavailable": "이 컴퓨터는 아직 Xbox 컨트롤러를 읽을 수 없습니다."
+          }
+        },
+        "device": {
+          "usb": "유선",
+          "bluetooth": "블루투스",
+          "battery": "{{percent}}%",
+          "charging": "충전 중 {{percent}}%"
+        }
+      }
     },
     "ghosts": {
       "title": "플러그인",
@@ -3966,6 +4104,8 @@
       "page": {
         "search": "플러그인 검색",
         "clearSearch": "플러그인 검색 지우기",
+        "secondaryTabsAria": "플러그인 페이지 섹션",
+        "overviewTab": "개요",
         "addPlugin": "플러그인 추가",
         "addPluginAria": "플러그인 추가 옵션",
         "installedSection": "설치됨",
@@ -4043,7 +4183,8 @@
           "stateChanged": "작업 중 계정, 플러그인 또는 릴리스가 변경되었습니다. 최신 상태를 확인한 후 다시 시도해 주세요.",
           "accessDenied": "이 플러그인 작업은 허용되지 않았거나 취소되었습니다.",
           "notConfigured": "이 환경에서는 플러그인 마켓을 사용할 수 없습니다.",
-          "invalidPackage": "이 플러그인 패키지가 올바르지 않거나 현재 Cindy 버전에서 지원되지 않습니다."
+          "invalidPackage": "이 플러그인 패키지가 올바르지 않거나 현재 Cindy 버전에서 지원되지 않습니다.",
+          "brokerRedirectPortRequired": "이 플러그인은 인증 broker를 선언했지만 같은 OAuth 설정에 redirectPort가 없어 플러그인 마켓에서 설치할 수 없습니다. 게시자에게 이 필드를 추가해 새 버전을 게시해 달라고 알려 주세요."
         },
         "securityTitle": "설치 및 권한",
         "securityDescription": "메인 프로세스에서 크기와 SHA-256 및 플러그인 매니페스트를 검증한 뒤 원자적으로 설치합니다. 최초 설치 후 자동으로 활성화되며 플러그인 페이지에서 언제든지 비활성화할 수 있습니다. 업데이트 시 현재 활성화 상태가 유지됩니다.",
@@ -4110,7 +4251,7 @@
             "authTitle": "비공개 리포지토리",
             "authBody": "인증은 전적으로 시스템 Git 구성에 의존하며 Cindy는 Git 자격 증명을 저장하지 않습니다. SSH: 이 머신에 사용 가능한 key가 구성되어 있어야 합니다. 조직이 SAML SSO를 강제하는 경우 GitHub SSH key 설정에서 Configure SSO로 해당 조직에 key를 승인해야 합니다. HTTPS: Personal Access Token을 사용하고 시스템 credential helper에 저장합니다.",
             "rulesTitle": "설치 규칙",
-            "rulesBody": "플러그인 id는 전역적으로 고유하며 선착순입니다. 설치된 플러그인과의 충돌은 명확히 표시됩니다. cindy- 같은 공식 예약 접두사를 사용하는 플러그인은 사용자 지정 마켓에서 설치할 수 없습니다. 설치 전에 플러그인이 선언한 권한을 모두 보여주며, 확인하면 설치가 완료되고 자동으로 활성화됩니다.",
+            "rulesBody": "플러그인 id는 전역적으로 고유하며 선착순입니다. 설치된 플러그인과의 충돌은 명확히 표시됩니다. 공식 예약 접두사 {{reservedGhostIdPrefixes}}를 사용하는 플러그인은 끌어다 놓기, 파일 선택, ghost_forge_pack 전달 또는 사용자 지정 플러그인 마켓으로는 설치할 수 없습니다. 설치 전에 플러그인이 선언한 권한을 모두 보여주며, 확인하면 설치가 완료되고 자동으로 활성화됩니다.",
             "copy": "가이드 복사",
             "copied": "가이드를 클립보드에 복사했습니다.",
             "copyFailed": "복사에 실패했습니다. 다시 시도하세요."
@@ -4181,7 +4322,6 @@
       "toast": {
         "installed": "\"{{name}}\" 설치됨",
         "uninstalled": "\"{{name}}\" 제거됨",
-        "installedAsleep": "\"{{name}}\" 설치 완료 (비활성 상태이며 여기에서 언제든 활성화할 수 있습니다)",
         "updated": "\"{{name}}\"이(가) v{{version}}(으)로 업데이트되었습니다",
         "reapproved": "\"{{name}}\"이(가) 복원되었습니다",
         "exported": "\"{{name}}\"의 .cindy 파일을 내보냈습니다",
@@ -4201,11 +4341,22 @@
         "cancel": "취소",
         "meta": "버전 {{version}}. 로컬에 설치되며 언제든 제거할 수 있습니다.",
         "metaWithAuthor": "제작자 {{author}} · 버전 {{version}}. 로컬에 설치되며 언제든 제거할 수 있습니다.",
-        "enableNow": "설치 후 바로 활성화",
-        "enableNowOpenPanel": "설치 후 바로 활성화하고 패널 열기",
         "manualCount": "번들 매뉴얼 {{count}}개",
         "expandDescription": "전체 소개 보기",
-        "collapseDescription": "소개 접기"
+        "collapseDescription": "소개 접기",
+        "typedIdLabel": "플러그인 id \"{{id}}\"을(를) 입력하여 설치를 확인하세요",
+        "agentBanner": {
+          "title": "이 설치는 Agent가 시작한 것입니다 — 당신이 누른 것이 아닙니다.",
+          "context": "작업 \"{{title}}\"을(를) 진행하던 중 {{path}} 아래의 플러그인 소스를 패키징했습니다.",
+          "contextNoPath": "작업 \"{{title}}\"을(를) 진행하던 중 플러그인 소스 디렉터리를 패키징했습니다.",
+          "contextNoTitle": "{{path}} 아래의 플러그인 소스를 패키징했습니다.",
+          "contextBare": "플러그인 소스 디렉터리를 패키징했습니다.",
+          "advice": "이 작업에서 플러그인 제작을 요청하지 않았다면 취소하세요 —— 그리고 이 작업이 방금 읽은 외부 콘텐츠를 다시 살펴보세요.",
+          "firstInstall": "이 플러그인 id는 이전에 설치된 적이 없습니다.",
+          "hazardSkill": "스킬 지시가 포함되어 있습니다. AI는 이를 당신의 모든 권한으로, 플러그인 샌드박스 밖에서, 모든 프로젝트에 대해 실행합니다.",
+          "hazardNode": "브라우저 샌드박스 밖에서 당신의 컴퓨터에서 프로그램을 실행할 수 있습니다.",
+          "hazardCredential": "설정 페이지에 입력한 자격 증명을 {{hosts}}(으)로 보냅니다."
+        }
       },
       "trust": {
         "official": "Cindy 공식 플러그인",
@@ -4258,6 +4409,8 @@
         "command": "채팅 명령 ${{command}}",
         "panelLeft": "패널 \"{{title}}\" · 채팅 왼쪽에 도킹",
         "panelTab": "패널 \"{{title}}\" · 플러그인 페이지에서 열기",
+        "mainView": "Cindy 사이드바에 “{{title}}” 항목을 추가할 수 있음",
+        "mainViewDetail": "클릭하면 플러그인 샌드박스에서 메인 보기가 열리며 파일, 네트워크 또는 자격 증명 접근 권한이 추가로 부여되지 않습니다.",
         "code": "실행 코드",
         "codeDetail": "격리된 샌드박스에서 실행되며 파일과 네트워크에 접근할 수 없습니다.",
         "resident": "상주 실행(활성화하면 시작되며 호출이 없어도 백그라운드 프로세스 유지)",
@@ -4330,7 +4483,10 @@
         "alreadyInstalled": "이 플러그인은 이미 설치되어 있습니다",
         "approvalRequired": "계속하려면 이 플러그인의 권한을 다시 확인해야 합니다",
         "commandConflict": "명령어가 설치된 플러그인과 충돌합니다. 먼저 상대를 제거하거나 명령어 이름을 변경하세요.",
-        "idReserved": "이 id는 공식 예약 접두사 cindy-를 사용합니다. 앱에 내장된 플러그인만 사용할 수 있습니다",
+        "idReserved": "{{reservedGhostIdPrefixes}}는 공식 플러그인용 예약 접두사입니다. 끌어다 놓기, 파일 선택, ghost_forge_pack 전달 또는 사용자 지정 플러그인 마켓으로는 설치할 수 없습니다. 해당 공식 플러그인은 Cindy 플러그인 마켓에서 설치하세요",
+        "brokerManualInstallNotAuthorized": "수동으로 설치한 .cindy는 인증 broker를 사용할 수 없습니다. 조직 플러그인 마켓에서 설치하거나, 작성자에게 조직 계정으로 ghost_forge_pack을 사용해 빌드하도록 요청하세요.",
+        "brokerNotAuthorized": "현재 설치 출처 또는 조직 계정에는 인증 broker 사용 권한이 없습니다. 조직 플러그인 마켓에서 설치하거나, 작성자에게 조직 계정으로 ghost_forge_pack을 사용해 빌드하도록 요청하세요.",
+        "brokerRedirectPortRequired": "이 플러그인은 인증 broker를 선언했지만 같은 OAuth 설정에 redirectPort를 선언하지 않았습니다. 인증의 마지막 단계가 로컬 수신 포트로 돌아올 수 있도록 작성자에게 이 필드를 추가해 달라고 요청하세요.",
         "sourceMissing": "선택한 파일을 찾을 수 없습니다",
         "generic": "작업에 실패했습니다. 다시 시도해 주세요",
         "updateIdMismatch": "선택한 파일은 플러그인 \"{{id}}\"로, 현재 플러그인 \"{{expected}}\"와 일치하지 않습니다"
@@ -4409,6 +4565,9 @@
         "settingsUnavailableUntilRestore": "이 설정을 다시 사용하려면 플러그인을 복원하세요.",
         "oauthScopeStale": "현재 인증에 새로 추가된 권한이 포함되어 있지 않습니다. 다시 연결해 권한을 받으세요.",
         "configurationTitle": "설정",
+        "sidebarEntryTitle": "사이드바 항목",
+        "showInSidebar": "사이드바에 표시",
+        "sidebarEntryDescription": "켜면 사이드바에 “{{title}}” 항목이 표시됩니다. 숨겨도 플러그인이 비활성화되지는 않습니다.",
         "openTool": "Tool {{name}} 세부 정보 보기",
         "noToolDescription": "이 Tool에는 설명이 없습니다.",
         "viewAllTools": "더 보기",
@@ -4418,6 +4577,7 @@
         "closeDialog": "대화 상자 닫기"
       },
       "contents": {
+        "mainView": "메인 보기",
         "panel": "패널",
         "settingsUi": "사용자 정의 설정 화면",
         "code": "실행 코드",
@@ -4495,7 +4655,9 @@
       "reapproveConfirm": {
         "title": "\"{{name}}\" 권한을 다시 확인할까요?",
         "body": "아래 권한을 확인하면 설치된 플러그인이 다시 승인됩니다. 설치 파일은 필요하지 않습니다.",
-        "confirm": "확인 후 복원"
+        "confirm": "확인 후 복원",
+        "enableNoticeEnabled": "확인 후 현재 활성화 상태를 유지합니다.",
+        "enableNoticeAsleep": "확인 후 휴면 상태를 유지합니다(자동으로 활성화되지 않음). 나중에 여기에서 수동으로 활성화할 수 있습니다."
       },
       "pick": {
         "dialogTitle": "폴더 선택",
@@ -4530,6 +4692,46 @@
         "reviewOutdated": "검토 기간 만료",
         "approve": "승인",
         "skip": "건너뛰기"
+      },
+      "publish": {
+        "section": "내 게시",
+        "action": "플러그인 게시…",
+        "confirmTitle": "{{name}} 게시",
+        "confirmDescription": "확인하면 현재 조직으로 업로드가 시작됩니다.",
+        "org": "조직",
+        "pluginId": "플러그인 id",
+        "version": "버전",
+        "size": "크기",
+        "confirm": "게시",
+        "cancel": "취소",
+        "disabled": "이 조직은 구성원 게시를 켜지 않았습니다. 관리자에게 문의하세요.",
+        "loadFailed": "게시 목록을 불러올 수 없습니다",
+        "startFailed": "게시를 시작할 수 없습니다",
+        "empty": "아직 게시 기록이 없습니다",
+        "unknownPlugin": "플러그인",
+        "uploading": "게시 중",
+        "badge": {
+          "validating": "검사 중",
+          "processing": "처리 중",
+          "pending": "검토 대기",
+          "approved": "게시됨",
+          "rejected": "거절됨",
+          "failed": "실패",
+          "expired": "만료됨"
+        },
+        "stage": {
+          "confirming": "확인 대기",
+          "hashing": "파일 검사 중",
+          "preparing": "업로드 생성 중",
+          "uploading": "업로드 중",
+          "committing": "제출 중",
+          "processing": "처리 중",
+          "succeeded": "완료",
+          "failed": "실패",
+          "expired": "만료됨",
+          "cancelled": "취소됨",
+          "cancelledTracking": "추적을 멈췄습니다. 서버는 계속 처리 중입니다."
+        }
       }
     },
     "mcp": {
@@ -5280,7 +5482,7 @@
       "ready": "새 버전 준비 완료 — 사이드바를 클릭해 업데이트 완료",
       "manifestFailed": "업데이트 확인 실패, 네트워크를 확인하세요",
       "downloadFailed": "새 버전 다운로드 실패, 나중에 다시 시도하세요",
-      "manualDownload": "Linux 첫 릴리스는 수동 다운로드만 지원합니다. 다운로드 페이지에서 최신 설치 프로그램을 받아 주세요."
+      "manualDownload": "앱에서 업데이트를 다운로드하세요. 설치하려면 시스템 비밀번호가 필요합니다."
     },
     "closeConfirm": {
       "title": "정말 나가시겠습니까?",
@@ -7153,6 +7355,8 @@
       "streamInterruptedNoRetry": "모델 출력이 중간에 중단되었습니다. 보통은 일시적인 상위 서비스 장애입니다. 잠시 후 다시 시도해 주세요",
       "networkShowRaw": "원본 오류 보기",
       "networkHideRaw": "원본 오류 숨기기",
+      "gatewayProxyTokenInvalid": "Cindy AI 자격 증명이 더 이상 유효하지 않습니다. 재시도를 클릭하세요. 반복되면 로그아웃 후 다시 로그인하세요",
+      "gatewayProxyTokenInvalidNoRetry": "Cindy AI 자격 증명이 더 이상 유효하지 않습니다. 반복되면 로그아웃 후 다시 로그인하세요",
       "silentStopContinue": "계속",
       "silentStopContinueTitle": "현재 작업 계속",
       "piTransportClosed": "원격 Pi 연결이 끊어졌습니다(SSH 채널 닫힘). 원격 작업은 계속 실행 중입니다. 다시 연결하면 계속할 수 있습니다.",

@@ -14,6 +14,7 @@ import {
   SIDEBAR_PROJECT_ORDER_CHANGED_CHANNEL,
   type SyncedProjectOrderSnapshot,
 } from '../shared/projectOrderSettings';
+import type { GhostInstallOrigin } from '../shared/ghostInstallOrigin';
 import type { SessionDragPreviewPalette } from '../shared/sessionDragPreview';
 import {
   AGENT_ISLAND_GET_DISPLAY_OPTIONS_CHANNEL,
@@ -58,6 +59,18 @@ import {
   type WorkLouderCodexSettingsPatch,
   type WorkLouderCodexState,
 } from '../shared/workLouderCodex';
+import {
+  XBOX_GAMEPAD_GET_STATE_CHANNEL,
+  XBOX_GAMEPAD_PREVIEW_INPUT_CHANNEL,
+  XBOX_GAMEPAD_PROBE_CHANNEL,
+  XBOX_GAMEPAD_RESET_SETTINGS_CHANNEL,
+  XBOX_GAMEPAD_SET_LAYOUT_PREVIEW_CHANNEL,
+  XBOX_GAMEPAD_SET_SETTINGS_CHANNEL,
+  XBOX_GAMEPAD_STATE_CHANGED_CHANNEL,
+  type XboxGamepadPreviewInput,
+  type XboxGamepadSettingsPatch,
+  type XboxGamepadState,
+} from '../shared/xboxGamepad';
 import {
   ANALYTICS_SETTINGS_CHANGE_CHANNEL,
   type AnalyticsSettingsPayload,
@@ -126,6 +139,7 @@ import type {
 } from '../shared/voiceInputRefinerProfiles';
 import { isIpcErrorCode, type IpcErrorCode } from '../shared/ipc-errors';
 import {
+  isSidebarGhostId,
   isSidebarLegacyRendererOwnerClaim,
   isSidebarSettingsSnapshot,
   type SidebarLegacyRendererOwnerClaim,
@@ -473,6 +487,9 @@ const fanOutSidebarPinnedOrderChanged = createIpcFanOut('sidebar-settings:pinned
 const fanOutSidebarHiddenProjectKeysChanged = createIpcFanOut(
   'sidebar-settings:hidden-project-keys-changed',
 );
+const fanOutSidebarHiddenMainViewGhostIdsChanged = createIpcFanOut(
+  'sidebar-settings:hidden-main-view-ghost-ids-changed',
+);
 const fanOutSidebarProjectOrderChanged = createIpcFanOut(SIDEBAR_PROJECT_ORDER_CHANGED_CHANNEL);
 // Workdir File Browser — push events from chokidar (add/change/unlink/...)
 const fanOutFileBrowserEvent = createIpcFanOut('maker:file-browser:event');
@@ -567,6 +584,8 @@ const fanOutLayoutChanged = createIpcFanOut('layout:changed');
 // 意识仓库变化广播 (install/uninstall 后 main 推全量已装清单,多窗口热更新;
 // 见 main/cindy-brain/index.ts)。
 const fanOutGhostsChanged = createIpcFanOut('ghosts:changed');
+const fanOutPluginPublisherProgress = createIpcFanOut('plugin-publisher:progress');
+const fanOutPluginPublisherConfirm = createIpcFanOut('plugin-publisher:confirm');
 const fanOutGhostSetupNavigate = createIpcFanOut('maker:plugin-setup:navigate');
 // Plugin 顶部已安装快捷行的最近使用顺序，多窗口同步。
 const fanOutGhostRecentUsageChanged = createIpcFanOut('ghosts:recent-usage-changed');
@@ -1104,13 +1123,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setupStatus: (id: string): Promise<unknown> => ipcRenderer.invoke('ghosts:setup-status', id),
     install: (
       lizFilePath: string,
-      opts: { enable?: boolean; expectedPackageSha256: string },
+      opts: { enable?: boolean; expectedPackageSha256: string; packTicket?: string },
     ): Promise<{ ghost: unknown }> => ipcRenderer.invoke('ghosts:install', lizFilePath, opts),
     update: (
       lizFilePath: string,
       opts: {
         expectedPackageSha256: string;
         expectedInstalledApproval: string;
+        packTicket?: string;
       },
     ): Promise<{ ghost: unknown }> => ipcRenderer.invoke('ghosts:update', lizFilePath, opts),
     cindyPrefsSync: (
@@ -1176,7 +1196,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       trust: unknown;
       packageSha256: string;
       iconDataUrl?: string;
+      packTicket?: string;
     }> => ipcRenderer.invoke('ghosts:inspect', lizFilePath),
+    abandonPackTicket: (packTicket: string): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('ghosts:abandon-pack-ticket', packTicket),
     /** 本地包第三条恢复路径:从已装目录读确认卡事实(零副作用)。 */
     reapproveInspect: (
       id: string,
@@ -1216,8 +1239,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       disabled: boolean,
     ): Promise<{ disabled: string[] }> =>
       ipcRenderer.invoke('ghosts:workdir-prefs:set', workdir, id, disabled),
-    takePendingInstall: (): Promise<{ filePath: string | null }> =>
-      ipcRenderer.invoke('ghosts:take-pending-install'),
+    takePendingInstall: (): Promise<{
+      filePath: string | null;
+      origin: GhostInstallOrigin;
+    }> => ipcRenderer.invoke('ghosts:take-pending-install'),
     onChanged: fanOutGhostsChanged,
     onSetupNavigate: (
       callback: (
@@ -1316,9 +1341,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ghosts:library-overview', id),
     libraryPickLocation: (
       id: string,
-    ): Promise<{ ok: boolean; cancelled?: boolean; candidate?: string; warnings?: string[]; message?: string }> =>
-      ipcRenderer.invoke('ghosts:library-pick-location', id),
-    libraryBind: (id: string, candidate: string): Promise<{ ok: boolean; message?: string; warnings?: string[] }> =>
+    ): Promise<{
+      ok: boolean;
+      cancelled?: boolean;
+      candidate?: string;
+      warnings?: string[];
+      message?: string;
+    }> => ipcRenderer.invoke('ghosts:library-pick-location', id),
+    libraryBind: (
+      id: string,
+      candidate: string,
+    ): Promise<{ ok: boolean; message?: string; warnings?: string[] }> =>
       ipcRenderer.invoke('ghosts:library-bind', id, candidate),
     libraryRelocate: (id: string, candidate: string): Promise<{ ok: boolean; message?: string }> =>
       ipcRenderer.invoke('ghosts:library-relocate', id, candidate),
@@ -1394,6 +1427,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('plugin-market:refresh-source', name),
     gitPreflight: (): Promise<{ ok: boolean; version: string | null }> =>
       ipcRenderer.invoke('plugin-market:git-preflight'),
+  },
+  pluginPublisher: {
+    start: (filePath: string): Promise<{ transferId: string; uploadId: string | null }> =>
+      ipcRenderer.invoke('plugin-publisher:start', filePath),
+    status: (transferId: string): Promise<{ progress: unknown }> =>
+      ipcRenderer.invoke('plugin-publisher:status', transferId),
+    cancel: (transferId: string): Promise<{ cancelled: boolean }> =>
+      ipcRenderer.invoke('plugin-publisher:cancel', transferId),
+    listMine: (cursor?: string): Promise<{ releases: unknown[]; nextCursor: string | null }> =>
+      ipcRenderer.invoke('plugin-publisher:list-mine', cursor ? { cursor } : {}),
+    onProgress: fanOutPluginPublisherProgress,
+    onConfirm: fanOutPluginPublisherConfirm,
+    resolveConfirm: (requestId: string, confirmed: boolean): Promise<{ handled: boolean }> =>
+      ipcRenderer.invoke('plugin-publisher:resolve-confirm', { requestId, confirmed }),
   },
   voiceInput: {
     prewarm: (payload?: {
@@ -1499,6 +1546,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:dictionary:import-entries', texts),
     renameDictionaryEntry: (entryId: string, text: string): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary:rename-entry', { entryId, text }),
+    editDictionaryEntry: (entryId: string, text: string, aliases: string[]): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:edit-entry', { entryId, text, aliases }),
     recordDictionaryLearningActions: (actions: unknown[]): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary-learning:record-actions', actions),
     getHistory: (limit?: number): unknown => {
@@ -1639,6 +1688,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ): void => callback(input);
       ipcRenderer.on(WORKLOUDER_CODEX_PREVIEW_INPUT_CHANNEL, listener);
       return () => ipcRenderer.removeListener(WORKLOUDER_CODEX_PREVIEW_INPUT_CHANNEL, listener);
+    },
+  },
+
+  xboxGamepad: {
+    getState: (): Promise<XboxGamepadState> => ipcRenderer.invoke(XBOX_GAMEPAD_GET_STATE_CHANNEL),
+    setSettings: (patch: XboxGamepadSettingsPatch): Promise<XboxGamepadState> =>
+      ipcRenderer.invoke(XBOX_GAMEPAD_SET_SETTINGS_CHANNEL, patch),
+    resetSettings: (): Promise<XboxGamepadState> =>
+      ipcRenderer.invoke(XBOX_GAMEPAD_RESET_SETTINGS_CHANNEL),
+    probe: (): Promise<XboxGamepadState> => ipcRenderer.invoke(XBOX_GAMEPAD_PROBE_CHANNEL),
+    setLayoutPreviewActive: (active: boolean): Promise<void> =>
+      ipcRenderer.invoke(XBOX_GAMEPAD_SET_LAYOUT_PREVIEW_CHANNEL, active),
+    onStateChanged: (callback: (state: XboxGamepadState) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: XboxGamepadState): void => {
+        callback(state);
+      };
+      ipcRenderer.on(XBOX_GAMEPAD_STATE_CHANGED_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(XBOX_GAMEPAD_STATE_CHANGED_CHANNEL, listener);
+    },
+    onPreviewInput: (callback: (input: XboxGamepadPreviewInput) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        input: XboxGamepadPreviewInput,
+      ): void => callback(input);
+      ipcRenderer.on(XBOX_GAMEPAD_PREVIEW_INPUT_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(XBOX_GAMEPAD_PREVIEW_INPUT_CHANNEL, listener);
     },
   },
 
@@ -3437,9 +3512,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         // connect 只对 providers 页有意义;主进程已做 id 白名单,这里按纵深防御
         // 原样复用同一规则。字段存在但不合法时丢弃整个 payload,不降级成半执行。
         if (
-          p.connect !== undefined
-          && (p.tab !== 'providers' || !isDeepLinkProviderConnectId(p.connect))
-        ) return;
+          p.connect !== undefined &&
+          (p.tab !== 'providers' || !isDeepLinkProviderConnectId(p.connect))
+        )
+          return;
         callback({
           type: 'settings',
           tab: p.tab,
@@ -3920,6 +3996,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Fullscreen state
   onFullscreenChange: fanOutFullscreenChange,
   getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state'),
+  toggleFullscreen: (): Promise<boolean> => ipcRenderer.invoke('toggle-fullscreen'),
 
   // 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门订阅它来决定要不要冻结常驻动画;
   // 关掉 backgroundThrottling 的窗口里 document.visibilityState 不可信,只能靠这条。
@@ -4646,6 +4723,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
             pinnedOrderIsAuthoritative: value.pinnedOrderIsAuthoritative,
             pinnedOrder: Array.from(value.pinnedOrder),
             hiddenProjectKeys: Array.from(value.hiddenProjectKeys),
+            hiddenMainViewGhostIds: Array.from(value.hiddenMainViewGhostIds),
           }
         : {
             dataOwnerId: null,
@@ -4653,6 +4731,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
             pinnedOrderIsAuthoritative: false,
             pinnedOrder: [],
             hiddenProjectKeys: [],
+            hiddenMainViewGhostIds: [],
           };
     },
     mutatePinnedOrder: async (
@@ -4702,6 +4781,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
           cb(Array.from(payload), ownerStamp);
         }
       }),
+    setMainViewHidden: async (
+      ghostId: string,
+      hidden: boolean,
+      ownerStamp: DataOwnerPushStamp,
+    ): Promise<string[]> => {
+      const result: unknown = await ipcRenderer.invoke('sidebar-settings:set-main-view-hidden', {
+        ...ownerStamp,
+        ghostId,
+        hidden,
+      });
+      if (!Array.isArray(result) || !result.every(isSidebarGhostId)) {
+        throw new Error('invalid hidden main-view plugin response');
+      }
+      return Array.from(result);
+    },
+    onHiddenMainViewGhostIdsChanged: (
+      cb: (ghostIds: string[], ownerStamp: DataOwnerPushStamp) => void,
+    ): (() => void) =>
+      fanOutSidebarHiddenMainViewGhostIdsChanged((payload, ownerStamp) => {
+        if (
+          Array.isArray(payload) &&
+          payload.every(isSidebarGhostId) &&
+          isDataOwnerPushStamp(ownerStamp)
+        ) {
+          cb(Array.from(payload), ownerStamp);
+        }
+      }),
     getProjectOrder: async (): Promise<SyncedProjectOrderSnapshot> =>
       parseProjectOrderSnapshot(await ipcRenderer.invoke(SIDEBAR_GET_PROJECT_ORDER_CHANNEL)),
     applyProjectOrder: async (request: {
@@ -4709,11 +4815,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp;
       projectOrder: 'activity' | 'custom';
     }): Promise<SyncedProjectOrderSnapshot> =>
-      parseProjectOrderSnapshot(await ipcRenderer.invoke(SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL, {
-        ...request.ownerStamp,
-        manualProjectOrder: request.manualProjectOrder,
-        projectOrder: request.projectOrder,
-      })),
+      parseProjectOrderSnapshot(
+        await ipcRenderer.invoke(SIDEBAR_APPLY_PROJECT_ORDER_CHANNEL, {
+          ...request.ownerStamp,
+          manualProjectOrder: request.manualProjectOrder,
+          projectOrder: request.projectOrder,
+        }),
+      ),
     onProjectOrderChanged: (
       cb: (
         snapshot: SyncedProjectOrderSnapshot,
@@ -4722,7 +4830,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ): (() => void) =>
       fanOutSidebarProjectOrderChanged((payload, ownerStamp) => {
         if (!isDataOwnerPushStamp(ownerStamp)) return;
-        cb(parseProjectOrderSnapshot({ ...parseProjectOrderSnapshot(payload), ownerStamp }), ownerStamp);
+        cb(
+          parseProjectOrderSnapshot({ ...parseProjectOrderSnapshot(payload), ownerStamp }),
+          ownerStamp,
+        );
       }),
   },
 
@@ -5282,15 +5393,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:local-model:abort', reason, name),
     localModelEnsure: (): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:ensure'),
-    localModelSetInPicker: (name: string, enabled: boolean): Promise<{ ok: true; created: boolean }> =>
+    localModelSetInPicker: (
+      name: string,
+      enabled: boolean,
+    ): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:set-in-picker', name, enabled),
     localModelDelete: (name: string): Promise<{ ok: true; created: boolean }> =>
       ipcRenderer.invoke('maker:local-model:delete', name),
     localModelDiscardPaused: (name: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:local-model:discard-paused', name),
-    localModelInstall: (
-      input: { consent: true },
-    ): Promise<{
+    localModelInstall: (input: {
+      consent: true;
+    }): Promise<{
       ok: true;
       status?: import('../shared/localModelRuntime').LocalRuntimeStatus;
       created?: boolean;
@@ -5853,7 +5967,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       requestId: string,
       // InteractionDecision union (permission/ask_user_question/plan_review,按 kind 分支)
       decision: Record<string, unknown>,
-    ): Promise<void> => ipcRenderer.invoke('maker:resolve-interaction', requestId, decision),
+    ): Promise<{ accepted: boolean }> =>
+      ipcRenderer.invoke('maker:resolve-interaction', requestId, decision),
 
     /** Local-only Secret handoff; Main verifies this is Cindy's trusted top-level frame. */
     submitPluginSetupInline: (request: {

@@ -30,7 +30,12 @@ import {
 } from '@/contexts/dataOwnerGeneration';
 import { isDataOwnerPushStamp } from '../../shared/dataOwnerPush';
 import { dbToMakerAgentKind } from '../../shared/agentKindConversion';
-import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
+import {
+  GATEWAY_PROXY_TOKEN_INVALID_REASON,
+  isCindyGatewayProviderId,
+  isGatewayProxyTokenInvalidError,
+  redactSensitiveText,
+} from '@cindy/maker-shared/error-redaction';
 import {
   formatRemoteError,
   isDeviceUnresponsiveRemoteError,
@@ -2319,6 +2324,12 @@ export interface SessionChatState {
    * agent 据此选 transport (stdio vs SSH-bridged daemon)。
    */
   remoteHostId: string | null;
+  /**
+   * 当前会话显式选定的供应商。undefined = 尚未从 session 行水合；
+   * null = 隐式 Cindy 网关默认来源。只用于给新排队项打 createOpts.providerId 快照，
+   * 不能拿来给历史 error 行重新分类。
+   */
+  sessionProviderId?: string | null;
   /** Internal: prevents infinite auth-retry loops for remote sessions. */
   _authRetryInFlight?: boolean;
   /** Internal: clientId of the last user message that triggered auth-retry (prevents re-retrying same message). */
@@ -2329,6 +2340,8 @@ export interface SessionChatState {
     data: Record<string, unknown> | null;
     agentMeta: Record<string, unknown> | null;
   };
+  /** Internal: root user input whose rejected Cindy gateway credential was already retried. */
+  _gatewayProxyTokenRetriedRootClientId?: string;
   /**
    * Internal: consecutive auto-retry count for this session. Hard cap against
    * the rare loop where the key refreshes successfully every time but the
@@ -3533,6 +3546,54 @@ const _activeViewSessions = new Map<string, number>();
 // On leave, history is invalidated and live error banner is cleared so the
 // reloaded history shows only the persisted ErrorMessageCard.
 const _pendingErrorClearOnLeave = new Set<string>();
+
+/** Terminal error 后、配对 done 到达前，凭据刷新必须等 host 空闲。 */
+const GATEWAY_PROXY_TOKEN_TURN_SETTLE_MS = 5_000;
+const gatewayProxyTokenTurnSettledWaiters = new Map<string, Array<() => void>>();
+
+function notifyGatewayProxyTokenTurnSettled(sessionId: string): void {
+  const waiters = gatewayProxyTokenTurnSettledWaiters.get(sessionId);
+  if (!waiters || waiters.length === 0) return;
+  gatewayProxyTokenTurnSettledWaiters.delete(sessionId);
+  for (const waiter of waiters) waiter();
+}
+
+function waitForGatewayProxyTokenTurnSettled(
+  sessionId: string,
+  dataOwnerAtIngress: DataOwnerGeneration,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const remaining = gatewayProxyTokenTurnSettledWaiters.get(sessionId);
+      if (remaining) {
+        const next = remaining.filter((waiter) => waiter !== finish);
+        if (next.length === 0) gatewayProxyTokenTurnSettledWaiters.delete(sessionId);
+        else gatewayProxyTokenTurnSettledWaiters.set(sessionId, next);
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, GATEWAY_PROXY_TOKEN_TURN_SETTLE_MS);
+    const waiters = gatewayProxyTokenTurnSettledWaiters.get(sessionId) ?? [];
+    waiters.push(finish);
+    gatewayProxyTokenTurnSettledWaiters.set(sessionId, waiters);
+    if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) finish();
+  });
+}
+
+function resolveGatewayRecoveryProviderId(
+  createOpts: { providerId?: string | null } | undefined,
+  session: Pick<SessionChatState, 'agentSwitchIntent' | 'sessionProviderId'>,
+): string | null | undefined {
+  if (createOpts && Object.prototype.hasOwnProperty.call(createOpts, 'providerId')) {
+    return createOpts.providerId ?? null;
+  }
+  if (session.agentSwitchIntent) return session.agentSwitchIntent.providerId;
+  return session.sessionProviderId;
+}
 
 function enterView(sessionId: string): () => void {
   _activeViewSessions.set(sessionId, (_activeViewSessions.get(sessionId) ?? 0) + 1);
@@ -5244,11 +5305,19 @@ export function handleStreamEvent(
       // Claude 的 plan_review 发生在 turn 内(ExitPlanMode 阻塞中),done 必然晚于决策,
       // 清扫语义不变。真正的放弃路径(abort/close)由 main 的 interaction dismissal
       // (permission_dismissed 事件)负责标 expired,不依赖这里。
+      //
+      // Codex ask_user 同款:code-mode 可能在提问 RPC 未决时就 turn/completed。
+      // 卡片必须跨 done 存活,等用户回答后走 detached continuation。
       const keepPlanReviewAcrossDone = state.agentKind === 'codex';
+      const keepAskUserAcrossDone = state.agentKind === 'codex';
       const cleanedMessages = finalized.messages.map((m) => {
         let next = m;
         if (m.isStreaming) next = { ...next, isStreaming: false };
-        if (m.role === 'ask_user' && m.askUserStatus === 'pending') {
+        if (
+          !keepAskUserAcrossDone &&
+          m.role === 'ask_user' &&
+          m.askUserStatus === 'pending'
+        ) {
           next = { ...next, askUserStatus: 'expired' as const };
         }
         if (
@@ -5298,14 +5367,14 @@ export function handleStreamEvent(
         activeTurnRetryText: null,
         errorRetryText: finalized.error ? finalized.errorRetryText : null,
         pendingPermission: null,
-        pendingAskUser: null,
+        pendingAskUser: keepAskUserAcrossDone ? state.pendingAskUser : null,
         continuationTurnClientId: null,
         // F-AUQ-MIN-5: viewerState lives with pendingAskUser — when the
         // pending question is gone, reset so the next one starts expanded.
-        askUserViewerState: 'expanded',
+        askUserViewerState: keepAskUserAcrossDone ? state.askUserViewerState : 'expanded',
         // F-AUQ-DRAFT: pending question gone → in-progress wizard draft is
         // meaningless, drop it so the next question starts clean.
-        askUserDraft: null,
+        askUserDraft: keepAskUserAcrossDone ? state.askUserDraft : null,
         pendingPlanReview: keepPlanReviewAcrossDone ? state.pendingPlanReview : null,
         pendingIssueConfirm: null,
         pendingRenameSessionsConfirm: null,
@@ -5629,22 +5698,27 @@ export function handleStreamEvent(
             ),
         };
       }
-      if (state.pendingAskUser?.requestId === data.requestId) {
+      if (
+        state.pendingAskUser?.requestId === data.requestId ||
+        state.messages.some((m) => m.role === 'ask_user' && m.askUserRequestId === data.requestId)
+      ) {
         // resolved + answers → 翻成 answered 并填答案(与答题端 answerUserQuestion 同款 reply / answers,
         // 卡片据此渲染 ✓ 选项);否则(真·放弃)标 expired。
+        // 多窗口输家可能已经乐观写成 answered；仍要用赢家决策覆盖，不能只认 pending。
         const answers = resolved?.answers as Record<string, string> | undefined;
-        const askUserReply = answers ? formatAskUserReply(answers) : '';
+        const dismissed = resolved?.dismissed === true;
+        const askUserReply = answers && !dismissed ? formatAskUserReply(answers) : '';
         return {
           ...state,
-          pendingAskUser: null,
-          askUserViewerState: 'expanded',
-          // F-AUQ-DRAFT: question dismissed → drop draft.
-          askUserDraft: null,
+          pendingAskUser:
+            state.pendingAskUser?.requestId === data.requestId ? null : state.pendingAskUser,
+          askUserViewerState:
+            state.pendingAskUser?.requestId === data.requestId ? 'expanded' : state.askUserViewerState,
+          askUserDraft:
+            state.pendingAskUser?.requestId === data.requestId ? null : state.askUserDraft,
           messages: state.messages.map((m) =>
-            m.role === 'ask_user' &&
-            m.askUserRequestId === data.requestId &&
-            m.askUserStatus === 'pending'
-              ? answers
+            m.role === 'ask_user' && m.askUserRequestId === data.requestId
+              ? answers && !dismissed
                 ? {
                     ...m,
                     askUserStatus: 'answered' as const,
@@ -6882,35 +6956,72 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
     // Legacy CC/XD remote auth-retry: 在 reducer 写 error 之前拦截,避免 error banner 闪烁。
     if (event.type === 'error') {
       const errData =
-        (event.data as { sdkError?: string; message?: string; errorStatus?: number }) ?? {};
+        (event.data as {
+          sdkError?: string;
+          message?: string;
+          errorStatus?: number;
+          reason?: string;
+        }) ?? {};
       const isAuthError =
         errData.sdkError === 'authentication_failed' ||
         errData.errorStatus === 401 ||
         /authentication_error|invalid.*api.key|401/i.test(errData.message ?? '');
+      const isGatewayProxyTokenInvalid =
+        errData.reason === GATEWAY_PROXY_TOKEN_INVALID_REASON ||
+        isGatewayProxyTokenInvalidError(errData.message ?? '');
       const preSnap = getOrCreateState(sessionId);
       const authRetryCount = preSnap._authRetryCount ?? 0;
-      if (
+      const ownsGatewayProxyTokenRecovery = ownsRemoteAuthRetry && !ingress.remoteDeviceId;
+      const recoveryProviderId =
+        preSnap.inputRecovery?.kind === 'active-turn'
+          ? resolveGatewayRecoveryProviderId(preSnap.inputRecovery.item.createOpts, preSnap)
+          : undefined;
+      const translatorClassifiedGateway =
+        errData.reason === GATEWAY_PROXY_TOKEN_INVALID_REASON;
+      const explicitCustomGatewayProvider =
+        recoveryProviderId !== undefined && !isCindyGatewayProviderId(recoveryProviderId);
+      const gatewayRecovery =
+        isGatewayProxyTokenInvalid &&
+        preSnap.inputRecovery?.kind === 'active-turn' &&
+        (translatorClassifiedGateway || !explicitCustomGatewayProvider)
+          ? preSnap.inputRecovery
+          : null;
+      const isCindyGatewayProxyTokenInvalid =
+        translatorClassifiedGateway || gatewayRecovery !== null;
+      const gatewayRetryRootClientId = gatewayRecovery
+        ? (gatewayRecovery.item.supersedesUserClientId ?? gatewayRecovery.item.clientId)
+        : null;
+      const canRecoverGatewayProxyToken =
+        ownsGatewayProxyTokenRecovery &&
+        gatewayRecovery !== null &&
+        gatewayRetryRootClientId !== null &&
+        !preSnap._authRetryInFlight &&
+        preSnap._gatewayProxyTokenRetriedRootClientId !== gatewayRetryRootClientId;
+      const canRecoverRemoteCcAuth =
         ownsRemoteAuthRetry &&
         isAuthError &&
-        preSnap.remoteHostId &&
+        !isGatewayProxyTokenInvalid &&
+        Boolean(preSnap.remoteHostId) &&
         preSnap.agentKind === 'claude-code' &&
         !preSnap._authRetryInFlight &&
-        authRetryCount < MAX_REMOTE_AUTH_RETRIES
-      ) {
+        authRetryCount < MAX_REMOTE_AUTH_RETRIES;
+      if (canRecoverGatewayProxyToken || canRecoverRemoteCcAuth) {
         const lastUser = [...preSnap.messages].reverse().find((m) => m.role === 'user');
-        const lastUserClientId = lastUser?.clientId;
+        const retryOwnerClientId = gatewayRecovery?.item.clientId ?? lastUser?.clientId;
         // Per-message retry guard: same user message only auto-retried once.
         // Session-level count guard (_authRetryCount): hard cap on consecutive
         // retries — the per-message guard can't stop a chain because each retry
         // sends a fresh user message with a new clientId.
-        if (lastUserClientId && preSnap._authRetryAttemptedClientId === lastUserClientId) {
+        if (retryOwnerClientId && preSnap._authRetryAttemptedClientId === retryOwnerClientId) {
           // Already retried this message — show error, don't loop.
         } else {
           setState(sessionId, (s) => ({
             ...s,
             _authRetryInFlight: true,
-            _authRetryAttemptedClientId: lastUserClientId,
-            _authRetryCount: (s._authRetryCount ?? 0) + 1,
+            _authRetryAttemptedClientId: retryOwnerClientId,
+            ...(isGatewayProxyTokenInvalid
+              ? { _gatewayProxyTokenRetriedRootClientId: gatewayRetryRootClientId ?? undefined }
+              : { _authRetryCount: (s._authRetryCount ?? 0) + 1 }),
           }));
           const retryText =
             lastUser && typeof lastUser.content === 'string' && lastUser.content.length > 0
@@ -6928,21 +7039,56 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
           void (async () => {
             try {
               if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
-              // 本地 only:网关 key 不再有服务器副本可拉。改为校验本机 safeStorage 是否
-              // 有 key —— 有则关闭并重发会话(重连时把本机 key 重新下发给 remote host);
-              // 没有则中止重试,让 error banner 浮现,提示用户在本机重填 key。
-              const localKey = await window.electronAPI.safeStorageRead(
-                providerSecretStorageKey('xd'),
-              );
-              if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
-              if (!localKey) {
-                throw new Error('no local api key available');
+              if (isGatewayProxyTokenInvalid) {
+                await waitForGatewayProxyTokenTurnSettled(sessionId, dataOwnerAtIngress);
+                if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+                if (
+                  !translatorClassifiedGateway &&
+                  recoveryProviderId === undefined
+                ) {
+                  const row = await sessionService.get(sessionId);
+                  if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+                  if (!isCindyGatewayProviderId(row.providerId ?? null)) {
+                    throw new Error('custom provider owns this LiteLLM token error');
+                  }
+                }
+                const status = await window.electronAPI.modelAccess.retry();
+                if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+                if (status.state !== 'ok') {
+                  throw new Error('model-access credentials retry failed');
+                }
               }
-              // preserveWorkspace: 鉴权重连是瞬态 close+resend,会话继续,工作区必须保留。
-              await makerApiFor(sessionId).closeSession(sessionId, { preserveWorkspace: true });
-              await new Promise((r) => setTimeout(r, 1500));
-              if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
-              if (hasRetryPayload) {
+              // 本机 Claude gateway-spawn 把 ANTHROPIC_API_KEY 冻在子进程里，
+              // proxy 对隐式/默认 Cindy 网关是 x-api-key passthrough。只重拉凭据
+              // 不重建会话的话，retryLastError 仍会带上已被拒的旧 token。
+              const recreateLocalClaudeGatewaySession =
+                isGatewayProxyTokenInvalid &&
+                !preSnap.remoteHostId &&
+                preSnap.agentKind === 'claude-code';
+              if (preSnap.remoteHostId || recreateLocalClaudeGatewaySession) {
+                if (preSnap.remoteHostId) {
+                  const localKey = await window.electronAPI.safeStorageRead(
+                    providerSecretStorageKey('xd'),
+                  );
+                  if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+                  if (!localKey) {
+                    throw new Error('no local api key available');
+                  }
+                }
+                await makerApiFor(sessionId).closeSession(sessionId, { preserveWorkspace: true });
+                if (preSnap.remoteHostId) {
+                  await new Promise((r) => setTimeout(r, 1500));
+                }
+                if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+              }
+              if (isGatewayProxyTokenInvalid) {
+                await retryLastError(sessionId);
+                if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
+                const postRetry = getOrCreateState(sessionId);
+                if (postRetry.error !== null || postRetry.inputRecovery !== null) {
+                  throw new Error('gateway credential retry did not take effect');
+                }
+              } else if (hasRetryPayload) {
                 const row = await sessionService.get(sessionId);
                 if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
                 if (row.workingDir && row.model) {
@@ -6976,14 +7122,16 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
               }
             } catch {
               if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
-              // 重试失败——main 侧已跳过持久化（isRemoteAuthRetry），在此补落。
-              // device-link 控制端经 makerApiFor 路由到被控端 main（不直调本地 IPC）;
-              // 同时透传 agentMeta 供 flushAssistantBlock 边界 meta 兜底与 dedup key。
-              void makerApiFor(sessionId).input.persistTurnErrorDeferred(
-                sessionId,
-                event.data as Record<string, unknown> | null,
-                event.agentMeta ?? null,
-              );
+              if (
+                isCindyGatewayProxyTokenInvalid ||
+                (preSnap.remoteHostId && preSnap.agentKind === 'claude-code')
+              ) {
+                void makerApiFor(sessionId).input.persistTurnErrorDeferred(
+                  sessionId,
+                  event.data as Record<string, unknown> | null,
+                  event.agentMeta ?? null,
+                );
+              }
               const terminalErrorEvent = {
                 sessionId,
                 type: 'error',
@@ -7013,9 +7161,8 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
       //     等价于旧行为（重启后错误丢失）—— 保守起见不做 deferred。
       if (
         ownsRemoteAuthRetry &&
-        isAuthError &&
-        preSnap.remoteHostId &&
-        preSnap.agentKind === 'claude-code' &&
+        ((ownsGatewayProxyTokenRecovery && isCindyGatewayProxyTokenInvalid) ||
+          (isAuthError && preSnap.remoteHostId && preSnap.agentKind === 'claude-code')) &&
         !preSnap._authRetryInFlight
       ) {
         void makerApiFor(sessionId).input.persistTurnErrorDeferred(
@@ -7030,6 +7177,7 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
 
     // done / error 副作用 (从老 stream listener 搬过来)
     if (isProductTurnDoneEvent(event)) {
+      notifyGatewayProxyTokenTurnSettled(sessionId);
       if (
         event.source === 'codex' &&
         (event.data as { silentStop?: boolean } | null | undefined)?.silentStop !== true
@@ -9983,6 +10131,10 @@ function ensureInitialMessages(sessionId: string): void {
         if (s.remoteHostId !== nextRemoteHostId) {
           updates.remoteHostId = nextRemoteHostId;
         }
+        const nextSessionProviderId = session.providerId ?? null;
+        if (s.sessionProviderId !== nextSessionProviderId) {
+          updates.sessionProviderId = nextSessionProviderId;
+        }
         if (session.sdkSessionId && s.sdkSessionId !== session.sdkSessionId) {
           updates.sdkSessionId = session.sdkSessionId;
         }
@@ -11795,6 +11947,11 @@ export function buildCreateOptsForCurrentSession(
     ...(current.remoteHostId ? { remoteHostId: current.remoteHostId } : {}),
     ...(opts?.vendorOptions ? { vendorOptions: opts.vendorOptions } : {}),
     ...(current.sdkSessionId ? { resumeSessionId: current.sdkSessionId } : {}),
+    ...(current.agentSwitchIntent
+      ? { providerId: current.agentSwitchIntent.providerId }
+      : current.sessionProviderId !== undefined
+        ? { providerId: current.sessionProviderId }
+        : {}),
   };
 }
 
@@ -13727,11 +13884,6 @@ function answerUserQuestion(
   // Build a human-readable reply summary
   const replySummary = formatAskUserReply(answers);
 
-  // Find the clientId for persistence update
-  const askMsg = state.messages.find(
-    (m) => m.askUserRequestId === requestId && m.askUserStatus === 'pending',
-  );
-
   // Update message to answered + clear pendingAskUser
   setState(sessionId, (s) => ({
     ...s,
@@ -13753,21 +13905,8 @@ function answerUserQuestion(
     ),
   }));
 
-  // F7.6: Persist answered state via PATCH API。
-  // device-link 远程会话:被控端在 RESOLVE_INTERACTION 里权威落库(onInteractionResolved),
-  // 控制端再写就是写自己的空库(dead write + 错误日志)→ 远程跳过,只本机会话走这条。
-  if (askMsg && !isRemoteSession(sessionId)) {
-    messageService
-      .updateContent(sessionId, askMsg.clientId, {
-        requestId,
-        questions: askMsg.askUserQuestions ?? null,
-        status: 'answered',
-        answers,
-      })
-      .catch((err) => log.error('Failed to persist ask_user answered state:', err));
-  }
-
-  // Send to maker (InteractionDecision kind: 'ask_user_question')
+  // 落库只走 main 的 onInteractionResolved。renderer 先写会让多窗口输家/
+  // Stop-vs-answer 的迟到 updateContent 覆盖赢家或 cancelled。
   makerApiFor(sessionId)
     .resolveInteraction(requestId, { kind: 'ask_user_question', answers })
     .catch((err) => log.error('Failed to answer user question:', err));
@@ -14591,20 +14730,26 @@ function sendUiTrigger(sessionId: string, prompt: string): Promise<void> {
  */
 function noteAgentSwitched(sessionId: string, agentKind: 'claude-code' | 'codex' | 'pi'): void {
   if (!sessionId) return;
-  setState(sessionId, (s) =>
-    s.agentKind === agentKind && s.sdkSessionId === null && s.agentSwitchIntent === null
-      ? s
-      : {
-          ...s,
-          agentKind,
-          sdkSessionId: null,
-          agentSwitchIntent: null,
-          // 意图被真实切换消费掉也是一次变更,在途读回据此作废。
-          ...(s.agentSwitchIntent === null
-            ? {}
-            : { agentSwitchIntentRev: s.agentSwitchIntentRev + 1 }),
-        },
-  );
+  setState(sessionId, (s) => {
+    const nextProviderId = s.agentSwitchIntent ? s.agentSwitchIntent.providerId : s.sessionProviderId;
+    if (
+      s.agentKind === agentKind &&
+      s.sdkSessionId === null &&
+      s.agentSwitchIntent === null &&
+      s.sessionProviderId === nextProviderId
+    ) {
+      return s;
+    }
+    return {
+      ...s,
+      agentKind,
+      sdkSessionId: null,
+      agentSwitchIntent: null,
+      ...(s.agentSwitchIntent ? { sessionProviderId: s.agentSwitchIntent.providerId } : {}),
+      // 意图被真实切换消费掉也是一次变更,在途读回据此作废。
+      ...(s.agentSwitchIntent === null ? {} : { agentSwitchIntentRev: s.agentSwitchIntentRev + 1 }),
+    };
+  });
 }
 
 /**
@@ -14788,6 +14933,7 @@ function mirrorSessionFields(
         fastMode?: unknown;
         planModeEnabled?: unknown;
         agentKind?: unknown;
+        providerId?: unknown;
         agentSwitchIntent?: unknown;
         agentSwitchIntentCanceled?: unknown;
       }
@@ -14815,11 +14961,29 @@ function mirrorSessionFields(
         agentKind: nextKind,
         sdkSessionId: null,
         // 意图被真实切换消费 = 一次意图变更,推进修订号让在途读回作废。
+        // 同时把目标 provider 写进 createOpts 快照,避免后续排队项仍带旧来源。
         ...(intentApplied
-          ? { agentSwitchIntent: null, agentSwitchIntentRev: s.agentSwitchIntentRev + 1 }
+          ? {
+              agentSwitchIntent: null,
+              agentSwitchIntentRev: s.agentSwitchIntentRev + 1,
+              sessionProviderId: s.agentSwitchIntent?.providerId,
+            }
           : {}),
       };
     });
+  }
+  if ('providerId' in patch) {
+    const nextProviderId =
+      typeof patch.providerId === 'string'
+        ? patch.providerId
+        : patch.providerId === null
+          ? null
+          : undefined;
+    if (nextProviderId !== undefined) {
+      setState(sessionId, (s) =>
+        s.sessionProviderId === nextProviderId ? s : { ...s, sessionProviderId: nextProviderId },
+      );
+    }
   }
   if (typeof patch.fastMode === 'boolean') {
     const next = patch.fastMode;

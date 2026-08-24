@@ -98,7 +98,7 @@ import {
   toGhostPluginDetail,
   toGhostPluginListItem,
   filterGhostPluginItems,
-  ghostPanelOwnerKey,
+  ghostWebviewOwnerKey,
   ghostPrimaryAction,
   marketPresentationForInstalledGhost,
   installedVisibleCount,
@@ -106,6 +106,7 @@ import {
   sortInstalledForDisplay,
   type GhostPluginListItem,
 } from './lib/ghostPluginViewModel';
+import { MyPublishesSection } from './MyPublishesSection';
 import { ignoredRoundStorageKey, isBatchFinished, updateRoundKey } from './lib/updateAllModel';
 import {
   approveUpdateExpansion,
@@ -125,6 +126,12 @@ import {
 } from './PluginManagementLayout';
 import { GhostPagePanelHost } from './GhostPagePanelHost';
 import { GhostPluginDetailView } from './GhostPluginDetailView';
+import {
+  currentMainViewVisibilityOwner,
+  readMainViewSidebarVisible,
+  useMainViewVisibilityRevision,
+  writeMainViewSidebarVisible,
+} from '@/cindy-brain/mainViewVisibilityStore';
 import { UpdateAllDialog } from './UpdateAllDialog';
 import { GhostPluginIcon } from './GhostPluginIcon';
 import { MarketPluginDetailView } from './MarketPluginDetailView';
@@ -168,6 +175,94 @@ const RECOMMENDED_FILTERS: readonly PluginPresentationFilter[] = [
 const MAX_VISIBLE_INSTALLED_PLUGINS = 8;
 /** 折叠入口只预览前三个隐藏插件，避免头像堆叠反过来抢占操作文案。 */
 const MAX_COLLAPSED_INSTALLED_PLUGIN_PREVIEWS = 3;
+
+/**
+ * 本期隐藏「我的发布」二级 tab，避免与「已安装」争抢顶层布局。
+ * 重新开放前必须先定首个 tab 的标签；当前「概览」仅为已被用户否掉的占位词，并非定案。
+ */
+export const SHOW_MY_PUBLISHES_SECTION = false;
+
+/**
+ * Product gate for the whole secondary tab experience. The overview stays mounted while tabs
+ * switch, and a disabled gate returns it without an extra wrapper or hidden publishing effects.
+ */
+export function MyPublishesSectionVisibilityGate({
+  visible,
+  overviewLabel,
+  publishesLabel,
+  tabsAriaLabel,
+  publishes,
+  children,
+}: {
+  visible: boolean;
+  overviewLabel: string;
+  publishesLabel: string;
+  tabsAriaLabel: string;
+  publishes: ReactNode;
+  children: ReactNode;
+}) {
+  const [activeTab, setActiveTab] = useState<'overview' | 'publishes'>('overview');
+  const id = useId();
+  const overviewTabId = `${id}-overview-tab`;
+  const overviewPanelId = `${id}-overview-panel`;
+  const publishesTabId = `${id}-publishes-tab`;
+  const publishesPanelId = `${id}-publishes-panel`;
+
+  if (!visible) return <>{children}</>;
+
+  return (
+    <>
+      <div
+        role="tablist"
+        aria-label={tabsAriaLabel}
+        className="mt-5 flex items-end gap-6 border-b border-[var(--border-default)]"
+      >
+        {([
+          ['overview', overviewLabel, overviewTabId, overviewPanelId],
+          ['publishes', publishesLabel, publishesTabId, publishesPanelId],
+        ] as const).map(([tab, label, tabId, panelId]) => {
+          const active = activeTab === tab;
+          return (
+            <button
+              key={tab}
+              id={tabId}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-controls={panelId}
+              onClick={() => setActiveTab(tab)}
+              className={cn(
+                '-mb-px select-none border-b-2 px-0.5 pb-2.5 pt-1 text-13 font-medium transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+                active
+                  ? 'border-[var(--text-primary)] text-[var(--text-primary)]'
+                  : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        id={overviewPanelId}
+        role="tabpanel"
+        aria-labelledby={overviewTabId}
+        hidden={activeTab !== 'overview'}
+      >
+        {children}
+      </div>
+      <div
+        id={publishesPanelId}
+        role="tabpanel"
+        aria-labelledby={publishesTabId}
+        hidden={activeTab !== 'publishes'}
+      >
+        {publishes}
+      </div>
+    </>
+  );
+}
 
 /** Keeps the installed-section disclosure rule deterministic and directly testable. */
 function visibleInstalledPluginItems<T>(items: readonly T[]): T[] {
@@ -326,10 +421,11 @@ export function GhostPluginPage({
   const marketLocale = resolveSystemLocale(i18n.resolvedLanguage ?? i18n.language);
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { confirm, confirmWithCheckbox } = useConfirmDialog();
+  const { confirm } = useConfirmDialog();
   const { user, mode, dataOwnerId } = useAuth();
   const showEnterprise = user?.membershipKind === 'org';
   const ghosts = useInstalledGhosts();
+  useMainViewVisibilityRevision();
   const installedGhostIds = useMemo(() => ghosts.map((ghost) => ghost.manifest.id), [ghosts]);
   const installedGhostIdsKey = useMemo(
     () => [...installedGhostIds].sort().join('\0'),
@@ -346,7 +442,7 @@ export function GhostPluginPage({
   const [marketSnapshot, setMarketSnapshot] = useState<PluginMarketSnapshot | null>(null);
   const [openPanelId, setOpenPanelId] = useState<string | null>(null);
   // 数据归属键:面板宿主按它失效(定义要早于消费点)。
-  const panelOwnerKey = ghostPanelOwnerKey(mode, dataOwnerId);
+  const panelOwnerKey = ghostWebviewOwnerKey(mode, dataOwnerId);
   const ignoredRoundKey = ignoredRoundStorageKey(mode, dataOwnerId);
   const [ignoredRound, setIgnoredRound] = useState(() => readIgnoredRound(ignoredRoundKey));
   // 账号 / 本地云模式切换:换桶重读,不把上一个身份的「忽略本轮」带进来。
@@ -751,6 +847,9 @@ export function GhostPluginPage({
   const selectedMarketUpdate = selectedDetail
     ? pluginUpdateForInstalledVersion(selectedMarketInstall)
     : null;
+  const selectedMainViewSidebarVisible = selectedDetail?.hasMainView
+    ? readMainViewSidebarVisible(dataOwnerId, selectedDetail.id)
+    : true;
 
   // ── 面板收束:页面独占的插件面板宿主;停用/卸载/换形态自动失效 ──
   const openPanelGhost = useMemo(() => {
@@ -899,10 +998,7 @@ export function GhostPluginPage({
             to: next.version,
           }),
           content: (
-            <GhostUpdateReview
-              diff={diff}
-              manualCount={next.manifest.manual?.items.length ?? 0}
-            />
+            <GhostUpdateReview diff={diff} manualCount={next.manifest.manual?.items.length ?? 0} />
           ),
           maxWidth: 520,
           confirmText: t('settings.ghosts.updateConfirm.confirm'),
@@ -948,8 +1044,8 @@ export function GhostPluginPage({
       await handleMarketUpdate(selectedDetail.id);
       return;
     }
-    await pickAndUpdateGhost(selectedDetail.id, { t, confirm, confirmWithCheckbox });
-  }, [confirm, confirmWithCheckbox, handleMarketUpdate, selectedDetail, selectedMarketUpdate, t]);
+    await pickAndUpdateGhost(selectedDetail.id, { t, confirm });
+  }, [confirm, handleMarketUpdate, selectedDetail, selectedMarketUpdate, t]);
 
   /**
    * 缺少批准状态时的恢复入口。市场自有的包重走市场安装确认(重新下载 + 逐项
@@ -966,15 +1062,15 @@ export function GhostPluginPage({
       }
       // 本地包路线:从已装目录读全量权限清单确认后开 receipt,不用用户翻出原始
       // .cindy 文件;目录读不出时该流程内部自动回退到"重新选包"。
-      await reapproveInstalledGhost(ghostId, { t, confirm, confirmWithCheckbox });
+      await reapproveInstalledGhost(ghostId, { t, confirm });
     },
-    [confirm, confirmWithCheckbox, ghosts, handleMarketUpdate, marketByGhostId, t],
+    [confirm, ghosts, handleMarketUpdate, marketByGhostId, t],
   );
 
   const handleUpdateFromFile = useCallback(async () => {
     if (!selectedDetail) return;
-    await pickAndUpdateGhost(selectedDetail.id, { t, confirm, confirmWithCheckbox });
-  }, [confirm, confirmWithCheckbox, selectedDetail, t]);
+    await pickAndUpdateGhost(selectedDetail.id, { t, confirm });
+  }, [confirm, selectedDetail, t]);
 
   // 控制器在挂载期借用本页的市场刷新;卸载后批次继续跑,重新进页全量刷新。
   useEffect(
@@ -997,20 +1093,35 @@ export function GhostPluginPage({
     setUpdateDialogOpen(true);
   }, [updatableInstalledItems]);
 
+  const handlePublish = useCallback(async () => {
+    const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
+    if (!picked || 'canceled' in picked) return;
+    try {
+      await window.electronAPI.pluginPublisher.start(picked.filePath);
+    } catch (error) {
+      const decoded = extractIpcError(error);
+      toast.error(
+        decoded?.code === 'PERMISSION_DENIED'
+          ? t('settings.ghosts.publish.disabled')
+          : t('settings.ghosts.publish.startFailed'),
+      );
+    }
+  }, [t]);
+
   const handleInstall = useCallback(async () => {
     const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
     if (!picked || 'canceled' in picked) return;
+    // 设置页选文件是用户亲手操作 → 手动来源(不传 origin),不加横幅、不加重。
     await confirmAndInstallGhost(picked.filePath, {
       t,
       confirm,
-      confirmWithCheckbox,
-      // 已在插件页:tab 型插件勾选「立即开启并打开面板」后原地开面板。
+      // 已在插件页:tab 型插件装入即生效后原地开面板。
       openPluginPanel: (ghostId) => {
         setSelectedId(null);
         setOpenPanelId(ghostId);
       },
     });
-  }, [confirm, confirmWithCheckbox, t]);
+  }, [confirm, t]);
 
   const handleRetryLegacyRecovery = useCallback(async () => {
     legacyRecoveryStatusRequestRef.current += 1;
@@ -1104,7 +1215,7 @@ export function GhostPluginPage({
     [confirm, ghosts, navigate, openGhostConfiguration, t],
   );
 
-  /** 卡片胶囊/详情主动作分发:面板型开页面内面板,指令/Host 能力型起对话,工具型进管理。整卡点击不走这里。 */
+  /** 卡片胶囊/详情主动作分发:面板型开页面内面板,指令/Host 能力起对话。 */
   const handlePrimaryAction = useCallback(
     (item: Pick<GhostPluginListItem, 'id' | 'name' | 'tabPanel' | 'canUse' | 'hostCapability'>) => {
       const action = ghostPrimaryAction(item);
@@ -1119,6 +1230,22 @@ export function GhostPluginPage({
       setSelectedId(item.id);
     },
     [handleUseGhost],
+  );
+
+  const handleMainViewSidebarVisibleChange = useCallback(
+    (visible: boolean) => {
+      const selected = selectedDetail;
+      if (!selected?.hasMainView) return;
+      const owner = currentMainViewVisibilityOwner();
+      void writeMainViewSidebarVisible(owner, selected.id, visible)
+        .then((persisted) => {
+          if (!persisted) toast.error(t('settings.ghosts.errors.generic'));
+        })
+        .catch(() => {
+          toast.error(t('settings.ghosts.errors.generic'));
+        });
+    },
+    [selectedDetail, t],
   );
 
   const handleUse = useCallback(() => {
@@ -1273,9 +1400,7 @@ export function GhostPluginPage({
           ...(isUpdate && installedGhost
             ? { expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval) }
             : {}),
-          ...(isUpdate &&
-            (diff!.added.length > 0 ||
-              installedGhost?.approval.state !== 'approved')
+          ...(isUpdate && (diff!.added.length > 0 || installedGhost?.approval.state !== 'approved')
             ? {
                 allowPermissionExpansion: true,
                 ...(installedGhost
@@ -1444,6 +1569,8 @@ export function GhostPluginPage({
               void handleToggle(selectedDetail.id, enabled, selectedDetail.name)
             }
             onUse={handleUse}
+            mainViewSidebarVisible={selectedMainViewSidebarVisible}
+            onMainViewSidebarVisibleChange={handleMainViewSidebarVisibleChange}
             onUpdate={() => void handleUpdate()}
             onUpdateFromFile={() => void handleUpdateFromFile()}
             // 受体模型的 §5 恢复入口:缺批准的安装在详情页重新确认(市场包重装 /
@@ -1512,6 +1639,18 @@ export function GhostPluginPage({
               </div>
             </header>
 
+            <MyPublishesSectionVisibilityGate
+              visible={SHOW_MY_PUBLISHES_SECTION && showEnterprise}
+              overviewLabel={t('settings.ghosts.page.overviewTab')}
+              publishesLabel={t('settings.ghosts.publish.section')}
+              tabsAriaLabel={t('settings.ghosts.page.secondaryTabsAria')}
+              publishes={
+                <MyPublishesSection
+                  enabled={showEnterprise}
+                  onPublish={() => void handlePublish()}
+                />
+              }
+            >
             {scopeDir ? (
               <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface-chip)] px-4 py-3">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -1802,6 +1941,7 @@ export function GhostPluginPage({
                 )}
               </section>
             ) : null}
+            </MyPublishesSectionVisibilityGate>
           </PluginManagementPage>
         </main>
         {panelAside}

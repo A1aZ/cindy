@@ -719,6 +719,13 @@
         "item2": "把大任務拆成多輪：先理解，再修改，再驗證。",
         "item3": "當你要處理獨立問題時，建立新任務而不是把所有事情混在一個任務裡。"
       },
+      "linuxUpdates": {
+        "title": "Linux 安裝與更新",
+        "description": "Linux 目前提供 Ubuntu 22.04 / 24.04 的 .deb 套件。有新版本時，應用程式會下載安裝包，安裝時需要系統密碼。",
+        "item1": "首次安裝用 sudo apt install ./cindy-<版本>-<架構>.deb（x64 為 amd64，arm64 為 arm64）。",
+        "item2": "應用程式內更新會下載 .deb，點更新後透過系統權限提示覆蓋安裝。",
+        "item3": "Linux 暫不提供 Beta 渠道和空閒時自動安裝，因為安裝需要輸入密碼。"
+      },
       "qnaTitle": "直接提問",
       "qnaDescription": "如果 overview 裡沒有覆蓋到你的問題，可以直接問我該怎麼做。",
       "qnaPlaceholder": "例如：如何匯入 codex 任務",
@@ -777,6 +784,7 @@
       "openLogsDirError": "開啟日誌目錄失敗",
       "autoUpdateLabel": "空閒時自動安裝更新",
       "autoUpdateDescription": "更新下載完成後，當這臺電腦 10 分鐘無操作且沒有任務執行時，自動重啟應用完成安裝。",
+      "linuxUpdateDescription": "有新版本時會在應用程式內下載 .deb。點更新後需要輸入系統密碼完成安裝，因此不會在空閒時自動安裝。",
       "autoUpdateEnabledToast": "已開啟空閒時自動安裝更新",
       "autoUpdateDisabledToast": "已關閉空閒時自動安裝更新",
       "autoUpdateSaveFailed": "儲存自動更新設定失敗",
@@ -1049,6 +1057,13 @@
           "cancel": "取消",
           "edit": "編輯",
           "delete": "刪除",
+          "termLabel": "詞條",
+          "aliasSeparator": "、",
+          "aliases": "常被聽成：{{aliases}}",
+          "aliasesEditLabel": "常被聽成",
+          "aliasesEditAriaLabel": "編輯常見誤識別寫法",
+          "aliasesPlaceholder": "每行一個誤識別寫法",
+          "aliasesEditHint": "每行一個；清空即可刪除全部誤識別寫法。",
           "searchAriaLabel": "搜尋詞典",
           "closeSearch": "收起搜尋",
           "searchPlaceholder": "搜尋詞典",
@@ -3518,6 +3533,12 @@
     },
     "shortcuts": {
       "title": "鍵盤快捷鍵",
+      "accessories": {
+        "title": "配件",
+        "description": "鍵盤、手把等輸入裝置",
+        "openAria": "打開配件",
+        "back": "返回"
+      },
       "resetAll": "恢復全部預設",
       "reset": "恢復預設",
       "recording": "按下新快捷鍵…",
@@ -3554,7 +3575,7 @@
           },
           "composer.submit": {
             "name": "傳送訊息",
-            "description": "傳送輸入框中的訊息"
+            "description": "傳送輸入框中的訊息；若有待確認的請求則改為批准"
           },
           "feedback": {
             "name": "傳送意見回饋",
@@ -3637,7 +3658,11 @@
           },
           "navigateBack": {
             "name": "返回",
-            "description": "在瀏覽記錄中返回"
+            "description": "返回上一頁；若有待確認的請求則改為拒絕"
+          },
+          "toggleFullscreen": {
+            "name": "切換全螢幕",
+            "description": "進入或退出全螢幕"
           },
           "composer.focus": {
             "name": "聚焦輸入框",
@@ -3657,7 +3682,6 @@
           }
         },
         "title": "Work Louder Codex Micro",
-        "beta": "Beta",
         "entryDescription": "用 Agent 鍵開啟任務，並用燈光顯示任務狀態。",
         "openAria": "開啟 Work Louder Codex Micro 設定",
         "back": "返回鍵盤快捷鍵",
@@ -3958,7 +3982,113 @@
       "edit": "編輯",
       "delete": "刪除",
       "deleteAria": "刪除 {{name}} 的快捷鍵",
-      "cancel": "取消"
+      "cancel": "取消",
+      "xboxGamepad": {
+        "title": "Xbox 手把",
+        "openAria": "打開 Xbox 手把設定",
+        "entryDescription": "Cindy 在前景時，用手把捲動、說話、傳送和切換任務",
+        "back": "返回鍵盤快捷鍵",
+        "retry": "重試",
+        "layout": {
+          "title": "鍵位",
+          "description": "點按鍵位即可改它做什麼。按下手把時，圖上對應的鍵會亮起。",
+          "clickToEdit": "點按即可設定",
+          "editor": {
+            "title": "按鍵",
+            "description": "給這個按鍵選一個 Cindy 功能。未設定的按鍵不會做任何事。",
+            "done": "完成",
+            "assigned": "功能",
+            "assignedDescription": "按下時觸發。按住說話會在鬆開時結束。"
+          },
+          "reset": {
+            "title": "恢復預設鍵位",
+            "description": "只還原每個按鍵的功能，不會關掉手把。",
+            "button": "恢復預設鍵位"
+          }
+        },
+        "stick": {
+          "description": "搖桿可以捲動對話，也可以給四個方向分別指定功能。",
+          "customDescription": "搖桿進入這個方向時觸發一次。",
+          "mode": {
+            "label": "搖桿用途",
+            "description": "捲動對話會依推桿力度連續捲動；自訂則為每個方向單獨指定功能。",
+            "options": {
+              "conversation-scroll": "捲動對話",
+              "custom": "自訂方向"
+            }
+          }
+        },
+        "directions": {
+          "up": "上",
+          "right": "右",
+          "down": "下",
+          "left": "左"
+        },
+        "controls": {
+          "a": "A",
+          "b": "B",
+          "x": "X",
+          "y": "Y",
+          "lb": "LB",
+          "rb": "RB",
+          "lt": "LT",
+          "rt": "RT",
+          "view": "View",
+          "menu": "Menu",
+          "xbox": "Xbox",
+          "ls": "左搖桿按下",
+          "rs": "右搖桿按下",
+          "dpadUp": "方向鍵上",
+          "dpadDown": "方向鍵下",
+          "dpadLeft": "方向鍵左",
+          "dpadRight": "方向鍵右",
+          "leftStick": "左搖桿",
+          "rightStick": "右搖桿"
+        },
+        "actions": {
+          "none": "未設定",
+          "voice": "語音輸入",
+          "voiceDescription": "按住進行語音輸入，鬆開結束。",
+          "commands": "命令",
+          "skills": "技能",
+          "choose": "選擇功能"
+        },
+        "errors": {
+          "load": "無法讀取手把設定",
+          "save": "無法儲存手把設定"
+        },
+        "connection": {
+          "label": "連線",
+          "toggle": {
+            "label": "啟用",
+            "aria": "讓這個 Cindy 在前景時使用 Xbox 手把"
+          },
+          "status": {
+            "connecting": "正在連線",
+            "connected": "已連線",
+            "not-detected": "未偵測到",
+            "present": "已連線",
+            "disabled": "未啟用",
+            "error": "連線異常",
+            "unavailable": "目前系統暫不支援"
+          },
+          "descriptions": {
+            "connecting": "Cindy 正在尋找 Xbox 手把。",
+            "connected": "Cindy 在前景時會監聽這只手把。",
+            "disabled": "啟用後，Cindy 在前景時會監聽手把。",
+            "present": "啟用後，Cindy 在前景時會監聽手把。",
+            "not-detected": "請用 USB 或藍牙連接 Xbox 手把。",
+            "error": "Cindy 暫時無法讀取手把，正在重試。",
+            "unavailable": "這台電腦還不能讀取 Xbox 手把。"
+          }
+        },
+        "device": {
+          "usb": "有線",
+          "bluetooth": "藍牙",
+          "battery": "{{percent}}%",
+          "charging": "充電中 {{percent}}%"
+        }
+      }
     },
     "ghosts": {
       "title": "插件",
@@ -3966,6 +4096,8 @@
       "page": {
         "search": "搜尋插件",
         "clearSearch": "清除插件搜尋",
+        "secondaryTabsAria": "插件頁內容",
+        "overviewTab": "總覽",
         "addPlugin": "新增插件",
         "addPluginAria": "插件新增選項",
         "installedSection": "已安裝",
@@ -4042,7 +4174,8 @@
           "stateChanged": "操作期間帳號、插件或版本已發生變化，請確認最新狀態後重試。",
           "accessDenied": "當前插件操作不被允許，或操作已取消。",
           "notConfigured": "當前環境未提供插件市場。",
-          "invalidPackage": "該插件包無效，或當前 Cindy 版本不支援它。"
+          "invalidPackage": "該插件包無效，或當前 Cindy 版本不支援它。",
+          "brokerRedirectPortRequired": "此插件宣告了授權 broker，但同一項 OAuth 設定缺少 redirectPort，無法從插件市場安裝。請聯絡釋出者補上該欄位並重新釋出。"
         },
         "securityTitle": "安裝與權限",
         "securityDescription": "安裝包會在主處理程序中校驗大小與 SHA-256，再經 Cindy 插件清單校驗後原子安裝。首次安裝完成後即自動開啟，可隨時在插件頁停用；更新會保留當前生效狀態。",
@@ -4109,7 +4242,7 @@
             "authTitle": "私有倉庫",
             "authBody": "認證完全依賴系統的 Git 配置，Cindy 不儲存任何 Git 憑證。SSH 方式：本機已配置可用的 key；若組織開啟了 SAML SSO，還需在 GitHub 的 SSH key 設定裡為該組織點 Configure SSO 授權。HTTPS 方式：使用 Personal Access Token，並由系統 credential helper 儲存。",
             "rulesTitle": "安裝規則",
-            "rulesBody": "插件 id 全域性唯一、先裝先得——與已安裝插件衝突時會明確提示。使用 cindy- 等官方保留字首的插件不能從自定義市場安裝。安裝前會逐項展示插件宣告的權限，確認後即完成安裝並自動開啟。",
+            "rulesBody": "插件 id 全域性唯一、先裝先得——與已安裝插件衝突時會明確提示。id 使用官方保留字首（{{reservedGhostIdPrefixes}}）的插件，無法透過拖入、選取檔案、ghost_forge_pack 轉交或自訂插件市場安裝。安裝前會逐項展示插件宣告的權限，確認後即完成安裝並自動開啟。",
             "copy": "複製指南",
             "copied": "指南已複製到剪貼簿。",
             "copyFailed": "複製失敗，請重試。"
@@ -4182,7 +4315,6 @@
         "reapproved": "已恢復「{{name}}」",
         "installed": "已安裝「{{name}}」",
         "uninstalled": "已解除安裝「{{name}}」",
-        "installedAsleep": "已安裝「{{name}}」(未生效，可在此開啟)",
         "updated": "「{{name}}」已更新到 v{{version}}",
         "exported": "已匯出「{{name}}」的 .cindy 檔案",
         "exportFailed": "匯出「{{name}}」失敗，請重試",
@@ -4201,11 +4333,22 @@
         "cancel": "取消",
         "meta": "版本 {{version}}。將安裝到本機，可隨時解除安裝。",
         "metaWithAuthor": "作者 {{author}} · 版本 {{version}}。將安裝到本機，可隨時解除安裝。",
-        "enableNow": "安裝後立即生效",
-        "enableNowOpenPanel": "安裝後立即生效並打開面板",
         "manualCount": "隨包手冊 {{count}} 篇",
         "expandDescription": "展開完整介紹",
-        "collapseDescription": "收起介紹"
+        "collapseDescription": "收起介紹",
+        "typedIdLabel": "輸入插件 id「{{id}}」以確認安裝",
+        "agentBanner": {
+          "title": "這次安裝是 Agent 發起的，不是你點的。",
+          "context": "它在任務「{{title}}」裡打包了 {{path}} 下的插件原始碼。",
+          "contextNoPath": "它在任務「{{title}}」裡打包了一個插件原始碼目錄。",
+          "contextNoTitle": "它打包了 {{path}} 下的插件原始碼。",
+          "contextBare": "它打包了一個插件原始碼目錄。",
+          "advice": "如果你沒在這個任務裡要求做插件，請取消 —— 並回頭看看這個任務剛才讀過哪些外部內容。",
+          "firstInstall": "這個插件 id 此前從未安裝過。",
+          "hazardSkill": "它帶了技能指令，AI 會以你的全部權限執行，不受插件沙箱限制，而且對你所有專案生效。",
+          "hazardNode": "它可以在你的電腦上執行程式，不受瀏覽器沙箱限制。",
+          "hazardCredential": "它會把你在它設定頁填的憑證發給 {{hosts}}。"
+        }
       },
       "trust": {
         "official": "Cindy 官方插件",
@@ -4258,6 +4401,8 @@
         "command": "對話指令 ${{command}}",
         "panelLeft": "面板「{{title}}」· 停靠主對話區左側",
         "panelTab": "面板「{{title}}」· 插件頁內開啟",
+        "mainView": "可在 Cindy 側邊欄新增「{{title}}」入口",
+        "mainViewDetail": "點擊後將在插件沙箱中開啟主視圖，不會因此取得檔案、網路或憑證存取權限。",
         "code": "可執行程式碼",
         "codeDetail": "在獨立沙箱中執行，無法訪問你的檔案與網路。",
         "resident": "常駐執行(生效後即啟動，不呼叫也保持後臺處理程序)",
@@ -4330,7 +4475,10 @@
         "alreadyInstalled": "這個插件已經安裝",
         "approvalRequired": "繼續前需要重新確認這個插件的權限",
         "commandConflict": "它的指令和已裝插件撞名了，先解除安裝佔用方或讓作者改名",
-        "idReserved": "該 id 使用了官方保留字首 cindy-，僅隨應用內建的插件可用",
+        "idReserved": "{{reservedGhostIdPrefixes}} 是官方插件保留字首，無法透過拖入、選取檔案、ghost_forge_pack 轉交或自訂插件市場安裝；請從 Cindy 插件市場安裝對應的官方插件",
+        "brokerManualInstallNotAuthorized": "手動安裝的 .cindy 無法使用授權 broker；請改從組織插件市場安裝，或請作者以組織身分使用 ghost_forge_pack 建置",
+        "brokerNotAuthorized": "目前的安裝來源或組織身分無權使用授權 broker；請從組織插件市場安裝，或請作者以組織身分使用 ghost_forge_pack 建置",
+        "brokerRedirectPortRequired": "這個插件宣告了授權 broker，但沒有在同一項 OAuth 設定中宣告 redirectPort。請讓作者補上該欄位，確保授權最後一跳能回到本機監聽連接埠。",
         "sourceMissing": "找不到所選檔案",
         "generic": "操作失敗，請稍後重試",
         "updateIdMismatch": "所選檔案是插件「{{id}}」，與當前插件「{{expected}}」不一致"
@@ -4409,6 +4557,9 @@
         "settingsUnavailableUntilRestore": "恢復插件後可繼續使用這項配置。",
         "oauthScopeStale": "當前授權未包含插件新增權限，請重新連線補齊授權。",
         "configurationTitle": "配置",
+        "sidebarEntryTitle": "側邊欄入口",
+        "showInSidebar": "顯示在側邊欄",
+        "sidebarEntryDescription": "開啟後，側邊欄會顯示「{{title}}」。隱藏入口不會停用插件。",
         "openTool": "檢視 Tool {{name}} 的詳情",
         "noToolDescription": "該 Tool 暫無描述。",
         "viewAllTools": "檢視更多",
@@ -4418,6 +4569,7 @@
         "closeDialog": "關閉彈窗"
       },
       "contents": {
+        "mainView": "主視圖",
         "panel": "面板",
         "settingsUi": "自定義設定介面",
         "code": "可執行程式碼",
@@ -4488,7 +4640,9 @@
       "reapproveConfirm": {
         "title": "重新確認「{{name}}」的權限？",
         "body": "按下方清單重新授權這個已安裝的插件，不需要重新提供安裝包檔案。",
-        "confirm": "確認並恢復"
+        "confirm": "確認並恢復",
+        "enableNoticeEnabled": "確認後保持目前啟用狀態。",
+        "enableNoticeAsleep": "確認後保持沉睡（不自動啟用）；你可以稍後在這裡手動啟用。"
       },
       "updateConfirm": {
         "title": "更新插件「{{name}}」？",
@@ -4530,6 +4684,46 @@
         "reviewOutdated": "審查過期",
         "approve": "同意",
         "skip": "跳過"
+      },
+      "publish": {
+        "section": "我的發佈",
+        "action": "發佈插件…",
+        "confirmTitle": "發佈 {{name}}",
+        "confirmDescription": "確認後開始上傳到目前組織。",
+        "org": "組織",
+        "pluginId": "插件 id",
+        "version": "版本",
+        "size": "大小",
+        "confirm": "發佈",
+        "cancel": "取消",
+        "disabled": "本企業未開啟成員發佈，請聯絡管理員",
+        "loadFailed": "發佈列表暫時無法使用",
+        "startFailed": "無法開始發佈",
+        "empty": "還沒有發佈記錄",
+        "unknownPlugin": "插件",
+        "uploading": "正在發佈",
+        "badge": {
+          "validating": "校驗中",
+          "processing": "處理中",
+          "pending": "待審核",
+          "approved": "已上架",
+          "rejected": "被駁回",
+          "failed": "失敗",
+          "expired": "已過期"
+        },
+        "stage": {
+          "confirming": "等待確認",
+          "hashing": "正在校驗檔案",
+          "preparing": "正在建立上傳",
+          "uploading": "正在上傳",
+          "committing": "正在提交",
+          "processing": "正在處理",
+          "succeeded": "已完成",
+          "failed": "失敗",
+          "expired": "已過期",
+          "cancelled": "已取消",
+          "cancelledTracking": "已停止追蹤，伺服器仍在處理"
+        }
       }
     },
     "mcp": {
@@ -5280,7 +5474,7 @@
       "ready": "新版本已就緒，點選側邊欄完成更新",
       "manifestFailed": "檢查更新失敗，請檢查網路",
       "downloadFailed": "新版本下載失敗，稍後再試",
-      "manualDownload": "Linux 首版僅支援手動下載安裝包，請前往下載頁獲取最新版。"
+      "manualDownload": "請在應用程式內下載更新，安裝時需要系統密碼。"
     },
     "closeConfirm": {
       "title": "確認要離開嗎？",
@@ -7152,6 +7346,8 @@
       "streamInterruptedNoRetry": "模型輸出中途中斷了。通常是上游暫時故障，請稍後重試。",
       "networkShowRaw": "檢視原始錯誤",
       "networkHideRaw": "收起原始錯誤",
+      "gatewayProxyTokenInvalid": "Cindy AI 憑據已失效。請點「重試」。若仍失敗，請退出後重新登入",
+      "gatewayProxyTokenInvalidNoRetry": "Cindy AI 憑據已失效。若後續仍失敗，請退出後重新登入",
       "silentStopContinue": "繼續",
       "silentStopContinueTitle": "繼續當前任務",
       "piTransportClosed": "遠端 Pi 連線已中斷（SSH 通道關閉）。遠端任務仍在執行，重新連線後可以繼續。",

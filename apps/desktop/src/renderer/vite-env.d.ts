@@ -1243,7 +1243,7 @@ interface ElectronAPI {
     install: (
       lizFilePath: string,
       /** enable:装入后立即开启(确认框勾选决定;缺省沉睡)。 */
-      opts: { enable?: boolean; expectedPackageSha256: string },
+      opts: { enable?: boolean; expectedPackageSha256: string; packTicket?: string },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /** 原位更新(同 id 换版):唤醒状态与面板位置延续,沙箱熄灯待重拉。 */
     update: (
@@ -1251,6 +1251,7 @@ interface ElectronAPI {
       opts: {
         expectedPackageSha256: string;
         expectedInstalledApproval: string;
+        packTicket?: string;
       },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /**
@@ -1317,7 +1318,11 @@ interface ElectronAPI {
       /** 本次检查的整包指纹；安装/更新时回传，防止确认后文件被替换。 */
       packageSha256: string;
       iconDataUrl?: string;
+      /** Host 一次性打包凭证。有则回传给 install/update；无则按手动装入。 */
+      packTicket?: string;
     }>;
+    /** 用户取消确认框时丢掉 inspect 签发的一次性打包凭证并清理 staging。 */
+    abandonPackTicket: (packTicket: string) => Promise<{ ok: true }>;
     /** 本地包第三条恢复路径第一步:从已装目录读确认卡事实,零副作用。 */
     reapproveInspect: (
       id: string,
@@ -1359,8 +1364,14 @@ interface ElectronAPI {
       id: string,
       disabled: boolean,
     ) => Promise<{ disabled: string[] }>;
-    /** 双击 .cindy 的待装路径,原子取走(取即清空;无则 null)。 */
-    takePendingInstall: () => Promise<{ filePath: string | null }>;
+    /**
+     * 双击 .cindy / forge 转交的待装路径与来源,原子取走(取即清空;无则 null)。
+     * 来源由主机填写、与路径同存同取,agent 不可伪造;没有待装项时返回 manual。
+     */
+    takePendingInstall: () => Promise<{
+      filePath: string | null;
+      origin: import('../shared/ghostInstallOrigin').GhostInstallOrigin;
+    }>;
     onChanged: (
       callback: (payload: { ghosts: import('../shared/ghost').InstalledGhost[] }) => void,
     ) => () => void;
@@ -1372,7 +1383,11 @@ interface ElectronAPI {
           | { sessionId: string; target: 'client_settings' },
       ) => void,
     ) => () => void;
-    /** 双击 .cindy 转交信号:收到后调 takePendingInstall 取路径走确认装入流程。 */
+    /**
+     * 双击 .cindy / forge 转交的"来取货"通知,**不携带任何事实**:收到后调
+     * takePendingInstall 取路径与来源。事实只放在 main 的 pending 缓冲里,
+     * 没有窗口时(冷启动 / macOS 关窗后应用仍在跑)本通知丢掉也不影响正确性。
+     */
     onInstallRequested: (callback: () => void) => () => void;
     /** 运行时状态广播:crashed / fused 时面板原地显示错误接管态。 */
     onRuntimeChanged: (
@@ -1645,6 +1660,18 @@ interface ElectronAPI {
     refreshSource: (name: string) => Promise<import('../shared/pluginMarket').MarketSourceSummary>;
     gitPreflight: () => Promise<{ ok: boolean; version: string | null }>;
   };
+  pluginPublisher: {
+    start: (filePath: string) => Promise<{ transferId: string; uploadId: string | null }>;
+    status: (transferId: string) => Promise<{ progress: unknown }>;
+    cancel: (transferId: string) => Promise<{ cancelled: boolean }>;
+    listMine: (cursor?: string) => Promise<{
+      releases: Array<Record<string, unknown>>;
+      nextCursor: string | null;
+    }>;
+    onProgress: (callback: (progress: unknown) => void) => () => void;
+    onConfirm: (callback: (request: unknown) => void) => () => void;
+    resolveConfirm: (requestId: string, confirmed: boolean) => Promise<{ handled: boolean }>;
+  };
   voiceInput: {
     prewarm: (payload?: {
       sourceLanguage?: string;
@@ -1762,6 +1789,11 @@ interface ElectronAPI {
     addDictionaryEntry: (text: string) => Promise<VoiceInputSettingsData>;
     importDictionaryEntries: (texts: string[]) => Promise<VoiceInputSettingsData>;
     renameDictionaryEntry: (entryId: string, text: string) => Promise<VoiceInputSettingsData>;
+    editDictionaryEntry: (
+      entryId: string,
+      text: string,
+      aliases: string[],
+    ) => Promise<VoiceInputSettingsData>;
     recordDictionaryLearningActions: (actions: VoiceInputDictionaryLearningAction[]) => Promise<{
       settings: VoiceInputSettingsData;
       newAutomaticEntries: Array<{ id: string; text: string }>;
@@ -1861,6 +1893,22 @@ interface ElectronAPI {
     onAction: (callback: (action: WorkLouderCodexRendererAction) => void) => () => void;
     onPreviewInput: (
       callback: (input: import('../shared/workLouderCodex').WorkLouderCodexPreviewInput) => void,
+    ) => () => void;
+  };
+
+  xboxGamepad: {
+    getState: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    setSettings: (
+      patch: import('../shared/xboxGamepad').XboxGamepadSettingsPatch,
+    ) => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    resetSettings: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    probe: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    setLayoutPreviewActive: (active: boolean) => Promise<void>;
+    onStateChanged: (
+      callback: (state: import('../shared/xboxGamepad').XboxGamepadState) => void,
+    ) => () => void;
+    onPreviewInput: (
+      callback: (input: import('../shared/xboxGamepad').XboxGamepadPreviewInput) => void,
     ) => () => void;
   };
 
@@ -3537,7 +3585,7 @@ interface ElectronAPI {
    *   - 'ready'            → 新版本已就绪,等待重启
    *   - 'manifest_failed'  → 拉清单失败(网络问题)
    *   - 'download_failed'  → 找到了新版本但下载失败
-   *   - 'manual_download'  → Linux 首版仅支持手动下载安装包
+   *   - 'manual_download'  → 保留给仍走手动安装的旧路径；现行 Linux 已应用内下 .deb
    */
   checkForUpdate: () => Promise<{
     result:
@@ -3569,6 +3617,7 @@ interface ElectronAPI {
   /** Query current fullscreen state synchronously on mount (covers IPC events
    *  that fired before the renderer had a chance to subscribe). */
   getFullscreenState: () => Promise<boolean>;
+  toggleFullscreen: () => Promise<boolean>;
 
   /** 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 ——
    *  backgroundThrottling 关闭时 document.visibilityState 会一直停在 visible。 */
@@ -4130,6 +4179,17 @@ interface ElectronAPI {
     onHiddenProjectKeysChanged: (
       cb: (
         projectKeys: string[],
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
+    setMainViewHidden: (
+      ghostId: string,
+      hidden: boolean,
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+    ) => Promise<string[]>;
+    onHiddenMainViewGhostIdsChanged: (
+      cb: (
+        ghostIds: string[],
         ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
       ) => void,
     ) => () => void;
@@ -5401,7 +5461,10 @@ interface ElectronAPI {
     };
 
     /** Resolve a pending interaction (permission / ask_user_question / plan_review). */
-    resolveInteraction: (requestId: string, decision: Record<string, unknown>) => Promise<void>;
+    resolveInteraction: (
+      requestId: string,
+      decision: Record<string, unknown>,
+    ) => Promise<{ accepted: boolean }>;
 
     /** Submit one inline plugin Secret through the local trusted-frame-only IPC. */
     submitPluginSetupInline: (request: {

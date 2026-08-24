@@ -1168,7 +1168,7 @@ export function MainLayout() {
           navigate('/cc-agent/new');
           return true;
         case 'settings':
-          navigate('/settings?tab=shortcuts&workLouderCodex=1');
+          navigate('/settings?tab=shortcuts');
           return true;
         case 'manageTasks':
           navigate('/cc-agent/scheduled');
@@ -1187,6 +1187,9 @@ export function MainLayout() {
           return true;
         case 'navigateForward':
           navigate(1);
+          return true;
+        case 'toggleFullscreen':
+          void window.electronAPI?.toggleFullscreen?.();
           return true;
         case 'toggleSidebar':
           handleToggleSidebar();

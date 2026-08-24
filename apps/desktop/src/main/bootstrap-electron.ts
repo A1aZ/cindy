@@ -379,6 +379,7 @@ import {
 import { reapClaudeOrphansSync } from './claude-orphan-reaper';
 import { startAgentProcessPriorityWatcher } from './agent-process-priority';
 import { registerProcessMonitorIpc } from './process-monitor/ipc.js';
+import { disposeWindowsProcessScanWorkers } from './process-monitor/windowsProcessScanWorkerClient.js';
 import { initAppBadgeService, clearAllSessionAttention } from './appBadgeService';
 import { initNotificationService } from './notificationService';
 import { initWecomGroupNotificationIpc } from './wecomGroupNotification';
@@ -852,6 +853,7 @@ import { registerRelaunchBusyActivityIpc } from './relaunchBusyActivityIpc.js';
 import { getGhostSetupChangeBus } from './cindy-brain/ghostSetupChangeBus.js';
 import { getGhostSetupInteractionBridge } from './cindy-brain/ghostSetupInteractionBridge.js';
 import { registerPluginMarketIpc, syncDefaultMarketPlugins } from './plugin-market/registerIpc.js';
+import { registerPluginPublisherIpc } from './plugin-publisher/registerIpc.js';
 import { findCindyFileInArgv } from './cindy-brain/argv.js';
 import { handleIncomingCindyFile } from './cindy-brain/openFileInstall.js';
 import { registerCindyFileAssociation } from './cindy-brain/fileAssociation.js';
@@ -876,7 +878,7 @@ import {
   resetSchedulerReady,
 } from './maker-ipc/schedule.js';
 import { registerProjectAutomationIpc } from './maker-ipc/project-automation.js';
-import { startGoalController, getGoalController } from './goal-host/index.js';
+import { startGoalController, getGoalController, resetGoalController, getGoalTeardownGeneration } from './goal-host/index.js';
 import { startLearnHost, getLearnController, resetLearnController } from './learn-host/index.js';
 import { fetchHubSkillReference } from './learn-host/hubReference.js';
 import { registerLearnIpc, broadcastLearnEvent } from './learn-host/registerIpc.js';
@@ -933,7 +935,19 @@ async function waitForCurrentAccountProviderModelsReady(): Promise<void> {
  * startScheduler 返回同一实例，WeakSet 防止 scheduler.on 重复挂 listener。切账号后
  * resetScheduler 把 _scheduler 置 null，新实例不在 WeakSet 里，会重新 attach 一次。
  */
-async function attemptStartScheduler(): Promise<void> {
+// Provider/DB readiness can trigger this entry from several places. Serialize
+// complete account-host attempts, not only Scheduler construction: when an
+// account-boundary reset supersedes an older attempt, its cleanup must finish
+// before an abort recovery starts Scheduler, GoalController, and Learn again.
+let attemptStartSchedulerBarrier: Promise<void> = Promise.resolve();
+
+function attemptStartScheduler(): Promise<void> {
+  const attempt = attemptStartSchedulerBarrier.then(() => attemptStartSchedulerOnce());
+  attemptStartSchedulerBarrier = attempt.catch(() => undefined);
+  return attempt;
+}
+
+async function attemptStartSchedulerOnce(): Promise<void> {
   // 两个前置条件必须满足才能启动：
   //   1. maker 单例已构造 (splash check-environment 完成 → registerMakerIpcsAfterSplash)
   //   2. DbClient 已 smoke 通过 (user login → renderer 触发 'local-db:ensure-ready' IPC)
@@ -961,7 +975,14 @@ async function attemptStartScheduler(): Promise<void> {
   // 触发时可能发生），_initialCustomMcpRefresh 刚启动但尚未落地；在 startScheduler 前
   // await，确保第一个 scheduler tick 能看到用户已保存的自定义 MCP 配置。
   // 若 Maker 已被 registerMakerIpcsAfterSplash 构造过，promise 早已 resolve，no-op。
+  const goalGenBefore = getGoalTeardownGeneration();
   await waitForInitialCustomMcpRefresh();
+  // If a teardown raced the await, bail out — the next account's activation
+  // pass will re-trigger attemptStartScheduler with fresh state.
+  if (getGoalTeardownGeneration() !== goalGenBefore) {
+    console.log('[bootstrap-electron] attemptStartScheduler: teardown raced await, aborting');
+    return;
+  }
   const automationGitBaselineHooks = createAutomationUserTurnGitBaselineHooks();
   try {
     const scheduler = await startScheduler({
@@ -972,6 +993,14 @@ async function attemptStartScheduler(): Promise<void> {
       logger: createSchedulerLogger('scheduler-host'),
       ...automationGitBaselineHooks,
     });
+    // startScheduler fences resets while its async startup is in flight. Keep
+    // the boundary check immediately before listener publication as a second
+    // guard so a stale generation can never make readiness visible.
+    if (getGoalTeardownGeneration() !== goalGenBefore) {
+      console.log('[bootstrap-electron] attemptStartScheduler: teardown raced scheduler start, aborting stale scheduler attach');
+      await resetScheduler();
+      return;
+    }
     // scheduler 真正 ready 后挂 listener + 喂入 readiness holder。WeakSet 按实例
     // 去重:localDb onReady 重试可能再次拿到同实例，此时 no-op；
     // 切账号后新实例不在 set 里，会重新 attach。
@@ -985,6 +1014,13 @@ async function attemptStartScheduler(): Promise<void> {
     }
   } catch (err) {
     console.error('[bootstrap-electron] startScheduler failed (non-fatal):', err);
+  }
+  // A superseded startup is reported as a non-fatal error by the catch above;
+  // keep the old post-await fence as well so it cannot continue into
+  // GoalController/learn-host startup with the stale maker.
+  if (getGoalTeardownGeneration() !== goalGenBefore) {
+    console.log('[bootstrap-electron] attemptStartScheduler: teardown raced scheduler start, aborting stale account startup');
+    return;
   }
   // GoalController 与 scheduler 同就绪点启动(maker + localDb 均 ready):内部幂等
   // (_controller 已存在则直接返回),启动时 resume 所有 active goal。失败非致命。
@@ -1328,13 +1364,19 @@ function clearAccountBoundaryAbortMark(): void {
 
 async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   const blockingFailures: unknown[] = [];
-  // Raised before anything else in this function, because everything below
-  // it is destructive: input device slots are suspended, the custom provider
-  // catalog is cleared, IM, the scheduler, embedding and the Ghost projection
-  // are stopped. Failing to raise it aborts the handover — and it used to do
-  // that *after* those services were already down, leaving the user on a
-  // half-dismantled old account with no way back except a restart. From here
-  // the abort costs nothing: nothing has been taken apart yet.
+  // Goal timers can dispatch through the outgoing Maker while launch-fence
+  // acquisition waits behind queued filesystem work. Invalidate them before
+  // the first await; resetGoalController() synchronously disposes the current
+  // controller and cancels continuation / usage-resume timers.
+  // Start disposal synchronously, then drain it before waiting on the
+  // cross-process launch fence. This closes the Goal boundary immediately;
+  // disposal itself only settles owner-scoped persistence and cannot launch a
+  // new durable runner after the controller has been fenced.
+  const goalDispose = resetGoalController();
+  // Raise the durable-run fence before the remaining destructive teardown:
+  // input device slots are suspended, the custom provider catalog is cleared,
+  // and IM, scheduler, embedding and Ghost projection are stopped. Failing to
+  // raise it still aborts the handover before those services are taken apart.
   //
   // Holding it for the whole teardown rather than only the shutdown+sweep is
   // the intended widening: a durable launch is exactly what must not start
@@ -1348,6 +1390,36 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
       path.join(app.getPath('userData'), 'pi-agent-home'),
     );
   } catch (err) {
+    try {
+      await goalDispose;
+    } catch (disposeErr) {
+      authBoundaryLog.error(`resetGoalController on ${reason} failed (non-fatal):`, disposeErr);
+    }
+    // The handover is aborting before the owner commit, so the outgoing Maker
+    // and DB remain authoritative. Recreate the controller disposed above;
+    // otherwise a transient fence failure leaves the still-active account with
+    // no goal IPC/runtime until the whole app restarts.
+    try {
+      const maker = getMakerCore();
+      const automationGitBaselineHooks = createAutomationUserTurnGitBaselineHooks();
+      startGoalController({
+        maker,
+        getDb: () => getDbClient().drizzle,
+        broadcastStatus: broadcastGoalStatus,
+        ...automationGitBaselineHooks,
+      });
+      // A startup already in flight before resetGoalController() will exit on
+      // its generation fence (and may stop a scheduler it just constructed).
+      // Queue a fresh full account-host attempt behind that cleanup so the
+      // still-active account also regains Scheduler and Learn. Do not await it:
+      // the original fence error must remain the handover result.
+      void attemptStartScheduler();
+    } catch (restoreErr) {
+      authBoundaryLog.error(
+        `restore GoalController after launch-fence failure on ${reason} failed:`,
+        restoreErr,
+      );
+    }
     // Fail closed, unlike quit and the relaunch. Those two are allowed to
     // continue without a fence because the process is about to disappear
     // (quit) or the operation is cancelled outright (relaunch). Here the
@@ -1361,6 +1433,11 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
       err,
       'the PI Subagent launch fence could not be raised',
     );
+  }
+  try {
+    await goalDispose;
+  } catch (err) {
+    authBoundaryLog.error(`resetGoalController on ${reason} failed (non-fatal):`, err);
   }
   try {
     // Hardware must stop before the long async drain. Otherwise a held stick or
@@ -2134,6 +2211,7 @@ setCodexImageAuthBinding({
 });
 registerGhostIpc();
 registerPluginMarketIpc();
+registerPluginPublisherIpc();
 authManager.setStableOwnerPostCommitTask(async ({ reason, scopeKey, dataOwnerId }) => {
   const builtinOutcome = await runStableOwnerPostCommitTask(reason, { scopeKey, dataOwnerId });
   if (builtinOutcome === 'deferred') return builtinOutcome;
@@ -2214,22 +2292,113 @@ if (started) {
 // written → crash. Block here (synchronously) until the lock disappears.
 {
   const lockPath = getUpdateLockPath();
-  const maxWaitMs = 30_000;
+  // Windows / mac 热更窗口很短。Linux pkexec 要用户输入密码，更新脚本会
+  // 心跳刷新这把锁并把自己的 PID 写进锁内容；只要 PID 还活着且心跳新鲜，
+  // 就不能清掉这把锁——否则旧进程会在安装中途启动，被 root 替换文件。
+  const maxWaitMs = process.platform === 'linux' ? 30 * 60 * 1000 : 30_000;
+  const staleAfterMs = process.platform === 'linux' ? 20_000 : 30_000;
   const pollMs = 500;
   const start = Date.now();
-  while (fs.existsSync(lockPath) && Date.now() - start < maxWaitMs) {
-    // Busy-wait is acceptable here: this only runs during the brief
-    // robocopy window and the app has no UI yet.
-    const waitUntil = Date.now() + pollMs;
-    while (Date.now() < waitUntil) {
-      /* spin */
+  // 启动阶段还没有 UI，必须同步等锁。Atomics.wait 会让出 CPU，
+  // 避免原来的空转在 Linux 输密码期间占满一核。
+  const lockWait = new Int32Array(new SharedArrayBuffer(4));
+  const readLockPid = (): number | null => {
+    try {
+      const raw = fs.readFileSync(lockPath, 'utf8');
+      const pid = Number(raw.trim().split(/\s+/).pop());
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
     }
+  };
+  const pidAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // 主进程在 spawn 前预建锁(持有者 = 主进程 PID),spawn 事件后退出;
+  // 更新脚本接管后再把自己的 PID 写进去。这中间有毫秒级的交接窗口:
+  // 锁里的主进程 PID 已死但 mtime 极新,不能当死锁清掉——给 5s 交接
+  // 宽限,期间继续等脚本接管。
+  const handoffGraceMs = 5_000;
+  // 孤儿心跳兜底:如果持有者 PID 已死、心跳却持续刷新锁(更新脚本被
+  // 单独 kill、心跳子进程还活着),不能无限等。心跳每次 5s 刷新,连续
+  // 3 个心跳周期都看到「PID 死 + mtime 新」就判定为孤儿,清锁继续启动。
+  const orphanGraceMs = (staleAfterMs * 2) + 5_000;
+  let deadButFreshSinceMs: number | null = null;
+  // 记录是否在锁上等过,供等锁实例醒来后 exec 自己(见循环下方)。
+  let waitedForUpdateLock = false;
+  while (fs.existsSync(lockPath)) {
+    waitedForUpdateLock = true;
+    if (process.platform === 'linux') {
+      const holderPid = readLockPid();
+      // 带 PID 的新锁:活锁 = 心跳新鲜 且(持有者存活 或 处于交接宽限)。
+      if (holderPid !== null) {
+        const mtimeMs = (() => {
+          try {
+            return fs.statSync(lockPath).mtimeMs;
+          } catch {
+            return null;
+          }
+        })();
+        if (mtimeMs === null) break;
+        const ageMs = Date.now() - mtimeMs;
+        const fresh = ageMs <= staleAfterMs;
+        const inHandoff = ageMs <= handoffGraceMs;
+        const holderAlive = pidAlive(holderPid);
+        if (fresh && (holderAlive || inHandoff)) {
+          Atomics.wait(lockWait, 0, 0, pollMs);
+          continue;
+        }
+        // 心跳新鲜但持有者已死:超过交接宽限就开始计孤儿时长。
+        if (fresh && !holderAlive) {
+          if (deadButFreshSinceMs === null) deadButFreshSinceMs = Date.now();
+          if (Date.now() - deadButFreshSinceMs < orphanGraceMs) {
+            Atomics.wait(lockWait, 0, 0, pollMs);
+            continue;
+          }
+          break;
+        }
+        break;
+      }
+      // 老格式锁(没有 PID):退回原来的总时长上限。
+      if (Date.now() - start >= maxWaitMs) break;
+      Atomics.wait(lockWait, 0, 0, pollMs);
+      continue;
+    }
+    if (Date.now() - start >= maxWaitMs) break;
+    Atomics.wait(lockWait, 0, 0, pollMs);
   }
-  // If still locked after 30s, proceed anyway (stale lock).
+  // If still locked after the wait, proceed anyway (stale lock).
+  // 锁已不存在(更新脚本正常清掉)同样算已清——等锁实例必须走
+  // 「拉起新进程退出」路径,否则旧代码继续跑。
+  let lockCleared = !fs.existsSync(lockPath);
   try {
     fs.unlinkSync(lockPath);
+    lockCleared = true;
   } catch {
-    /* ignore */
+    lockCleared = !fs.existsSync(lockPath);
+  }
+
+  // Linux:这个实例在锁上等过(说明一次应用内更新刚刚完成)。它加载的
+  // 是安装前的旧代码,直接继续会与更新脚本刚拉起的新实例抢单实例锁,
+  // 抢赢的话旧代码会带着新资源混跑。等锁的实例醒来后拉一个新进程
+  // (加载磁盘上的新二进制)并立即退出,单实例锁两边都已是新代码。
+  // 只有锁确实删掉了才走这条路:删不掉(目录只读/权限被改)说明更新
+  // 脚本或环境仍认为更新在进行,继续按原策略放行会让自己陷入「拉起
+  // 新进程 → 新进程又见锁等待 → 再拉起」的重启循环。
+  if (process.platform === 'linux' && waitedForUpdateLock && lockCleared) {
+    try {
+      const exe = process.execPath;
+      const args = process.argv.slice(1);
+      spawn(exe, args, { stdio: 'inherit', detached: true }).unref();
+    } catch {
+      /* ignore */
+    }
+    process.exit(0);
   }
 }
 
@@ -4342,6 +4511,16 @@ const registerIpcHandlers = () => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow();
     if (!win) return false;
     return win.isFullScreen() || win.isSimpleFullScreen();
+  });
+
+  ipcMain.handle('toggle-fullscreen', (event): boolean => {
+    assertTrustedAppRendererEvent(event);
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow();
+    if (!win) return false;
+    const next = !(win.isFullScreen() || win.isSimpleFullScreen());
+    if (win.isSimpleFullScreen()) win.setSimpleFullScreen(false);
+    win.setFullScreen(next);
+    return next;
   });
 
   // Find-in-page (F-FIP-1): renderer overlay drives Chromium's native page search.
@@ -7937,6 +8116,7 @@ onQuit(
   'sync',
 );
 onQuit('auth-manager', () => authManager.dispose(), 'sync');
+onQuit('windows-process-scan-workers', disposeWindowsProcessScanWorkers, 'sync');
 onQuit('resource-usage-window', () => resourceUsageWindowController.dispose(), 'sync');
 onQuit('rsb-window', () => rsbWindowController.dispose(), 'sync');
 onQuit('ghost-panel-windows', () => ghostPanelWindowsController.dispose(), 'sync');

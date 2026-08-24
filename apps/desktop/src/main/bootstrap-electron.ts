@@ -255,7 +255,6 @@ import {
   stageLocalFileToCache,
   sweepStagedChatAttachmentsOnStartup,
 } from './file-browser/remote-file-cache';
-import { sweepStartupDraftImages } from './imageCacheOrphanSweep';
 import { sweepLegacyDialogueWorkingDirs } from './localDb/dialogueWorkdirSelfHeal';
 import { legacyDialogueUserDataDirNames } from '@cindy/maker-shared/brand-identity';
 import * as videoCacheStore from './videoCacheStore';
@@ -7007,6 +7006,19 @@ const registerIpcHandlers = () => {
       getQueueScanTexts: collectAgentInputQueueScanTexts,
       loadSnapshotPayloads: loadAllQueueSnapshotPayloads,
       getRegisteredDraftUrls: getAllRegisteredDraftUrls,
+      openLegacyImagesDir: async () => {
+        const rootDir = imageCacheStore.getCacheRoot();
+        try {
+          const stat = await fs.promises.lstat(rootDir);
+          if (!stat.isDirectory()) return false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+          throw err;
+        }
+        const error = await shell.openPath(rootDir);
+        if (error) throw new Error(error);
+        return true;
+      },
     });
     ipcMain.handle('cindy-media:storage-stats', () => storageHandlers.stats());
     ipcMain.handle('cindy-media:storage-scan', (_event, params: { draftUrls: string[] }) =>
@@ -7026,6 +7038,10 @@ const registerIpcHandlers = () => {
       ) => storageHandlers.cleanup(params),
     );
     ipcMain.handle('cindy-media:storage-reconcile', () => storageHandlers.reconcile());
+    ipcMain.handle('cindy-media:legacy-images-open-dir', (event) => {
+      assertTrustedAppRendererEvent(event);
+      return storageHandlers.openLegacyImagesDir();
+    });
   }
 
   // F5: SDK send-time temporary base64 read (renderer-initiated; main-initiated
@@ -7504,7 +7520,7 @@ app.on('ready', async () => {
       // 必须先 await ensureLifecycleDbClient(内部 await createDbClient → worker
       // spawn + db open + migration scan + smoke,约 1-2s),把 client 经
       // setCurrentDbClient 暴露给全局 getDbClient() 之后,后续 attemptStartScheduler /
-      // attemptStartEmbeddingHost / sweepStartupDraftImages 才能拿到 ready 的 DbClient。
+      // attemptStartEmbeddingHost 等后续启动任务才能拿到 ready 的 DbClient。
       //
       // 历史:MR2.0 时这里是 fire-and-forget,scheduler/embedding 走老 getDrizzle/getRawDb
       // 路径不受影响。MR2.2 把 158 callsite 切到 DbClient 后,fire-and-forget 让后续
@@ -7804,23 +7820,6 @@ app.on('ready', async () => {
                 elapsedMs: Math.round(performance.now() - startedAt),
               });
             }
-            void sweepStartupDraftImages({
-              dbClient: getDbClient(),
-              processStartedAtMs: PROCESS_STARTED_AT_MS,
-            })
-              .then((result) => {
-                if (result.removed === 0 && result.removedDanglingMeta === 0 && result.errors === 0)
-                  return;
-                createLogger('image-cache-orphan-sweep').info(
-                  'startup draft image sweep completed',
-                  result,
-                );
-              })
-              .catch((err) => {
-                createLogger('image-cache-orphan-sweep').warn('startup draft image sweep failed', {
-                  error: err instanceof Error ? err.message : String(err),
-                });
-              });
           },
           (err) => {
             accountSwitchLog.warn('account provider readiness rejected unexpectedly', {

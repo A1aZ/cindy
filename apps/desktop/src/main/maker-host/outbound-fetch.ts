@@ -490,13 +490,13 @@ export function rewritePinnedProxyDispatchOptions(
  * rebinding 窗口。包装层把下游连接目标改成已审核 IP，同时保留原始 Host 与 TLS SNI。
  * dispatcher 为单次请求所有，响应消费完由 SSRF shell 统一关闭。
  */
-function createPinnedProxyDispatcher(
+/** @internal 导出供安全回归测试断言多地址故障转移只发生在请求发出前。 */
+export function createPinnedProxyDispatcher(
   proxy: OutboundProxyTarget,
   upstream: URL,
   addresses: readonly string[],
 ): Dispatcher {
-  const address = addresses[0];
-  if (!address) throw new Error(`Unable to resolve hostname: ${upstream.hostname}`);
+  if (addresses.length === 0) throw new Error(`Unable to resolve hostname: ${upstream.hostname}`);
   const base = createProxyDispatcher(
     proxy,
     upstreamProtocol(upstream),
@@ -508,7 +508,67 @@ function createPinnedProxyDispatcher(
       options: Dispatcher.DispatchOptions,
       handler: Dispatcher.DispatchHandler,
     ): boolean {
-      return base.dispatch(rewritePinnedProxyDispatchOptions(options, upstream, address), handler);
+      const dispatchFrom = (startIndex: number): boolean => {
+        let lastError: unknown;
+        for (let index = startIndex; index < addresses.length; index += 1) {
+          const address = addresses[index]!;
+          let requestStarted = false;
+          const attemptHandler: Dispatcher.DispatchHandler = {
+            onRequestStart(controller, context) {
+              requestStarted = true;
+              handler.onRequestStart?.(controller, context);
+            },
+            onRequestUpgrade(controller, statusCode, headers, socket) {
+              handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
+            },
+            onResponseStart(controller, statusCode, headers, statusMessage) {
+              handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+            },
+            onResponseData(controller, chunk) {
+              handler.onResponseData?.(controller, chunk);
+            },
+            onResponseEnd(controller, trailers) {
+              handler.onResponseEnd?.(controller, trailers);
+            },
+            onResponseError(controller, error) {
+              // HTTPS CONNECT / SOCKS5 握手失败发生在 onRequestStart 之前；一旦请求开始，
+              // 就不能为了换 IP 而重放可能产生副作用的 POST。
+              if (!requestStarted && !controller.aborted && index + 1 < addresses.length) {
+                try {
+                  dispatchFrom(index + 1);
+                } catch (nextError) {
+                  handler.onResponseError?.(
+                    controller,
+                    nextError instanceof Error ? nextError : new Error(String(nextError)),
+                  );
+                }
+                return;
+              }
+              handler.onResponseError?.(controller, error);
+            },
+            onResponseStarted() {
+              handler.onResponseStarted?.();
+            },
+            onBodySent(chunk) {
+              handler.onBodySent?.(chunk);
+            },
+            onRequestSent() {
+              handler.onRequestSent?.();
+            },
+          };
+          try {
+            return base.dispatch(
+              rewritePinnedProxyDispatchOptions(options, upstream, address),
+              attemptHandler,
+            );
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      };
+
+      return dispatchFrom(0);
     }
 
     override async close(): Promise<void> {

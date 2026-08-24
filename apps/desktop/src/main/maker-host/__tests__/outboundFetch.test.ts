@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Agent as UndiciAgent, ProxyAgent } from 'undici';
+import { Agent as UndiciAgent, Dispatcher, ProxyAgent } from 'undici';
 
 import { Socks5HttpsAgent, TunnelingHttpsAgent } from '@cindy/anthropic-compat-proxy';
 
@@ -53,6 +53,7 @@ vi.mock('undici', async (importOriginal) => {
 
 import {
   createOutboundHttpAgent,
+  createPinnedProxyDispatcher,
   guardedOutboundFetch,
   outboundFetch,
   outboundUndiciFetch,
@@ -312,6 +313,53 @@ describe('outboundFetch', () => {
       'host',
       'api.example.com',
     ]);
+  });
+
+  it('fails over between vetted proxy targets only before the request starts', async () => {
+    const dispatchSpy = vi.spyOn(ProxyAgent.prototype, 'dispatch');
+    const controller = {} as Dispatcher.DispatchController;
+    const responseError = vi.fn();
+    try {
+      dispatchSpy
+        .mockImplementationOnce((_options, handler) => {
+          handler.onResponseError?.(controller, new Error('first address unreachable'));
+          return true;
+        })
+        .mockImplementationOnce((_options, handler) => {
+          handler.onRequestStart?.(controller, null);
+          handler.onResponseError?.(controller, new Error('request failed after start'));
+          return true;
+        });
+      const dispatcher = createPinnedProxyDispatcher(
+        {
+          kind: 'http',
+          url: 'http://127.0.0.1:7890',
+          hostname: '127.0.0.1',
+          port: 7890,
+        },
+        new URL('https://api.example.com/data'),
+        ['203.0.113.10', '203.0.113.11'],
+      );
+
+      dispatcher.dispatch(
+        { origin: 'https://api.example.com', path: '/data', method: 'POST', body: 'payload' },
+        { onRequestStart: vi.fn(), onResponseError: responseError },
+      );
+
+      expect(dispatchSpy).toHaveBeenCalledTimes(2);
+      expect(dispatchSpy.mock.calls.map(([options]) => options.origin)).toEqual([
+        'https://203.0.113.10',
+        'https://203.0.113.11',
+      ]);
+      expect(responseError).toHaveBeenCalledTimes(1);
+      expect(responseError).toHaveBeenCalledWith(
+        controller,
+        expect.objectContaining({ message: 'request failed after start' }),
+      );
+      await dispatcher.close();
+    } finally {
+      dispatchSpy.mockRestore();
+    }
   });
 
   it.each([

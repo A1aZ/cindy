@@ -61,6 +61,22 @@ export function extractSettledYieldCellIdsFromCodexItem(item: unknown): string[]
   return [cellId];
 }
 
+/**
+ * A wait that still prints the running marker proves the claimed cell is alive.
+ * The original exec item keeps the yield marker forever, so this is the only
+ * evidence a later empty continuation can use to retry instead of lost-handle.
+ */
+export function extractAliveYieldCellsFromCodexItem(item: unknown): YieldedExecCell[] {
+  const record = asRecord(item);
+  if (!record || !isWaitItem(record)) return [];
+  const args = parseJsonObject(record.arguments) ?? asRecord(record.input);
+  const cellId = firstString(args, ['cell_id', 'cellId']);
+  if (!cellId) return [];
+  const output = collectItemText(record);
+  if (!extractYieldedExecCellIds(output).includes(cellId)) return [];
+  return [{ cellId }];
+}
+
 export function formatYieldContinuationPrompt(cells: readonly YieldedExecCell[]): string {
   const unique = dedupeCells(cells);
   const cellList = unique.map((cell) => {

@@ -120,6 +120,7 @@ import { scanCodexCustomizations } from './customization-scanner.js';
 import { commandExecutionDisplayInput } from './command-display.js';
 import {
   dedupeCells,
+  extractAliveYieldCellsFromCodexItem,
   extractSettledYieldCellIdsFromCodexItem,
   extractYieldedExecCellsFromCodexItem,
   formatYieldContinuationPrompt,
@@ -3196,13 +3197,18 @@ export class CodexAgent extends BaseAgent {
         ? item as Record<string, unknown>
         : null;
       const itemId = yieldItemLedgerKey(record);
-      const cells = extractYieldedExecCellsFromCodexItem(item);
+      const cells = dedupeCells([
+        ...extractYieldedExecCellsFromCodexItem(item),
+        ...extractAliveYieldCellsFromCodexItem(item),
+      ]);
       const existing = yieldedExecCellsByTurnId.get(turnId) ?? new Map<string, YieldedExecCell[]>();
       if (cells.length === 0) {
         if (phase === 'completed' && itemId) existing.delete(itemId);
       } else if (itemId) {
         existing.set(itemId, cells);
       } else {
+        // Nameless exec and wait share the same anonymous bucket. A later wait
+        // that is still running must accumulate, not replace the yielded exec.
         const anonymous = existing.get('') ?? [];
         existing.set('', dedupeCells([...anonymous, ...cells]));
       }
@@ -8049,6 +8055,28 @@ export class CodexAgent extends BaseAgent {
       return true;
     }
 
+    function isolateCancelledTurnStart(
+      resp: TurnStartResponse | undefined,
+      sendOpts: SendOptions | undefined,
+      stage: string,
+    ): void {
+      if (!closed && sendOpts?.signal?.aborted !== true) return;
+      abandonBufferedTurns(`send cancelled ${stage}`);
+      const staleTurnId = resp?.turn?.id;
+      if (!staleTurnId) return;
+      terminalErroredTurnIds.add(staleTurnId);
+      if (!threadId) return;
+      host
+        .request(Method.TurnInterrupt, { threadId, turnId: staleTurnId })
+        .catch((error: unknown) => {
+          log.warn('cancelled turn/start interrupt failed (best-effort)', {
+            turnId: staleTurnId,
+            stage,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
+
     function isLocalAcceptBoundaryError(err: unknown): boolean {
       const text = err instanceof Error ? err.message : String(err);
       return /Codex send (?:cancelled|cannot be accepted)/i.test(text);
@@ -11368,24 +11396,11 @@ export class CodexAgent extends BaseAgent {
           });
           markTurnConfigAccepted();
           adoptUnidentifiedDeadTurn(resp, initialStartSeq);
+          // yield continuation 带 throwOnStartFailure + AbortSignal: 取消检查会
+          // 抛, 不能把墓碑/interrupt 写在 return 后面。先隔离已被 server 接受
+          // 的 turn, 再让取消检查抛/返回, 迟到的 turnStarted 才会撞墓碑。
+          isolateCancelledTurnStart(resp, sendOpts, 'after turn/start');
           if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start')) {
-            // 本地取消边界直接 return: 挂起的 buffered 请求没有 settle 者
-            // (codex R17 P2), 统一释放。
-            abandonBufferedTurns('send cancelled after turn/start');
-            const staleTurnId = resp.turn?.id;
-            if (staleTurnId) {
-              terminalErroredTurnIds.add(staleTurnId);
-              if (threadId) {
-                host
-                  .request(Method.TurnInterrupt, { threadId, turnId: staleTurnId })
-                  .catch((error: unknown) => {
-                    log.warn('cancelled yield continuation interrupt failed (best-effort)', {
-                      turnId: staleTurnId,
-                      error: error instanceof Error ? error.message : String(error),
-                    });
-                  });
-              }
-            }
             return;
           }
           handleTurnStartResp(resp, initialStartSeq);
@@ -11479,8 +11494,8 @@ export class CodexAgent extends BaseAgent {
               });
               markTurnConfigAccepted();
               adoptUnidentifiedDeadTurn(resp, initialStartSeq);
+              isolateCancelledTurnStart(resp, sendOpts, 'after turn/start retry');
               if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start retry')) {
-                abandonBufferedTurns('send cancelled after turn/start retry');
                 return;
               }
               handleTurnStartResp(resp, initialStartSeq);

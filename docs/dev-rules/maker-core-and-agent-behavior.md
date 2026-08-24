@@ -81,6 +81,9 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   判据；cell 跨 turn 存活性未证实前，续段失败必须诚实报 lost-handle，不得 replay 原请求
   或重跑已执行命令。续段 claim 一旦挡住产品结束，所有非重试终态错误路径（不限
   transport）都必须同步结算它，不能只推 Done 而让 `isTurnRunning()` 仍为 true。
+  续段 `turn/start` 已被服务端接受后若本地取消，必须先凭响应里的 turn id 落墓碑并
+  best-effort interrupt，再抛/返回取消；`wait` 仍输出 running marker 视为 cell
+  存活证据，重试预算内继续等，不得当空续段报 lost-handle。
   Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。
 
 ## 3. 守住四项核心数据指标

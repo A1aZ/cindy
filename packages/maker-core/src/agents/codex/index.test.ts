@@ -17528,7 +17528,9 @@ describe('CodexAgent yield continuation', () => {
     const [, params] = yieldTurnStartCalls(host)[0] as [string, {
       input: Array<{ text?: string }>;
     }];
-    expect(params.input[0]?.text).toContain('Wait for cell ID 229');
+    const prompt = params.input[0]?.text ?? '';
+    expect(prompt).toContain('cell ID 229');
+    expect(prompt).toContain('cell ID 11');
     await handle.close();
   });
 
@@ -17637,6 +17639,71 @@ describe('CodexAgent yield continuation', () => {
     await vi.waitFor(() => {
       expect(yieldTurnStartCalls(host)).toHaveLength(1);
     });
+    expect(handle.isTurnRunning?.()).toBe(true);
+    await handle.close();
+  });
+
+  it('retries a continuation when wait still reports the cell running', async () => {
+    const agent = new CodexAgent(createDeps());
+    let turnSeq = 0;
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnSeq += 1;
+        return { turn: { id: `turn-${turnSeq}` } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-wait-alive-retry',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted) {
+      throw new Error('expected item and turn handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'run typecheck' });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-alive-retry',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(1);
+    });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      item: {
+        id: 'item-wait-alive-retry',
+        type: 'function_call',
+        name: 'wait',
+        arguments: JSON.stringify({ cell_id: '226', yield_time_ms: 1000 }),
+        content: [{ type: 'output_text', text: 'Script running with cell ID 226\nWall time 1.0 seconds\nOutput:\n' }],
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(2);
+    });
+    expect(events.some((event) => (
+      event.type === 'error'
+      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+    ))).toBe(false);
     expect(handle.isTurnRunning?.()).toBe(true);
     await handle.close();
   });
@@ -17901,6 +17968,70 @@ describe('CodexAgent yield continuation', () => {
       threadId: 'start-thread-id',
       turnId: 'turn-2',
     });
+    await handle.close();
+  });
+
+  it('isolates a cancelled yield continuation before the turn/start response can activate it', async () => {
+    const agent = new CodexAgent(createDeps());
+    let turnStarts = 0;
+    const continuationStart = deferred<{ turn: { id: string } }>();
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnStarts += 1;
+        if (turnStarts === 1) return { turn: { id: 'turn-1' } };
+        return continuationStart.promise;
+      }
+      if (method === Method.TurnInterrupt) return {};
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-cancel-before-start-resp',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.turnStarted) {
+      throw new Error('expected item, turn, and started handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'run typecheck' });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-cancel-before-resp',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.some((event) => event.type === 'done' && event.turnContinuationId != null)).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(turnStarts).toBe(2);
+    });
+    const claimedDone = events.find((event) => event.type === 'done' && event.turnContinuationId != null);
+    await handle.abort();
+    continuationStart.resolve({ turn: { id: 'turn-2' } });
+    await waitForExpectation(() => {
+      expect(host.request).toHaveBeenCalledWith(Method.TurnInterrupt, {
+        threadId: 'start-thread-id',
+        turnId: 'turn-2',
+      });
+    });
+    handlers.turnStarted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'inProgress' },
+    });
+    expect(handle.getCurrentTurnId?.()).not.toBe('turn-2');
+    const state = handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId);
+    expect(state === 'cancelled' || state === null).toBe(true);
     await handle.close();
   });
 

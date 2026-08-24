@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  extractAliveYieldCellsFromCodexItem,
   extractSettledYieldCellIdsFromCodexItem,
   extractYieldedExecCellIds,
   extractYieldedExecCellsFromCodexItem,
@@ -123,6 +124,26 @@ describe('extractSettledYieldCellIdsFromCodexItem', () => {
       name: 'wait',
       arguments: JSON.stringify({ cell_id: '11' }),
       content: [{ type: 'output_text', text: 'Script running with cell ID 12' }],
+    })).toEqual([]);
+  });
+});
+
+describe('extractAliveYieldCellsFromCodexItem', () => {
+  it('treats a wait still printing the running marker as proof the cell is alive', () => {
+    expect(extractAliveYieldCellsFromCodexItem({
+      type: 'function_call',
+      name: 'wait',
+      arguments: JSON.stringify({ cell_id: '226', yield_time_ms: 1000 }),
+      content: [{ type: 'output_text', text: 'Script running with cell ID 226\nWall time 1.0 seconds\nOutput:\n' }],
+    })).toEqual([{ cellId: '226' }]);
+  });
+
+  it('does not treat a completed wait as an alive cell', () => {
+    expect(extractAliveYieldCellsFromCodexItem({
+      type: 'function_call',
+      name: 'wait',
+      arguments: JSON.stringify({ cell_id: '226', max_tokens: 1000 }),
+      content: [{ type: 'output_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' }],
     })).toEqual([]);
   });
 });

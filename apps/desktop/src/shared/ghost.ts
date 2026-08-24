@@ -2451,12 +2451,22 @@ export function unreviewedGhostPermissionItems(
     approved.add(ghostPermissionProjectionKey(item));
     approvedKeys.add(item.key);
   }
+  const previewWithinCap = (cap: GhostManifest): boolean =>
+    actual.preview === undefined ||
+    (cap.preview !== undefined &&
+      actual.preview.hosts.every((host) => cap.preview?.hosts.includes(host)));
+  const previewApproved =
+    previewWithinCap(reviewed) ||
+    (previouslyInstalled !== undefined && previewWithinCap(previouslyInstalled));
   return ghostPermissionItems(actual).filter(
     (item) =>
       !approved.has(ghostPermissionProjectionKey(item)) &&
       // code 的 detailKey 只是在复述已单列的 network/node 等能力。实际包少一项
       // 能力时文案会降档，但不能因此把“更少能力”反判为扩权。
-      !(item.key === 'code' && approvedKeys.has(item.key)),
+      !(item.key === 'code' && approvedKeys.has(item.key)) &&
+      // preview 的展示 detail 包含完整 hosts；真实包删减 host 是收权，不应因
+      // detail 字符串变化被反判成新增能力。新增或替换 host 仍会保留为未审查项。
+      !(item.key === 'preview' && previewApproved),
   );
 }
 
@@ -5858,15 +5868,39 @@ export function validateNormalizedGhostManifest(raw: unknown): ManifestValidatio
 
 /** 把无 slots 的 v2 运行时投影还原成旧客户端能读取的作者清单。 */
 function withLegacyAuthorSlots(raw: Record<string, unknown>): Record<string, unknown> {
-  if (raw.schemaVersion !== 2 || Array.isArray(raw.slots)) return raw;
-  const slots: string[] = [];
-  for (const [field, slot] of V3_DECLARATION_TO_LEGACY_SLOT) {
-    if (raw[field] !== undefined) slots.push(slot);
+  if (raw.schemaVersion !== 2) return raw;
+  const slots: unknown[] = Array.isArray(raw.slots) ? [...raw.slots] : [];
+  if (!Array.isArray(raw.slots)) {
+    for (const [field, slot] of V3_DECLARATION_TO_LEGACY_SLOT) {
+      if (raw[field] !== undefined) slots.push(slot);
+    }
+    for (const field of V3_BOOLEAN_CAPABILITY_FIELDS) {
+      if (raw[field] === true) slots.push(V3_BOOLEAN_TO_LEGACY_SLOT[field]);
+    }
   }
-  for (const field of V3_BOOLEAN_CAPABILITY_FIELDS) {
-    if (raw[field] === true) slots.push(V3_BOOLEAN_TO_LEGACY_SLOT[field]);
+  const legacy: Record<string, unknown> = { ...raw, slots };
+  for (const field of V3_BOOLEAN_CAPABILITY_FIELDS) delete legacy[field];
+  return legacy;
+}
+
+/** 同一份 v2 清单在移除运行时 slots 前后的持久摘要必须保持一致。 */
+export function ghostManifestToLegacyV2DigestFormat(
+  manifest: unknown,
+  source?: unknown,
+): unknown {
+  if (!isPlainObject(manifest)) return manifest;
+  if (
+    manifest.schemaVersion === 2 &&
+    isPlainObject(source) &&
+    source.schemaVersion === 2 &&
+    Array.isArray(source.slots)
+  ) {
+    return withLegacyAuthorSlots({
+      ...manifest,
+      slots: source.slots.map((slot) => (slot === 'model' ? 'cindy' : slot)),
+    });
   }
-  return { ...raw, slots };
+  return withLegacyAuthorSlots(manifest);
 }
 
 /**

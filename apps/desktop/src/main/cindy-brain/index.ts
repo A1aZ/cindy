@@ -298,7 +298,7 @@ import { getGhostGrantConfirmBridge } from './ghostGrantConfirmBridge.js';
 import { getSessionFsSnapshot, getSessionRowSnapshot } from '../localDb/ipc/sessions.js';
 import { getTeamByWorkerSession } from '../localDb/orcaTeamStore.js';
 import { getDirDepositVault, getSaveDepositVault, isPathInsideDir } from './dirDeposit.js';
-import { readInstalledGhostManifest } from '../installedGhostManifest.js';
+import { readInstalledGhostManifestDigestFormats } from '../installedGhostManifest.js';
 import {
   ghostManifestDigest,
   PluginMarketLedger,
@@ -2543,8 +2543,13 @@ function readInstalledGhostManifestDigest(ghostId: string): string | null {
     .list()
     .find((candidate) => candidate.manifest.id === ghostId);
   if (!ghost) return null;
-  const parsed = readInstalledGhostManifest(ghost.dir, GHOST_INSTALL_MANIFEST_MAX_BYTES);
-  return parsed.ok ? ghostManifestDigest(parsed.manifest) : null;
+  const digests = readInstalledGhostManifestDigestFormats(
+    ghost.dir,
+    GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  ).map(ghostManifestDigest);
+  const expected = getPluginMarketLedger().installationForGhost(ghostId)?.manifestDigest;
+  if (expected !== undefined && digests.includes(expected)) return expected;
+  return digests[0] ?? null;
 }
 
 /** Resolve Connection metadata from trusted organization installs or legacy Forge receipts. */

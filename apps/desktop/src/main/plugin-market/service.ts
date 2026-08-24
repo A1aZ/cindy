@@ -72,7 +72,10 @@ import {
   GHOST_MANIFEST_MAX_BYTES,
   readBoundedFileNoFollowWithStat,
 } from '../utils/readBoundedFile.js';
-import { readInstalledGhostManifest } from '../installedGhostManifest.js';
+import {
+  readInstalledGhostManifest,
+  readInstalledGhostManifestDigestFormats,
+} from '../installedGhostManifest.js';
 import { withGhostInstallLock } from '../cindy-brain/ghostInstallLock.js';
 import { ghostBrokerRedirectPortInstallError } from '../cindy-brain/ghostBrokerRedirectPort.js';
 import { PluginMarketApi } from './api.js';
@@ -304,9 +307,15 @@ function installedGhostRawManifest(dir: string): GhostManifest | null {
   return parsed.ok ? parsed.manifest : null;
 }
 
-function installedGhostRawManifestDigest(dir: string): string | null {
-  const manifest = installedGhostRawManifest(dir);
-  return manifest ? ghostManifestDigest(manifest) : null;
+function installedGhostRawManifestDigest(
+  dir: string,
+  expectedDigest?: string,
+): string | null {
+  const digests = readInstalledGhostManifestDigestFormats(dir, GHOST_MANIFEST_MAX_BYTES).map(
+    ghostManifestDigest,
+  );
+  if (expectedDigest !== undefined && digests.includes(expectedDigest)) return expectedDigest;
+  return digests[0] ?? null;
 }
 
 /**
@@ -431,7 +440,7 @@ function serverRecordMatchesInstalledGhost(
   }
   return (
     record.manifestDigest === undefined ||
-    record.manifestDigest === installedGhostRawManifestDigest(ghost.dir)
+    record.manifestDigest === installedGhostRawManifestDigest(ghost.dir, record.manifestDigest)
   );
 }
 
@@ -1285,11 +1294,12 @@ export class PluginMarketService {
           .list()
           .find((ghost) => ghost.manifest.id === plugin.ghostId);
         const sourceKey = marketSourceKey(discovered.config.source);
-        // 选择时刻的已装内容摘要：打包窗口内不能换掉当前包。
-        const reviewInstalledDigest = existing
-          ? installedGhostRawManifestDigest(existing.dir)
-          : null;
         const currentRecord = ledger.installationForGhost(plugin.ghostId);
+        // 选择时刻的已装内容摘要：打包窗口内不能换掉当前包。v2 存量记录可继续
+        // 使用升级前的 slots 摘要；新记录使用当前稳定投影。
+        const reviewInstalledDigest = existing
+          ? installedGhostRawManifestDigest(existing.dir, currentRecord?.manifestDigest)
+          : null;
         const matchesSelectedRoute = Boolean(
           existing &&
           currentRecord?.installed &&
@@ -1362,7 +1372,11 @@ export class PluginMarketService {
                   : 'Plugin was uninstalled while the install was packaging',
               );
             }
-            if (current && installedGhostRawManifestDigest(current.dir) !== reviewInstalledDigest) {
+            if (
+              current &&
+              installedGhostRawManifestDigest(current.dir, reviewInstalledDigest ?? undefined) !==
+                reviewInstalledDigest
+            ) {
               throwIpcError('PRECONDITION_FAILED', 'Installed Plugin changed during the install');
             }
             // raw manifest 摘要不含 Host receipt；内容未变但批准态变化也必须拒绝。
@@ -2065,7 +2079,10 @@ export class PluginMarketService {
               });
               return;
             }
-            const installedManifestDigest = installedGhostRawManifestDigest(currentInstalled.dir);
+            const installedManifestDigest = installedGhostRawManifestDigest(
+              currentInstalled.dir,
+              record.manifestDigest,
+            );
             if (approvalEvidence.packageSha256 === null) {
               if (!approvalEvidence.legacyMigrated) {
                 log.info('disconnected market recovery skipped', {
@@ -2256,7 +2273,8 @@ export class PluginMarketService {
           // 目录里,digest 迁移永远补不上,fail-closed 会让老安装的合法清理永久失效。
           if (
             record?.manifestDigest != null &&
-            installedGhostRawManifestDigest(installed.dir) !== record.manifestDigest
+            installedGhostRawManifestDigest(installed.dir, record.manifestDigest) !==
+              record.manifestDigest
           ) {
             return skip(removal, 'manifest-digest-mismatch');
           }
@@ -2526,7 +2544,13 @@ export class PluginMarketService {
       ghostsById: new Map(ghosts.map((ghost) => [ghost.manifest.id, ghost])),
       installations,
       rawDigestByGhostId: new Map(
-        ghosts.map((ghost) => [ghost.manifest.id, installedGhostRawManifestDigest(ghost.dir)]),
+        ghosts.map((ghost) => {
+          const record = installations[ghost.manifest.id];
+          return [
+            ghost.manifest.id,
+            installedGhostRawManifestDigest(ghost.dir, record?.manifestDigest),
+          ];
+        }),
       ),
     };
   }

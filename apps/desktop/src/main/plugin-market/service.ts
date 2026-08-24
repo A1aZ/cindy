@@ -14,6 +14,7 @@ import { app, dialog } from 'electron';
 import {
   GHOST_ICON_MAX_BYTES,
   ghostNetworkAuthorizationWithinCap,
+  ghostNodeSecretAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
   ghostInstallApprovalToken,
@@ -1775,6 +1776,7 @@ export class PluginMarketService {
           if (
             extraCapabilities.length > 0 ||
             !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
+            !ghostNodeSecretAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostUnknownV3FieldsWithinCap(manifestCap, inspected.canonicalManifest)
           ) {

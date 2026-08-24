@@ -2458,6 +2458,10 @@ export function unreviewedGhostPermissionItems(
   const previewApproved =
     previewWithinCap(reviewed) ||
     (previouslyInstalled !== undefined && previewWithinCap(previouslyInstalled));
+  const nodeSecretsApproved =
+    ghostNodeSecretAuthorizationWithinCap(reviewed, actual) ||
+    (previouslyInstalled !== undefined &&
+      ghostNodeSecretAuthorizationWithinCap(previouslyInstalled, actual));
   return ghostPermissionItems(actual).filter(
     (item) =>
       !approved.has(ghostPermissionProjectionKey(item)) &&
@@ -2466,8 +2470,35 @@ export function unreviewedGhostPermissionItems(
       !(item.key === 'code' && approvedKeys.has(item.key)) &&
       // preview 的展示 detail 包含完整 hosts；真实包删减 host 是收权，不应因
       // detail 字符串变化被反判成新增能力。新增或替换 host 仍会保留为未审查项。
-      !(item.key === 'preview' && previewApproved),
+      !(item.key === 'preview' && previewApproved) &&
+      // Node secret 的展示 key 带完整 methods；换序或收窄是收权。URL/hint 与
+      // entry 等 Host 实际消费字段由专用上限比较守住，不能依赖展示投影相等。
+      !(item.key.startsWith('node:secret:') && nodeSecretsApproved),
   );
+}
+
+/** 市场清单对 Node Worker 凭证注入与配置引导的授权上限。 */
+export function ghostNodeSecretAuthorizationWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  const actualBindings = actual.node?.secretBindings ?? [];
+  if (actualBindings.length === 0) return true;
+  const reviewedNode = reviewed.node;
+  if (!reviewedNode) return false;
+  const reviewedBindings = reviewedNode.secretBindings ?? [];
+  for (const binding of actualBindings) {
+    const targetEntry = binding.entry ?? actual.node?.entry;
+    const cap = reviewedBindings.find(
+      (candidate) =>
+        candidate.key === binding.key &&
+        (candidate.entry ?? reviewedNode.entry) === targetEntry,
+    );
+    if (!cap || !binding.methods.every((method) => cap.methods.includes(method))) return false;
+    if (binding.url !== undefined && binding.url !== cap.url) return false;
+    if (binding.hint !== undefined && binding.hint !== cap.hint) return false;
+  }
+  return true;
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   ghostExternalLinkUrls,
   ghostLocalePathFor,
   ghostNetworkAuthorizationWithinCap,
+  ghostNodeSecretAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
   ghostNetworkHostMatches,
@@ -4580,6 +4581,53 @@ describe('ghostPermissionProjectionFingerprint', () => {
     expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, same.manifest)).toBe(true);
     expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
     expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, undeclared.manifest)).toBe(false);
+  });
+
+  it('Node 凭证方法可换序或收窄，但 Host 消费字段不能超出市场声明', () => {
+    const manifest = (binding: Record<string, unknown>) =>
+      validateGhostManifest({
+        schemaVersion: 3,
+        minCindyVersion: '0.1.61',
+        id: 'node-secret-helper',
+        name: 'Node secret helper',
+        version: '1.0.0',
+        entry: 'main.js',
+        settingsHtml: 'settings.html',
+        node: {
+          entry: 'worker.js',
+          protocol: 'json-rpc-stdio',
+          secretBindings: [
+            {
+              key: 'api_key',
+              label: 'API key',
+              methods: ['read', 'write'],
+              hint: 'Create a key',
+              url: 'https://example.com/keys',
+              ...binding,
+            },
+          ],
+        },
+      });
+    const reviewed = manifest({});
+    const reordered = manifest({ methods: ['write', 'read'] });
+    const narrowed = manifest({ methods: ['read'] });
+    const expanded = manifest({ methods: ['read', 'write', 'delete'] });
+    const changedUrl = manifest({ url: 'https://evil.example/keys' });
+    expect(
+      reviewed.ok && reordered.ok && narrowed.ok && expanded.ok && changedUrl.ok,
+    ).toBe(true);
+    if (!reviewed.ok || !reordered.ok || !narrowed.ok || !expanded.ok || !changedUrl.ok) return;
+
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, reordered.manifest)).toBe(true);
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, narrowed.manifest)).toBe(true);
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, reordered.manifest)).toEqual(
+      [],
+    );
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, narrowed.manifest)).toEqual(
+      [],
+    );
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
+    expect(ghostNodeSecretAuthorizationWithinCap(reviewed.manifest, changedUrl.manifest)).toBe(false);
   });
 
   it('语义相同时指纹稳定(与字段/条目顺序无关)', () => {

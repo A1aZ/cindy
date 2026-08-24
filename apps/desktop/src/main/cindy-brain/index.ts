@@ -27,6 +27,7 @@ import {
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   ghostInstallApprovalToken,
   ghostNetworkAuthorizationWithinCap,
+  ghostNodeSecretAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
   isGhostInstallApprovalToken,
@@ -5665,6 +5666,10 @@ async function installOrUpdateMarketGhostPackageLocked(
       if (
         undeclaredCapabilities.length > 0 ||
         !ghostNetworkAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
+        !ghostNodeSecretAuthorizationWithinCap(
+          expected.manifestCap,
+          inspected.canonicalManifest,
+        ) ||
         !ghostSubscribeAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
         !ghostUnknownV3FieldsWithinCap(expected.manifestCap, inspected.canonicalManifest)
       ) {

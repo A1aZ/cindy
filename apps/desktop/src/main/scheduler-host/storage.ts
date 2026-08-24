@@ -303,7 +303,7 @@ function turnCostFromAgentMeta(
           : asValueEstimateMoney(money)
         : null,
       sdkEstimatedValueMoney: isEstimate ? sdkEstimatedValueMoney : null,
-      legacyProjectedActualAmount: !structured && !isEstimate ? money.amount : 0,
+      legacyProjectedActualAmount: !structured ? money.amount : 0,
     };
   } catch {
     return {

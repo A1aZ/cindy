@@ -103,7 +103,8 @@ const SCHEDULER_DDL = [
       total_cost_usd REAL,
       total_cost_amount REAL NOT NULL DEFAULT 0,
       total_cost_currency TEXT,
-      total_cost_is_approximate INTEGER NOT NULL DEFAULT 0
+      total_cost_is_approximate INTEGER NOT NULL DEFAULT 0,
+      provider_id TEXT
     )
   `,
   `
@@ -1263,6 +1264,65 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           sessionCount: 0,
           sessions: [],
         },
+      ]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  it('deduplicates a reclassified legacy custom-provider SDK amount from the session total', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({
+      id: 'sch-legacy-sdk',
+      name: 'legacy sdk',
+      providerId: 'custom-provider',
+      persistentSession: true,
+      targetSessionId: 'sess-legacy-sdk',
+    });
+
+    try {
+      harness.db.run(sql`
+        INSERT INTO sessions (
+          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd
+        ) VALUES (
+          'sess-legacy-sdk', '[Schedule] legacy sdk', 'scheduler', 'dialogue', 1, 20, 0.42
+        )
+      `);
+      await harness.storage.insert(schedule);
+      enableLegacySessionFallback(harness, schedule.id);
+      harness.db.run(sql`
+        INSERT INTO schedule_runs (id, schedule_id, session_id, fired_at, status)
+        VALUES ('legacy-session:sess-legacy-sdk', ${schedule.id}, 'sess-legacy-sdk', 1, 'success')
+      `);
+      harness.db.run(sql`
+        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
+        VALUES (
+          'legacy-sdk-assistant', 'legacy-sdk-assistant', 'sess-legacy-sdk', 'assistant', '{}',
+          '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-sdk"},"turnCostUsd":0.42,"turnCostIsCustomProvider":true}', 10
+        )
+      `);
+
+      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
+        expect.objectContaining({
+          scheduleId: schedule.id,
+          totalMoney: expect.objectContaining({ amount: 0 }),
+          totalEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
+          totalSdkEstimatedValueMoney: expect.objectContaining({
+            amount: expect.closeTo(0.42, 10),
+          }),
+          sessions: [
+            expect.objectContaining({
+              sessionId: 'sess-legacy-sdk',
+              totalMoney: expect.objectContaining({ amount: 0 }),
+              totalEstimatedValueMoney: expect.objectContaining({
+                amount: expect.closeTo(0.42, 10),
+              }),
+              totalSdkEstimatedValueMoney: expect.objectContaining({
+                amount: expect.closeTo(0.42, 10),
+              }),
+            }),
+          ],
+        }),
       ]);
     } finally {
       harness.close();

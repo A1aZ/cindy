@@ -660,6 +660,7 @@ describe('summarizeEstimatedSessionValuesBySession', () => {
     expect(result['s-hidden']?.excludedActualMoney?.amount).toBeCloseTo(0.42);
     expect(result['s-cleared']?.estimatedValueMoney).toBeNull();
     expect(result['s-empty']).toEqual({
+      projectionVersion: 1,
       estimatedValueMoney: null,
       excludedActualMoney: null,
       totalValueUsd: 0,

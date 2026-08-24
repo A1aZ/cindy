@@ -145,7 +145,7 @@ describe('turn cost routing regression', () => {
     expect(shown.estimatedTurnMoney?.estimateReasons).not.toContain('subscription-value');
   });
 
-  it('keeps remote custom-provider SDK fallback estimate-only when the route is unknown', () => {
+  it('keeps remote custom-provider SDK fallback token-only when the route is unknown', () => {
     for (const model of ['remote-model', 'xai/custom-grok']) {
       const result = resolveClaudeTurnCostSinks(
         [
@@ -166,11 +166,7 @@ describe('turn cost routing regression', () => {
       );
 
       expect(result.turnMoney).toBeNull();
-      expect(result.estimatedTurnMoney).toMatchObject({
-        amount: 1.25,
-        kind: 'value-estimate',
-        estimateReasons: ['sdk-estimate'],
-      });
+      expect(result.estimatedTurnMoney).toBeNull();
     }
   });
 });

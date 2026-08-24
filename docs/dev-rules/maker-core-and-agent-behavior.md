@@ -85,8 +85,8 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   best-effort interrupt，再抛/返回取消；`wait` 仍输出 running marker 视为 cell
   存活证据，重试预算内继续等，不得当空续段报 lost-handle。
   claim 只归属于铸造它的 origin turn 及其续段 turn；迟到的外族终态（含成功
-  `completed`）不得结算、取消、lost-handle 当前 claim，也不得发出未认领的
-  产品 `done`。同一产品 turn 上的
+  `completed`）不得结算、取消、lost-handle 当前 claim，不得发出未认领的
+  产品 `done`，也不得结算当前续段的 generation／usage。同一产品 turn 上的
   ask_user／plan 内部续段必须等 yield 空闲后再 `turn/start`，不得并发；Stop／
   close 取消 yield 时，排队中的内部续段必须退出而不是被当成正常空闲继续发送。
   只有 cell 真正结算的成功空闲才能唤醒排队续段；lost-handle、重试耗尽、

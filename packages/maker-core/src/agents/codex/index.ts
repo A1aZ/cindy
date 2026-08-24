@@ -8831,6 +8831,15 @@ export class CodexAgent extends BaseAgent {
       clearActiveToolContextsForTurn(turn.id);
       const overlapsActiveTurn = suppressTerminalUi && currentTurnId !== null && currentTurnId !== turn.id;
       if (overlapsActiveTurn) return;
+      const activeYieldClaim = activeYieldContinuationClaim();
+      if (activeYieldClaim && !claimOwnsTurn(activeYieldClaim, turn.id)) {
+        // Foreign terminals must not settle the live continuation's usage,
+        // generation timing, claim, or product Done. Tombstone the foreign
+        // turn above, then leave the owned continuation untouched.
+        latestPlanByTurn.delete(turn.id);
+        flushDeferredTerminalTurnCompletionsIfIdle();
+        return;
+      }
       const completedTurnWasPlanMode = currentTurnPlanModeActive;
       if (currentTurnId === turn.id || currentTurnId === null) {
         isTurnInFlight = false;
@@ -8952,12 +8961,6 @@ export class CodexAgent extends BaseAgent {
       }
 
       if (turn.status === 'failed' || turn.status === 'interrupted') {
-        const claim = activeYieldContinuationClaim();
-        if (claim && !claimOwnsTurn(claim, turn.id)) {
-          latestPlanByTurn.delete(turn.id);
-          flushDeferredTerminalTurnCompletionsIfIdle();
-          return;
-        }
         // 失败 / 中断的 plan turn 不发审批 — 半截计划没有审批意义, 循环就此结束。
         proposedPlanText = null;
         planCycleActive = false;
@@ -9007,13 +9010,7 @@ export class CodexAgent extends BaseAgent {
       yieldedExecCellsByTurnId.delete(turn.id);
       let yieldClaim: YieldContinuationClaim | null = null;
       let suppressSuccessfulYieldBoundary = false;
-      if (existingYieldClaim && !claimOwnsTurn(existingYieldClaim, turn.id)) {
-        // A late foreign completed must not settle the claim or emit an
-        // unclaimed product Done while the continuation is still running.
-        latestPlanByTurn.delete(turn.id);
-        flushDeferredTerminalTurnCompletionsIfIdle();
-        return;
-      } else if (existingYieldClaim?.state === 'awaiting') {
+      if (existingYieldClaim?.state === 'awaiting') {
         yieldClaim = existingYieldClaim;
         if (yieldedCells.length > 0) {
           yieldClaim.cells = dedupeCells([...yieldClaim.cells, ...yieldedCells]);

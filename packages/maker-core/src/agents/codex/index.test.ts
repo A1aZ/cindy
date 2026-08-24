@@ -18608,8 +18608,8 @@ describe('CodexAgent yield continuation', () => {
       workingDir: '/repo',
     });
     const handlers = host.getThreadHandlers();
-    if (!handlers?.itemCompleted || !handlers.turnCompleted) {
-      throw new Error('expected item and turn handlers');
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.turnStarted || !handlers.tokenUsageUpdated) {
+      throw new Error('expected item, turn, started, and usage handlers');
     }
     const events = await collectYieldEvents(handle);
     await handle.send({ type: 'user', content: 'run typecheck' });
@@ -18636,6 +18636,18 @@ describe('CodexAgent yield continuation', () => {
     });
     const claimedDone = events.find((event) => event.type === 'done' && event.turnContinuationId != null);
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
+    handlers.turnStarted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'inProgress' },
+    });
+    handlers.tokenUsageUpdated({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      tokenUsage: {
+        total: { totalTokens: 42, inputTokens: 30, outputTokens: 12, cachedInputTokens: 0 },
+        last: { totalTokens: 42, inputTokens: 30, outputTokens: 12, cachedInputTokens: 0 },
+      },
+    });
     handlers.turnCompleted({
       threadId: 'start-thread-id',
       turn: { id: 'old-foreign-turn', status: 'failed', error: { message: 'stale turn failed' } },
@@ -18644,6 +18656,30 @@ describe('CodexAgent yield continuation', () => {
     expect(events.find((event) => event.type === 'done' && event.turnContinuationId == null)).toBeUndefined();
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
     expect(handle.isTurnRunning?.()).toBe(true);
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      item: {
+        id: 'item-wait-after-foreign-fail',
+        type: 'function_call',
+        name: 'wait',
+        arguments: JSON.stringify({ cell_id: '226', max_tokens: 1000 }),
+        content: [{ type: 'output_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' }],
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.filter((event) => event.type === 'done')).toHaveLength(2);
+    });
+    const productDone = events.find((event) => event.type === 'done' && event.turnContinuationId == null);
+    expect((productDone?.data as { usage?: { promptTokens?: number; completionTokens?: number } }).usage).toMatchObject({
+      promptTokens: 30,
+      completionTokens: 12,
+    });
+    expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
 
@@ -18663,8 +18699,8 @@ describe('CodexAgent yield continuation', () => {
       workingDir: '/repo',
     });
     const handlers = host.getThreadHandlers();
-    if (!handlers?.itemCompleted || !handlers.turnCompleted) {
-      throw new Error('expected item and turn handlers');
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.turnStarted || !handlers.tokenUsageUpdated) {
+      throw new Error('expected item, turn, started, and usage handlers');
     }
     const events = await collectYieldEvents(handle);
     await handle.send({ type: 'user', content: 'run typecheck' });
@@ -18691,6 +18727,18 @@ describe('CodexAgent yield continuation', () => {
     });
     const claimedDone = events.find((event) => event.type === 'done' && event.turnContinuationId != null);
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
+    handlers.turnStarted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'inProgress' },
+    });
+    handlers.tokenUsageUpdated({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      tokenUsage: {
+        total: { totalTokens: 42, inputTokens: 30, outputTokens: 12, cachedInputTokens: 0 },
+        last: { totalTokens: 42, inputTokens: 30, outputTokens: 12, cachedInputTokens: 0 },
+      },
+    });
     handlers.turnCompleted({
       threadId: 'start-thread-id',
       turn: { id: 'old-foreign-turn', status: 'completed' },
@@ -18703,6 +18751,30 @@ describe('CodexAgent yield continuation', () => {
     expect(events.find((event) => event.type === 'done' && event.turnContinuationId == null)).toBeUndefined();
     expect(handle.beginTurnContinuationWait?.(claimedDone?.turnContinuationId)).toBe('active');
     expect(handle.isTurnRunning?.()).toBe(true);
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      item: {
+        id: 'item-wait-after-foreign',
+        type: 'function_call',
+        name: 'wait',
+        arguments: JSON.stringify({ cell_id: '226', max_tokens: 1000 }),
+        content: [{ type: 'output_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' }],
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.filter((event) => event.type === 'done')).toHaveLength(2);
+    });
+    const productDone = events.find((event) => event.type === 'done' && event.turnContinuationId == null);
+    expect((productDone?.data as { usage?: { promptTokens?: number; completionTokens?: number } }).usage).toMatchObject({
+      promptTokens: 30,
+      completionTokens: 12,
+    });
+    expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
 

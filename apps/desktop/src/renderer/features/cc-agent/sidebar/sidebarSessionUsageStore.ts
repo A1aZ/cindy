@@ -314,4 +314,3 @@ export function __resetSidebarSessionUsageStoreForTests(): void {
   unsubscribeRemotePush = undefined;
   listenersInstalled = false;
 }
-

@@ -14,6 +14,7 @@ import { app, dialog } from 'electron';
 import {
   GHOST_ICON_MAX_BYTES,
   ghostNetworkAuthorizationWithinCap,
+  ghostSubscribeAuthorizationWithinCap,
   ghostInstallApprovalToken,
   ghostIconMimeType,
   isSafeGhostRelativePath,
@@ -1750,7 +1751,8 @@ export class PluginMarketService {
           );
           if (
             extraCapabilities.length > 0 ||
-            !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest)
+            !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
+            !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest)
           ) {
             throwIpcError(
               'GHOST_FILE_INVALID',

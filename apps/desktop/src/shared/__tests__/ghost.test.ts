@@ -14,6 +14,7 @@ import {
   ghostExternalLinkUrls,
   ghostLocalePathFor,
   ghostNetworkAuthorizationWithinCap,
+  ghostSubscribeAuthorizationWithinCap,
   ghostNetworkHostMatches,
   ghostPanelKind,
   ghostPermissionBaselineKey,
@@ -2304,6 +2305,21 @@ describe('ghost · subscribe 订阅详单校验(卡槽①,2026-07-12)', () => {
       if (!v.ok) return;
       expect(ghostPermissionItems(v.manifest).map((i) => i.key)).toContain('subscribe:topics');
     }
+  });
+
+  it('市场能力上限按具体订阅 topic 比较，不把 turn 与 session 当成同一授权', () => {
+    const turnOnly = validateGhostManifest(withSub({ topics: ['turn'] }));
+    const sessionOnly = validateGhostManifest(withSub({ topics: ['session'] }));
+    expect(turnOnly.ok && sessionOnly.ok).toBe(true);
+    if (!turnOnly.ok || !sessionOnly.ok) return;
+
+    expect(
+      unreviewedGhostPermissionItems(turnOnly.manifest, undefined, sessionOnly.manifest),
+    ).toEqual([]);
+    expect(
+      ghostSubscribeAuthorizationWithinCap(turnOnly.manifest, sessionOnly.manifest),
+    ).toBe(false);
+    expect(ghostSubscribeAuthorizationWithinCap(turnOnly.manifest, turnOnly.manifest)).toBe(true);
   });
 
   it('will-assistant-message:出口钩子合法(继承 resident 要求),单列一档权限行', () => {

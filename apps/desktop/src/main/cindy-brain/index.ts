@@ -27,6 +27,7 @@ import {
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   ghostInstallApprovalToken,
   ghostNetworkAuthorizationWithinCap,
+  ghostSubscribeAuthorizationWithinCap,
   isGhostInstallApprovalToken,
   ghostAppContextLocale,
   unreviewedGhostPermissionItems,
@@ -2546,7 +2547,7 @@ function readInstalledGhostManifestDigest(ghostId: string): string | null {
   return parsed.ok ? ghostManifestDigest(parsed.manifest) : null;
 }
 
-/** Resolve Connection metadata only from a trusted organization market install. */
+/** Resolve Connection metadata from trusted organization installs or legacy Forge receipts. */
 function getConnectionAudienceResolver(): ConnectionAudienceResolver {
   if (!connectionAudienceResolverSingleton) {
     connectionAudienceResolverSingleton = loadConnectionAudienceResolver({
@@ -2556,6 +2557,13 @@ function getConnectionAudienceResolver(): ConnectionAudienceResolver {
           .find((candidate) => candidate.manifest.id === ghostId)?.manifest ?? null,
       readInstalledManifestDigest: readInstalledGhostManifestDigest,
       readMarketInstallation: (ghostId) => getPluginMarketLedger().installationForGhost(ghostId),
+      readApprovedPackageSha256: (ghostId) =>
+        getGhostManager().approvedInstallEvidence(ghostId)?.packageSha256 ?? null,
+      readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
+      lookupOrganizationPrefix: (orgId) =>
+        createOrganizationPrefixStore(
+          ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
+        ).lookup(orgId),
       log,
     });
   }
@@ -5646,7 +5654,8 @@ async function installOrUpdateMarketGhostPackageLocked(
       );
       if (
         undeclaredCapabilities.length > 0 ||
-        !ghostNetworkAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest)
+        !ghostNetworkAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
+        !ghostSubscribeAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest)
       ) {
         log.warn('market package exceeds catalog manifest capabilities', {
           ghostId: expected.ghostId,

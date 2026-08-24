@@ -155,6 +155,38 @@ describe('installed Plugin Connection audience resolver', () => {
     ).toBeNull();
   });
 
+  it('keeps legacy Forge OIDC for an approved current-organization prefix plugin', () => {
+    const forgeManifest: GhostManifest = { ...manifest, id: 'acme-tool' };
+    const resolver = loadConnectionAudienceResolver({
+      ...resolverOptions(forgeManifest, null),
+      readInstallOrigin: () => 'agent-forge',
+      readApprovedPackageSha256: () => 'a'.repeat(64),
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+    });
+    expect(resolver.resolve('acme-tool', identity)).toEqual({
+      membershipId: 'membership-1',
+      audience: 'org-example:acme-tool',
+      pluginSlug: 'acme-tool',
+      allowedHosts: ['service-a.x.test'],
+    });
+  });
+
+  it('does not extend legacy Forge OIDC to a manual install or another prefix', () => {
+    const forgeManifest: GhostManifest = { ...manifest, id: 'acme-tool' };
+    for (const options of [
+      { readInstallOrigin: () => 'manual' as const, pluginPrefix: 'acme' },
+      { readInstallOrigin: () => 'agent-forge' as const, pluginPrefix: 'other' },
+    ]) {
+      const resolver = loadConnectionAudienceResolver({
+        ...resolverOptions(forgeManifest, null),
+        readInstallOrigin: options.readInstallOrigin,
+        readApprovedPackageSha256: () => 'a'.repeat(64),
+        lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: options.pluginPrefix }),
+      });
+      expect(resolver.resolve('acme-tool', identity)).toBeNull();
+    }
+  });
+
   it('requires the managed secret target to match a declared exact host', () => {
     const resolver = loadConnectionAudienceResolver({
       ...resolverOptions(),

@@ -1,12 +1,14 @@
 /**
- * Host-owned Connection audience resolution. Only organization-scoped Plugin
- * Market installs with an intact manifest may receive a token; the Host derives
- * the audience from the current organization and the installed plugin id.
+ * Host-owned Connection audience resolution. New grants require an intact
+ * organization-scoped Plugin Market install; a bounded read-only fallback keeps
+ * legacy Forge receipts working. The Host derives the audience from the current
+ * organization and the installed plugin id.
  */
 import { isValidGhostId, isValidGhostNetworkHostPattern } from '../../shared/ghost.js';
 import type { GhostManifest } from '../../shared/ghost.js';
 import type { PluginMarketInstallationRecord } from '../plugin-market/ledger.js';
 import { PLUGIN_MEMBER_PUBLISHER_GHOST_ID } from '../plugin-publisher/types.js';
+import { PLUGIN_PREFIX_PATTERN } from '@cindy/plugin-protocol';
 
 export interface ConnectionAudienceIdentity {
   membershipId: string;
@@ -58,6 +60,11 @@ export interface LoadConnectionAudienceResolverOptions {
   readInstalledManifest(ghostId: string): GhostManifest | null;
   readInstalledManifestDigest(ghostId: string): string | null;
   readMarketInstallation(ghostId: string): PluginMarketInstallationRecord | null;
+  readApprovedPackageSha256?(ghostId: string): string | null;
+  readInstallOrigin?(ghostId: string): 'manual' | 'agent-forge';
+  lookupOrganizationPrefix?(
+    orgId: string,
+  ): { kind: 'known'; pluginPrefix: string | null } | { kind: 'absent' } | { kind: 'unavailable' };
   log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -112,6 +119,34 @@ export function loadConnectionAudienceResolver(
           allowedHosts,
         };
       };
+
+      const readManifest = (): GhostManifest | null => {
+        try {
+          return options.readInstalledManifest(ghostId);
+        } catch {
+          return null;
+        }
+      };
+
+      // 只读兼容升级前的 Forge receipt。新安装不再写 agent-forge；但旧插件的
+      // Connection JWT 资格不能因客户端升级中断。个人身份、缺失组织 slug、未知
+      // 前缀与缺失批准包哈希都已在进入此分支前后 fail closed。
+      const forgeOrigin = options.readInstallOrigin?.(ghostId);
+      if (forgeOrigin === 'agent-forge') {
+        const prefixLookup = options.lookupOrganizationPrefix?.(identity.orgId);
+        const prefix =
+          prefixLookup && prefixLookup.kind === 'known' ? prefixLookup.pluginPrefix : null;
+        if (prefix && PLUGIN_PREFIX_PATTERN.test(prefix) && ghostId.startsWith(`${prefix}-`)) {
+          const approvedSha = options.readApprovedPackageSha256?.(ghostId) ?? null;
+          if (!approvedSha || !/^[a-f0-9]{64}$/.test(approvedSha)) {
+            return reject('forge-package-sha-missing');
+          }
+          const manifest = readManifest();
+          if (!manifest) return reject('plugin-not-installed');
+          if (manifest.id !== ghostId) return reject('plugin-id-mismatch');
+          return finish(manifest);
+        }
+      }
 
       let installation: PluginMarketInstallationRecord | null = null;
       try {

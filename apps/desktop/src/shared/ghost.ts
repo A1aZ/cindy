@@ -861,8 +861,9 @@ export const GHOST_OAUTH_BOUNCE_PATH_RE = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)
  *   `gh auth token`,不可用时回落到同 key 经 /secrets 保存的 PAT。两种值都
  *   只在 networkSlot 请求 GitHub API 时注入,不进入插件、Renderer、KV 或日志。
  * - 'oidc-token':值 = Cindy 为当前企业 Membership 签发的短时 Connection
- *   JWT。只有当前组织的 Plugin Market organization 安装记录和 manifest digest
- *   校验通过时,Host 才根据当前组织和插件 id 推导 audience;插件不能声明或读取。
+ *   JWT。新授权只有当前组织的 Plugin Market organization 安装记录和 manifest
+ *   digest 校验通过时才会签发；升级前已有的 agent-forge receipt 保留只读兼容。
+ *   Host 根据当前组织和插件 id 推导 audience，插件不能声明或读取。
  *   令牌只在 networkSlot 发请求时注入，且永不进入 Node Worker。
  *
  * ('login-feishu-token' 已于 2026-07-17 随飞书登录整体下线退役——xd-feishu
@@ -2520,6 +2521,25 @@ export function ghostNetworkAuthorizationWithinCap(
     }
   }
   return true;
+}
+
+/** 市场清单对真实包的订阅事件授权上限；具体 topic/hook 只能保持或收缩。 */
+export function ghostSubscribeAuthorizationWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  const actualSubscribe = actual.subscribe;
+  if (!actualSubscribe) return true;
+  const reviewedSubscribe = reviewed.subscribe;
+  if (!reviewedSubscribe) return false;
+  return (
+    (actualSubscribe.topics ?? []).every((topic) =>
+      (reviewedSubscribe.topics ?? []).includes(topic),
+    ) &&
+    (actualSubscribe.hooks ?? []).every((hook) =>
+      (reviewedSubscribe.hooks ?? []).includes(hook),
+    )
+  );
 }
 
 /**

@@ -662,8 +662,8 @@ interface ModelSelectorProps {
   /** 仅普通 composer 显式开启 chip → panel 容器形变；设置页/worker 等维持 Radix。 */
   useMorphPopover?: boolean;
   /**
-   * 关闭选择器后的回焦目标(composer 输入框)。选完模型 / Esc / 点空白后把焦点送回
-   * 输入框,避免搜索框或选项行卸掉后焦点掉到 body。设置页等非 composer 入口不传。
+   * 指针关闭后的回焦目标(composer 输入框)。选完模型 / 点空白后立刻送回输入框;
+   * Esc 仍回 pill(§14.2)。设置页等非 composer 入口不传。
    */
   restoreFocusTarget?: () => HTMLElement | null;
   /** Popover 弹出方向,默认 "top"（底部工具栏向上弹），dialog 内嵌场景传 "bottom"。 */

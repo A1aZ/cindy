@@ -7,7 +7,8 @@
  * 故本文件按新语义重写(取代旧 ghost/left-定位/focus-first-action/scroll-close 契约):
  *   - 打开聚焦 [data-morph-autofocus] → 首个 input → 面板容器(不抢焦到首个按钮,§14.2)
  *   - 关闭仅键盘(Esc)归还 trigger 焦点;鼠标关闭(选项/outside)不回焦(防误弹 trigger tooltip)
- *   - 传了 restoreFocusTarget 时,关完回该目标(选完模型立刻能接着打字);其它控件已接走则不抢
+ *   - 传了 restoreFocusTarget 时,指针关闭立刻回该目标(选完模型能接着打字);
+ *     Esc 仍回 trigger(§14.2);其它控件已接走则不抢
  *   - outside pointerdown 关闭,但嵌套 Radix portal(data-radix-popper-content-wrapper)内不算 outside
  *   - trigger chip 全程可见(不隐藏),再点即关(toggle)
  *   - 无 ghost 幽灵层
@@ -264,7 +265,45 @@ describe('MorphPopover interaction contract', () => {
     expect(document.activeElement).toBe(screen.getByLabelText('Composer'));
   });
 
-  it('restoreFocusTarget:Esc 关闭也回指定输入,不回 trigger', async () => {
+  it('restoreFocusTarget:鼠标选完在收合动画开始时就把焦点送回输入,不等卸掉', async () => {
+    setReducedMotion(false);
+    function RestoreHomeImmediateHarness() {
+      const [open, setOpen] = useState(false);
+      const composerRef = useRef<HTMLTextAreaElement>(null);
+      return (
+        <>
+          <textarea ref={composerRef} aria-label="Composer" />
+          <MorphPopover
+            open={open}
+            onOpenChange={setOpen}
+            restoreFocusTarget={() => composerRef.current}
+            panelAriaLabel="Immediate restore panel"
+            trigger={
+              <button type="button" onClick={() => setOpen((current) => !current)}>
+                Toggle
+              </button>
+            }
+          >
+            <button type="button" onClick={() => setOpen(false)}>
+              Select model
+            </button>
+          </MorphPopover>
+        </>
+      );
+    }
+
+    render(<RestoreHomeImmediateHarness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle' }));
+    const action = await screen.findByRole('button', { name: 'Select model' });
+    action.focus();
+    fireEvent.pointerDown(action);
+    fireEvent.click(action);
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Composer')));
+    expect(screen.getByRole('group', { name: 'Immediate restore panel' })).toBeTruthy();
+  });
+
+  it('restoreFocusTarget:Esc 关闭仍回 trigger,不改 §14.2 键盘归还', async () => {
     function RestoreHomeEscHarness() {
       const [open, setOpen] = useState(false);
       const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -289,13 +328,14 @@ describe('MorphPopover interaction contract', () => {
     }
 
     render(<RestoreHomeEscHarness />);
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle' }));
+    const trigger = screen.getByRole('button', { name: 'Toggle' });
+    fireEvent.click(trigger);
     await screen.findByRole('group', { name: 'Restore home panel' });
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() =>
       expect(screen.queryByRole('group', { name: 'Restore home panel' })).toBeNull(),
     );
-    expect(document.activeElement).toBe(screen.getByLabelText('Composer'));
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('restoreFocusTarget:焦点已被其它控件接走时不抢回', async () => {

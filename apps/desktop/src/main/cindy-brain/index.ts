@@ -5596,6 +5596,8 @@ export async function installOrUpdateMarketGhostPackage(
     beforeCommitInLock?: () => void;
     /** 新包已经原子换位；后续异常不能再按落位失败回滚来源路由。 */
     onPackagePlacedInLock?: () => void;
+    /** 包与 receipt 已提交，仍持 owner mutation lease；用于原子写入来源账本。 */
+    afterCommitInLock?: (installed: InstalledGhost) => void | Promise<void>;
     /** 仅 server-market 主机路径可传；custom/local 不传。 */
     officialCindyGithub?: boolean;
   },
@@ -5620,6 +5622,8 @@ async function installOrUpdateMarketGhostPackageLocked(
     beforeCommitInLock?: () => void;
     /** 新包已经原子换位；后续异常不能再按落位失败回滚来源路由。 */
     onPackagePlacedInLock?: () => void;
+    /** 包与 receipt 已提交，仍持 owner mutation lease；用于原子写入来源账本。 */
+    afterCommitInLock?: (installed: InstalledGhost) => void | Promise<void>;
     officialCindyGithub?: boolean;
   },
 ): Promise<InstalledGhost> {
@@ -5693,12 +5697,14 @@ async function installOrUpdateMarketGhostPackageLocked(
       // 所有前置校验(保留前缀/能力上限/签名/解压上限)都会作用在旧字节上。
       // 本地 .cindy 装入通道已强制此对账,市场通道同一口径。
       expected.beforeCommitInLock?.();
-      return installAndDock(manager, cindyFilePath, {
+      const installedGhost = await installAndDock(manager, cindyFilePath, {
         ghostId: expected.ghostId,
         enable: true,
         expectedPackageSha256: inspected.packageSha256,
         ...(trustOverride ? { trustOverride } : {}),
       });
+      await expected.afterCommitInLock?.(installedGhost);
+      return installedGhost;
     }
 
     expected.beforeCommitInLock?.();
@@ -5774,6 +5780,7 @@ async function installOrUpdateMarketGhostPackageLocked(
       }
     }
     spawnIfResident(result.ghost);
+    await expected.afterCommitInLock?.(result.ghost);
     return result.ghost;
   } finally {
     releaseMutation?.();

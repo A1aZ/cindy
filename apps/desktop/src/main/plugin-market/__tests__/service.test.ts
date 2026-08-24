@@ -77,7 +77,16 @@ vi.mock('../../cindy-brain/index.js', () => ({
     inspect: runtime.inspect,
   }),
   isGhostAvailableForActiveSession: vi.fn(() => runtime.accountGhostAvailable),
-  installOrUpdateMarketGhostPackage: runtime.install,
+  installOrUpdateMarketGhostPackage: async (
+    filePath: string,
+    options: {
+      afterCommitInLock?: (installed: unknown) => void | Promise<void>;
+    },
+  ) => {
+    const installed = await runtime.install(filePath, options);
+    await options.afterCommitInLock?.(installed);
+    return installed;
+  },
   hasPendingGhostCalls: vi.fn(() => runtime.pendingCalls),
   hasRunningGhostErrand: vi.fn(() => runtime.runningErrand),
   hasRunningGhostCindyWork: vi.fn(() => runtime.cindyWork),
@@ -1147,6 +1156,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       ghostId: 'cindy-test',
       version: '1.0.0',
       manifestCap: incompatibleManifest,
+      afterCommitInLock: expect.any(Function),
     });
   });
 
@@ -1219,6 +1229,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       ghostId: 'cindy-test',
       version: '1.0.0',
       manifestCap: manifest(),
+      afterCommitInLock: expect.any(Function),
     });
     // 安装入口用目录 summary 做 detail 身份绑定(防止把 A 的确认导向 B 的内容),
     // 因此手动安装也会先取一次目录,但不做任何 listAll 之外的多余请求。
@@ -1370,6 +1381,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       ghostId: 'cindy-test',
       version: '1.0.0',
       manifestCap: manifest(),
+      afterCommitInLock: expect.any(Function),
     });
   });
 
@@ -3188,7 +3200,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
   });
 
-  it('records provenance for the captured owner when the owner changes after install', async () => {
+  it('rejects provenance commit when the owner changes before the final callback', async () => {
     const item = summary();
     const installedGhost = {
       manifest: manifest(),
@@ -3206,14 +3218,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
       return installedGhost;
     });
 
-    await expect(h.service.install(item.id, reviewedInstallOptions(item))).resolves.toEqual({
-      ghost: installedGhost,
-    });
-    expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({
-      pluginId: item.id,
-      releaseId: item.currentRelease.id,
-      installed: true,
-    });
+    await expect(h.service.install(item.id, reviewedInstallOptions(item))).rejects.toThrow(
+      '[PRECONDITION_FAILED]',
+    );
+    expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
   });
 
   it('reports a successful market uninstall when the owner changes during cleanup', async () => {

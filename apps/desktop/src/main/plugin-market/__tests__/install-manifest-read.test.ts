@@ -37,7 +37,16 @@ const brain = vi.hoisted(() => ({
 }));
 vi.mock('../../cindy-brain/index.js', () => ({
   getGhostManager: () => ({ inspect: brain.inspect }),
-  installOrUpdateMarketGhostPackage: brain.installOrUpdateMarketGhostPackage,
+  installOrUpdateMarketGhostPackage: async (
+    filePath: string,
+    options: {
+      afterCommitInLock?: (installed: unknown) => void | Promise<void>;
+    },
+  ) => {
+    const installed = await brain.installOrUpdateMarketGhostPackage(filePath, options);
+    await options.afterCommitInLock?.(installed);
+    return installed;
+  },
   rejectReservedGhostIdForCustomMarket: brain.rejectReservedGhostIdForCustomMarket,
 }));
 vi.mock('../../cindy-brain/forge.js', () => ({

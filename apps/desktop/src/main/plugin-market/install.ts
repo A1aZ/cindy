@@ -84,7 +84,7 @@ export async function installCustomMarketPlugin(input: {
    */
   withCommitLock?: <T>(fn: () => Promise<T>) => Promise<T>;
   /**
-   * 落位成功后、仍在 `withCommitLock` 内执行的溯源写入钩。
+   * 落位成功后、仍在 `withCommitLock` 与 owner mutation lease 内执行的溯源写入钩。
    *
    * 账本写入必须与落位同锁:放在锁外时,另一条路径(本地 .cindy 装入/更新)可以
    * 插在"包已落位"与"写下溯源"之间换掉同 id 的包,账本随后认领一个其实已被替换
@@ -228,9 +228,13 @@ export async function installCustomMarketPlugin(input: {
           ...(input.onPackagePlaced
             ? { onPackagePlacedInLock: input.onPackagePlaced }
             : {}),
+          ...(input.afterCommit
+            ? {
+                afterCommitInLock: (committed) =>
+                  input.afterCommit!(committed, packed.manifest),
+              }
+            : {}),
         });
-        // 溯源写入与落位同锁(见 afterCommit 注释)。
-        await input.afterCommit?.(installed, packed.manifest);
         return { ghost: installed };
       };
       return input.withCommitLock ? input.withCommitLock(run) : run();

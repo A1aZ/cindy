@@ -37,7 +37,38 @@ describe('market Ghost session boundary', () => {
     expect(installBody).toContain('const ledger = this.ledgerForOwner(owner);');
     expect(installBody).toContain('const manager = this.sourceManagerForOwner(owner);');
     expect(installBody).toContain('requireSameMarketOwner(owner);');
+    expect(installBody).toContain(
+      'beforePackagePlacement: () => {\n            requireSameMarketOwner(owner);',
+    );
+    expect(installBody).toContain(
+      'afterCommit: async (_installed, packagedManifest) => {',
+    );
+    expect(installBody).toContain(
+      'requireSameMarketOwner(owner, { allowPendingBoundary: true });',
+    );
     expect(automaticBody).toContain('          true,\n          owner,\n        );');
+  });
+
+  it('keeps package placement and market ledger commit in the same owner lease', () => {
+    const installStart = source.indexOf(
+      'async function installOrUpdateMarketGhostPackageLocked(',
+    );
+    const installEnd = source.indexOf('\n}\n\ntype GhostUninstallLedgerCompletion', installStart);
+    const installBody = source.slice(installStart, installEnd);
+    const firstAfterCommit = installBody.indexOf(
+      'await expected.afterCommitInLock?.(installedGhost);',
+    );
+    const updateAfterCommit = installBody.indexOf(
+      'await expected.afterCommitInLock?.(result.ghost);',
+    );
+    const release = installBody.indexOf('releaseMutation?.();');
+
+    expect(firstAfterCommit).toBeGreaterThan(-1);
+    expect(updateAfterCommit).toBeGreaterThan(firstAfterCommit);
+    expect(release).toBeGreaterThan(updateAfterCommit);
+    expect(marketServiceSource).toContain(
+      'afterCommitInLock: async (committed) => {\n          requireSameMarketOwner(owner, { allowPendingBoundary: true });',
+    );
   });
 
   it('requires the pre-approval session generation when acquiring the mutation lease', () => {
@@ -177,7 +208,7 @@ describe('market Ghost session boundary', () => {
 
     expect(initialBranch.indexOf('expected.beforeCommitInLock?.();')).toBeGreaterThan(-1);
     expect(initialBranch.indexOf('expected.beforeCommitInLock?.();')).toBeLessThan(
-      initialBranch.indexOf('return installAndDock('),
+      initialBranch.indexOf('await installAndDock('),
     );
     expect(body.match(/expected\.beforeCommitInLock\?\.\(\);/g)).toHaveLength(2);
 

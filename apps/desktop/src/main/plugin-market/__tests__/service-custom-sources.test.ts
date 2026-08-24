@@ -84,7 +84,16 @@ vi.mock('../../cindy-brain/index.js', () => ({
     inspect: runtime.inspect,
   }),
   isGhostAvailableForActiveSession: vi.fn(() => runtime.accountGhostAvailable),
-  installOrUpdateMarketGhostPackage: runtime.install,
+  installOrUpdateMarketGhostPackage: async (
+    filePath: string,
+    options: {
+      afterCommitInLock?: (installed: unknown) => void | Promise<void>;
+    },
+  ) => {
+    const installed = await runtime.install(filePath, options);
+    await options.afterCommitInLock?.(installed);
+    return installed;
+  },
   hasPendingGhostCalls: vi.fn(() => runtime.pendingCalls),
   hasRunningGhostErrand: vi.fn(() => runtime.runningErrand),
   hasRunningGhostCindyWork: vi.fn(() => runtime.cindyWork),

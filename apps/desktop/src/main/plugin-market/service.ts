@@ -135,10 +135,13 @@ function canCaptureMarketOwner(): boolean {
   );
 }
 
-function requireSameMarketOwner(expected: ActiveAppSession): void {
+function requireSameMarketOwner(
+  expected: ActiveAppSession,
+  options: { allowPendingBoundary?: boolean } = {},
+): void {
   const current = getActiveAppSession();
   if (
-    isAppSessionBoundaryPending() ||
+    (!options.allowPendingBoundary && isAppSessionBoundaryPending()) ||
     current.mode !== expected.mode ||
     current.dataOwnerId !== expected.dataOwnerId ||
     current.generation !== expected.generation
@@ -1367,6 +1370,7 @@ export class PluginMarketService {
           },
           expectedInstalledApproval: options.expectedInstalledApproval,
           beforePackagePlacement: () => {
+            requireSameMarketOwner(owner);
             if (automatic && isGhostBusy(plugin.ghostId)) {
               throw new SilentUpgradeBusyError('Plugin is busy');
             }
@@ -1406,11 +1410,15 @@ export class PluginMarketService {
           // 放到锁外时,本地装入能插在"包已落位"与"写下溯源"之间换掉同 id 的包。
           // 锁序:pluginId → SOURCE_MUTATION_KEY → ghostId → ledgerMutation。
           afterCommit: async (_installed, packagedManifest) => {
+            // owner mutation lease 已阻止切号提交新 generation；boundary 可能已进入
+            // pending 并等待本 lease 收尾，此时仍必须把包与原 owner 账本一起提交。
+            requireSameMarketOwner(owner, { allowPendingBoundary: true });
             // packGhostDirToFile 返回的是写入真实临时包的 canonical manifest；
             // Main 随后复验并用包 SHA 钉死同一文件，因此无需在包已经落位后
             // 再读一次目录。后置 I/O 失败不应把成功安装误报成失败或漏写来源。
             const manifestDigest = ghostManifestDigest(packagedManifest);
             await this.withCapturedLedgerMutation(ledger, () => {
+              requireSameMarketOwner(owner, { allowPendingBoundary: true });
               ledger.upsertInstallation({
                 pluginId,
                 ghostId: plugin.ghostId,
@@ -1843,6 +1851,7 @@ export class PluginMarketService {
       let replacedRouteWasSuppressed = false;
       let packageLanded = false;
       const detachPreviousRoute = (): void => {
+        requireSameMarketOwner(owner);
         options.beforeCommitInLock?.();
         if (!replacingSource || !currentRecordNow) return;
         replacedRouteWasSuppressed = this.detachMarketRouteForReplacement(
@@ -1881,6 +1890,13 @@ export class PluginMarketService {
               },
             }
           : {}),
+        afterCommitInLock: async (committed) => {
+          requireSameMarketOwner(owner, { allowPendingBoundary: true });
+          await this.withCapturedLedgerMutation(ledger, () => {
+            requireSameMarketOwner(owner, { allowPendingBoundary: true });
+            ledger.upsertInstallation(recordFrom(plugin, 'market', committed));
+          });
+        },
       }).catch((error) => {
         if (routeDetached && !packageLanded && currentRecordNow) {
           this.restoreMarketRouteAfterFailedReplacement(
@@ -1891,9 +1907,6 @@ export class PluginMarketService {
           );
         }
         throw error;
-      });
-      await this.withCapturedLedgerMutation(ledger, () => {
-        ledger.upsertInstallation(recordFrom(plugin, 'market', installed));
       });
       return installed;
     });

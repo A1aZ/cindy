@@ -377,7 +377,7 @@ export function resolveTurnCost(args: {
   // 其它第三方供应商 / 未知路由:SDK 值是 USD 口径,投影到账本币种而不是构建区域,
   // 否则 USD 结算账号上这些花费会变成 CNY 并被账本守卫丢弃。
   const sdkAmount = Math.max(0, sdkCostDelta ?? 0);
-  if (sdkAmount > 0) {
+  if (context.billingRoute === 'provider-api' && sdkAmount > 0) {
     if (context.customProviderSdkEstimate === 'hidden') {
       return { model, money: null, source: 'sdk' };
     }
@@ -389,7 +389,7 @@ export function resolveTurnCost(args: {
         context.customProviderSdkEstimate === 'shown' ? 'value-estimate' : 'actual-cost',
         context.customProviderSdkEstimate === 'shown' ? 'sdk-estimate' : undefined,
       ),
-      source: context.billingRoute === 'provider-api' ? 'sdk' : 'sdk-fallback',
+      source: 'sdk',
     };
   }
   return {

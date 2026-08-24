@@ -556,9 +556,11 @@ import {
 } from '@/session/sessionOverview';
 import {
   billingSessionForRevision,
+  hasAuthoritativeBillingProjection,
   mobileSessionBillingRevision,
   projectSessionBilling,
   resolveMobileSdkCostPresentation,
+  TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION,
   type MobileMessageBillingProjection,
   withoutSessionMoney,
 } from '@/session/sessionBillingProjection';
@@ -2283,6 +2285,10 @@ export default function SessionScreen() {
         showSdkEstimate,
       );
       if (cancelled) return;
+      if (!hasAuthoritativeBillingProjection(snapshot)) {
+        setSessionBillingProjection(null);
+        return;
+      }
       setSessionBillingProjection({
         entries: snapshot.entries,
         presentation,
@@ -2324,18 +2330,8 @@ export default function SessionScreen() {
         showSdkEstimate: sessionBillingProjection.showSdkEstimate,
       };
     }
-    return {
-      entries: [],
-      presentation: resolveMobileSdkCostPresentation(
-        currentSession?.providerId,
-        composerDeviceProviders.providers,
-        false,
-      ),
-      showSdkEstimate: false,
-    };
+    return TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION;
   }, [
-    composerDeviceProviders.providers,
-    currentSession?.providerId,
     sessionBillingProjection,
     sessionBillingRequestKey,
   ]);

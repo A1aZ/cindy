@@ -310,7 +310,7 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
       renderCounts.estimated += 1;
       const value = useSessionEstimatedValue(sessionId, true);
       return (
-        <div data-testid="estimated-value">{value == null ? '' : value.amount.toFixed(2)}</div>
+        <div data-testid="estimated-value">{value == null ? '' : value.estimatedValueMoney?.amount.toFixed(2)}</div>
       );
     }
 
@@ -370,7 +370,7 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
     function EstimatedValueProbe() {
       const value = useSessionEstimatedValue(sessionId, true);
       return (
-        <div data-testid="estimated-value">{value == null ? '' : value.amount.toFixed(2)}</div>
+        <div data-testid="estimated-value">{value == null ? '' : value.estimatedValueMoney?.amount.toFixed(2)}</div>
       );
     }
 
@@ -436,7 +436,7 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
       renderCounts.estimated += 1;
       const value = useSessionEstimatedValue(currentSessionId, true);
       return (
-        <div data-testid="estimated-value">{value == null ? '' : value.amount.toFixed(2)}</div>
+        <div data-testid="estimated-value">{value == null ? '' : value.estimatedValueMoney?.amount.toFixed(2)}</div>
       );
     }
 
@@ -525,7 +525,7 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
     function EstimatedValueProbe({ sessionId: currentSessionId }: { sessionId: string }) {
       const value = useSessionEstimatedValue(currentSessionId, true);
       return (
-        <div data-testid="estimated-value">{value == null ? '' : value.amount.toFixed(2)}</div>
+        <div data-testid="estimated-value">{value == null ? '' : value.estimatedValueMoney?.amount.toFixed(2)}</div>
       );
     }
 

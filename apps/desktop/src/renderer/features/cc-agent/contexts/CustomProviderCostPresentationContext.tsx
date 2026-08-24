@@ -2,7 +2,7 @@ import { createContext, useContext, useMemo, type ReactNode } from 'react';
 
 import type { ProviderView } from '@cindy/model-providers';
 
-import { useCustomProviderBillingSettings } from '@/hooks/useCustomProviderBillingSettings';
+import { useCustomProviderBillingSettingsSnapshot } from '@/hooks/useCustomProviderBillingSettings';
 import {
   resolveCustomProviderCostPresentation,
   type CustomProviderCostPresentation,
@@ -33,12 +33,22 @@ export function CustomProviderCostPresentationProvider({
 export function useSessionCustomProviderCostPresentation(
   providerId: string | null | undefined,
   deviceId?: string | null,
-): CustomProviderCostPresentation {
+  enabled = true,
+): {
+  presentation: CustomProviderCostPresentation;
+  showSdkEstimate: boolean;
+} {
   const { providers } = useContext(CustomProviderCostPresentationContext);
-  const { showSdkCostForCustomProviders } = useCustomProviderBillingSettings(deviceId);
-  return resolveCustomProviderCostPresentation(providerId, providers, showSdkCostForCustomProviders);
-}
-
-export function useShowCustomProviderSdkEstimate(deviceId?: string | null): boolean {
-  return useCustomProviderBillingSettings(deviceId).showSdkCostForCustomProviders;
+  const { showSdkCostForCustomProviders } = useCustomProviderBillingSettingsSnapshot(
+    deviceId,
+    enabled,
+  );
+  return {
+    presentation: resolveCustomProviderCostPresentation(
+      providerId,
+      providers,
+      showSdkCostForCustomProviders,
+    ),
+    showSdkEstimate: showSdkCostForCustomProviders,
+  };
 }

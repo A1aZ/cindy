@@ -1732,6 +1732,7 @@ export interface EstimatedSessionValueRow {
 }
 
 export interface EstimatedSessionValueSummary {
+  projectionVersion: number;
   estimatedValueMoney: RegionalMoney | null;
   excludedActualMoney: RegionalMoney | null;
   totalValueUsd?: number;
@@ -1862,6 +1863,7 @@ export function summarizeEstimatedSessionValuesBySession(
       showSdkEstimate,
     );
     result[sessionId] = {
+      projectionVersion: ESTIMATED_SESSION_VALUE_PROJECTION_VERSION,
       estimatedValueMoney: summarized.totalValueMoney,
       excludedActualMoney: summarized.excludedActualMoney,
       ...(summarized.totalValueUsd != null ? { totalValueUsd: summarized.totalValueUsd } : {}),

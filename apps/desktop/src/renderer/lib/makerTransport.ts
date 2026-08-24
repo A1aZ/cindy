@@ -464,11 +464,7 @@ export function listSessionBackgroundTasksFor(
  * 与 goal/learn 链路同款);老被控端无此 channel → CHANNEL_NOT_ALLOWED,调用方 catch
  * 后退化为只显示已加载消息 + 实时推送的部分值。
  */
-export function estimatedSessionValueFor(
-  sessionId: string,
-  presentation: import('../../shared/regionalMoney').SdkCostPresentation = 'regular',
-  showSdkEstimate: boolean = presentation === 'estimate',
-): Promise<{
+export interface EstimatedSessionValueSnapshot {
   projectionVersion?: number;
   totalValueMoney?: import('../../shared/regionalMoney').RegionalMoney | null;
   totalValueUsd?: number;
@@ -481,19 +477,44 @@ export function estimatedSessionValueFor(
     turnCostProviderId?: string | null;
     turnUsageDetails?: unknown;
   }>;
-}> {
+}
+
+function tokenOnlyEstimatedSessionValueSnapshot(): EstimatedSessionValueSnapshot {
+  return { projectionVersion: 1, totalValueMoney: null, totalValueUsd: 0, entries: [] };
+}
+
+function isAuthoritativeEstimatedSessionValueSnapshot(
+  snapshot: unknown,
+): snapshot is EstimatedSessionValueSnapshot {
+  return Boolean(
+    snapshot &&
+    typeof snapshot === 'object' &&
+    (snapshot as { projectionVersion?: unknown }).projectionVersion === 1 &&
+    Array.isArray((snapshot as { entries?: unknown }).entries),
+  );
+}
+
+export async function estimatedSessionValueFor(
+  sessionId: string,
+  presentation: import('../../shared/regionalMoney').SdkCostPresentation = 'regular',
+  showSdkEstimate: boolean = presentation === 'estimate',
+): Promise<EstimatedSessionValueSnapshot> {
   const deviceId = getStickySessionDeviceId(sessionId);
   if (!deviceId) {
     return messageService.estimatedSessionValue(sessionId, presentation, showSdkEstimate);
   }
-  return invokeRemote(deviceId, 'local-db:messages:estimatedSessionValue', [
+  const snapshot = await invokeRemote(deviceId, 'local-db:messages:estimatedSessionValue', [
     sessionId,
     presentation,
     showSdkEstimate,
-  ]) as ReturnType<typeof estimatedSessionValueFor>;
+  ]);
+  return isAuthoritativeEstimatedSessionValueSnapshot(snapshot)
+    ? snapshot
+    : tokenOnlyEstimatedSessionValueSnapshot();
 }
 
 export interface EstimatedSessionValueSummary {
+  projectionVersion?: number;
   estimatedValueMoney: import('../../shared/regionalMoney').RegionalMoney | null;
   excludedActualMoney: import('../../shared/regionalMoney').RegionalMoney | null;
   totalValueUsd?: number;
@@ -513,6 +534,7 @@ function summaryFromEstimatedSessionValueSnapshot(
     entry.excludedActualMoney ? [entry.excludedActualMoney] : [],
   );
   return {
+    projectionVersion: snapshot.projectionVersion,
     estimatedValueMoney: snapshot.totalValueMoney ?? null,
     excludedActualMoney:
       excluded.length > 0
@@ -524,6 +546,25 @@ function summaryFromEstimatedSessionValueSnapshot(
         : null,
     ...(snapshot.totalValueUsd != null ? { totalValueUsd: snapshot.totalValueUsd } : {}),
   };
+}
+
+function isAuthoritativeEstimatedSessionValueSummary(value: unknown): value is EstimatedSessionValueSummary {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    (value as { projectionVersion?: unknown }).projectionVersion === 1,
+  );
+}
+
+function tokenOnlyEstimatedSessionValueSummaries(
+  sessionIds: readonly string[],
+): Record<string, EstimatedSessionValueSummary> {
+  return Object.fromEntries(
+    sessionIds.map((sessionId) => [
+      sessionId,
+      { projectionVersion: 1, estimatedValueMoney: null, excludedActualMoney: null },
+    ]),
+  );
 }
 
 const ESTIMATED_SESSION_VALUE_BATCH_LIMIT = 256;
@@ -568,11 +609,16 @@ async function estimatedSessionValueBatchOnDevice(
     if (!deviceId) {
       return await messageService.estimatedSessionValueBatch(payload);
     }
-    return (await invokeRemote(
+    const result = (await invokeRemote(
       deviceId,
       'local-db:messages:estimatedSessionValueBatch',
       [payload],
-    )) as Record<string, EstimatedSessionValueSummary>;
+    )) as Record<string, unknown>;
+    return sessionIds.every((sessionId) =>
+      isAuthoritativeEstimatedSessionValueSummary(result[sessionId]),
+    )
+      ? result as Record<string, EstimatedSessionValueSummary>
+      : tokenOnlyEstimatedSessionValueSummaries(sessionIds);
   } catch (err) {
     if (extractIpcError(err)?.code === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED') {
       return fallback();

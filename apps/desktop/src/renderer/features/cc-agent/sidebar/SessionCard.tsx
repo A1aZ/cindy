@@ -101,7 +101,6 @@ import {
 } from '../splitGroupDnd';
 import {
   useSessionCustomProviderCostPresentation,
-  useShowCustomProviderSdkEstimate,
 } from '../contexts/CustomProviderCostPresentationContext';
 
 const log = createLogger('SessionCard');
@@ -252,11 +251,13 @@ export function SessionCard({
   const cardPrRefs = usePrRefsForSession(session.id);
   const cardInfoPrRef = taskInfoFields.includes('pr') ? cardPrRefs[0] : undefined;
   const cardInfoWorktree = useTaskInfoWorktree(session, taskInfoFields.includes('worktree'));
-  const costPresentation = useSessionCustomProviderCostPresentation(
-    session.providerId,
-    session.deviceLinkDeviceId,
-  );
-  const showSdkEstimate = useShowCustomProviderSdkEstimate(session.deviceLinkDeviceId);
+  const wantsCostInfo = taskInfoFields.includes('cost');
+  const { presentation: costPresentation, showSdkEstimate } =
+    useSessionCustomProviderCostPresentation(
+      session.providerId,
+      session.deviceLinkDeviceId,
+      wantsCostInfo,
+    );
   // 传 hasPrRef / hasWorktree 让它们参与「按勾选顺序」排列。
   const cardInfoPieces = useProjectedSessionInfoPieces(
     session,

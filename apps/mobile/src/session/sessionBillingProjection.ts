@@ -19,6 +19,14 @@ export interface MobileMessageBillingProjection {
   legacyHost?: boolean;
 }
 
+export const TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION: MobileMessageBillingProjection =
+  Object.freeze({
+    presentation: 'hidden',
+    showSdkEstimate: false,
+    entries: [],
+    legacyHost: true,
+  });
+
 const BUILTIN_PROVIDER_IDS = new Set([
   ...BUILTIN_PROVIDERS.map((provider) => provider.id),
   // Pi persists the XD aggregate route under this compatibility id.
@@ -167,6 +175,19 @@ export function projectMobileMessageBilling(
     if (message.role !== 'assistant') return message;
 
     const originalMeta = message.agentMeta ?? {};
+    if (projection.legacyHost) {
+      const nextMeta: Record<string, unknown> = { ...originalMeta };
+      delete nextMeta.turnCost;
+      delete nextMeta.turnCostUsd;
+      delete nextMeta.turnCostIsEstimate;
+      delete nextMeta.userTurnCost;
+      delete nextMeta.userTurnCostUsd;
+      delete nextMeta.userTurnCostIsEstimate;
+      if (nextMeta.turnUsageDetails !== undefined) {
+        nextMeta.turnUsageDetails = projectUsageDetails(nextMeta.turnUsageDetails, 'hidden');
+      }
+      return { ...message, agentMeta: nextMeta };
+    }
     const entry = entries.get(message.clientId);
     const turnMoney = moneyFromMeta(
       originalMeta,

@@ -130,7 +130,7 @@ describe('maker:event hot path ordering', () => {
     expect(wireSessionSource).toContain(
       'const claudeTurnDurationMs =\n          completedTurnWallClockMs ??',
     );
-    expect(wireSessionSource.match(/claudeTurnDurationMs,/g)).toHaveLength(3);
+    expect(wireSessionSource.match(/claudeTurnDurationMs,/g)).toHaveLength(5);
   });
 
   it('uses the assistant API message id as Vertex output-lag evidence', () => {
@@ -860,7 +860,7 @@ describe('maker:event hot path ordering', () => {
     expect(codexDoneSource).toContain('promptTokens + completionTokens + cachedTokens');
     expect(codexDoneSource).not.toContain('promptTokens + completionTokens + reasoningTokens + cachedTokens');
     expect(codexDoneSource).toContain('const isCustomProviderRoute =');
-    expect(codexDoneSource).toContain('isUserProviderSession(session.id)');
+    expect(codexDoneSource).toContain('isCustomProviderForBilling(');
     expect(codexDoneSource).toMatch(/&&\s*pricingModel\.startsWith\('codex\/'\);/);
     expect(codexDoneSource).toMatch(/&&\s*isExclusiveXaiModelId\(pricingModel\);/);
     expect(codexDoneSource).toContain('const hasGatewayKey = Boolean(readClaudeApiKey());');
@@ -998,7 +998,7 @@ describe('maker:event hot path ordering', () => {
     expect(claudeDoneSource).toContain('buildClaudeTurnUsageDetails(');
     // 窄兜底: total_cost_usd 是进程累计；首次只建基线，且累计 usage 不得冒充本轮 token。
     expect(claudeDoneSource).toMatch(
-      /const rawDelta\s*=\s*prevReportedCost === undefined\s*\? 0\s*:\s*Math\.max\(0, cumulative - prevReportedCost\);/,
+      /const rawDelta\s*=\s*prevReportedCost === undefined\s*\? 0\s*:\s*computeCumulativeCostDelta\(prevReportedCost, cumulative\);/,
     );
     const claudeCostFallback = claudeDoneSource.slice(
       claudeDoneSource.indexOf("} else if (typeof cumulative === 'number' && cumulative >= 0)"),
@@ -1029,9 +1029,7 @@ describe('maker:event hot path ordering', () => {
     );
     expect(piDoneSource).toContain('money = resolveTurnCost({');
     expect(piDoneSource).toContain('segments: pricingSegments,');
-    expect(piDoneSource).toContain(
-      "billingRoute === 'provider-api' ? undefined : group.sdkCostUsd",
-    );
+    expect(piDoneSource).toContain('sdkCostDelta: group.sdkCostUsd');
     expect(piDoneSource).toContain('money ?? unpricedSubscriptionValueMarker()');
     expect(piDoneSource).toContain('money: modelRowMoney,');
     expect(piDoneSource).toContain('if (actualMoney)');

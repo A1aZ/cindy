@@ -6,6 +6,7 @@ import {
   projectMobileMessageBilling,
   projectSessionBilling,
   resolveMobileSdkCostPresentation,
+  TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION,
   withoutSessionMoney,
 } from '@/session/sessionBillingProjection';
 import type { RemoteMessage } from '@/session/types';
@@ -195,6 +196,27 @@ describe('mobile custom-provider billing projection', () => {
       ...message,
       agentMeta: { ...message.agentMeta, userTurnCostUsd: 0.3 },
     }])).not.toBe(first);
+  });
+
+  it('keeps message costs token-only until an authoritative host projection arrives', () => {
+    const [projected] = projectMobileMessageBilling([
+      assistantMessage('legacy-history', {
+        turnCost: {
+          amount: 0.42,
+          currency: 'USD',
+          approximate: false,
+          kind: 'actual-cost',
+        },
+        turnCostUsd: 0.42,
+        userTurnCostUsd: 0.42,
+        turnUsageDetails: { totalTokens: 12_345 },
+      }),
+    ], TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION);
+
+    expect(projected.agentMeta).not.toHaveProperty('turnCost');
+    expect(projected.agentMeta).not.toHaveProperty('turnCostUsd');
+    expect(projected.agentMeta).not.toHaveProperty('userTurnCostUsd');
+    expect(projected.agentMeta?.turnUsageDetails).toEqual({ totalTokens: 12_345 });
   });
 
   it('uses host exclusions to hide legacy custom-provider SDK amounts without a turn marker', () => {

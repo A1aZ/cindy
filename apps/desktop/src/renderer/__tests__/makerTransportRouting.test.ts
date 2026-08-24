@@ -318,13 +318,18 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
 
   it('estimatedSessionValueFor:远程经隧道查被控端汇总;本机查本地库(不经隧道)', async () => {
     const { localMessages, invoke } = stubElectron();
-    invoke.mockResolvedValue({ totalValueUsd: 1.5, entries: [{ clientId: 'a', costUsd: 1.5 }] });
+    invoke.mockResolvedValue({
+      projectionVersion: 1,
+      totalValueUsd: 1.5,
+      entries: [{ clientId: 'a', costUsd: 1.5 }],
+    });
     const { estimatedSessionValueFor } = await import('@/lib/makerTransport');
     const { remoteProjectsStore } = await import('@/features/device-link/remoteProjectsStore');
     remoteProjectsStore.setDeviceSessions('dev-1', 'Mac', [sess('rs')]);
 
     // 远程会话:查本机是空库恒 0,必须隧道到被控端
     await expect(estimatedSessionValueFor('rs')).resolves.toEqual({
+      projectionVersion: 1,
       totalValueUsd: 1.5,
       entries: [{ clientId: 'a', costUsd: 1.5 }],
     });
@@ -352,7 +357,11 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
       'local-b': { estimatedValueMoney: { amount: 0.2, currency: 'USD' }, excludedActualMoney: null },
     });
     invoke.mockResolvedValue({
-      rs: { estimatedValueMoney: { amount: 1.5, currency: 'USD' }, excludedActualMoney: null },
+      rs: {
+        projectionVersion: 1,
+        estimatedValueMoney: { amount: 1.5, currency: 'USD' },
+        excludedActualMoney: null,
+      },
     });
     const { estimatedSessionValueBatchFor } = await import('@/lib/makerTransport');
     const { remoteProjectsStore } = await import('@/features/device-link/remoteProjectsStore');
@@ -370,7 +379,11 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
     ).resolves.toEqual({
       'local-a': { estimatedValueMoney: { amount: 0.1, currency: 'USD' }, excludedActualMoney: null },
       'local-b': { estimatedValueMoney: { amount: 0.2, currency: 'USD' }, excludedActualMoney: null },
-      rs: { estimatedValueMoney: { amount: 1.5, currency: 'USD' }, excludedActualMoney: null },
+      rs: {
+        projectionVersion: 1,
+        estimatedValueMoney: { amount: 1.5, currency: 'USD' },
+        excludedActualMoney: null,
+      },
     });
     expect(localMessages.estimatedSessionValueBatch).toHaveBeenCalledTimes(1);
     expect(localMessages.estimatedSessionValueBatch).toHaveBeenCalledWith({
@@ -387,7 +400,7 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
     ]);
   });
 
-  it('estimatedSessionValueBatchFor: older remotes fall back to per-session reads', async () => {
+  it('estimatedSessionValueBatchFor: older remotes stay token-only after per-session fallback', async () => {
     const { localMessages, invoke } = stubElectron();
     invoke
       .mockRejectedValueOnce(
@@ -405,8 +418,10 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
       estimatedSessionValueBatchFor([{ sessionId: 'rs', presentation: 'regular' }], false),
     ).resolves.toEqual({
       rs: {
-        estimatedValueMoney: { amount: 1.5, currency: 'USD', kind: 'value-estimate' },
+        projectionVersion: 1,
+        estimatedValueMoney: null,
         excludedActualMoney: null,
+        totalValueUsd: 0,
       },
     });
     expect(invoke).toHaveBeenNthCalledWith(1, 'dev-1', 'local-db:messages:estimatedSessionValueBatch', [
@@ -422,6 +437,21 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
       false,
     ]);
     expect(localMessages.estimatedSessionValueBatch).not.toHaveBeenCalled();
+  });
+
+  it('estimatedSessionValueFor: rejects legacy remote projections without a version marker', async () => {
+    const { invoke } = stubElectron();
+    invoke.mockResolvedValueOnce({ totalValueUsd: 1.5, entries: [] });
+    const { estimatedSessionValueFor } = await import('@/lib/makerTransport');
+    const { remoteProjectsStore } = await import('@/features/device-link/remoteProjectsStore');
+    remoteProjectsStore.setDeviceSessions('dev-1', 'Mac', [sess('rs')]);
+
+    await expect(estimatedSessionValueFor('rs', 'regular', false)).resolves.toEqual({
+      projectionVersion: 1,
+      totalValueMoney: null,
+      totalValueUsd: 0,
+      entries: [],
+    });
   });
 
   it('customProviderBillingGetFor: remote GET plus fail-closed old remotes', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 import { customProviderBillingGetFor } from '@/lib/makerTransport';
 import {
@@ -7,80 +7,156 @@ import {
   subscribeCustomProviderShowSdkCost,
 } from '@/lib/customProviderBillingSettingsStore';
 
+interface CustomProviderBillingSettingsSnapshot {
+  showSdkCostForCustomProviders: boolean;
+  isCustomized: boolean;
+}
+
+const LOCAL_KEY = '';
+const EMPTY_REMOTE_SETTINGS: CustomProviderBillingSettingsSnapshot = Object.freeze({
+  showSdkCostForCustomProviders: false,
+  isCustomized: false,
+});
+let localSnapshot: CustomProviderBillingSettingsSnapshot = {
+  showSdkCostForCustomProviders: getCustomProviderShowSdkCost(),
+  isCustomized: false,
+};
+const remoteSnapshots = new Map<string, CustomProviderBillingSettingsSnapshot>();
+const remoteListeners = new Map<string, Set<() => void>>();
+const remoteInflight = new Map<string, Promise<void>>();
+let sharedListenersInstalled = false;
+let unsubscribeLocalPush: (() => void) | undefined;
+let unsubscribeRemotePush: (() => void) | undefined;
+
+function keyFor(deviceId?: string | null): string {
+  return deviceId ?? LOCAL_KEY;
+}
+
+function readSnapshot(deviceId?: string | null): CustomProviderBillingSettingsSnapshot {
+  return deviceId ? remoteSnapshots.get(deviceId) ?? EMPTY_REMOTE_SETTINGS : localSnapshot;
+}
+
+function notify(key: string): void {
+  remoteListeners.get(key)?.forEach((listener) => listener());
+}
+
+function writeSnapshot(
+  deviceId: string | null | undefined,
+  snapshot: CustomProviderBillingSettingsSnapshot,
+): void {
+  const key = keyFor(deviceId);
+  if (!deviceId) {
+    localSnapshot = snapshot;
+    setCustomProviderShowSdkCost(snapshot.showSdkCostForCustomProviders);
+  } else {
+    remoteSnapshots.set(deviceId, snapshot);
+  }
+  notify(key);
+}
+
+function refresh(deviceId?: string | null): Promise<void> {
+  const key = keyFor(deviceId);
+  const existing = remoteInflight.get(key);
+  if (existing) return existing;
+  const request = customProviderBillingGetFor(deviceId)
+    .then((snapshot) => writeSnapshot(deviceId, snapshot))
+    .catch(() => {
+      if (deviceId) writeSnapshot(deviceId, EMPTY_REMOTE_SETTINGS);
+    })
+    .finally(() => {
+      if (remoteInflight.get(key) === request) remoteInflight.delete(key);
+    });
+  remoteInflight.set(key, request);
+  return request;
+}
+
+function installSharedListeners(): void {
+  if (sharedListenersInstalled) return;
+  sharedListenersInstalled = true;
+  unsubscribeLocalPush = window.electronAPI?.maker?.onCustomProviderBillingChanged?.(
+    (payload: { deviceId?: string }) => {
+      if (payload?.deviceId) return;
+      void refresh();
+    },
+  );
+  unsubscribeRemotePush = window.electronAPI?.deviceLink?.onRemotePush?.((push) => {
+    if (push.channel !== 'maker:custom-provider-billing:changed' || !push.deviceId) return;
+    void refresh(push.deviceId);
+  });
+}
+
+function subscribe(deviceId: string | null | undefined, listener: () => void): () => void {
+  installSharedListeners();
+  const key = keyFor(deviceId);
+  const listeners = remoteListeners.get(key) ?? new Set<() => void>();
+  const first = listeners.size === 0;
+  listeners.add(listener);
+  remoteListeners.set(key, listeners);
+  if (first) void refresh(deviceId);
+  const unsubscribeLocal = deviceId
+    ? undefined
+    : subscribeCustomProviderShowSdkCost((showSdkCostForCustomProviders) => {
+        if (localSnapshot.showSdkCostForCustomProviders === showSdkCostForCustomProviders) return;
+        localSnapshot = { ...localSnapshot, showSdkCostForCustomProviders };
+        notify(LOCAL_KEY);
+      });
+  return () => {
+    unsubscribeLocal?.();
+    const current = remoteListeners.get(key);
+    current?.delete(listener);
+    if (current?.size === 0) remoteListeners.delete(key);
+  };
+}
+
+export function useCustomProviderBillingSettingsSnapshot(
+  deviceId?: string | null,
+  enabled = true,
+): CustomProviderBillingSettingsSnapshot {
+  return useSyncExternalStore(
+    useCallback(
+      (listener: () => void) => enabled ? subscribe(deviceId, listener) : () => undefined,
+      [deviceId, enabled],
+    ),
+    useCallback(
+      () => enabled ? readSnapshot(deviceId) : EMPTY_REMOTE_SETTINGS,
+      [deviceId, enabled],
+    ),
+    () => EMPTY_REMOTE_SETTINGS,
+  );
+}
+
 export function useCustomProviderBillingSettings(deviceId?: string | null): {
   showSdkCostForCustomProviders: boolean;
   isCustomized: boolean;
   setShowSdkCostForCustomProviders: (next: boolean) => Promise<void>;
   reset: () => Promise<void>;
 } {
-  const [showSdkCostForCustomProviders, setEnabledState] = useState<boolean>(
-    deviceId ? false : getCustomProviderShowSdkCost(),
-  );
-  const [isCustomized, setIsCustomized] = useState(false);
-
-  const refresh = useCallback(async (isCancelled: () => boolean = () => false) => {
-    const settings = await customProviderBillingGetFor(deviceId);
-    if (isCancelled()) return;
-    if (!deviceId) setCustomProviderShowSdkCost(settings.showSdkCostForCustomProviders);
-    setEnabledState(settings.showSdkCostForCustomProviders);
-    setIsCustomized(settings.isCustomized);
-  }, [deviceId]);
+  const snapshot = useCustomProviderBillingSettingsSnapshot(deviceId);
 
   const setShowSdkCostForCustomProviders = useCallback(async (next: boolean) => {
     const settings = await window.electronAPI.maker.customProviderBillingSet(next);
-    setCustomProviderShowSdkCost(settings.showSdkCostForCustomProviders);
-    setEnabledState(settings.showSdkCostForCustomProviders);
-    setIsCustomized(settings.isCustomized);
+    writeSnapshot(null, settings);
   }, []);
 
   const reset = useCallback(async () => {
     const settings = await window.electronAPI.maker.customProviderBillingReset();
-    setCustomProviderShowSdkCost(settings.showSdkCostForCustomProviders);
-    setEnabledState(settings.showSdkCostForCustomProviders);
-    setIsCustomized(settings.isCustomized);
+    writeSnapshot(null, settings);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const failClosed = () => {
-      if (!cancelled && deviceId) {
-        setEnabledState(false);
-        setIsCustomized(false);
-      }
-    };
-    void refresh(() => cancelled).catch(failClosed);
+  return { ...snapshot, setShowSdkCostForCustomProviders, reset };
+}
 
-    const localUnsubscribe = deviceId
-      ? undefined
-      : subscribeCustomProviderShowSdkCost((next) => {
-          if (!cancelled) setEnabledState(next);
-        });
-    const pushUnsubscribe = window.electronAPI.maker?.onCustomProviderBillingChanged?.(
-      (payload: { deviceId?: string }) => {
-        if (deviceId && payload?.deviceId !== deviceId) return;
-        if (!deviceId && payload?.deviceId) return;
-        void refresh(() => cancelled).catch(failClosed);
-      },
-    );
-
-    const remotePushUnsubscribe = window.electronAPI.deviceLink?.onRemotePush?.((push) => {
-      if (
-        !deviceId ||
-        push.deviceId !== deviceId ||
-        push.channel !== 'maker:custom-provider-billing:changed'
-      ) {
-        return;
-      }
-      void refresh(() => cancelled).catch(failClosed);
-    });
-
-    return () => {
-      cancelled = true;
-      localUnsubscribe?.();
-      pushUnsubscribe?.();
-      remotePushUnsubscribe?.();
-    };
-  }, [deviceId, refresh]);
-
-  return { showSdkCostForCustomProviders, isCustomized, setShowSdkCostForCustomProviders, reset };
+export function __resetCustomProviderBillingSettingsForTests(): void {
+  localSnapshot = {
+    showSdkCostForCustomProviders: getCustomProviderShowSdkCost(),
+    isCustomized: false,
+  };
+  remoteSnapshots.clear();
+  remoteListeners.clear();
+  remoteInflight.clear();
+  unsubscribeLocalPush?.();
+  unsubscribeRemotePush?.();
+  unsubscribeLocalPush = undefined;
+  unsubscribeRemotePush = undefined;
+  sharedListenersInstalled = false;
 }

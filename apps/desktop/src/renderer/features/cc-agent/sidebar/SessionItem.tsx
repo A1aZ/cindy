@@ -106,7 +106,6 @@ import {
 import { shouldPrefetchSessionOnPointerDown } from './sessionSwitchPrefetch';
 import {
   useSessionCustomProviderCostPresentation,
-  useShowCustomProviderSdkEstimate,
 } from '../contexts/CustomProviderCostPresentationContext';
 
 // Module-level dedup cache for loadScheduleSidebarIndexRuns.
@@ -365,11 +364,13 @@ export const SessionItem = memo(function SessionItem({
   // PR 信息(C' 期):勾选且有引用时取最新一条(prRefs 已按 lastSeenAt 降序)。
   const infoPrRef = taskInfoFields.includes('pr') ? prRefs[0] : undefined;
   const infoWorktree = useTaskInfoWorktree(session, taskInfoFields.includes('worktree'));
-  const costPresentation = useSessionCustomProviderCostPresentation(
-    session.providerId,
-    remoteDeviceId,
-  );
-  const showSdkEstimate = useShowCustomProviderSdkEstimate(remoteDeviceId);
+  const wantsCostInfo = taskInfoFields.includes('cost');
+  const { presentation: costPresentation, showSdkEstimate } =
+    useSessionCustomProviderCostPresentation(
+      session.providerId,
+      remoteDeviceId,
+      wantsCostInfo,
+    );
   // 传 hasPrRef / hasWorktree 让它们参与「按勾选顺序」排列。
   const infoPieces = useProjectedSessionInfoPieces(
     session,

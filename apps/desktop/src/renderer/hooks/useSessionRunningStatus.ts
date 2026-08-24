@@ -53,6 +53,7 @@ import {
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
 } from '@/lib/silencedSessionDoneStore';
+import { getStartingSessionIds } from '@/lib/sessionStartingStore';
 
 // Codex maker 化后, codex session 也走 makerChatStore;
 // 不再需要双 store 合并 —— 直接订阅 makerChatStore 即可。
@@ -110,6 +111,8 @@ export function useSessionRunningStatus(
   const onSessionDoneRef = useRef(options?.onSessionDone);
   const onSessionErrorRef = useRef(options?.onSessionError);
   const onSessionNeedsReplyRef = useRef(options?.onSessionNeedsReply);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
   useEffect(() => {
     onSessionDoneRef.current = options?.onSessionDone;
     onSessionErrorRef.current = options?.onSessionError;
@@ -201,8 +204,6 @@ export function useSessionRunningStatus(
         // 抑制 callback，侧栏 / Dock attention 仍按普通 done/error 逻辑保留。
         const notificationOwnedByScheduler =
           isSessionTerminalNotificationOwnedByScheduler(sessionId);
-        const isActive = sessionId === activeSessionId;
-
         // error 立刻处理:队列会被 abort,不存在"下一条自动接着跑"的场景;红角标 +
         // 系统通知(onSessionError,由 renderer 侧 gate focus)都马上触发,不走
         // debounce。出错永不静默:失败的后台 turn 不能伪装成正常完成或悄无声息消失。
@@ -235,13 +236,16 @@ export function useSessionRunningStatus(
           // section 3 在 section 2 之后跑、awaiting 天然覆盖 done;debounce 把 done 推迟到
           // section 3 之后,必须显式让 awaiting 优先。done 系统通知仍照常发(与原行为一致)。
           const cur = makerChatStore.getRunningSnapshot().get(sessionId);
+          const isActive = sessionId === activeSessionIdRef.current;
+          const isRunning = cur?.isRunning === true;
+          const isStarting = getStartingSessionIds().has(sessionId);
           const stillPending =
             !!cur &&
             (cur.hasPendingAskUser ||
               cur.hasPendingPermission ||
               cur.hasPendingPlanReview ||
               cur.hasPendingPluginSetup);
-          if (!isActive && !stillPending) {
+          if (!isActive && !isRunning && !isStarting && !stillPending) {
             addSessionAttention(sessionId, 'done');
           }
           if (!notificationOwnedByScheduler) onSessionDoneRef.current?.(sessionId);

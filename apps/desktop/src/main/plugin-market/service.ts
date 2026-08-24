@@ -15,6 +15,7 @@ import {
   GHOST_ICON_MAX_BYTES,
   ghostNetworkAuthorizationWithinCap,
   ghostNodeSecretAuthorizationWithinCap,
+  ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
   ghostInstallApprovalToken,
@@ -1777,6 +1778,7 @@ export class PluginMarketService {
             extraCapabilities.length > 0 ||
             !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostNodeSecretAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
+            !ghostSettingsUiWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
             !ghostUnknownV3FieldsWithinCap(manifestCap, inspected.canonicalManifest)
           ) {

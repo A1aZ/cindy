@@ -15,6 +15,7 @@ import {
   ghostLocalePathFor,
   ghostNetworkAuthorizationWithinCap,
   ghostNodeSecretAuthorizationWithinCap,
+  ghostSettingsUiWithinCap,
   ghostSubscribeAuthorizationWithinCap,
   ghostUnknownV3FieldsWithinCap,
   ghostNetworkHostMatches,
@@ -4457,6 +4458,85 @@ describe('ghostPermissionProjectionFingerprint', () => {
     expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, actual.manifest)).toBe(false);
     expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, changedHint.manifest)).toBe(false);
     expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, reviewed.manifest)).toBe(true);
+  });
+
+  it('market cap allows OAuth scopes to reorder or narrow but rejects expansion and other drift', () => {
+    const manifest = (scopes: string[], label = 'Example account') =>
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['panel', 'model', 'network'],
+        settingsHtml: 'settings.html',
+        network: {
+          hosts: ['accounts.example.com'],
+          secrets: [
+            {
+              key: 'oauth_token',
+              label,
+              source: 'oauth',
+              inject: { header: 'Authorization', format: 'Bearer {value}' },
+              oauth: {
+                authorizeUrl: 'https://accounts.example.com/authorize',
+                tokenUrl: 'https://accounts.example.com/token',
+                scopes,
+              },
+            },
+          ],
+        },
+      });
+    const reviewed = manifest(['read', 'write']);
+    const reordered = manifest(['write', 'read']);
+    const narrowed = manifest(['read']);
+    const expanded = manifest(['read', 'admin']);
+    const changedLabel = manifest(['read'], 'Account password');
+    expect(
+      reviewed.ok && reordered.ok && narrowed.ok && expanded.ok && changedLabel.ok,
+    ).toBe(true);
+    if (!reviewed.ok || !reordered.ok || !narrowed.ok || !expanded.ok || !changedLabel.ok) {
+      return;
+    }
+
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, reordered.manifest)).toBe(true);
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, narrowed.manifest)).toBe(true);
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, reordered.manifest)).toEqual(
+      [],
+    );
+    expect(unreviewedGhostPermissionItems(reviewed.manifest, undefined, narrowed.manifest)).toEqual(
+      [],
+    );
+    expect(ghostNetworkAuthorizationWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
+    expect(
+      unreviewedGhostPermissionItems(reviewed.manifest, undefined, changedLabel.manifest),
+    ).toEqual([expect.objectContaining({ key: 'network:secret:oauth_token' })]);
+  });
+
+  it('market cap requires settings UI presence and only allows its height to stay or shrink', () => {
+    const withoutSettings = validateGhostManifest(goodChipManifest());
+    const autoHeight = validateGhostManifest({
+      ...goodChipManifest(),
+      settingsHtml: 'settings.html',
+    });
+    const fixedHeight = (height: number) =>
+      validateGhostManifest({
+        ...goodChipManifest(),
+        settingsHtml: 'settings.html',
+        settingsHeight: height,
+      });
+    const reviewed = fixedHeight(360);
+    const narrowed = fixedHeight(240);
+    const expanded = fixedHeight(480);
+    expect(
+      withoutSettings.ok && autoHeight.ok && reviewed.ok && narrowed.ok && expanded.ok,
+    ).toBe(true);
+    if (!withoutSettings.ok || !autoHeight.ok || !reviewed.ok || !narrowed.ok || !expanded.ok) {
+      return;
+    }
+
+    expect(ghostSettingsUiWithinCap(withoutSettings.manifest, autoHeight.manifest)).toBe(false);
+    expect(ghostSettingsUiWithinCap(reviewed.manifest, narrowed.manifest)).toBe(true);
+    expect(ghostSettingsUiWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
+    expect(ghostSettingsUiWithinCap(reviewed.manifest, autoHeight.manifest)).toBe(false);
+    expect(ghostSettingsUiWithinCap(autoHeight.manifest, reviewed.manifest)).toBe(true);
+    expect(ghostSettingsUiWithinCap(autoHeight.manifest, withoutSettings.manifest)).toBe(true);
   });
 
   it('same-key/different-labelArgs 同时作废 baseline、diff 与真实包复核', () => {

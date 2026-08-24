@@ -2437,6 +2437,38 @@ export function diffInstalledGhostPermissionItems(
   };
 }
 
+function ghostOauthAuthorizationWithinCap(
+  reviewed: GhostSecretOauthDecl,
+  actual: GhostSecretOauthDecl,
+): boolean {
+  const { scopes: reviewedScopes, ...reviewedBase } = reviewed;
+  const { scopes: actualScopes, ...actualBase } = actual;
+  return (
+    JSON.stringify(actualBase) === JSON.stringify(reviewedBase) &&
+    (actualScopes ?? []).every((scope) => (reviewedScopes ?? []).includes(scope))
+  );
+}
+
+function ghostOauthPermissionWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+  item: GhostPermissionItem,
+): boolean {
+  const actualSecret = actual.network?.secrets?.find(
+    (secret) => `network:secret:${secret.key}` === item.key,
+  );
+  if (actualSecret?.source !== 'oauth' || !actualSecret.oauth) return false;
+  const reviewedSecret = reviewed.network?.secrets?.find(
+    (secret) => secret.key === actualSecret.key,
+  );
+  return (
+    reviewedSecret?.source === 'oauth' &&
+    reviewedSecret.oauth !== undefined &&
+    actualSecret.label === reviewedSecret.label &&
+    ghostOauthAuthorizationWithinCap(reviewedSecret.oauth, actualSecret.oauth)
+  );
+}
+
 /** 返回真实包中超出市场声明与既有安装基线的 Host 能力。 */
 export function unreviewedGhostPermissionItems(
   reviewed: GhostManifest,
@@ -2462,6 +2494,10 @@ export function unreviewedGhostPermissionItems(
     ghostNodeSecretAuthorizationWithinCap(reviewed, actual) ||
     (previouslyInstalled !== undefined &&
       ghostNodeSecretAuthorizationWithinCap(previouslyInstalled, actual));
+  const oauthPermissionApproved = (item: GhostPermissionItem): boolean =>
+    ghostOauthPermissionWithinCap(reviewed, actual, item) ||
+    (previouslyInstalled !== undefined &&
+      ghostOauthPermissionWithinCap(previouslyInstalled, actual, item));
   return ghostPermissionItems(actual).filter(
     (item) =>
       !approved.has(ghostPermissionProjectionKey(item)) &&
@@ -2473,7 +2509,10 @@ export function unreviewedGhostPermissionItems(
       !(item.key === 'preview' && previewApproved) &&
       // Node secret 的展示 key 带完整 methods；换序或收窄是收权。URL/hint 与
       // entry 等 Host 实际消费字段由专用上限比较守住，不能依赖展示投影相等。
-      !(item.key.startsWith('node:secret:') && nodeSecretsApproved),
+      !(item.key.startsWith('node:secret:') && nodeSecretsApproved) &&
+      // OAuth 展示 detail 带完整 scopes；换序或收窄同样是收权。其余 OAuth
+      // 参数、凭证标签与注入语义仍由专用上限和完整投影逐项钉住。
+      !oauthPermissionApproved(item),
   );
 }
 
@@ -2505,6 +2544,18 @@ export function ghostNodeSecretAuthorizationWithinCap(
     if (binding.hint !== undefined && binding.hint !== cap.hint) return false;
   }
   return true;
+}
+
+/** 市场清单对真实包设置 WebView 暴露面的授权上限。 */
+export function ghostSettingsUiWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  if (actual.settingsHtml === undefined) return true;
+  if (reviewed.settingsHtml === undefined) return false;
+  if (actual.settingsHeight === undefined) return reviewed.settingsHeight === undefined;
+  if (reviewed.settingsHeight === undefined) return true;
+  return actual.settingsHeight <= reviewed.settingsHeight;
 }
 
 /**
@@ -2548,8 +2599,8 @@ export function ghostNetworkAuthorizationWithinCap(
     ) {
       return false;
     }
-    if (secret.oauth !== undefined && JSON.stringify(secret.oauth) !== JSON.stringify(cap.oauth)) {
-      return false;
+    if (secret.oauth !== undefined) {
+      if (!cap.oauth || !ghostOauthAuthorizationWithinCap(cap.oauth, secret.oauth)) return false;
     }
   }
 

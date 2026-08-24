@@ -17,6 +17,7 @@ import { app } from 'electron';
 import {
   ghostNetworkAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostUnknownV3FieldsWithinCap,
   unreviewedGhostPermissionItems,
   validateGhostManifest,
   type GhostManifest,
@@ -198,7 +199,8 @@ export async function installCustomMarketPlugin(input: {
       if (
         extraCapabilities.length > 0 ||
         !ghostNetworkAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
-        !ghostSubscribeAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest)
+        !ghostSubscribeAuthorizationWithinCap(validated.manifest, inspected.canonicalManifest) ||
+        !ghostUnknownV3FieldsWithinCap(validated.manifest, inspected.canonicalManifest)
       ) {
         throwIpcError(
           'GHOST_FILE_INVALID',

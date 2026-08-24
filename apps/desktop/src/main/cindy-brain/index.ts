@@ -28,6 +28,7 @@ import {
   ghostInstallApprovalToken,
   ghostNetworkAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostUnknownV3FieldsWithinCap,
   isGhostInstallApprovalToken,
   ghostAppContextLocale,
   unreviewedGhostPermissionItems,
@@ -5664,7 +5665,8 @@ async function installOrUpdateMarketGhostPackageLocked(
       if (
         undeclaredCapabilities.length > 0 ||
         !ghostNetworkAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
-        !ghostSubscribeAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest)
+        !ghostSubscribeAuthorizationWithinCap(expected.manifestCap, inspected.canonicalManifest) ||
+        !ghostUnknownV3FieldsWithinCap(expected.manifestCap, inspected.canonicalManifest)
       ) {
         log.warn('market package exceeds catalog manifest capabilities', {
           ghostId: expected.ghostId,

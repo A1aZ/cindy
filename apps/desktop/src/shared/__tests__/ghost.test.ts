@@ -15,6 +15,7 @@ import {
   ghostLocalePathFor,
   ghostNetworkAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostUnknownV3FieldsWithinCap,
   ghostNetworkHostMatches,
   ghostPanelKind,
   ghostPermissionBaselineKey,
@@ -4533,6 +4534,52 @@ describe('ghostPermissionProjectionFingerprint', () => {
     expect(
       unreviewedGhostPermissionItems(reviewed.manifest, undefined, expanded.manifest),
     ).toEqual([expect.objectContaining({ key: 'preview' })]);
+  });
+
+  it('真实包的未知 v3 字段只能是市场声明的逐项一致子集', () => {
+    const reviewed = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'future-helper',
+      name: 'Future helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      futureCapability: { mode: 'safe', limits: { daily: 5 } },
+      anotherFutureCapability: true,
+    });
+    const same = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'future-helper',
+      name: 'Future helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      futureCapability: { limits: { daily: 5 }, mode: 'safe' },
+    });
+    const expanded = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'future-helper',
+      name: 'Future helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      futureCapability: { mode: 'elevated', limits: { daily: 5 } },
+    });
+    const undeclared = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'future-helper',
+      name: 'Future helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      delayedCapability: true,
+    });
+    expect(reviewed.ok && same.ok && expanded.ok && undeclared.ok).toBe(true);
+    if (!reviewed.ok || !same.ok || !expanded.ok || !undeclared.ok) return;
+
+    expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, same.manifest)).toBe(true);
+    expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, expanded.manifest)).toBe(false);
+    expect(ghostUnknownV3FieldsWithinCap(reviewed.manifest, undeclared.manifest)).toBe(false);
   });
 
   it('语义相同时指纹稳定(与字段/条目顺序无关)', () => {

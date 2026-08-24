@@ -2552,6 +2552,37 @@ export function ghostSubscribeAuthorizationWithinCap(
   );
 }
 
+function canonicalGhostExtensionValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalGhostExtensionValue).join(',')}]`;
+  }
+  if (isPlainObject(value)) {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalGhostExtensionValue(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** v3 前向兼容字段可以被旧 Host 保留，但真实包不能超出市场清单声明。 */
+export function ghostUnknownV3FieldsWithinCap(
+  reviewed: GhostManifest,
+  actual: GhostManifest,
+): boolean {
+  if (actual.schemaVersion !== 3) return true;
+  return Object.entries(actual)
+    .filter(
+      ([key]) => key === 'model' || !GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS.has(key),
+    )
+    .every(
+      ([key, value]) =>
+        Object.prototype.hasOwnProperty.call(reviewed, key) &&
+        canonicalGhostExtensionValue(value) ===
+          canonicalGhostExtensionValue((reviewed as Record<string, unknown>)[key]),
+    );
+}
+
 /**
  * icon 允许的图片扩展名 → mime(校验与 main 读盘供图共用同一口径)。
  * 不收 svg:svg 可携带脚本,虽经 <img> 渲染不执行,仍不给这个面。

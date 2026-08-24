@@ -98,6 +98,56 @@ describe('Ghost manifest contract', () => {
     ).toBe(false);
   });
 
+  it('validates and normalizes setup at the shared protocol boundary', () => {
+    const manifest = {
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'setup-helper',
+      name: 'Setup Helper',
+      version: '1.0.0',
+      entry: 'index.js',
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['api.example.com'],
+        secrets: [
+          {
+            key: 'api_key',
+            label: 'API key',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+          },
+        ],
+      },
+      setup: {
+        requires: [
+          {
+            anyOf: ['secret:api_key', { kv: 'repository', label: 'Repository' }],
+          },
+        ],
+      },
+    } as const;
+
+    const result = validateGhostManifest(manifest);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.manifest.setup).toEqual({
+      requires: [
+        {
+          anyOf: [
+            { kind: 'secret', key: 'api_key' },
+            { kind: 'kv', key: 'repository', label: 'Repository' },
+          ],
+        },
+      ],
+    });
+    expect(validateGhostManifest({ ...manifest, setup: { requires: 'bad' } }).ok).toBe(false);
+    expect(
+      validateGhostManifest({
+        ...manifest,
+        setup: { requires: [{ anyOf: ['secret:missing'] }] },
+      }).ok,
+    ).toBe(false);
+  });
+
   it('accepts empty and zero-power v2 slots and drops the latter', () => {
     expect(validateGhostManifest({ ...validManifest, slots: [], tools: undefined })).toMatchObject({
       ok: true,

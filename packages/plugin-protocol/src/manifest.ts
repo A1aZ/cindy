@@ -834,6 +834,24 @@ export interface GhostManualNeeds {
   items: GhostManualItem[];
 }
 
+/** setup 作者声明：组间 allOf，组内 anyOf。 */
+export type GhostSetupRequirement =
+  | { kind: 'secret'; key: string }
+  | { kind: 'connection'; key: string }
+  | { kind: 'kv'; key: string; label: string };
+
+export interface GhostSetupGroup {
+  anyOf: GhostSetupRequirement[];
+}
+
+export interface GhostSetupDecl {
+  requires: GhostSetupGroup[];
+}
+
+export const GHOST_SETUP_MAX_GROUPS = 8;
+export const GHOST_SETUP_MAX_ITEMS_PER_GROUP = 8;
+export const GHOST_SETUP_KV_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 /** 已校验的 ghost.json 协议文档；Desktop 会再投影成无 slots 的运行时模型。 */
 export interface GhostManifest {
   /** v2 仅作存量兼容；新插件使用 v3。 */
@@ -969,6 +987,8 @@ export interface GhostManifest {
    * 正文经 ghost_manual 按需读取。旧客户端忽略这一可选顶层字段。
    */
   manual?: GhostManualNeeds;
+  /** 使用前置检查；引用必须绑定本清单已声明的凭证、连接或设置项。 */
+  setup?: GhostSetupDecl;
   /** v3 未知顶层字段原样保留，但 Host 不解释、不展示、不授权。 */
   [key: string]: unknown;
 }
@@ -1111,6 +1131,12 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+const GHOST_MANIFEST_RESERVED_RECORD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isGhostManifestReservedRecordKey(value: string): boolean {
+  return GHOST_MANIFEST_RESERVED_RECORD_KEYS.has(value);
+}
+
 const GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS = new Set([
   'schemaVersion',
   'id',
@@ -1143,6 +1169,7 @@ const GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS = new Set([
   'preview',
   'skill',
   'manual',
+  'setup',
   'notify',
   'badge',
   'confirm',
@@ -3564,6 +3591,154 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
     manual = { items: manualItems };
   }
 
+  // setup 引用必须在交付边界就与同一份 manifest 的凭证、连接和设置入口对齐；
+  // 不能让服务端接受、Desktop 装入时才拒绝。
+  let setup: GhostSetupDecl | undefined;
+  if (raw.setup !== undefined) {
+    if (!isPlainObject(raw.setup)) {
+      return {
+        ok: false,
+        reason: 'setup 必须是对象(如 { "requires": [{ "anyOf": ["secret:api_key"] }] })',
+      };
+    }
+    const setupRaw = raw.setup as Record<string, unknown>;
+    if (
+      !Array.isArray(setupRaw.requires) ||
+      setupRaw.requires.length > GHOST_SETUP_MAX_GROUPS
+    ) {
+      return {
+        ok: false,
+        reason: `setup.requires 必须是 0–${GHOST_SETUP_MAX_GROUPS} 组的数组(空数组 = 显式声明无使用前置需求)`,
+      };
+    }
+    const secretByKey = new Map<
+      string,
+      { hostDerivedSource: 'login-email' | 'gh-cli' | 'oidc-token' | null }
+    >([
+      ...(network?.secrets ?? []).map(
+        (secret) =>
+          [
+            secret.key,
+            {
+              hostDerivedSource:
+                secret.source === 'login-email' ||
+                secret.source === 'gh-cli' ||
+                secret.source === 'oidc-token'
+                  ? secret.source
+                  : null,
+            },
+          ] as const,
+      ),
+      ...(node?.secretBindings ?? []).map(
+        (secret) => [secret.key, { hostDerivedSource: null }] as const,
+      ),
+    ]);
+    const connectionKeys = new Set((network?.connections ?? []).map((connection) => connection.key));
+    const groups: GhostSetupGroup[] = [];
+    for (const group of setupRaw.requires) {
+      if (
+        !isPlainObject(group) ||
+        !Array.isArray(group.anyOf) ||
+        group.anyOf.length === 0 ||
+        group.anyOf.length > GHOST_SETUP_MAX_ITEMS_PER_GROUP
+      ) {
+        return {
+          ok: false,
+          reason: `setup.requires 每组必须是 { "anyOf": [...] } 且组内 1–${GHOST_SETUP_MAX_ITEMS_PER_GROUP} 条`,
+        };
+      }
+      const items: GhostSetupRequirement[] = [];
+      const seenRefs = new Set<string>();
+      for (const requirement of group.anyOf) {
+        let item: GhostSetupRequirement;
+        if (typeof requirement === 'string') {
+          const match = /^(secret|connection):(.+)$/.exec(requirement);
+          if (!match) {
+            return {
+              ok: false,
+              reason: `setup 条目 ${JSON.stringify(requirement)} 形态不对(字符串条目须为 "secret:<key>" 或 "connection:<key>";kv 用对象 { "kv": "<key>", "label": "..." })`,
+            };
+          }
+          const [, kind, key] = match;
+          if (kind === 'secret') {
+            const declaration = secretByKey.get(key);
+            if (!declaration) {
+              return {
+                ok: false,
+                reason: `setup 引用了未声明的凭证 ${JSON.stringify(key)}(必须逐字取自 network.secrets[].key 或 node.secretBindings[].key)`,
+              };
+            }
+            if (declaration.hostDerivedSource) {
+              return {
+                ok: false,
+                reason: `setup 不允许引用 ${declaration.hostDerivedSource} 源凭证 ${JSON.stringify(key)}(Host 派生身份没有用户配置动作可引导)`,
+              };
+            }
+            item = { kind: 'secret', key };
+          } else {
+            if (!connectionKeys.has(key)) {
+              return {
+                ok: false,
+                reason: `setup 引用了未声明的连接 ${JSON.stringify(key)}(必须逐字取自 network.connections[].key)`,
+              };
+            }
+            item = { kind: 'connection', key };
+          }
+        } else if (isPlainObject(requirement)) {
+          if (
+            typeof requirement.kv === 'string' &&
+            isGhostManifestReservedRecordKey(requirement.kv)
+          ) {
+            return {
+              ok: false,
+              reason: `setup kv 条目的 kv 不允许使用对象保留键名 ${JSON.stringify(requirement.kv)}`,
+            };
+          }
+          if (
+            typeof requirement.kv !== 'string' ||
+            !GHOST_SETUP_KV_KEY_RE.test(requirement.kv)
+          ) {
+            return {
+              ok: false,
+              reason: 'setup kv 条目的 kv 必须是 1–64 位字母/数字/下划线/点/连字符的键名',
+            };
+          }
+          if (
+            typeof requirement.label !== 'string' ||
+            requirement.label.trim().length === 0 ||
+            requirement.label.length > 64
+          ) {
+            return {
+              ok: false,
+              reason: 'setup kv 条目必须带 1–64 字符的 label(kv 键名宿主无先验,弹窗要有名字可展示)',
+            };
+          }
+          if (raw.settingsHtml === undefined) {
+            return {
+              ok: false,
+              reason:
+                'setup 引用了 kv 参数但没有 settingsHtml——参数由意识设置界面收单,没有界面就没人填',
+            };
+          }
+          item = { kind: 'kv', key: requirement.kv, label: requirement.label };
+        } else {
+          return {
+            ok: false,
+            reason: 'setup.requires[].anyOf 每条必须是字符串引用或 { "kv", "label" } 对象',
+          };
+        }
+        const ref = `${item.kind}:${item.key}`;
+        if (seenRefs.has(ref)) {
+          return { ok: false, reason: `setup 同组内含重复条目 ${JSON.stringify(ref)}` };
+        }
+        seenRefs.add(ref);
+        items.push(item);
+      }
+      groups.push({ anyOf: items });
+    }
+    setup = { requires: groups };
+  }
+
   // 显式触发指令:1–32 字符、无空白、无 '/'(允许中文,如 /画图);
   // 必须有工具可干活。跨意识查重在装入时由 GhostManager 执行(需要本地清单)。
   if (raw.command !== undefined) {
@@ -3676,6 +3851,7 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
         ? { iosSimulator: true as const }
         : {}),
       ...(manual !== undefined ? { manual } : {}),
+      ...(setup !== undefined ? { setup } : {}),
     },
   };
 }

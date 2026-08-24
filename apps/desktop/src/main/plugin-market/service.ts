@@ -15,6 +15,7 @@ import {
   GHOST_ICON_MAX_BYTES,
   ghostNetworkAuthorizationWithinCap,
   ghostSubscribeAuthorizationWithinCap,
+  ghostUnknownV3FieldsWithinCap,
   ghostInstallApprovalToken,
   ghostIconMimeType,
   isSafeGhostRelativePath,
@@ -1774,7 +1775,8 @@ export class PluginMarketService {
           if (
             extraCapabilities.length > 0 ||
             !ghostNetworkAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
-            !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest)
+            !ghostSubscribeAuthorizationWithinCap(manifestCap, inspected.canonicalManifest) ||
+            !ghostUnknownV3FieldsWithinCap(manifestCap, inspected.canonicalManifest)
           ) {
             throwIpcError(
               'GHOST_FILE_INVALID',

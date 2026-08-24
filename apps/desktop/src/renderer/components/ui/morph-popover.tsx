@@ -38,7 +38,8 @@ import { cn } from '@/lib/utils';
  *   Chromium "ResizeObserver loop" 告警)。
  * - prefers-reduced-motion 降级为直切(红线 a);焦点/Esc/outside-click 语义
  *   与 §14.2 相同(红线 d):打开聚焦 [data-morph-autofocus] → 首个 input →
- *   面板容器,关闭后焦点归还 trigger。
+ *   面板容器,关闭后焦点归还 trigger。composer 工具条可另传 restoreFocusTarget,
+ *   把「关完回哪」改成输入框(选完模型立刻能接着打字),其它控件已接走焦点时仍不抢。
  * - Esc 分层:面板内嵌套的 Radix 浮层(role=dialog,如模型行 effort 子面板)
  *   开着时先让内层关。必须挂 capture —— keydown 是 discrete 事件,Radix 的
  *   capture 处理器关层后 React 同步 flush DOM 移除,bubble 阶段已看不到 dialog;
@@ -137,6 +138,12 @@ interface MorphPopoverProps {
   panelAriaLabel?: string;
   /** 打开完成后的外部焦点目标；未提供时按面板内默认规则聚焦。 */
   autoFocusTarget?: () => HTMLElement | null;
+  /**
+   * 关闭后的回焦目标。composer 工具条用它把焦点送回输入框,而不是 trigger
+   * (选完模型 / Esc / 点空白后立刻能接着打字)。未提供时保持 §14.2:键盘关
+   * 回 trigger,鼠标关不回焦。目标已被其它控件接走时仍不抢。
+   */
+  restoreFocusTarget?: () => HTMLElement | null;
 }
 
 /** 是否处于 reduced-motion(SSR/jsdom 无 matchMedia 时按 false) */
@@ -176,6 +183,7 @@ export function MorphPopover({
   wrapperClassName,
   panelAriaLabel,
   autoFocusTarget,
+  restoreFocusTarget,
 }: MorphPopoverProps) {
   // mounted 独立于 open:关闭时先播收合动画,动画完再卸载 portal
   const [mounted, setMounted] = useState(false);
@@ -413,6 +421,8 @@ export function MorphPopover({
       // 面板 / trigger 内 = 键盘关闭(Enter/Space 选项、Esc、点 trigger 收起)→ 归还
       // trigger;已被外部控件 / body 接走(点空白、动作交接)→ 不抢回,避免点空白
       // 关闭后凭空冒 trigger 的 tooltip。
+      // restoreFocusTarget(composer 输入框)是这条默认的例外:面板卸掉后焦点会掉到
+      // body,调用方明确要求回输入框,其它控件已接走时仍不抢。
       let ownedFocusAtClose = false;
       focusSnapTimerRef.current = setTimeout(() => {
         focusSnapTimerRef.current = null;
@@ -428,19 +438,22 @@ export function MorphPopover({
       closeTimerRef.current = setTimeout(
         () => {
           setMounted(false);
-          if (ownedFocusAtClose) {
-            const active = document.activeElement;
-            const focusClaimedElsewhere =
-              active instanceof Node &&
-              active !== document.body &&
-              !panel.contains(active) &&
-              !wrap.contains(active);
-            if (!focusClaimedElsewhere) {
-              wrap.querySelector<HTMLElement>('button, [tabindex]')?.focus({
-                preventScroll: true,
-              });
-            }
+          const active = document.activeElement;
+          const focusClaimedElsewhere =
+            active instanceof Node &&
+            active !== document.body &&
+            !panel.contains(active) &&
+            !wrap.contains(active);
+          if (focusClaimedElsewhere) return;
+          const preferredHome = restoreFocusTarget?.();
+          if (preferredHome instanceof HTMLElement && preferredHome.isConnected) {
+            preferredHome.focus({ preventScroll: true });
+            return;
           }
+          if (!ownedFocusAtClose) return;
+          wrap.querySelector<HTMLElement>('button, [tabindex]')?.focus({
+            preventScroll: true,
+          });
         },
         reducedClose ? 0 : MORPH_MS + 20,
       );
@@ -461,6 +474,7 @@ export function MorphPopover({
     endBorderColor,
     syncPanelToContent,
     autoFocusTarget,
+    restoreFocusTarget,
   ]);
 
   /** 打开稳定后跟随内容尺寸变化(搜索过滤 / Edit 面板展宽),同曲线平滑过渡 */

@@ -50,10 +50,7 @@ import {
   TunnelingHttpsAgent,
   type OutboundProxyTarget,
 } from '@cindy/anthropic-compat-proxy';
-import {
-  fetchSingleHopWithSsrFGuard,
-  type SsrFPolicy,
-} from '@cindy/browser-control-runtime/ssrf-runtime';
+import { fetchSingleHopWithSsrFGuard } from '@cindy/browser-control-runtime/ssrf-runtime';
 
 import { createMakerLogger } from './logger-adapter.js';
 import { resolveDesktopOutboundProxy } from './outbound-proxy-resolver.js';
@@ -524,13 +521,6 @@ function createPinnedProxyDispatcher(
   })();
 }
 
-const PROXIED_PUBLIC_SSRF_POLICY: SsrFPolicy = {
-  // Clash / sing-box / Surge 的 fake-IP DNS 只在已经确定走代理时放行；其它
-  // RFC1918、loopback、link-local 与 metadata 地址仍由默认策略阻断。
-  allowRfc2544BenchmarkRange: true,
-  allowIpv6UniqueLocalRange: true,
-};
-
 /**
  * Agent 在途访问未声明公网目标的单跳出口：沿用 Desktop 的系统/PAC/env 代理判定，
  * 但无论直连还是代理都只连接 SSRF 守门已确认的地址。beforeDispatch 在代理解析与
@@ -551,7 +541,6 @@ export async function guardedOutboundFetch(
     requireHttps: true,
     ...(proxy
       ? {
-          policy: PROXIED_PUBLIC_SSRF_POLICY,
           dispatcherFactory: ({ url: guardedUrl, pinned }) =>
             createPinnedProxyDispatcher(proxy, guardedUrl, pinned.addresses),
         }

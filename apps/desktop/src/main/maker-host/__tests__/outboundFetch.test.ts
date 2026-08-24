@@ -336,6 +336,22 @@ describe('outboundFetch', () => {
     expect(undiciState.fetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'https://198.18.0.1/data',
+    'https://[fc00::1]/data',
+  ])('does not treat selecting a proxy as authorization for special-use target %s', async (url) => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    loggerState.debug.mockClear();
+
+    await expect(guardedOutboundFetch(url, { method: 'GET' }, vi.fn())).rejects.toThrow(/blocked/i);
+
+    expect(undiciState.fetch).not.toHaveBeenCalled();
+    expect(loggerState.debug).not.toHaveBeenCalledWith(
+      'creating outbound proxy dispatcher',
+      expect.anything(),
+    );
+  });
+
   it('passes the proxy dispatcher through to undici fetch', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     await outboundFetch('https://platform.claude.com/v1/oauth/token', { method: 'POST' });

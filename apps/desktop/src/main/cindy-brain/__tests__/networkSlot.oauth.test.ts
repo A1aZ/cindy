@@ -62,6 +62,7 @@ function makeSlot(params: {
     readSecret: () => null,
     getLoginEmail: () => null,
     fetchImpl: fetchImpl as unknown as NetworkSlotDeps['fetchImpl'],
+    fetchPublicImpl: async () => ({ response: fakeResponse(), release: async () => undefined }),
     saveGhostMedia: async () => ({ url: 'cindy-media://blobs/a.png', hash: 'a'.repeat(64), ext: '.png' }),
     isSupportedMediaMime: () => false,
     readGhostMedia: async () => null,

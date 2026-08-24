@@ -341,6 +341,7 @@ import {
   hasGrokOAuthLogin,
 } from '../maker-host/grok-oauth-login.js';
 import { invalidateXaiBridgeAuth } from '../maker-host/xai-auth-invalidation-host.js';
+import { fetchSingleHopWithSsrFGuard } from '@cindy/browser-control-runtime/ssrf-runtime';
 import {
   isModelDisabled,
   isModelDisabledWithUniqueLegacyBasename,
@@ -4846,6 +4847,15 @@ export function getGhostNetworkSlot(): GhostNetworkSlot {
       // init 收窄:body 的 Uint8Array 在 lib.dom 的 BodyInit 泛型下对不齐,
       // 运行时 undici 原生支持,按 RequestInit 交给 fetch。
       fetchImpl: (url, init) => outboundFetch(url, init as RequestInit),
+      // 未在 manifest / 连接白名单声明的 Agent 在途目标不能复用普通
+      // outboundFetch：它会重新解析 hostname，留下 DNS rebinding 窗口。
+      // 这里每跳都以复核后的 DNS 地址建立 pinned dispatcher。
+      fetchPublicImpl: (url, init) => fetchSingleHopWithSsrFGuard({
+        url,
+        init: init as RequestInit,
+        signal: init.signal,
+        requireHttps: true,
+      }),
       // 媒体模式(as:'media'):字节直落总仓 + ghost-gallery 记账(出生=该
       // 意识,与 cindy 槽产物同一记账口径),走统一入库助手 ingestMedia
       // (规则 25)。mime 白名单同一来源(blobStore),槽内归一化后再判。

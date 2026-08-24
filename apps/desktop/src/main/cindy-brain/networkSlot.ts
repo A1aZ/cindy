@@ -100,6 +100,17 @@ export interface NetworkSlotDeps {
     redirect: 'manual';
   }): Promise<Response>;
   /**
+   * Agent 在途访问未声明公网目标时使用的单跳安全 fetch。实现必须在连接前
+   * 复核 DNS 结果并把连接钉到已复核地址；调用方消费完响应后执行 release。
+   */
+  fetchPublicImpl(url: string, init: {
+    method: string;
+    headers: Record<string, string>;
+    body?: string | Uint8Array;
+    signal: AbortSignal;
+    redirect: 'manual';
+  }): Promise<{ response: Response; release: () => Promise<void> }>;
+  /**
    * 上传通道:按指纹读"该意识名下"的总仓媒体字节(生产实现内做归属查账
    * ghostCanRead——出生自它 / 挂它画廊 / 用户显式过户;越权与不存在统一
    * 返回 null,不给探测空间)。ext 含点(如 '.png')。
@@ -1100,6 +1111,7 @@ export class GhostNetworkSlot {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     timer.unref?.();
     let holdingMediaGate = false;
+    const guardedFetchReleases: Array<() => Promise<void>> = [];
     try {
       this.deps.log?.info('ghost fetch-request start', {
         ghostId, callId, method, host: url.hostname, path: url.pathname,
@@ -1231,13 +1243,20 @@ export class GhostNetworkSlot {
               };
             }
           }
-          response = await this.deps.fetchImpl(currentUrl.toString(), {
+          const fetchInit = {
             method: currentMethod,
             headers: hopHeaders,
             ...(currentBody !== undefined ? { body: currentBody } : {}),
             signal: controller.signal,
-            redirect: 'manual',
-          });
+            redirect: 'manual' as const,
+          };
+          if (agentMediated && !hostDeclared(currentUrl.hostname)) {
+            const guarded = await this.deps.fetchPublicImpl(currentUrl.toString(), fetchInit);
+            guardedFetchReleases.push(guarded.release);
+            response = guarded.response;
+          } else {
+            response = await this.deps.fetchImpl(currentUrl.toString(), fetchInit);
+          }
           responseConnectionInjected = currentConnectionInjected;
           responseMethod = currentMethod;
           if (![301, 302, 303, 307, 308].includes(response.status)) break;
@@ -1504,6 +1523,7 @@ export class GhostNetworkSlot {
       return { ok: false, message: `请求失败:${message}` };
     } finally {
       clearTimeout(timer);
+      await Promise.allSettled(guardedFetchReleases.map((release) => release()));
       if (holdingMediaGate) this.mediaReadsInflight -= 1;
       const left = (this.inflight.get(ghostId) ?? 1) - 1;
       if (left <= 0) this.inflight.delete(ghostId);

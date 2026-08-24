@@ -100,6 +100,43 @@ async function guardHop(
   return { url, dispatcher };
 }
 
+/**
+ * Guard and execute exactly one manually redirected HTTP hop.
+ *
+ * Callers that own redirect semantics can re-run this function for every hop;
+ * the returned dispatcher keeps the vetted DNS answers pinned until the
+ * response body has been consumed and `release()` is called.
+ */
+export async function fetchSingleHopWithSsrFGuard(
+  params: GuardedFetchOptions,
+): Promise<{ response: Response; release: () => Promise<void> }> {
+  const { url, dispatcher } = await guardHop(
+    params.url,
+    params.policy,
+    params.lookupFn,
+    params.requireHttps,
+  );
+  try {
+    const fetchOptions = {
+      ...params.init,
+      signal: params.signal ?? params.init?.signal,
+      redirect: 'manual' as const,
+      dispatcher,
+    };
+    const response = (await undiciFetch(
+      url.href,
+      fetchOptions as unknown as Parameters<typeof undiciFetch>[1],
+    )) as unknown as Response;
+    return {
+      response,
+      release: () => closeDispatcher(dispatcher),
+    };
+  } catch (err) {
+    await closeDispatcher(dispatcher);
+    throw err;
+  }
+}
+
 function stripSensitiveHeaders(init: RequestInit | undefined): RequestInit | undefined {
   if (!init?.headers) return init;
   const headers = new Headers(init.headers);

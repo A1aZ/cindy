@@ -64,6 +64,7 @@ function makeSlot(overrides: Partial<NetworkSlotDeps> = {}) {
     readSecret: () => null,
     getLoginEmail: () => null,
     fetchImpl,
+    fetchPublicImpl: async () => ({ response: response(), release: async () => undefined }),
     readGhostMedia: async () => null,
     takeDirDeposit: () => null,
     writeSaveDeposit: async () => null,

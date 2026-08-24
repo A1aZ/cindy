@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { fetchWithSsrFGuard } from '../shim/ssrf-runtime.js';
+import {
+  fetchSingleHopWithSsrFGuard,
+  fetchWithSsrFGuard,
+} from '../shim/ssrf-runtime.js';
 import {
   isBlockedHostnameOrIp,
   isPrivateIpAddress,
@@ -89,6 +92,15 @@ describe('fetchWithSsrFGuard thin shell', () => {
 
   it('blocks a private IP when policy does not allow it', async () => {
     await expect(fetchWithSsrFGuard({ url: 'http://10.0.0.5/' })).rejects.toThrow(/blocked/i);
+  });
+
+  it('blocks a hostname whose pinned DNS answer is private before a single-hop fetch', async () => {
+    await expect(
+      fetchSingleHopWithSsrFGuard({
+        url: 'https://public.example/data',
+        lookupFn: lookupAddresses([{ address: '127.0.0.1', family: 4 }]),
+      }),
+    ).rejects.toThrow(/blocked/i);
   });
 
   it('does NOT block an allowlisted loopback host (regression: CDP control plane)', async () => {

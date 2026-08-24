@@ -18206,6 +18206,57 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
+  it('does not mint a claim from a nameless itemUpdated yield that later completes without a marker', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-nameless-updated-then-finished',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemUpdated || !handlers.itemCompleted || !handlers.turnCompleted) {
+      throw new Error('expected item and turn handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'run typecheck' });
+    handlers.itemUpdated({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'inProgress',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Exit 0',
+        exitCode: 0,
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.some((event) => event.type === 'done')).toBe(true);
+    });
+    expect(events.find((event) => event.type === 'done')?.turnContinuationId).toBeUndefined();
+    expect(yieldTurnStartCalls(host)).toHaveLength(0);
+    expect(handle.isTurnRunning?.()).toBe(false);
+    await handle.close();
+  });
+
   it('emits a terminal error when a later continuation start is rejected without throwing', async () => {
     const agent = new CodexAgent(createDeps());
     let turnStarts = 0;

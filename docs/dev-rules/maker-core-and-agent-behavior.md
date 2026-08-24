@@ -75,7 +75,9 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   结算 usage；只有原子挂在该终态边界上的显式 continuation claim 才能挡住产品结束。
   Codex `functions.exec` yield 没有协议级 execution handle（cell / wait 活在
   `codex-rs` daemon），近期检测只能是 adapter 内、用真实 rollout fixture 锁死的启发式，
-  用来铸造有界 claim，再由宿主确定性开续段让模型 wait 同一 cell。同 turn 或续段里
+  用来铸造有界 claim，再由宿主确定性开续段让模型 wait 同一 cell。无 `id`／`call_id`
+  的 item 只认 `itemCompleted` 快照：`itemUpdated` 不得入账，无 yield marker 的完成
+  必须清掉匿名桶，不得给匿名条目发明身份。同 turn 或续段里
   后续 `wait` 输出 `Script completed` / `Script terminated` 后视为该 cell 已结算，不得
   再铸 claim，也不得报 lost-handle。禁止把 `last_agent_message == null` 或开场白当结算
   判据；cell 跨 turn 存活性未证实前，续段失败必须诚实报 lost-handle，不得 replay 原请求

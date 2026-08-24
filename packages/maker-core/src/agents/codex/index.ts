@@ -3207,12 +3207,20 @@ export class CodexAgent extends BaseAgent {
       ]);
       const existing = yieldedExecCellsByTurnId.get(turnId) ?? new Map<string, YieldedExecCell[]>();
       if (cells.length === 0) {
-        if (phase === 'completed' && itemId) existing.delete(itemId);
+        if (phase === 'completed') {
+          // Named completions drop that item. Nameless completions cannot match
+          // a prior updated snapshot, so they clear the anonymous bucket rather
+          // than invent a synthetic identity.
+          if (itemId) existing.delete(itemId);
+          else existing.delete('');
+        }
       } else if (itemId) {
         existing.set(itemId, cells);
-      } else {
+      } else if (phase === 'completed') {
         // Nameless exec and wait share the same anonymous bucket. A later wait
         // that is still running must accumulate, not replace the yielded exec.
+        // Only completed snapshots are authoritative; nameless itemUpdated
+        // cannot later be forgotten without an id.
         const anonymous = existing.get('') ?? [];
         existing.set('', dedupeCells([...anonymous, ...cells]));
       }

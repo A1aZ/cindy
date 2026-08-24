@@ -6,7 +6,6 @@ import {
   GHOST_CINDY_EMBED_MAX_TEXTS,
   GHOST_MANIFEST_SUMMARY_MAX_CHARS,
   GHOST_MAIN_VIEW_ICONS,
-  GHOST_SLOTS,
   changedBuiltinOauthClientSecretKeys,
   deriveGhostSessionContext,
   diffGhostPermissionItems,
@@ -122,7 +121,7 @@ describe('ghost · id 规则', () => {
     const base = validateGhostManifest(goodManifest());
     expect(base.ok && ghostContentKeys(base.manifest)).toEqual(['panel', 'code']);
     const chip = validateGhostManifest(goodChipManifest());
-    expect(chip.ok && ghostContentKeys(chip.manifest)).toEqual(['panel', 'code', 'slotCindy']);
+    expect(chip.ok && ghostContentKeys(chip.manifest)).toEqual(['panel', 'code']);
     const noPanel: Record<string, unknown> = {
       ...goodManifest(),
       slots: ['tool'],
@@ -148,7 +147,9 @@ describe('ghost · 清单校验', () => {
     const v = validateGhostManifest({ ...goodManifest(), unknownField: 'ignored' });
     expect(v.ok).toBe(true);
     const manifest = (v as { ok: true; manifest: GhostManifest }).manifest;
-    expect(manifest).toEqual(goodManifest()); // 未知字段被丢弃
+    const expected = goodManifest();
+    delete expected.slots;
+    expect(manifest).toEqual(expected); // 未知字段与 v2 slots 被丢弃
   });
 
   it('panel 可省略(slots 不含 panel 时)', () => {
@@ -983,6 +984,82 @@ describe('ghost · 清单校验', () => {
   });
 });
 
+describe('ghost · Manifest v3 直接能力声明', () => {
+  it('规范化为无 slots 的运行时模型，并保留但不授权未知顶层字段', () => {
+    const result = validateGhostManifest({
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'direct-helper',
+      name: 'Direct Helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      tools: [{ name: 'help', description: '提供帮助' }],
+      card: {},
+      agent: {},
+      notify: true,
+      library: true,
+      futureCapability: { mode: 'example' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.manifest).not.toHaveProperty('slots');
+    expect(result.manifest.card).toEqual({});
+    expect(result.manifest.agent).toEqual({});
+    expect(result.manifest.notify).toBe(true);
+    expect(result.manifest.library).toBe(true);
+    expect(ghostPermissionItems(result.manifest).map((item) => item.key)).toContain('library');
+    expect(result.manifest.futureCapability).toEqual({ mode: 'example' });
+    expect(result.unsupportedLegacySlots).toEqual([]);
+    expect(ghostPermissionItems(result.manifest).map((item) => item.key)).not.toContain(
+      'futureCapability',
+    );
+  });
+
+  it('拒绝 v3 slots、缺 minCindyVersion 和 false 布尔能力', () => {
+    const base = {
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      id: 'direct-helper',
+      name: 'Direct Helper',
+      version: '1.0.0',
+      entry: 'main.js',
+    };
+    expect(validateGhostManifest({ ...base, slots: [] }).ok).toBe(false);
+    expect(validateGhostManifest({ ...base, minCindyVersion: undefined }).ok).toBe(false);
+    expect(validateGhostManifest({ ...base, minCindyVersion: '0.1.60' }).ok).toBe(false);
+    expect(validateGhostManifest({ ...base, notify: false }).ok).toBe(false);
+  });
+
+  it('v2 与等价 v3 使用同一权限基线，移除 slots 本身不构成扩权', () => {
+    const common = {
+      id: 'equivalent-helper',
+      name: 'Equivalent Helper',
+      version: '1.0.0',
+      entry: 'main.js',
+      tools: [{ name: 'help', description: '提供帮助' }],
+    };
+    const legacy = validateGhostManifest({
+      ...common,
+      schemaVersion: 2,
+      slots: ['tool', 'card', 'notify', 'library'],
+    });
+    const direct = validateGhostManifest({
+      ...common,
+      schemaVersion: 3,
+      minCindyVersion: '0.1.61',
+      card: {},
+      notify: true,
+      library: true,
+    });
+    expect(legacy.ok && direct.ok).toBe(true);
+    if (!legacy.ok || !direct.ok) return;
+    expect(ghostPermissionBaselineKey(legacy.manifest)).toBe(
+      ghostPermissionBaselineKey(direct.manifest),
+    );
+    expect(diffGhostPermissionItems(legacy.manifest, direct.manifest).added).toEqual([]);
+  });
+});
+
 describe('ghost · 芯片型清单(schemaVersion 2)', () => {
   it('全字段合法芯片清单通过', () => {
     const v = validateGhostManifest(goodChipManifest());
@@ -990,7 +1067,7 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     const manifest = (v as { ok: true; manifest: GhostManifest }).manifest;
     expect(manifest.kind).toBe('chip');
     expect(manifest.entry).toBe('main.js');
-    expect(manifest.slots).toEqual(['panel', 'cindy']); // 'model' 旧名归一化
+    expect(manifest).not.toHaveProperty('slots');
     expect(manifest.panel?.html).toBe('panel.html');
   });
 
@@ -1004,12 +1081,21 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     expect(validateGhostManifest({ ...goodChipManifest(), entry: 'src/main.js' }).ok).toBe(true);
   });
 
-  it('slots 必填非空、只认已知卡槽、不许重复', () => {
+  it('v2 slots 必须是数组；允许空值与未知声明，但重复仍拒绝', () => {
     expect(validateGhostManifest({ ...goodChipManifest(), slots: undefined }).ok).toBe(false);
-    expect(validateGhostManifest({ ...goodChipManifest(), slots: [] }).ok).toBe(false);
     expect(
-      validateGhostManifest({ ...goodChipManifest(), slots: ['panel', 'filesystem'] }).ok,
-    ).toBe(false);
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: [],
+        panel: undefined,
+      }).ok,
+    ).toBe(true);
+    const unknown = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'filesystem'],
+    });
+    expect(unknown.ok).toBe(true);
+    if (unknown.ok) expect(unknown.unsupportedLegacySlots).toEqual(['filesystem']);
     expect(validateGhostManifest({ ...goodChipManifest(), slots: ['model', 'model'] }).ok).toBe(
       false,
     );
@@ -1027,7 +1113,7 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     });
     expect(userActionOnly.ok).toBe(true);
     if (!userActionOnly.ok) return;
-    expect(userActionOnly.manifest.agent).toBeUndefined();
+    expect(userActionOnly.manifest.agent).toEqual({});
     expect(ghostContentKeys(userActionOnly.manifest)).toContain('slotAgent');
     expect(ghostPermissionItems(userActionOnly.manifest)).toEqual(
       expect.arrayContaining([
@@ -1236,7 +1322,7 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     );
   });
 
-  it('node 清单拒绝任意命令字段、越界配置和槽/详单不成对', () => {
+  it('node 清单拒绝任意命令字段、越界配置和无槽详单；空槽按零能力兼容', () => {
     const withNode = (node: unknown, slots: string[] = ['panel', 'node']) =>
       validateGhostManifest({ ...goodChipManifest(), slots, node });
     expect(withNode({ entry: 'node/a.cjs', protocol: 'json-rpc-stdio' }).ok).toBe(true);
@@ -1259,9 +1345,12 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
       }).ok,
     ).toBe(false);
     expect(withNode({ entry: 'node/a.cjs', protocol: 'json-rpc-stdio' }, ['panel']).ok).toBe(false);
-    expect(validateGhostManifest({ ...goodChipManifest(), slots: ['panel', 'node'] }).ok).toBe(
-      false,
-    );
+    const emptyNode = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'node'],
+    });
+    expect(emptyNode.ok).toBe(true);
+    if (emptyNode.ok) expect(emptyNode.manifest.node).toBeUndefined();
   });
 
   it('node.secretBindings 逐方法声明保险库凭证并生成单独权限项', () => {
@@ -1412,13 +1501,14 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     ).toBe(false);
   });
 
-  it('工具声明(卡槽②)与 tool 槽成对;名/描述/条数校验', () => {
+  it('工具详单必须有 tool 槽；空槽按零能力兼容；名/描述/条数校验', () => {
     const withTools = (slots: string[], tools: unknown) =>
       validateGhostManifest({ ...goodChipManifest(), slots, tools });
-    // 成对:有 tool 槽必须有 tools,反之亦然
-    expect(validateGhostManifest({ ...goodChipManifest(), slots: ['panel', 'tool'] }).ok).toBe(
-      false,
-    );
+    // 旧包只写 tool 槽但没有详单，可以安装，运行时不获得工具能力。
+    const emptyTool = validateGhostManifest({ ...goodChipManifest(), slots: ['panel', 'tool'] });
+    expect(emptyTool.ok).toBe(true);
+    if (emptyTool.ok) expect(emptyTool.manifest.tools).toBeUndefined();
+    // 有详单仍必须有对应槽。
     expect(withTools(['panel'], [{ name: 'x', description: 'y' }]).ok).toBe(false);
     // 合法
     expect(withTools(['panel', 'tool'], [{ name: 'gen_image', description: '生成图片' }]).ok).toBe(
@@ -1483,16 +1573,15 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     }
   });
 
-  it('@ 资源入口复用 tool 槽，不新增硬白名单 slot', () => {
-    expect(GHOST_SLOTS).not.toContain('at-resource');
-    expect(
-      validateGhostManifest({
-        ...goodChipManifest(),
-        slots: ['panel', 'tool', 'at-resource'],
-        tools: [{ name: 'search_issues', description: '只读搜索议题' }],
-        atResourceProvider: { tool: 'search_issues' },
-      }).ok,
-    ).toBe(false);
+  it('@ 资源入口复用 tools；同名未知 v2 slot 只提示、不授权', () => {
+    const result = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'tool', 'at-resource'],
+      tools: [{ name: 'search_issues', description: '只读搜索议题' }],
+      atResourceProvider: { tool: 'search_issues' },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.unsupportedLegacySlots).toEqual(['at-resource']);
   });
 
   it('@ 资源入口复用原工具执行权，但作为新增调用入口单独披露', () => {
@@ -1613,7 +1702,7 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     expect(validateGhostManifest(noHtml).ok).toBe(false);
   });
 
-  it('mainView 与 main-view 槽严格成对，并强制最低 Cindy 版本', () => {
+  it('v2 mainView 与 main-view 槽严格成对，最低版本保持可选', () => {
     expect(GHOST_MAIN_VIEW_ICONS).toEqual([
       'puzzle',
       'globe',
@@ -1644,8 +1733,8 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
         ...goodChipManifest(),
         slots: ['panel', 'main-view'],
         mainView: { html: 'main-view.html' },
-      }),
-    ).toMatchObject({ ok: false, reason: expect.stringContaining('minCindyVersion') });
+      }).ok,
+    ).toBe(true);
     expect(
       validateGhostManifest({
         ...goodChipManifest(),
@@ -2079,12 +2168,12 @@ describe('ghost · model → cindy 旧名兼容(2026-07-11 更名)', () => {
       model: { image: ['generate'] },
     });
     expect(v.ok, JSON.stringify(v)).toBe(true);
-    expect(v.ok && v.manifest.slots).toEqual(['panel', 'cindy']);
+    expect(v.ok && v.manifest).not.toHaveProperty('slots');
     expect(v.ok && v.manifest.cindy).toEqual({ image: ['generate'] });
     expect(v.ok && (v.manifest as unknown as Record<string, unknown>).model).toBeUndefined();
   });
 
-  it("新旧名并存时以 cindy 为准;'model' 与 'cindy' 同列 slots 视为重复", () => {
+  it("新旧字段并存时以 cindy 为准；无详单的 model/cindy 槽同时丢弃", () => {
     const both = validateGhostManifest({
       ...goodChipManifest(),
       slots: ['panel', 'cindy'],
@@ -2097,7 +2186,8 @@ describe('ghost · model → cindy 旧名兼容(2026-07-11 更名)', () => {
       ...goodChipManifest(),
       slots: ['panel', 'model', 'cindy'],
     });
-    expect(dup.ok).toBe(false);
+    expect(dup.ok).toBe(true);
+    if (dup.ok) expect(dup.manifest.cindy).toBeUndefined();
   });
 });
 
@@ -2495,13 +2585,12 @@ describe('ghost · 逐项权限清单', () => {
     expect(d.builtinOauthClientChanged).toBe(false);
   });
 
-  it('diff:新增 main-view 作为独立权限进入更新确认', () => {
+  it('diff:新增 mainView 作为独立能力进入差异结果', () => {
     const previous = fullChip();
     const next: GhostManifest = {
       ...previous,
       version: '2.0.0',
       minCindyVersion: '1.2.3',
-      slots: [...previous.slots, 'main-view'],
       mainView: { title: '工作台', html: 'main-view.html' },
     };
 
@@ -3389,12 +3478,18 @@ describe('ghost · network 详单校验', () => {
     }
   });
 
-  it('badge 槽是**可证明**的新声明:老包不可能带它(未知槽名一律拒装)', () => {
-    // slots 是硬白名单,当年装老包的客户端遇到未登记的 'badge' 会直接拒绝整份清单。
-    // 所以「清单里有 badge 槽」⇒「这份清单是本能力上线之后写的」,严格校验才安全。
-    const r = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'not-a-real-slot'] });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain('未知卡槽');
+  it('格式合法的未知 v2 slot 只作为安装提示，不进入运行时或权限', () => {
+    const r = validateGhostManifest({
+      ...goodManifest(),
+      slots: ['panel', 'tool', 'not-a-real-slot'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.manifest).not.toHaveProperty('slots');
+    expect(r.unsupportedLegacySlots).toEqual(['not-a-real-slot']);
+    expect(ghostPermissionItems(r.manifest).map((item) => item.key)).not.toContain(
+      'not-a-real-slot',
+    );
   });
 
   it('来源投影丢掉 badge 槽时,包里的 badge 必须被识别成「未审权限」', () => {
@@ -3846,10 +3941,12 @@ describe('ghost · 2026-07-23 通用能力四件套(session-context / pick / pre
     expect(withNode({ ...nodeBase, entries: ['../evil.cjs'] }).ok).toBe(false);
   });
 
-  it('preview 槽与详单严格成对;hosts 语法同 network 白名单', () => {
+  it('preview 详单必须有槽；空槽按零能力兼容；hosts 语法同 network 白名单', () => {
     const base = goodChipManifest();
-    // 有槽必有详单
-    expect(validateGhostManifest({ ...base, slots: ['panel', 'preview'] }).ok).toBe(false);
+    // 旧包空槽可以安装，但不产生 preview 能力。
+    const emptyPreview = validateGhostManifest({ ...base, slots: ['panel', 'preview'] });
+    expect(emptyPreview.ok).toBe(true);
+    if (emptyPreview.ok) expect(emptyPreview.manifest.preview).toBeUndefined();
     // 有详单必有槽
     expect(validateGhostManifest({ ...base, preview: { hosts: ['example.com'] } }).ok).toBe(false);
     const good = validateGhostManifest({
@@ -3928,13 +4025,13 @@ describe('ghost · 2026-07-23 通用能力四件套(session-context / pick / pre
     );
   });
 
-  it('ios-simulator 槽必须声明最低 Cindy 版本', () => {
+  it('v2 ios-simulator 槽不强制补写最低 Cindy 版本', () => {
     const r = validateGhostManifest({
       ...goodChipManifest(),
       slots: ['panel', 'ios-simulator'],
     });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain('minCindyVersion');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.iosSimulator).toBe(true);
   });
 
   it('ghostPreviewUrlAllowed:https + 白名单命中放行;http 仅 loopback;凭证/越界/畸形拒', () => {
@@ -4131,11 +4228,14 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
     validateGhostManifest({ ...goodChipManifest(), slots, skill });
   const goodItems = [{ dir: 'skills/foo', name: 'foo', description: '教 Agent 用 foo' }];
 
-  it('槽与详单严格成对;合法声明原样收录', () => {
-    // 有槽必有详单
-    expect(validateGhostManifest({ ...goodChipManifest(), slots: ['panel', 'skill'] }).ok).toBe(
-      false,
-    );
+  it('skill 详单必须有槽；空槽按零能力兼容；合法声明原样收录', () => {
+    // 旧包空槽可以安装，但不产生 skill 能力。
+    const emptySkill = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'skill'],
+    });
+    expect(emptySkill.ok).toBe(true);
+    if (emptySkill.ok) expect(emptySkill.manifest.skill).toBeUndefined();
     // 有详单必有槽
     expect(validateGhostManifest({ ...goodChipManifest(), skill: { items: goodItems } }).ok).toBe(
       false,

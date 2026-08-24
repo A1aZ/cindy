@@ -1,15 +1,16 @@
 /**
- * fsSlot.ts — fs 槽代写文件(2026-07-14,与 Lizi 定案)。
+ * fsSlot.ts — 插件沙箱的主机文件操作边界(2026-07-14,与 Lizi 定案)。
  * ---------------------------------------------------------------------------
  * 意识没有文件系统(沙箱红线不破),想落盘只能经管子请主机代写:
  *
  *   电子脑 cindy.send({type:'fs-request', op, root, path?, content?, …})
- *     → 资格审(声明了 'fs' 卡槽?)
- *     → 按 root 三档守门:
+ *     → 按执行上下文与 root 三档守门:
  *       'data'    私有数据目录 userData/ghost-fs/<ghostId>——自己的储物柜,
- *                 免确认;全 op(write/read/list/delete);配额封顶;卸载回收。
+ *                 要求插件自主 fs 声明;免确认;全 op(write/read/list/delete);
+ *                 配额封顶;卸载回收。
  *       'workdir' 当前会话工作目录——仅 write;必须带 callId(主机凭
- *                 cardService 反查 session,不信意识自报);**跟随会话
+ *                 cardService 严格反查当前 Agent 调用与 session,不信意识
+ *                 自报);当前 Agent 调用无需插件自主 fs 声明;**跟随会话
  *                 permission 模式**(映射表见 workdirWriteVerdict:免批模式
  *                 直写、逐条模式弹 fs_write 确认卡、plan 拒);远程工作区
  *                 (remoteHostId 非空)明确拒——路径在远端机器,本地代写
@@ -24,7 +25,7 @@
  *                 反查走**严格在途**查询(inFlightCallInfo,与 workspace
  *                 槽同一判据):交卷即失效,不享卡片供片的宽限窗——目录
  *                 授权上下文必须用完即废。
- *       'save'    主 agent 过户的 save 票据目录——仅 write;复用
+ *       'save'    主 agent 过户的 save 票据目录——仅 write;票据自身授权;复用
  *                 saveDeposit 票据库的 TTL/次数/字节预算与文件名消毒去重
  *                 (与 fetch as:'file' 下载落盘同一本账)。
  *     → 主机代写/代读,只回结构化 GhostPipeFsResult(永不 reject)。
@@ -298,14 +299,27 @@ export class GhostFsSlot {
   private async dispatch(ghostId: string, payload: unknown): Promise<GhostPipeFsResult> {
     const ghost = this.deps.getGhost(ghostId);
     if (!ghost) return fail('意识未装入');
-    if (!ghost.manifest.slots.includes('fs')) {
-      return fail('未声明 "fs" 卡槽——想写文件先在 ghost.json 的 slots 里声明 "fs"(装入确认时会向用户如实展示)');
-    }
     const req = (payload ?? {}) as Record<string, unknown>;
     const op = req.op as GhostFsOp;
     const root = req.root as GhostFsRoot;
     if (!GHOST_FS_OPS.includes(op)) return fail(`op 必须是 ${GHOST_FS_OPS.join(' / ')}`);
     if (!GHOST_FS_ROOTS.includes(root)) return fail(`root 必须是 ${GHOST_FS_ROOTS.join(' / ')}`);
+
+    // data 是插件自己的持久私有存储，继续要求 manifest.fs。workdir
+    // 只有能严格证明处于当前 Agent ghost_call 内才可复用会话文件
+    // 授权；save 则以 Agent 发放的限时、绑定插件的票据作为授权。
+    if (ghost.manifest.fs !== true) {
+      const callId = typeof req.callId === 'string' ? req.callId : null;
+      const callInfo = callId ? this.deps.inFlightCallInfo(callId) : null;
+      const agentMediatedWorkdir =
+        root === 'workdir'
+        && callInfo?.ghostId === ghostId
+        && callInfo.channel === 'session'
+        && callInfo.sessionId !== null;
+      if (!agentMediatedWorkdir && root !== 'save') {
+        return fail('本操作不在当前 Agent 授权调用中，且插件未声明自主 fs 能力');
+      }
+    }
 
     if (root === 'data') return this.handleData(ghostId, op, req);
     if (op !== 'write') return fail(`root:"${root}" 只支持 op:"write"(read/list/delete 仅限私有目录 root:"data")`);

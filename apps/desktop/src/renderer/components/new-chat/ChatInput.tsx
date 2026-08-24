@@ -2888,49 +2888,52 @@ export function ChatInput({
   );
   // 统一建议面板的插件条目(旧 `+` 菜单口径的并集):可用项可选,无指令或
   // Host 入口或未生效项保留展示但置灰(entry 级 disabled + 原因)。
-  const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(() => {
-    // device-link 会话的插件运行在被控端；控制端清单既不代表远端已安装
-    // 状态，选择后也无法用本地 InstalledGhost 解析并插入命令。fail-closed：
-    // 仅 deviceLinkDeviceId === null（已确认本机）才展示；undefined（所有权
-    // 尚未解析）与 string（远程）一律隐藏，避免 bootstrap/重连窗口期把控制端
-    // 本地插件项泄漏进可能落为远程的会话。
-    if (deviceLinkDeviceId !== null) return [];
-    return pluginsForMenu.map((ghost) => {
-      const hasCommand = !!ghost.manifest.command;
-      const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
-      const hasComposerEntry = hasCommand || hostCapability !== null;
-      const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasComposerEntry;
-      const entryKey = ghost.manifest.command ?? hostCapability ?? '';
-      return {
-        item: {
-          type: 'plugin-command' as const,
-          name: ghost.manifest.name,
-          relPath:
-            ghost.manifest.command ??
-            (hostCapability
-              ? `cindy://host-capability/${hostCapability}`
-              : `cindy://plugin/${ghost.manifest.id}`),
-          pluginId: ghost.manifest.id,
-          ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
-          sourceLabel: entryKey,
-          _nameLower: `${ghost.manifest.name} ${entryKey}`.toLowerCase(),
-          _relPathLower: `${entryKey} ${ghost.manifest.id}`.toLowerCase(),
-        },
-        ...(selectable
-          ? {}
-          : {
-              disabled: true,
-              disabledReason: t(
-                !pluginAvailableIds.has(ghost.manifest.id)
-                  ? 'extraDirs.pluginDisabled'
-                  : ghost.manifest.slots.includes('skill')
-                    ? 'extraDirs.pluginAgentInvoked'
-                    : 'extraDirs.pluginNoCommand',
-              ),
-            }),
-      };
-    });
-  }, [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t]);
+  const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(
+    () => {
+      // device-link 会话的插件运行在被控端；控制端清单既不代表远端已安装
+      // 状态，选择后也无法用本地 InstalledGhost 解析并插入命令。fail-closed：
+      // 仅 deviceLinkDeviceId === null（已确认本机）才展示；undefined（所有权
+      // 尚未解析）与 string（远程）一律隐藏，避免 bootstrap/重连窗口期把控制端
+      // 本地插件项泄漏进可能落为远程的会话。
+      if (deviceLinkDeviceId !== null) return [];
+      return pluginsForMenu.map((ghost) => {
+        const hasCommand = !!ghost.manifest.command;
+        const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
+        const hasComposerEntry = hasCommand || hostCapability !== null;
+        const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasComposerEntry;
+        const entryKey = ghost.manifest.command ?? hostCapability ?? '';
+        return {
+          item: {
+            type: 'plugin-command' as const,
+            name: ghost.manifest.name,
+            relPath:
+              ghost.manifest.command ??
+              (hostCapability
+                ? `cindy://host-capability/${hostCapability}`
+                : `cindy://plugin/${ghost.manifest.id}`),
+            pluginId: ghost.manifest.id,
+            ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
+            sourceLabel: entryKey,
+            _nameLower: `${ghost.manifest.name} ${entryKey}`.toLowerCase(),
+            _relPathLower: `${entryKey} ${ghost.manifest.id}`.toLowerCase(),
+          },
+          ...(selectable
+            ? {}
+            : {
+                disabled: true,
+                disabledReason: t(
+                  !pluginAvailableIds.has(ghost.manifest.id)
+                    ? 'extraDirs.pluginDisabled'
+                    : ghost.manifest.skill
+                      ? 'extraDirs.pluginAgentInvoked'
+                      : 'extraDirs.pluginNoCommand',
+                ),
+              }),
+        };
+      });
+    },
+    [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t],
+  );
   useEffect(() => {
     setGhostCommandRoster(editor, ghostsForCommand);
   }, [editor, ghostsForCommand]);

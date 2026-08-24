@@ -256,7 +256,6 @@ describe('Ghost plugin detail sections', () => {
             version: detail.version,
             kind: 'chip',
             entry: 'main.js',
-            slots: [],
             settingsHtml: 'settings.html',
           },
           dir: detail.installDir ?? '/tmp/plugin',
@@ -477,8 +476,8 @@ describe('Ghost plugin detail sections', () => {
         ).disabled,
       ).toBe(true);
 
-      // 启用开关(改版为带 aria-pressed 的按钮,非原生 switch)缺批准时禁用,点了不触发 onToggle。
-      const toggle = screen.getByRole('button', {
+      // 启用区域是单个 switch 按钮；点文字或轨道都由同一交互处理。
+      const toggle = screen.getByRole('switch', {
         name: 'settings.ghosts.enableAria',
       }) as HTMLButtonElement;
       expect(toggle.disabled).toBe(true);

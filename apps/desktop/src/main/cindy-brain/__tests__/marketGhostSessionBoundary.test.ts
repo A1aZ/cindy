@@ -81,51 +81,59 @@ describe('market Ghost session boundary', () => {
       "ipcMain.handle('ghosts:pick-file'",
       updateStart,
     );
-    const body = source.slice(updateStart, updateEnd);
+    const updateBody = source.slice(updateStart, updateEnd);
+    const helperStart = source.indexOf('async function updateLocalGhostPackageLocked(');
+    const helperEnd = source.indexOf(
+      '\n}\n\n/**\n * Forge 的显式安装入口。',
+      helperStart,
+    );
+    const helperBody = source.slice(helperStart, helperEnd);
 
-    const ledgerReadIndex = body.indexOf(
+    const ledgerReadIndex = helperBody.indexOf(
       'marketLedger.installationForGhost(inspected.manifest.id)',
     );
-    const captureIndex = body.indexOf('const mutationOwner = captureGhostMutationOwner();');
-    const ledgerBindIndex = body.indexOf('const marketLedger = getPluginMarketLedger().bind(');
-    const inspectIndex = body.indexOf('await manager.inspect(lizFilePath)');
-    const leaseIndex = body.indexOf('const releaseMutation = beginGhostMutation(mutationOwner);');
-    const detachDecisionIndex = body.indexOf(
+    const captureIndex = updateBody.indexOf('const mutationOwner = captureGhostMutationOwner();');
+    const inspectIndex = updateBody.indexOf('await manager.inspect(lizFilePath)');
+    const leaseIndex = updateBody.indexOf('const releaseMutation = beginGhostMutation(mutationOwner);');
+    const helperCallIndex = updateBody.indexOf('updateLocalGhostPackageLocked(');
+    const ledgerBindIndex = helperBody.indexOf('const marketLedger = getPluginMarketLedger().bind(');
+    const detachDecisionIndex = helperBody.indexOf(
       'const detachMarketRecord = Boolean(marketRecord?.installed)',
     );
-    const runtimeStopIndex = body.indexOf('runtime.stop(inspected.manifest.id)');
-    const stopAndWaitIndex = body.indexOf(
+    const runtimeStopIndex = helperBody.indexOf('runtime.stop(inspected.manifest.id)');
+    const stopAndWaitIndex = helperBody.indexOf(
       'await getGhostNodeRuntimeBroker().stopAndWait(inspected.manifest.id);',
     );
-    const oauthLockIndex = body.indexOf(
+    const oauthLockIndex = helperBody.indexOf(
       'result = await withActiveOwnerGhostOauthMutationLock(inspected.manifest.id',
     );
-    const managerUpdateIndex = body.indexOf('manager.update(lizFilePath,');
-    const detachIndex = body.indexOf(
+    const managerUpdateIndex = helperBody.indexOf('manager.update(cindyFilePath,');
+    const detachIndex = helperBody.indexOf(
       'marketLedger.markRemoved(inspected.manifest.id, marketInstallSubject)',
     );
 
     expect(captureIndex).toBeGreaterThan(-1);
-    expect(ledgerBindIndex).toBeGreaterThan(captureIndex);
-    expect(ledgerBindIndex).toBeLessThan(inspectIndex);
+    expect(captureIndex).toBeLessThan(inspectIndex);
     expect(leaseIndex).toBeGreaterThan(inspectIndex);
-    expect(ledgerReadIndex).toBeGreaterThan(leaseIndex);
+    expect(helperCallIndex).toBeGreaterThan(leaseIndex);
+    expect(ledgerBindIndex).toBeGreaterThan(-1);
+    expect(runtimeStopIndex).toBeGreaterThan(ledgerBindIndex);
+    expect(ledgerReadIndex).toBeGreaterThan(stopAndWaitIndex);
     expect(detachDecisionIndex).toBeGreaterThan(ledgerReadIndex);
-    expect(runtimeStopIndex).toBeGreaterThan(leaseIndex);
     expect(stopAndWaitIndex).toBeGreaterThan(runtimeStopIndex);
     // 只有确认旧进程退出，才切断旧市场的自动更新路由；等待失败时保留原路由，
     // 也不会尝试恢复第二份 resident 进程。
     expect(detachIndex).toBeGreaterThan(stopAndWaitIndex);
     expect(oauthLockIndex).toBeGreaterThan(detachIndex);
     expect(managerUpdateIndex).toBeGreaterThan(oauthLockIndex);
-    expect(body).toContain('marketLedger.isDefaultInstallSuppressed(');
-    expect(body).toContain('marketLedger.restoreInstallation(');
-    expect(body).toContain('suppressed: marketRecordWasSuppressed');
-    expect(body).toContain('onPackagePlaced: () => {');
-    expect(body).toContain('packagePlaced = true;');
-    expect(body).toContain('if (!packagePlaced) {\n            restoreMarketRecord();');
-    expect(body).toContain('releaseMutation();');
-    expect(body).not.toContain('GHOST_SOURCE_CONFLICT');
+    expect(helperBody).toContain('marketLedger.isDefaultInstallSuppressed(');
+    expect(helperBody).toContain('marketLedger.restoreInstallation(');
+    expect(helperBody).toContain('suppressed: marketRecordWasSuppressed');
+    expect(helperBody).toContain('onPackagePlaced: () => {');
+    expect(helperBody).toContain('packagePlaced = true;');
+    expect(helperBody).toContain('if (!packagePlaced) {\n      restoreMarketRecord();');
+    expect(updateBody).toContain('releaseMutation();');
+    expect(helperBody).not.toContain('GHOST_SOURCE_CONFLICT');
   });
 
   it('runs the final market callback before both initial install and update placement', () => {
@@ -166,16 +174,22 @@ describe('market Ghost session boundary', () => {
   it('releases the mutation lease for shutdown failures and restores only after confirmed shutdown', () => {
     const updateStart = source.indexOf("ipcMain.handle('ghosts:update'");
     const updateEnd = source.indexOf("ipcMain.handle('ghosts:pick-file'", updateStart);
-    const body = source.slice(updateStart, updateEnd);
+    const updateBody = source.slice(updateStart, updateEnd);
+    const helperStart = source.indexOf('async function updateLocalGhostPackageLocked(');
+    const helperEnd = source.indexOf(
+      '\n}\n\n/**\n * Forge 的显式安装入口。',
+      helperStart,
+    );
+    const helperBody = source.slice(helperStart, helperEnd);
 
-    const waitIndex = body.indexOf(
+    const waitIndex = helperBody.indexOf(
       'await getGhostNodeRuntimeBroker().stopAndWait(inspected.manifest.id);',
     );
-    const oauthLockIndex = body.indexOf(
+    const oauthLockIndex = helperBody.indexOf(
       'result = await withActiveOwnerGhostOauthMutationLock(inspected.manifest.id',
     );
-    const updateIndex = body.indexOf('manager.update(lizFilePath');
-    const restoreIndex = body.indexOf(
+    const updateIndex = helperBody.indexOf('manager.update(cindyFilePath');
+    const restoreIndex = helperBody.indexOf(
       'if (previousGhost) spawnIfResident(previousGhost);',
     );
 
@@ -188,13 +202,9 @@ describe('market Ghost session boundary', () => {
     // spawnIfResident is in the market-provenance catch block, after
     // stopAndWait (rollback if provenance check fails).
     expect(restoreIndex).toBeGreaterThan(waitIndex);
-    expect(body).toContain('finally {\n      releaseMutation();');
-    const leaseReleaseIndex = body.indexOf('finally {\n      releaseMutation();');
-    const stagingReleaseIndex = body.indexOf('releaseForgePackStaging(');
-    expect(leaseReleaseIndex).toBeGreaterThan(-1);
-    expect(stagingReleaseIndex).toBeGreaterThan(leaseReleaseIndex);
-    expect(body).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
-    expect(body).toContain("throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');");
+    expect(updateBody).toContain('finally {\n      releaseMutation();');
+    expect(helperBody).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
+    expect(helperBody).toContain("throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');");
   });
 
   it('Ghost 媒体在途守卫只依赖当前进程的 AppSession owner 边界', () => {

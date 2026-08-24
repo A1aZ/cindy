@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 describe('installed ghost manifest compatibility', () => {
-  it('keeps valid Manual manifests strict and does not strip them', () => {
+  it('keeps valid Manual manifests while normalizing legacy slots', () => {
     const raw = {
       ...manifest(),
       manual: {
@@ -65,7 +65,20 @@ describe('installed ghost manifest compatibility', () => {
 
     const parsed = parseInstalledGhostManifest(raw);
 
-    expect(parsed).toEqual({ ok: true, manifest: raw, legacyManualIgnored: false });
+    expect(parsed).toEqual({
+      ok: true,
+      manifest: {
+        schemaVersion: 2,
+        id: 'legacy-plugin',
+        name: 'Legacy plugin',
+        version: '1.0.0',
+        kind: 'chip',
+        entry: 'main.js',
+        tools: [{ name: 'run', description: 'Run the plugin' }],
+        manual: raw.manual,
+      },
+      legacyManualIgnored: false,
+    });
   });
 
   it.each([

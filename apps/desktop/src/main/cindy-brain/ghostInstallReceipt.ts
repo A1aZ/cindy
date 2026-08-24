@@ -66,13 +66,7 @@ export interface GhostInstallReceipt {
    */
   packageSha256?: string;
   /**
-   * 本次装入/更新操作的来源。可选；缺失按 `manual` 读。
-   * 不要改成必填、不要升 schemaVersion、不要批量重写旧 receipt。
-   * 未知值只在授权判断时降级为 manual，不写回磁盘。
-   */
-  installOrigin?: string;
-  /**
-   * 按 skill item 目录钉住的批准字节指纹(`item.dir` → sha256)。声明了 skill 槽
+   * 按 skill item 目录钉住的固化字节指纹(`item.dir` → sha256)。声明了 skill 能力
    * 时逐项必填，没声明时是空对象。
    *
    * 这一项**是运行期判据**，与只作审计用的 `packageSha256` 不同：快照缺失需要从
@@ -100,7 +94,7 @@ export type GhostInstallReceiptRecoveryReadResult =
  * receipt 的迁移"——此后任何缺失 receipt 都按删除/损坏 fail closed,不再触发迁移。
  *
  * 它是迁移的**全局一次性门**(见 `GhostManager.migrateLegacyApprovalsOnce`):没有
- * 这道门,删掉某个 receipt 就能骗一次"从当前可变安装目录重建授权",而安装目录可被
+ * 这道门,删掉某个 receipt 就能骗一次"从当前可变安装目录重建验证状态",而安装目录可被
  * 同权限进程改写。ledger 门是充分守卫——能删 ledger 的进程本就能直接往状态根写一份
  * 结构合法的伪造 receipt(§7 已登记"状态根无写保护"缺口),迁移路径严格弱于它。
  */
@@ -108,11 +102,11 @@ export interface GhostLegacyMigrationLedger {
   version: 1;
   /** 迁移完成时刻(ISO)。仅审计,不参与判定。 */
   migratedAt: string;
-  /** 实际 backfill 出 receipt 的 id 清单,便于事后分辨"用户确认过"与"迁移来的"。 */
+  /** 实际 backfill 出 receipt 的 id 清单,便于事后分辨"正常安装写入"与"迁移来的"。 */
   migratedIds: string[];
   /**
    * 迁移读不出核心事实而 fail closed 的 id(坏 manifest / 技能目录含链接等)。
-   * 记进台账供支持排查与 UI 提示;这些 id 走每插件的重新确认恢复入口。
+   * 记进台账供支持排查与 UI 提示;这些 id 走每插件的重新安装恢复入口。
    */
   failedIds?: string[];
   /**
@@ -141,7 +135,7 @@ export interface GhostLegacyMigrationLedger {
  * 还没写」这段崩溃窗口:
  * - install:崩溃留下"有 finalDir、无 receipt、无 ledger"的目录,与 legacy 安装无法
  *   区分 —— 全新 owner 首个安装崩在这里,下轮迁移会把它(含崩溃窗口内被同权限进程
- *   改写的 manifest)当存量批准掉,用户确认的是 A、被授权的是 B。
+ *   改写的 manifest)当存量安装收编,检查的是 A、最后固化的是 B。
  * - update:`final→backup`、`staging→final`、写 receipt 三步;第二三步之间崩溃留下
  *   "新字节 + 旧 receipt",恢复器旧逻辑(final 在位就删 backup)会把它固化成"按旧批准
  *   跑新代码"。
@@ -886,7 +880,7 @@ export class GhostInstallReceiptStore {
    *
    * 只在新 receipt 已经原子提交之后跑:此刻旧 revision 已不是批准事实，留着
    * 就是每次更新泄漏一份完整拷贝。共享技能根里指向旧 revision 的链接会因此
-   * 短暂断链，直到下一轮对账重指——对越出沙箱的 skill 槽来说，短暂"技能不可
+   * 短暂断链，直到下一轮对账重指——对越出沙箱的 skill 能力来说，短暂"技能不可
    * 用"是正确的收敛方向，留着旧批准版本继续生效不是。
    *
    * best-effort:批准事实已经落盘，回收失败只记为待清理状态，不回滚安装。
@@ -994,9 +988,8 @@ function classifyCleanupEntrySync(absPath: string): CleanupEntryKind {
  * 迁移失败:旧模型读的也是同一个文件,缺了同样显示不出 verified,不比旧模型少展示什么。
  *
  * `cindy-official` 一律**封顶拒收**(按镜像损坏处理):官方档只该由 provisioning 在与
- * 随包种子逐字节对账后授予,而本函数的两个调用方(legacy 迁移 / 从已装目录重新确认)都
- * 只服务非随包插件 —— 非随包目录里出现官方档镜像本身就不可信,照抄会让确认卡/列表把
- * 一个可变目录里的插件展示成「Cindy 官方」。
+ * 随包种子逐字节对账后授予,而本函数仅供 legacy 迁移非随包插件使用。非随包目录里
+ * 出现官方档镜像本身就不可信,照抄会让列表把一个可变目录里的插件展示成「Cindy 官方」。
  */
 export function readLegacyInstallTrust(dir: string): GhostTrustInfo | null {
   const file = path.join(dir, '.cindy-trust.json');
@@ -1027,11 +1020,7 @@ export function createGhostInstallReceipt(input: {
   packageSha256?: string;
   revision?: string;
   iconDataUrl?: string;
-  installOrigin?: string;
 }): GhostInstallReceipt {
-  if (input.installOrigin !== undefined && !isPersistableInstallOrigin(input.installOrigin)) {
-    throw new Error('receipt installOrigin 不合法');
-  }
   return {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     id: input.manifest.id,
@@ -1043,26 +1032,7 @@ export function createGhostInstallReceipt(input: {
     skillContentSha256: input.skillContentSha256,
     ...(input.packageSha256 ? { packageSha256: input.packageSha256 } : {}),
     ...(input.iconDataUrl ? { iconDataUrl: input.iconDataUrl } : {}),
-    ...(input.installOrigin !== undefined ? { installOrigin: input.installOrigin } : {}),
   };
-}
-
-const MAX_INSTALL_ORIGIN_CHARS = 64;
-const INSTALL_ORIGIN_PATTERN = /^[a-z0-9-]+$/;
-
-function isPersistableInstallOrigin(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value.length <= MAX_INSTALL_ORIGIN_CHARS &&
-    INSTALL_ORIGIN_PATTERN.test(value)
-  );
-}
-
-/** Authorization-time view: missing or unknown → manual. Never write this back. */
-export function effectiveInstallOrigin(
-  receipt: Pick<GhostInstallReceipt, 'installOrigin'>,
-): 'manual' | 'agent-forge' {
-  return receipt.installOrigin === 'agent-forge' ? 'agent-forge' : 'manual';
 }
 
 /**
@@ -1194,16 +1164,6 @@ function validateReceipt(
     if (!validated.ok) return { ok: false, reason: `receipt locale 不合法:${localePath}` };
     localeResources[localePath] = validated.resource;
   }
-  let installOrigin: string | undefined;
-  if (value.installOrigin !== undefined) {
-    if (typeof value.installOrigin !== 'string') {
-      return { ok: false, reason: 'receipt installOrigin 不合法' };
-    }
-    if (!isPersistableInstallOrigin(value.installOrigin)) {
-      return { ok: false, reason: 'receipt installOrigin 不合法' };
-    }
-    installOrigin = value.installOrigin;
-  }
   return {
     ok: true,
     receipt: {
@@ -1217,7 +1177,6 @@ function validateReceipt(
       skillContentSha256,
       ...(typeof value.packageSha256 === 'string' ? { packageSha256: value.packageSha256 } : {}),
       ...(typeof value.iconDataUrl === 'string' ? { iconDataUrl: value.iconDataUrl } : {}),
-      ...(installOrigin !== undefined ? { installOrigin } : {}),
     },
   };
 }

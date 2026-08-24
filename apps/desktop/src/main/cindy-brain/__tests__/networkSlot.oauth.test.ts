@@ -35,7 +35,6 @@ function oauthGhost(): InstalledGhost {
       version: '1.0.0',
       kind: 'chip',
       entry: 'main.js',
-      slots: ['tool', 'network'],
       tools: [{ name: 't', description: 'x' }],
       network,
     },

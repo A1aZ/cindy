@@ -23,7 +23,6 @@ function fakeGhost(
   overrides: {
     id?: string;
     enabled?: boolean;
-    slots?: string[];
     trust?: InstalledGhost['trust'];
     /** null = 有槽无详单(老包语义);undefined = 默认 brave+tavily 双域名。 */
     network?: GhostNetworkNeeds | null;
@@ -52,7 +51,6 @@ function fakeGhost(
       version: '1.0.0',
       kind: 'chip',
       entry: 'main.js',
-      slots: overrides.slots ?? ['tool', 'network'],
       tools: [{ name: 'search_web', description: '搜索' }],
       ...(overrides.network === null ? {} : { network: overrides.network ?? defaultNetwork }),
     },
@@ -182,23 +180,63 @@ describe('networkSlot · 载荷与 URL 校验', () => {
   });
 });
 
-describe('networkSlot · 资格审(槽 + 详单双闸)', () => {
-  it('意识不存在/停用/未声明 network 槽/有槽无详单一律拒', async () => {
+describe('networkSlot · 能力资格审', () => {
+  it('意识不存在/停用/未声明 network.hosts 一律拒', async () => {
     const gone = makeSlot({ getGhost: () => null });
     expect((await gone.slot.handleFetchRequest('web-search', { url: BRAVE_URL })).ok).toBe(false);
 
     const disabled = makeSlot({ getGhost: () => fakeGhost({ enabled: false }) });
     expect((await disabled.slot.handleFetchRequest('web-search', { url: BRAVE_URL })).ok).toBe(false);
 
-    const noSlot = makeSlot({ getGhost: () => fakeGhost({ slots: ['tool'], network: null }) });
+    const noSlot = makeSlot({ getGhost: () => fakeGhost({ network: null }) });
     const r1 = await noSlot.slot.handleFetchRequest('web-search', { url: BRAVE_URL });
     expect(r1.ok).toBe(false);
-    if (!r1.ok) expect(r1.message).toContain('network 卡槽');
+    if (!r1.ok) expect(r1.message).toContain('network.hosts');
 
     const noNeeds = makeSlot({ getGhost: () => fakeGhost({ network: null }) });
     const r2 = await noNeeds.slot.handleFetchRequest('web-search', { url: BRAVE_URL });
     expect(r2.ok).toBe(false);
     if (!r2.ok) expect(r2.message).toContain('network.hosts');
+  });
+
+  it('Agent 在途调用可访问未预声明域名，同一 callId 不属于本插件则拒绝', async () => {
+    const allowed = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo: (callId) =>
+        callId === 'call-agent'
+          ? { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }
+          : null,
+    });
+    expect(
+      await allowed.slot.handleFetchRequest('web-search', {
+        url: 'https://example.com/data',
+        callId: 'call-agent',
+      }),
+    ).toMatchObject({ ok: true });
+
+    const wrongOwner = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo: () => ({ ghostId: 'another-plugin', sessionId: 'session-1', channel: 'session' }),
+    });
+    expect(
+      await wrongOwner.slot.handleFetchRequest('web-search', {
+        url: 'https://example.com/data',
+        callId: 'call-agent',
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
+  it('脚本/后台通道不能冒充 Agent 授权访问未声明域名', async () => {
+    const { slot } = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: null, channel: 'script' }),
+    });
+    expect(
+      await slot.handleFetchRequest('web-search', {
+        url: 'https://example.com/data',
+        callId: 'call-script',
+      }),
+    ).toMatchObject({ ok: false });
   });
 });
 

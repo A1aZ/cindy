@@ -63,8 +63,6 @@ export interface LoadGhostFirstPartyFactsLoaderOptions {
   /** Missing or legacy package evidence must return null. */
   readApprovedPackageSha256(ghostId: string): string | null;
   lookupOrganizationPrefix(orgId: string): OrganizationPrefixLookup;
-  /** Missing / unreadable receipts must return `manual`. */
-  readInstallOrigin(ghostId: string): 'manual' | 'agent-forge';
 }
 
 function actionFor(purpose: GhostFirstPartyFactsPurpose): GhostFirstPartyFactsUnavailableAction {
@@ -103,7 +101,6 @@ export function bindPendingMarketRecordToInspectedPackage(
 }
 
 export type GhostFirstPartyFactsOverrides = {
-  installOrigin?: 'manual' | 'agent-forge';
   marketRecord?: GhostFirstPartyMarketRecord | null;
 };
 
@@ -116,7 +113,6 @@ export function applyGhostFirstPartyFactsOverrides(
     kind: 'ready',
     facts: {
       ...load.facts,
-      ...(overrides.installOrigin !== undefined ? { installOrigin: overrides.installOrigin } : {}),
       ...(overrides.marketRecord !== undefined ? { marketRecord: overrides.marketRecord } : {}),
     },
   };
@@ -156,13 +152,6 @@ export function loadGhostFirstPartyFactsLoader(
         marketRecord = null;
       }
 
-      let installOrigin: 'manual' | 'agent-forge' = 'manual';
-      try {
-        installOrigin = options.readInstallOrigin(ghostId);
-      } catch {
-        installOrigin = 'manual';
-      }
-
       if (identity.membershipKind !== 'org' || !identity.orgId) {
         return {
           kind: 'ready',
@@ -171,7 +160,6 @@ export function loadGhostFirstPartyFactsLoader(
             builtin,
             marketRecord,
             currentOrganization: null,
-            installOrigin,
           },
         };
       }
@@ -193,7 +181,7 @@ export function loadGhostFirstPartyFactsLoader(
        */
       const builtinOnlyFacts = (): GhostFirstPartyFactsLoad => ({
         kind: 'ready',
-        facts: { ghostId, builtin, marketRecord, currentOrganization: null, installOrigin },
+        facts: { ghostId, builtin, marketRecord, currentOrganization: null },
       });
 
       let lookup: OrganizationPrefixLookup;
@@ -215,7 +203,6 @@ export function loadGhostFirstPartyFactsLoader(
               organizationId: identity.orgId,
               pluginPrefix: lookup.pluginPrefix,
             },
-            installOrigin,
           },
         };
       }

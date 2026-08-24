@@ -53,7 +53,7 @@ import {
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
 } from '@/lib/silencedSessionDoneStore';
-import { getStartingSessionIds } from '@/lib/sessionStartingStore';
+import { getStartingSessionIds, useStartingSessionIds } from '@/lib/sessionStartingStore';
 
 // Codex maker 化后, codex session 也走 makerChatStore;
 // 不再需要双 store 合并 —— 直接订阅 makerChatStore 即可。
@@ -64,6 +64,15 @@ import { getStartingSessionIds } from '@/lib/sessionStartingStore';
  * 太大用户等真通知等太久。
  */
 const QUEUE_DEBOUNCE_MS = 500;
+
+function hasPendingInteraction(info: SessionStatusInfo | undefined): boolean {
+  return !!info && (
+    info.hasPendingAskUser ||
+    info.hasPendingPermission ||
+    info.hasPendingPlanReview ||
+    info.hasPendingPluginSetup
+  );
+}
 
 interface UseSessionRunningStatusOptions {
   /**
@@ -105,6 +114,7 @@ export function useSessionRunningStatus(
     makerChatStore.getRunningSnapshot,
     makerChatStore.getRunningSnapshot,
   );
+  const startingSessionIds = useStartingSessionIds();
 
   // Latest callbacks — kept in refs so the transition effect doesn't
   // re-run when the caller passes inline lambdas each render.
@@ -138,12 +148,33 @@ export function useSessionRunningStatus(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
 
+  // debounce 到期时下一轮仍处于 starting,先暂缓上一轮 done 角标。starting
+  // 若随后失败 / 暂停 / TTL 清除且没有权威运行态,再恢复该角标;成功进入
+  // running 则丢弃。系统通知 callback 已在 debounce 到期时触发,这里只补角标。
+  const pendingStartingDoneAttentionRef = useRef(new Set<string>());
+
   const notifications = useSessionAttentionSnapshot();
 
   // Detect transitions that should add or remove notifications.
   useEffect(() => {
     const currentRunningSet = deriveRunningSet(statusMap);
     const prevRunning = prevRunningRef.current;
+
+    // starting 是乐观态,可能以失败 / 暂停结束而从未进入 running。若 debounce
+    // 期间因此抑制了上一轮 done,starting 清除后必须按当前权威状态收口。
+    for (const sessionId of pendingStartingDoneAttentionRef.current) {
+      const cur = statusMap.get(sessionId);
+      const isActive = sessionId === activeSessionId;
+      const isRunning = cur?.isRunning === true;
+      const stillPending = hasPendingInteraction(cur);
+      if (isActive || isRunning || stillPending) {
+        pendingStartingDoneAttentionRef.current.delete(sessionId);
+        continue;
+      }
+      if (startingSessionIds.has(sessionId)) continue;
+      pendingStartingDoneAttentionRef.current.delete(sessionId);
+      addSessionAttention(sessionId, 'done');
+    }
 
     // --- 1. Detect new turn starts ---
     for (const sessionId of currentRunningSet) {
@@ -239,14 +270,13 @@ export function useSessionRunningStatus(
           const isActive = sessionId === activeSessionIdRef.current;
           const isRunning = cur?.isRunning === true;
           const isStarting = getStartingSessionIds().has(sessionId);
-          const stillPending =
-            !!cur &&
-            (cur.hasPendingAskUser ||
-              cur.hasPendingPermission ||
-              cur.hasPendingPlanReview ||
-              cur.hasPendingPluginSetup);
-          if (!isActive && !isRunning && !isStarting && !stillPending) {
-            addSessionAttention(sessionId, 'done');
+          const stillPending = hasPendingInteraction(cur);
+          if (!isActive && !isRunning && !stillPending) {
+            if (isStarting) {
+              pendingStartingDoneAttentionRef.current.add(sessionId);
+            } else {
+              addSessionAttention(sessionId, 'done');
+            }
           }
           if (!notificationOwnedByScheduler) onSessionDoneRef.current?.(sessionId);
         }, QUEUE_DEBOUNCE_MS);
@@ -257,12 +287,7 @@ export function useSessionRunningStatus(
     // --- 3. Detect pending ask-user / permission / plan-review / plugin-setup ---
     const currentPendingSet = new Set<string>();
     for (const [id, info] of statusMap) {
-      if (
-        info.hasPendingAskUser ||
-        info.hasPendingPermission ||
-        info.hasPendingPlanReview ||
-        info.hasPendingPluginSetup
-      ) {
+      if (hasPendingInteraction(info)) {
         currentPendingSet.add(id);
         const isActive = id === activeSessionId;
         const wasAlreadyPending = prevPendingRef.current.has(id);
@@ -310,7 +335,7 @@ export function useSessionRunningStatus(
 
     prevRunningRef.current = new Set(currentRunningSet);
     prevPendingRef.current = currentPendingSet;
-  }, [statusMap, activeSessionId]);
+  }, [statusMap, activeSessionId, startingSessionIds]);
 
   // Unmount cleanup:清掉所有还没 fire 的 done debounce 定时器,避免 hook 卸载后
   // 定时器仍触发 addSessionAttention / onSessionDone(referring stale refs 后果小,
@@ -320,6 +345,7 @@ export function useSessionRunningStatus(
     return () => {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      pendingStartingDoneAttentionRef.current.clear();
     };
   }, []);
 

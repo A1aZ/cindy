@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   generatedTitle: null as string | null,
   selection: null as null | { pin: string },
+  onGenerate: null as null | (() => void),
   requestUtilityText: vi.fn(),
 }));
 
@@ -11,7 +12,10 @@ vi.mock('../../maker-host/session-storage.js', () => ({
 }));
 
 vi.mock('../../maker-ipc/title.js', () => ({
-  generateMakerSessionTitle: vi.fn(async () => h.generatedTitle),
+  generateMakerSessionTitle: vi.fn(async () => {
+    h.onGenerate?.();
+    return h.generatedTitle;
+  }),
 }));
 
 vi.mock('../../utility-model/auxiliary-model-settings-store.js', () => ({
@@ -36,6 +40,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.generatedTitle = null;
   h.selection = null;
+  h.onGenerate = null;
   h.requestUtilityText.mockResolvedValue({
     ok: true,
     text: '旧 utility 兜底标题',
@@ -55,6 +60,16 @@ describe('IM task title auxiliary model boundary', () => {
 
   it('fails closed when an explicit global title model was selected', async () => {
     h.selection = { pin: 'cat:openrouter:codex:openai/gpt-5-mini' };
+
+    await expect(generateImSessionTitleText('task-1', '第一条消息')).resolves.toBeNull();
+    expect(h.requestUtilityText).not.toHaveBeenCalled();
+  });
+
+  it('preserves the initially selected exact route when settings change in flight', async () => {
+    h.selection = { pin: 'cat:openrouter:codex:openai/gpt-5-mini' };
+    h.onGenerate = () => {
+      h.selection = null;
+    };
 
     await expect(generateImSessionTitleText('task-1', '第一条消息')).resolves.toBeNull();
     expect(h.requestUtilityText).not.toHaveBeenCalled();

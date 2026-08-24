@@ -49,6 +49,16 @@ describe('encodeCatalogPin / decodeCatalogPin', () => {
     });
   });
 
+  it('编码包含分隔符的运行期供应商 ID', () => {
+    const pin = encodeCatalogPin('custom:xai', 'codex', 'grok:4');
+    expect(pin).toBe('cat:custom%3Axai:codex:grok:4');
+    expect(decodeCatalogPin(pin)).toEqual({
+      providerId: 'custom:xai',
+      agentKind: 'codex',
+      model: 'grok:4',
+    });
+  });
+
   it('非目录钉 / 残缺形态 / 不可路由 agent 一律 null', () => {
     for (const bad of [
       '',
@@ -138,6 +148,7 @@ describe('buildTextOneshotPinOptions', () => {
           models: {
             codex: [
               chat('disabled', { disabled: true }),
+              chat('retired', { status: 'retired' }),
               chat('hidden-by-default', { defaultEnabled: false }),
             ],
           },
@@ -453,5 +464,12 @@ describe('resolveOneshotCatalogModel', () => {
       provider({ id: 'xd', models: { codex: [chat('gpt-disabled', { disabled: true })] } }),
     );
     expect(resolveOneshotCatalogModel(catalog, undefined, 'gpt-disabled')).toBeNull();
+  });
+
+  it('目录中已退役的模型不能作为声明路由', () => {
+    const catalog = catalogOf(
+      provider({ id: 'xd', models: { codex: [chat('gpt-retired', { status: 'retired' })] } }),
+    );
+    expect(resolveOneshotCatalogModel(catalog, undefined, 'gpt-retired')).toBeNull();
   });
 });

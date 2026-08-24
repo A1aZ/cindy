@@ -28,6 +28,8 @@ const AUXILIARY_TITLE_TIMEOUT_MS = 12_000;
 const AUXILIARY_TITLE_MAX_TOKENS = 32;
 const AUXILIARY_TITLE_OUTPUT_MAX_CHARS = 256;
 const AUXILIARY_TITLE_VISUAL_MAX_CHARS = 40;
+const AUXILIARY_TITLE_RESPONSE_INSTRUCTIONS =
+  'Output only the short conversation title requested by the user message, without quotation marks or ending punctuation.';
 
 interface AuxiliaryTitleRuntimeDeps {
   readSelection: (
@@ -95,6 +97,12 @@ async function generateExplicitTitle(
     model: selection.model,
     maxTokens: AUXILIARY_TITLE_MAX_TOKENS,
     timeoutMs: AUXILIARY_TITLE_TIMEOUT_MS,
+    // Short title budgets cannot afford provider-default thinking. Messages /
+    // chat routes receive their native disable flag; Responses routes use the
+    // lowest supported effort because that protocol has no off value.
+    disableReasoning: true,
+    reasoningEffort: 'minimal',
+    responseInstructions: AUXILIARY_TITLE_RESPONSE_INSTRUCTIONS,
     signal: args.signal,
     // Settings may change while OAuth refresh/credential discovery awaits. The
     // paid request is dispatched only if the same exact pin is still active.

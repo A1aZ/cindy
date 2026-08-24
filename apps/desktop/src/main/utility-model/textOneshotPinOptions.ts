@@ -19,7 +19,7 @@
 
 import {
   classifyModel,
-  isAgentSelectableModel,
+  isModelSelectableForNewRoute,
   isModelDisabled,
   isProviderDisabled,
   type AgentKind,
@@ -97,8 +97,7 @@ function isRoutableForOneshot(provider: Provider, agentKind: AgentKind): boolean
  *  更宽的判据会把 mode 缺省、group='image' 的网关条目放进钉档清单,钉死
  *  不回落 = 恒失败)。userProvider 标记镜像模型选择器的自定义供应商放行。 */
 function isChatModel(model: CatalogModel, provider: Provider): boolean {
-  return model.disabled !== true
-    && isAgentSelectableModel(model, { userProvider: provider.source === 'user' });
+  return isModelSelectableForNewRoute(model, { userProvider: provider.source === 'user' });
 }
 
 const AGENT_LABEL: Record<(typeof ONESHOT_ROUTE_AGENTS)[number], string> = {

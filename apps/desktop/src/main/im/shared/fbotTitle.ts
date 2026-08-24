@@ -71,11 +71,18 @@ export async function generateImSessionTitleText(
   sessionId: string,
   seedText: string,
 ): Promise<string | null> {
+  // Preserve the route selected when this title attempt began. If the exact
+  // route fails and Settings changes while it is in flight, falling through
+  // based on the new value would silently send the same prompt to another
+  // provider.
+  const startedWithExplicitRoute = Boolean(
+    readAuxiliaryModelSelection('sessionTitleModel'),
+  );
   const generated = (await generateMakerSessionTitle(seedText, 'claude-code', sessionId))?.trim();
   if (generated) return generated;
   // An explicit auxiliary model is an exact, fail-closed route. Do not hide a
   // failure by falling through to the legacy utility-model candidate chain.
-  if (readAuxiliaryModelSelection('sessionTitleModel')) return null;
+  if (startedWithExplicitRoute) return null;
   try {
     // 动态 import 保持本模块的静态依赖链不继续膨胀(cindySlot 同款)。
     const [{ requestUtilityText }, { getMaker }] = await Promise.all([

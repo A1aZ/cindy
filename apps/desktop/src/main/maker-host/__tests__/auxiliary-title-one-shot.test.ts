@@ -86,6 +86,9 @@ describe('auxiliary task-title routing', () => {
         providerId: 'openrouter',
         agentKind: 'codex',
         model: 'openai/gpt-5-mini',
+        disableReasoning: true,
+        reasoningEffort: 'minimal',
+        responseInstructions: expect.stringContaining('Output only the short conversation title'),
       }),
     );
     expect(h.generateLegacy).not.toHaveBeenCalled();

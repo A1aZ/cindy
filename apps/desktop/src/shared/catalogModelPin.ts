@@ -1,10 +1,10 @@
 /**
  * A stable catalog route pin for one-shot text work.
  *
- * The model id may contain both `/` and `:`, so only the first two separators
- * after `cat:` are structural. Keep this parser shared by persistence, IPC and
- * execution so a value accepted by Settings is always decoded the same way at
- * dispatch time.
+ * The provider and model ids may contain `:`, so the provider segment is URI
+ * encoded while the model remains the final opaque segment. Keep this parser
+ * shared by persistence, IPC and execution so a value accepted by Settings is
+ * always decoded the same way at dispatch time.
  */
 
 export const CATALOG_MODEL_PIN_PREFIX = 'cat:';
@@ -21,7 +21,7 @@ const CATALOG_MODEL_PIN_AGENTS = new Set<CatalogModelPinAgentKind>(['codex', 'cl
 
 /** Encode an exact provider × runtime × model route. */
 export function encodeCatalogModelPin(route: CatalogModelPinRoute): string {
-  return `${CATALOG_MODEL_PIN_PREFIX}${route.providerId}:${route.agentKind}:${route.model}`;
+  return `${CATALOG_MODEL_PIN_PREFIX}${encodeURIComponent(route.providerId)}:${route.agentKind}:${route.model}`;
 }
 
 /** Decode a catalog pin; malformed or unsupported-runtime values return null. */
@@ -33,10 +33,15 @@ export function decodeCatalogModelPin(raw: string): CatalogModelPinRoute | null 
   const secondSep = rest.indexOf(':', firstSep + 1);
   if (secondSep <= firstSep + 1) return null;
 
-  const providerId = rest.slice(0, firstSep);
+  let providerId: string;
+  try {
+    providerId = decodeURIComponent(rest.slice(0, firstSep));
+  } catch {
+    return null;
+  }
   const agentKind = rest.slice(firstSep + 1, secondSep);
   const model = rest.slice(secondSep + 1);
-  if (!model || !CATALOG_MODEL_PIN_AGENTS.has(agentKind as CatalogModelPinAgentKind)) {
+  if (!providerId || !model || !CATALOG_MODEL_PIN_AGENTS.has(agentKind as CatalogModelPinAgentKind)) {
     return null;
   }
   return {

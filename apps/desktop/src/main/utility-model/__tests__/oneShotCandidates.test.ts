@@ -421,6 +421,52 @@ describe('utility one-shot candidates', () => {
     });
   });
 
+  it('rejects a retired model pinned to an explicit auxiliary route', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'tapsvc',
+        name: 'Tap Service',
+        source: 'user',
+        agents: ['codex'],
+        auth: { method: 'apiKey' },
+        routing: {
+          codex: {
+            upstream: 'https://custom.example/v1',
+            authStrategy: 'api-key-header',
+          },
+        },
+        models: {
+          codex: [{
+            id: 'retired-mini',
+            name: 'Retired Mini',
+            contextWindow: 100_000,
+            status: 'retired',
+          }],
+        },
+      }],
+    } as never);
+    readCustomKey.mockReturnValue('custom-secret');
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'tapsvc',
+      agentKind: 'codex',
+      model: 'retired-mini',
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'no_candidate',
+      attempts: [expect.objectContaining({
+        providerId: 'tapsvc',
+        model: 'retired-mini',
+        status: 'skipped',
+        reason: 'model_unavailable',
+      })],
+    });
+    expect(readCustomKey).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('does not read or send a custom-provider key while its route is mutating', async () => {
     activeCatalog.mockReturnValue({
       providers: [{
@@ -625,12 +671,16 @@ describe('utility one-shot candidates', () => {
       model: 'gpt-5.5',
       systemPrompt: 'SYSTEM POLICY',
       responseInstructions: 'ONE LINE ONLY',
+      disableReasoning: true,
+      reasoningEffort: 'minimal',
       beforeDispatch,
     });
 
     expect(result).toMatchObject({ ok: true, text: 'next prompt' });
     expect(beforeDispatch).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      thinking: { type: 'disabled' },
+      reasoning_effort: 'minimal',
       messages: [
         { role: 'system', content: 'SYSTEM POLICY\nONE LINE ONLY' },
         { role: 'user', content: 'reference material' },

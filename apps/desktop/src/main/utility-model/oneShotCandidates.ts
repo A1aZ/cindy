@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { type AgentKind, type Maker } from '@cindy/maker-core';
 import {
   appendProviderRequestPath,
-  isAgentSelectableModel,
+  isModelSelectableForNewRoute,
   storedCustomProviderId,
 } from '@cindy/model-providers';
 
@@ -68,6 +68,12 @@ export type UtilityTextRequestOptions = {
   timeoutMs?: number;
   /** Optional lightweight reasoning hint for short internal classifiers. */
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /**
+   * Disable provider-native thinking for strict short-output budgets. Messages
+   * and chat routes send `thinking.type=disabled`; Responses routes use the
+   * lowest supported effort because that protocol has no off value.
+   */
+  disableReasoning?: boolean;
   /** Abort an in-flight direct HTTP request when the owning workflow ends. */
   signal?: AbortSignal;
   /** Provider-native system/instructions text, kept separate from reference data. */
@@ -555,7 +561,8 @@ async function requestExplicitProviderText(
   // Model resolution is scoped to the selected agent. Never use provider.titleModel
   // here: that legacy field may belong to another runtime (for example Codex),
   // which would silently turn a Claude request into a Codex request.
-  const model = requestedModel || configuredModels[0]?.id || '';
+  const model = requestedModel || configuredModels.find((item) =>
+    isModelSelectableForNewRoute(item, { userProvider: provider?.source === 'user' }))?.id || '';
   const selectedRouting = agentKind ? provider?.routing[agentKind] : undefined;
   const transport: UtilityModelTransport =
     agentKind === 'codex' && selectedRouting?.wireProtocol !== 'openai-chat'
@@ -601,7 +608,9 @@ async function requestExplicitProviderText(
       }],
     };
   }
-  if (requestedModel && !configuredModels.some((item) => item.id === requestedModel)) {
+  if (requestedModel && !configuredModels.some((item) =>
+    item.id === requestedModel
+    && isModelSelectableForNewRoute(item, { userProvider: provider.source === 'user' }))) {
     return {
       ok: false,
       reason: 'no_candidate',
@@ -630,7 +639,7 @@ async function requestExplicitProviderText(
     const currentModel = currentProvider.models[agentKind]?.find((item) => item.id === model);
     if (
       !currentModel ||
-      !isAgentSelectableModel(currentModel, { userProvider: currentProvider.source === 'user' })
+      !isModelSelectableForNewRoute(currentModel, { userProvider: currentProvider.source === 'user' })
     ) return false;
     return stableSnapshot({
       routing: currentProvider.routing[agentKind],
@@ -653,6 +662,7 @@ async function requestExplicitProviderText(
       maxTokens: opts.maxTokens,
       timeoutMs: opts.timeoutMs,
       reasoningEffort: opts.reasoningEffort,
+      disableReasoning: opts.disableReasoning,
       signal: opts.signal,
       systemPrompt: opts.systemPrompt,
       responseInstructions: opts.responseInstructions,
@@ -751,6 +761,7 @@ async function requestExplicitProviderText(
       maxTokens: requestOpts?.maxTokens,
       timeoutMs: requestOpts?.timeoutMs,
       reasoningEffort: requestOpts?.reasoningEffort,
+      disableReasoning: requestOpts?.disableReasoning,
       signal: requestOpts?.signal,
       systemPrompt: requestOpts?.systemPrompt,
       responseInstructions: requestOpts?.responseInstructions,
@@ -815,6 +826,7 @@ async function requestBuiltinProviderText(
     maxTokens?: number;
     timeoutMs?: number;
     reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    disableReasoning?: boolean;
     signal?: AbortSignal;
     systemPrompt?: string;
     responseInstructions?: string;
@@ -868,6 +880,7 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         signal: requestOpts?.signal ?? input.signal,
         systemPrompt: requestOpts?.systemPrompt,
         responseInstructions: requestOpts?.responseInstructions,
@@ -914,6 +927,7 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens ?? catalogModel?.maxOutput ?? 81_920,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         signal: requestOpts?.signal ?? input.signal,
         systemPrompt: requestOpts?.systemPrompt,
         responseInstructions: requestOpts?.responseInstructions,
@@ -965,6 +979,7 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         // ChatGPT's private Codex Responses endpoint rejects this public API
         // parameter with HTTP 400. The Auto reviewer enforces its own compact
         // output ceiling after the response instead.
@@ -1016,6 +1031,7 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         supportsReasoning: supportsXaiReasoning(input.model),
         signal: requestOpts?.signal ?? input.signal,
         systemPrompt: requestOpts?.systemPrompt,
@@ -1293,6 +1309,7 @@ async function requestProviderHttpText(input: {
   maxTokens?: number;
   timeoutMs?: number;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  disableReasoning?: boolean;
   /** Some coding-specialized models reject their wire's reasoning field. */
   supportsReasoning?: boolean;
   /** Unknown custom routes may reject optional fields from an otherwise compatible wire. */
@@ -1322,13 +1339,17 @@ async function requestProviderHttpText(input: {
     const instructions = [input.systemPrompt, input.responseInstructions]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n');
+    const reasoningEffort = input.disableReasoning
+      ? 'minimal'
+      : input.reasoningEffort;
     const supportsRequestedReasoning = Boolean(
       input.wire !== 'anthropic-messages'
-      && input.reasoningEffort
+      && reasoningEffort
       && input.supportsReasoning !== false,
     );
     const hasOptionalRequestFields = input.wire === 'responses'
       || input.maxTokens !== undefined
+      || input.disableReasoning === true
       || supportsRequestedReasoning;
     const buildBody = (minimal: boolean) => input.wire === 'responses'
       ? {
@@ -1343,7 +1364,7 @@ async function requestProviderHttpText(input: {
           ? { max_output_tokens: input.maxTokens }
           : {}),
         ...(!minimal && supportsRequestedReasoning
-          ? { reasoning: { effort: input.reasoningEffort } }
+          ? { reasoning: { effort: reasoningEffort } }
           : {}),
       }
       : input.wire === 'anthropic-messages'
@@ -1354,13 +1375,15 @@ async function requestProviderHttpText(input: {
           // 回退,不是宿主承诺的输出上限。
           max_tokens: input.maxTokens ?? 81_920,
           ...(instructions ? { system: instructions } : {}),
+          ...(!minimal && input.disableReasoning ? { thinking: { type: 'disabled' } } : {}),
           messages: [{ role: 'user', content: input.prompt }],
         }
         : {
           model: input.model,
           ...(!minimal && input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
+          ...(!minimal && input.disableReasoning ? { thinking: { type: 'disabled' } } : {}),
           ...(!minimal && supportsRequestedReasoning
-            ? { reasoning_effort: input.reasoningEffort }
+            ? { reasoning_effort: reasoningEffort }
             : {}),
           messages: [
             ...(instructions ? [{ role: 'system', content: instructions }] : []),
@@ -1514,6 +1537,7 @@ async function requestCustomProviderText(input: {
   maxTokens?: number;
   timeoutMs?: number;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  disableReasoning?: boolean;
   signal?: AbortSignal;
   systemPrompt?: string;
   responseInstructions?: string;
@@ -1565,6 +1589,7 @@ async function requestCustomProviderText(input: {
     maxTokens: input.maxTokens,
     timeoutMs: input.timeoutMs,
     reasoningEffort: input.reasoningEffort,
+    disableReasoning: input.disableReasoning,
     retryWithMinimalBodyOnInvalidRequest: true,
     signal: input.signal,
     systemPrompt: input.systemPrompt,

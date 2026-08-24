@@ -210,7 +210,7 @@ describe('networkSlot · 能力资格审', () => {
       getGhost: () => fakeGhost({ network: null }),
       inFlightCallInfo: (callId) =>
         callId === 'call-agent'
-          ? { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }
+          ? { ghostId: 'web-search', sessionId: 'session-1', remoteHostId: null, channel: 'session' }
           : null,
     });
     expect(
@@ -224,7 +224,7 @@ describe('networkSlot · 能力资格审', () => {
 
     const wrongOwner = makeSlot({
       getGhost: () => fakeGhost({ network: null }),
-      inFlightCallInfo: () => ({ ghostId: 'another-plugin', sessionId: 'session-1', channel: 'session' }),
+      inFlightCallInfo: () => ({ ghostId: 'another-plugin', sessionId: 'session-1', remoteHostId: null, channel: 'session' }),
     });
     expect(
       await wrongOwner.slot.handleFetchRequest('web-search', {
@@ -237,7 +237,7 @@ describe('networkSlot · 能力资格审', () => {
   it('脚本/后台通道不能冒充 Agent 授权访问未声明域名', async () => {
     const { slot } = makeSlot({
       getGhost: () => fakeGhost({ network: null }),
-      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: null, channel: 'script' }),
+      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: null, remoteHostId: undefined, channel: 'script' }),
     });
     expect(
       await slot.handleFetchRequest('web-search', {
@@ -247,12 +247,33 @@ describe('networkSlot · 能力资格审', () => {
     ).toMatchObject({ ok: false });
   });
 
+  it('SSH remote Agent 不能借本机 Desktop 出口访问未声明域名', async () => {
+    const { slot, fetchImpl, fetchPublicImpl } = makeSlot({
+      getGhost: () => fakeGhost({ network: null }),
+      inFlightCallInfo: () => ({
+        ghostId: 'web-search',
+        sessionId: 'session-remote',
+        remoteHostId: 'ssh-host-1',
+        channel: 'session',
+      }),
+    });
+
+    expect(
+      await slot.handleFetchRequest('web-search', {
+        url: 'https://example.com/data',
+        callId: 'call-agent',
+      }),
+    ).toMatchObject({ ok: false });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchPublicImpl).not.toHaveBeenCalled();
+  });
+
   it('Agent 未声明目标的 SSRF 守门失败时不回退普通 fetch', async () => {
     const guardedError = new Error('Blocked: resolves to private/internal/special-use IP address');
     const guardedFetch = vi.fn(async () => { throw guardedError; });
     const { slot, fetchImpl } = makeSlot({
       getGhost: () => fakeGhost({ network: null }),
-      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }),
+      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', remoteHostId: null, channel: 'session' }),
       fetchPublicImpl: guardedFetch,
     });
 
@@ -280,7 +301,7 @@ describe('networkSlot · 能力资格审', () => {
       getGhost: () => fakeGhost({ network: null }),
       inFlightCallInfo: () =>
         live
-          ? { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }
+          ? { ghostId: 'web-search', sessionId: 'session-1', remoteHostId: null, channel: 'session' }
           : null,
       fetchPublicImpl: guardedFetch,
     });
@@ -299,7 +320,7 @@ describe('networkSlot · 能力资格审', () => {
   it('Agent 访问已声明目标仍使用声明边界，不额外阻断私有服务', async () => {
     const { slot, fetchImpl, fetchPublicImpl } = makeSlot({
       getGhost: () => fakeGhost({ network: { hosts: ['127.0.0.1'], secrets: [] } }),
-      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }),
+      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', remoteHostId: null, channel: 'session' }),
     });
 
     const result = await slot.handleFetchRequest('web-search', {
@@ -457,7 +478,7 @@ describe('networkSlot · 重定向逐跳守门', () => {
       .mockResolvedValueOnce({ response: fakeResponse(), release });
     const { slot, fetchImpl } = makeSlot({
       getGhost: () => fakeGhost({ network: null }),
-      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', channel: 'session' }),
+      inFlightCallInfo: () => ({ ghostId: 'web-search', sessionId: 'session-1', remoteHostId: null, channel: 'session' }),
       fetchPublicImpl: guardedFetch,
     });
 
@@ -476,7 +497,12 @@ describe('networkSlot · 重定向逐跳守门', () => {
   });
 
   it('Agent 交卷后不再跟进未声明目标的后续重定向', async () => {
-    const liveCall = { ghostId: 'web-search', sessionId: 'session-1', channel: 'session' as const };
+    const liveCall = {
+      ghostId: 'web-search',
+      sessionId: 'session-1',
+      remoteHostId: null,
+      channel: 'session' as const,
+    };
     const inFlightCallInfo = vi.fn()
       // 入口资格、首跳资格与重定向目标预检仍在途。
       .mockReturnValueOnce(liveCall)

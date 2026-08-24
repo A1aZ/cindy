@@ -66,12 +66,15 @@ export interface NetworkSlotDeps {
   getGhost(id: string): InstalledGhost | null;
   /**
    * callId → 严格在途的 Agent 调用上下文。只有 channel:'session'、
-   * sessionId 存在且 ghostId 匹配时，才能复用外层 ghost_call 已经
-   * 通过的 Cindy Agent 授权；面板、订阅、后台与脚本通道都不在此列。
+   * sessionId 存在、明确是本地会话(remoteHostId === null)且 ghostId
+   * 匹配时，才能复用外层 ghost_call 已经通过的 Cindy Agent 授权；
+   * 面板、订阅、后台、远程 SSH 与脚本通道都不在此列。
    */
   inFlightCallInfo?(callId: string): {
     ghostId: string;
     sessionId: string | null;
+    /** null = 已证明是本地会话；string = SSH remote；undefined = 未知。 */
+    remoteHostId: string | null | undefined;
     channel: 'session' | 'script';
   } | null;
   /**
@@ -1045,7 +1048,8 @@ export class GhostNetworkSlot {
         : null;
       return callInfo?.ghostId === ghostId
         && callInfo.channel === 'session'
-        && callInfo.sessionId !== null;
+        && callInfo.sessionId !== null
+        && callInfo.remoteHostId === null;
     };
     const agentMediated = hasLiveAgentAuthorization();
     // 静态 hosts 与动态连接地址(network.connections,用户在设置页添加、

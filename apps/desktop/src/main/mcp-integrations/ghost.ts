@@ -1690,12 +1690,16 @@ export function getCindyGhostsMcpDeps(
       // 据此配对取卡;没供过 = 结果零变化,模型永远看不到内部 UUID)。
       const callId = randomUUID();
       const cardService = getGhostCardService();
+      const callSessionContext = resolveSessionContext();
       cardService.registerCall(callId, {
         ghostId,
         toolUseId: agentToolUseId ?? null,
         // ALS 优先(codex 每单恢复)、闭包兜底(claude 建线期按 session 绑定)
         // ——此前 claude 路径这里恒为 null,卡片只能靠 toolUseId 启发式锚定。
-        sessionId: resolveSessionContext()?.sessionId ?? null,
+        sessionId: callSessionContext?.sessionId ?? null,
+        // 未声明 network 的 Agent 调用只能借本机 Agent 授权走 Desktop 出网；
+        // SSH remote 会话保留 host id，由 networkSlot 明确拒绝本地出口。
+        remoteHostId: callSessionContext?.remoteHostId ?? null,
       });
       // GhostToolCallResult 与 CindyGhostCallResult 同构(错误码枚举一致),
       // 原样透传;类型层若有漂移 tsc 会拦。

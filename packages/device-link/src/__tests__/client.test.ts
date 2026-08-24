@@ -4886,26 +4886,24 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
       .at(-1)?.id;
     expect(linkRequestId).toBeTruthy();
 
+    const confirmationAcks = (relay.deliveredTo.get('desktop') ?? []).filter((env) => (
+      parseTransportAck(env)?.linkRequestId !== undefined
+    ));
+    // 在发送首个可靠业务帧前取样，确保这里只统计独立确认重试；业务帧触发的累计 ACK
+    // 也会合法携带 linkRequestId，不能计入确认重试次数。第一包已被丢弃，因此送达数
+    // 最多是总尝试次数减一，并且必须全部属于当前 request 代际。
+    expect(confirmationAcks.length).toBeGreaterThanOrEqual(1);
+    expect(confirmationAcks.length).toBeLessThanOrEqual(TRANSPORT_MAX_RETRY_ATTEMPTS - 1);
+    expect(confirmationAcks.every((env) => (
+      parseTransportAck(env)?.linkRequestId === linkRequestId
+    ))).toBe(true);
+
     const liveInvoke = host.invoke('ios', {
       channel: 'maker:confirmed-by-retry',
       args: [],
     }, 500);
     await relay.settleUntil(() => receivedInvokes.length === 1);
     await expect(liveInvoke).resolves.toEqual({ ok: true, result: 'retry-confirmed' });
-
-    const confirmationAcks = (relay.deliveredTo.get('desktop') ?? []).filter((env) => (
-      parseTransportAck(env)?.linkRequestId !== undefined
-    ));
-    // 第一包确认被丢弃后，host 收到首个重试便会恢复发送；但在其首个可靠业务帧
-    // 回到 controller、取消确认计时器之前，下一次 20ms 重试可能已经进入 relay。
-    // Windows runner 会合并相邻的短 timer；这里沿用生产默认的有界重试次数，
-    // 避免测试专用的过窄确认窗口先于合法重试耗尽。断言仍只约束协议不变量：
-    // 至少有一次确认送达，且不会超过首包丢失后的剩余重试预算，也不跨 request 代际。
-    expect(confirmationAcks.length).toBeGreaterThanOrEqual(1);
-    expect(confirmationAcks.length).toBeLessThanOrEqual(TRANSPORT_MAX_RETRY_ATTEMPTS);
-    expect(confirmationAcks.every((env) => (
-      parseTransportAck(env)?.linkRequestId === linkRequestId
-    ))).toBe(true);
 
     offHost();
     offController();

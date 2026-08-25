@@ -99,9 +99,10 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   `waitForYieldContinuationIdle()`，同时收掉未完成的 ask_user／plan 卡，不得在用户
   已看到失败后再开 ask_user／plan turn。续段启动失败的产品终态只由续段层
   发送一次（`yield-continuation-start-failed`），`handle.send` 不得再发一组
-  通用终态。continuation 的 `turn/start` 已被服务端接受后若本地 Stop，即使
-  `turnStarted` 已激活、随后 `interrupted` 被墓碑吞掉，也必须发出一条未认领的
-  cancelled `done`，避免 Session 仍握着 `currentTurnAttemptToken`。
+  通用终态。continuation 的 `turn/start` 已被服务端接受、但 RPC 仍 pending 时若
+  本地 Stop，墓碑会吞掉随后的 `interrupted`，必须补一条未认领 cancelled `done`，
+  避免 Session 仍握着 `currentTurnAttemptToken`。RPC 已返回后由 provider
+  `interrupted` 发唯一产品 Done，abort 不得再合成一条。
   续段必须继承铸造 claim 时的 origin 上下文：`turnPermissionPolicy`、
   capability selection 与 auto-review intent。不得把无人值守只读边界重置成普通
   Auto，也不得用固定 wait 提示覆盖原请求的能力选择或审查意图。

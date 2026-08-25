@@ -12019,11 +12019,13 @@ export class CodexAgent extends BaseAgent {
 
       async abort() {
         const cancelledYield = cancelActiveYieldContinuation('aborted');
-        // isolateCancelledTurnStart tombstones the accepted turn and swallows
-        // interrupted turn/completed. Emit the unclaimed cancelled done here so
-        // Session releases currentTurnAttemptToken even if turnStarted already
-        // activated the continuation and the RPC is still pending.
-        if (cancelledYield) {
+        // isolateCancelledTurnStart tombstones an accepted turn whose TurnStart
+        // RPC is still pending, and that tombstone swallows interrupted
+        // turn/completed. Only then emit an unclaimed cancelled done so Session
+        // releases currentTurnAttemptToken. After the RPC has returned,
+        // provider interrupted already emits one product Done — synthesizing
+        // another here would settle the next attempt.
+        if (cancelledYield && isTurnStartPending) {
           emitCancelledYieldProductDone();
         }
         clearReconnectStall();

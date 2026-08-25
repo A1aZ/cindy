@@ -293,6 +293,17 @@ describe('messageMarkdown', () => {
       { type: 'text', text: ' 与 ' },
       { type: 'link', text: 'https://例子.测试/path', url: 'https://例子.测试/path' },
     ]);
+    expect(parseMobileMarkdownInlines('打开 https://example.com/ＡＢＣ 与 https://example.com/abc々def')).toEqual([
+      { type: 'text', text: '打开 ' },
+      { type: 'link', text: 'https://example.com/ＡＢＣ', url: 'https://example.com/ＡＢＣ' },
+      { type: 'text', text: ' 与 ' },
+      { type: 'link', text: 'https://example.com/abc々def', url: 'https://example.com/abc々def' },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://example.com/path\u00A0然后')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
+      { type: 'text', text: '\u00A0然后' },
+    ]);
   });
 
   it('parses common inline formatting tokens', () => {

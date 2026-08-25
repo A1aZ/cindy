@@ -64,6 +64,15 @@ describe('clipBareHttpAutolinkText', () => {
     expect(clipBareHttpAutolinkText('https://例子123.测试/path')).toBe(
       'https://例子123.测试/path',
     );
+    expect(clipBareHttpAutolinkText('https://example.com/ＡＢＣ')).toBe(
+      'https://example.com/ＡＢＣ',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/ｶﾀｶﾅ')).toBe(
+      'https://example.com/ｶﾀｶﾅ',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/abc々def')).toBe(
+      'https://example.com/abc々def',
+    );
   });
 });
 
@@ -82,6 +91,15 @@ describe('BARE_HTTP_URL_RE_SOURCE', () => {
     );
     expect(matchBareHttp('打开 https://例子.测试/path 看')).toBe(
       'https://例子.测试/path',
+    );
+    expect(matchBareHttp('打开 https://example.com/ＡＢＣ 看')).toBe(
+      'https://example.com/ＡＢＣ',
+    );
+    expect(matchBareHttp('看 https://example.com/path\u00A0然后')).toBe(
+      'https://example.com/path',
+    );
+    expect(matchBareHttp('看 https://example.com/path\u202F然后')).toBe(
+      'https://example.com/path',
     );
   });
 

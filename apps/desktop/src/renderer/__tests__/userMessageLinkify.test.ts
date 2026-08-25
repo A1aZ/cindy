@@ -96,6 +96,13 @@ describe('userMessageLinkify', () => {
     expect(urls('打开 https://www.例子.com/2024年报告')).toEqual([
       'https://www.例子.com/2024年报告',
     ]);
+    expect(urls('打开 https://example.com/ＡＢＣ 与 https://example.com/ｶﾀｶﾅ')).toEqual([
+      'https://example.com/ＡＢＣ',
+      'https://example.com/ｶﾀｶﾅ',
+    ]);
+    expect(urls('看 https://example.com/path\u00A0然后')).toEqual([
+      'https://example.com/path',
+    ]);
   });
 
   it('keeps apostrophes inside URL paths and at URL endings', () => {

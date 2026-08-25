@@ -341,15 +341,19 @@ export function shrinkAutolinkTrailingJunk(
 }
 
 /**
- * 扫描器用的裸 http(s) 源。空白 / 尖括号 / ASCII 引号 / 弯引号 /
- * CJK 与全角标点处结束。汉字、假名、谚文可以出现在域名和路径里；
- * 半角括号留给 `clipBareHttpAutolink` 按配对/包裹处理。
+ * 扫描器用的裸 http(s) 源。任意 Unicode 空白 / 尖括号 / 引号 / 省略号 /
+ * 真正的 CJK·全角标点处结束。全角字母、半角片假名、々 等字母
+ * 留在地址里；半角括号留给 `clipBareHttpAutolink` 按配对处理。
+ * 标点范围与 `isAutolinkPunctuationBoundary` 的 P/Z 判定对齐，不是整块 Unicode block。
  */
 export const BARE_HTTP_URL_RE_SOURCE =
-  'https?://[^ \t\r\n<>"\u2018-\u201F\u2026\u3000-\u303F\uFF00-\uFFEF]+';
+  String.raw`https?://[^\s<>"\u2018-\u201F\u2026\u3000-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]+`;
 
 const MARKDOWN_FORMATTING_STRIP_BOUNDARY =
   /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+
+const CJK_OR_FULLWIDTH_PUNCT_BLOCK =
+  /(?:[\u3000-\u303F\uFF00-\uFFEF])/u;
 
 function isAutolinkPunctuationBoundary(ch: string): boolean {
   const code = ch.codePointAt(0);
@@ -357,9 +361,8 @@ function isAutolinkPunctuationBoundary(ch: string): boolean {
   if (ch === '"' || ch === '`') return true;
   if (code >= 0x2018 && code <= 0x201f) return true;
   if (code === 0x2026) return true;
-  if (code >= 0x3000 && code <= 0x303f) return true;
-  if (code >= 0xff00 && code <= 0xffef) return true;
-  return false;
+  if (!CJK_OR_FULLWIDTH_PUNCT_BLOCK.test(ch)) return false;
+  return /^\p{P}$/u.test(ch) || /^\p{Z}$/u.test(ch);
 }
 
 /**

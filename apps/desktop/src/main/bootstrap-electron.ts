@@ -2272,7 +2272,9 @@ registerAppearanceSettingsIpc();
 // ── 资源用量面板 IPC ─────────────────────────────────────────────────
 // 订阅驱动采样(面板不开不采样),interval 已 unref 不拖退出;terminate 只认
 // 本产品 spawn 的 agent 根进程。见 main/process-monitor/。
-registerProcessMonitorIpc();
+registerProcessMonitorIpc({
+  allowsSampling: (sender) => resourceUsageWindowController.allowsProcessMonitorSampling(sender),
+});
 
 // ── 主界面布局树存储 IPC──────────────────────────────────────────────
 // renderer 首帧 sendSync 拉布局(规则 7 无跳变)、set/reset 写路径、changed

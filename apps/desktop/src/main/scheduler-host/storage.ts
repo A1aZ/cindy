@@ -401,9 +401,12 @@ function reclassifyLegacyCustomProviderSnapshot(
   }
   const existingEstimatedValueMoney =
     estimatedValueMoney && estimatedValueMoney.amount > 0 ? estimatedValueMoney : null;
+  const combinedEstimatedValueMoney = existingEstimatedValueMoney
+    ? addCompatibleRegionalMoney([existingEstimatedValueMoney, sdkPart], existingEstimatedValueMoney.currency)
+    : sdkPart;
   return {
     costMoney: null,
-    estimatedValueMoney: existingEstimatedValueMoney ?? sdkPart,
+    estimatedValueMoney: combinedEstimatedValueMoney,
     sdkEstimatedValueMoney: sdkPart,
   };
 }

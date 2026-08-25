@@ -322,6 +322,33 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
+  it('combines independent estimates with reclassified legacy SDK spend', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({ id: 'sch-combined-estimate', providerId: 'custom-provider' });
+    try {
+      await harness.storage.insert(schedule);
+      await harness.storage.insertRun({
+        id: 'run-combined-estimate',
+        scheduleId: schedule.id,
+        firedAt: 10,
+        finishedAt: 20,
+        status: 'success',
+        costUsd: 0.42,
+        estimatedValueUsd: 0.18,
+        costAttribution: 'direct',
+      });
+      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
+        expect.objectContaining({
+          id: 'run-combined-estimate',
+          costMoney: expect.objectContaining({ amount: 0.42 }),
+          estimatedValueMoney: expect.objectContaining({ amount: 0.18 }),
+        }),
+      ]);
+    } finally {
+      harness.close();
+    }
+  });
+
   it('keeps reference estimates while reclassifying SDK and historical custom-provider amounts', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({ id: 'sch-sdk-projection' });

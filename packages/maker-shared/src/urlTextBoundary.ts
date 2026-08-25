@@ -1,7 +1,13 @@
+/**
+ * 裸 http(s) URL 在聊天正文里的切边权威。
+ *
+ * Desktop 用户消息、Desktop GFM autolink 后处理、Mobile markdown 分词共用这一份，
+ * 避免「URL 后面粘着（说明）」这类尾巴在一端被切掉、另一端点进 404。
+ * 匹配可以按扫描器各自写；href 从哪一刀结束只问 `clipBareHttpAutolink`。
+ */
+
 // 尾部 ASCII 标点集合：GFM spec 会剥掉 ? ! . , : * _ ~，此处额外加了 ;
 // 以便把 `https://x.com/foo; 然后` 这类散文分号也视为 URL 边界。
-// 用在我们自己的 plain-text linkifier 和 remark 后处理里，避免两条渲染链路
-// 对 `https://x.com/foo.` / `https://x.com/foo(base` 这类边界给出不同结果。
 
 const PROSE_TRAILING_PUNCT = new Set(['?', '!', '.', ',', ':', ';']);
 const MARKDOWN_FORMATTING_TRAILING_PUNCT = new Set(['*', '_', '~']);
@@ -332,4 +338,103 @@ export function shrinkAutolinkTrailingJunk(
     break;
   }
   return end;
+}
+
+/**
+ * 扫描器用的裸 http(s) 源。空白 / 尖括号 / ASCII 引号 / 任何非 ASCII
+ * （含全角括号与中文）处结束，避免匹配阶段就把说明吃进候选。
+ * 半角括号留给 `clipBareHttpAutolink` 按配对/包裹处理。
+ */
+export const BARE_HTTP_URL_RE_SOURCE =
+  String.raw`https?://[^\s<>"\u0080-\uFFFF]+`;
+
+const AUTOLINK_PROSE_BOUNDARY = new RegExp(
+  '[' +
+    '"`' +
+    '\\u2018-\\u201F' +
+    '\\u2026' +
+    '\\u3000-\\u303F' +
+    '\\u3040-\\u30FF' +
+    '\\u3400-\\u4DBF' +
+    '\\u4E00-\\u9FFF' +
+    '\\uAC00-\\uD7AF' +
+    '\\uFF00-\\uFFEF' +
+    ']',
+);
+
+const MARKDOWN_FORMATTING_STRIP_BOUNDARY =
+  /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+
+export function markdownWrapMarkerFromPrefix(prefix: string | null | undefined): string | null {
+  if (!prefix) return null;
+  for (const marker of MARKDOWN_WRAP_MARKERS) {
+    if (!prefix.endsWith(marker)) continue;
+    return isMarkdownWrapOpenBoundary(prefix[prefix.length - marker.length - 1])
+      ? marker
+      : null;
+  }
+  return null;
+}
+
+export type ClipBareHttpAutolinkOptions = {
+  prefix?: string | null;
+  markdownWrapMarker?: string | null;
+  stripMarkdownFormattingPunct?: boolean | 'auto';
+};
+
+/**
+ * 返回 `raw` 里真实 href 的结束下标（不含）。
+ * prefix 是 URL 前面的正文，用来识别包裹括号 / 引号 / markdown 开标记。
+ */
+export function clipBareHttpAutolink(
+  raw: string,
+  options: ClipBareHttpAutolinkOptions = {},
+): number {
+  const prefix = options.prefix ?? '';
+  const wrappingParenCount = countUnmatchedOpeningParens(prefix);
+  const marker =
+    options.markdownWrapMarker === undefined
+      ? markdownWrapMarkerFromPrefix(prefix)
+      : options.markdownWrapMarker;
+  const boundaryIndex = raw.search(AUTOLINK_PROSE_BOUNDARY);
+  const boundaryCut = boundaryIndex >= 0 ? boundaryIndex : raw.length;
+  const markdownCut = cutBeforeClosingMarkdownWrap(raw, marker);
+  const limited = Math.min(boundaryCut, markdownCut);
+  const proseCut = Math.min(
+    limited,
+    cutBeforeUnbalancedParenProse(raw, limited, { wrappingParenCount }),
+    cutBeforePathBracketProse(raw),
+  );
+  const stripMarkdown =
+    options.stripMarkdownFormattingPunct === true ||
+    (options.stripMarkdownFormattingPunct === 'auto' &&
+      (markdownCut < raw.length ||
+        hasTrailingMultiCharMarkdownMarkerAfterCodeHostResource(raw, proseCut) ||
+        (boundaryIndex >= 0 &&
+          proseCut === boundaryCut &&
+          MARKDOWN_FORMATTING_STRIP_BOUNDARY.test(raw[boundaryIndex]))));
+  return shrinkAutolinkTrailingJunk(raw, proseCut, {
+    stripMarkdownFormattingPunct: stripMarkdown,
+    stripWrappingApostrophe: prefix.endsWith("'"),
+    stripWrappingParenCount: wrappingParenCount,
+  });
+}
+
+export function clipBareHttpAutolinkText(
+  raw: string,
+  options: ClipBareHttpAutolinkOptions = {},
+): string {
+  return raw.slice(0, clipBareHttpAutolink(raw, options));
+}
+
+function hasTrailingMultiCharMarkdownMarkerAfterCodeHostResource(
+  raw: string,
+  cut: number,
+): boolean {
+  if (cut < 2) return false;
+  return ['**', '__', '~~'].some(
+    (marker) =>
+      raw.slice(cut - marker.length, cut) === marker &&
+      isCodeHostNumericResourcePath(raw.slice(0, cut - marker.length)),
+  );
 }

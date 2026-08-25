@@ -251,6 +251,44 @@ describe('messageMarkdown', () => {
     ]);
   });
 
+  it('does not swallow fullwidth parentheses or CJK punctuation after a bare URL', () => {
+    expect(parseMobileMarkdownInlines(
+      '诊断已写在 https://github.com/example/app/issues/3561#issuecomment-5391602790（无 @）。',
+    )).toEqual([
+      { type: 'text', text: '诊断已写在 ' },
+      {
+        type: 'link',
+        text: 'https://github.com/example/app/issues/3561#issuecomment-5391602790',
+        url: 'https://github.com/example/app/issues/3561#issuecomment-5391602790',
+      },
+      { type: 'text', text: '（无 @）。' },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://example.com/path（说明）然后')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
+      { type: 'text', text: '（说明）然后' },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://example.com/path。然后')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
+      { type: 'text', text: '。然后' },
+    ]);
+    expect(parseMobileMarkdownInlines('见 https://en.wikipedia.org/wiki/Foo_(bar) 词条')).toEqual([
+      { type: 'text', text: '见 ' },
+      {
+        type: 'link',
+        text: 'https://en.wikipedia.org/wiki/Foo_(bar)',
+        url: 'https://en.wikipedia.org/wiki/Foo_(bar)',
+      },
+      { type: 'text', text: ' 词条' },
+    ]);
+    expect(parseMobileMarkdownInlines('见 (https://example.com/path) 收尾')).toEqual([
+      { type: 'text', text: '见 (' },
+      { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
+      { type: 'text', text: ') 收尾' },
+    ]);
+  });
+
   it('parses common inline formatting tokens', () => {
     expect(parseMobileMarkdownInlines(
       'Use **bold**, *em*, `code`, ~~gone~~, [docs](https://example.com/docs).',

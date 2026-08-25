@@ -143,6 +143,23 @@ describe('remarkTruncateCjkUrls', () => {
     expect(tail.value).toBe('（说明）');
   });
 
+  it('issue comment fragment + 全角说明：…#issuecomment-1（无 @）', () => {
+    const tree = autolinkTree(
+      'https://github.com/example/app/issues/3561#issuecomment-5391602790（无 @）',
+    );
+    transform(tree);
+    const para = tree.children[0] as Paragraph;
+    const link = para.children[0] as Link;
+    const tail = para.children[1] as Text;
+    expect(link.url).toBe(
+      'https://github.com/example/app/issues/3561#issuecomment-5391602790',
+    );
+    expect((link.children[0] as Text).value).toBe(
+      'https://github.com/example/app/issues/3561#issuecomment-5391602790',
+    );
+    expect(tail.value).toBe('（无 @）');
+  });
+
   it('URL + 直接跟中文文字：https://example.com/path这是说明', () => {
     const tree = autolinkTree('https://example.com/path这是说明');
     transform(tree);

@@ -201,12 +201,18 @@ async function flushPending(): Promise<void> {
       for (const request of group) {
         const summary = summaries[request.sessionId];
         const params = interestParams.get(request.sessionId);
-        if (!params) continue;
+        if (
+          !params ||
+          params.presentation !== request.presentation ||
+          params.showSdkEstimate !== request.showSdkEstimate
+        ) {
+          continue;
+        }
         writeCache(request.sessionId, {
           estimatedValueMoney: summary?.estimatedValueMoney ?? null,
           excludedActualMoney: summary?.excludedActualMoney ?? null,
-          presentation: params.presentation,
-          showSdkEstimate: params.showSdkEstimate,
+          presentation: request.presentation,
+          showSdkEstimate: request.showSdkEstimate,
         });
       }
     }

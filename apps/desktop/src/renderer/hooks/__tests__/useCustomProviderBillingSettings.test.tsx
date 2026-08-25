@@ -144,6 +144,27 @@ describe('useCustomProviderBillingSettingsSnapshot', () => {
     expect(hook.result.current.showSdkCostForCustomProviders).toBe(false);
   });
 
+  it('refetches mounted devices when the relay returns online', async () => {
+    const hook = renderHook(() => useCustomProviderBillingSettingsSnapshot('dev-1'));
+    await flushRequests();
+    expect(hook.result.current.showSdkCostForCustomProviders).toBe(true);
+
+    act(() => statusListener?.({ status: 'connecting' }));
+    expect(hook.result.current.showSdkCostForCustomProviders).toBe(false);
+    customProviderBillingGetFor.mockResolvedValueOnce({
+      showSdkCostForCustomProviders: true,
+      isCustomized: true,
+    });
+    await act(async () => {
+      statusListener?.({ status: 'online' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(customProviderBillingGetFor).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.showSdkCostForCustomProviders).toBe(true);
+  });
+
   it('accepts a fresh GET after the device comes back online', async () => {
     const hook = renderHook(() => useCustomProviderBillingSettingsSnapshot('dev-1'));
     await flushRequests();

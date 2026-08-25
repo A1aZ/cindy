@@ -154,6 +154,57 @@ describe('useSidebarSessionUsageMoney', () => {
     expect(hook.result.current.estimatedValueMoney?.amount).toBeCloseTo(0.99);
   });
 
+  it('drops an in-flight summary after its presentation changes', async () => {
+    vi.useFakeTimers();
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    estimatedSessionValueBatchFor
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirst = resolve;
+      }))
+      .mockResolvedValueOnce({
+        's-1': {
+          estimatedValueMoney: null,
+          excludedActualMoney: null,
+        },
+      });
+
+    const hook = renderHook(
+      ({ presentation, showSdkEstimate }: { presentation: 'estimate' | 'hidden'; showSdkEstimate: boolean }) =>
+        useSidebarSessionUsageMoney(
+          's-1',
+          { amount: 1, currency: 'USD', approximate: false, kind: 'actual-cost' },
+          1,
+          presentation,
+          showSdkEstimate,
+        ),
+      { initialProps: { presentation: 'estimate', showSdkEstimate: true } },
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    hook.rerender({ presentation: 'hidden', showSdkEstimate: false });
+    await act(async () => {
+      resolveFirst?.({
+        's-1': {
+          estimatedValueMoney: {
+            amount: 0.42,
+            currency: 'USD',
+            approximate: true,
+            kind: 'value-estimate',
+            estimateReasons: ['sdk-estimate'],
+          },
+          excludedActualMoney: null,
+        },
+      });
+      await Promise.resolve();
+      await vi.runAllTimersAsync();
+    });
+
+    expect(hook.result.current.estimatedValueMoney).toBeNull();
+    expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(2);
+  });
+
   it('refreshes a remote sidebar row from remote spend and turn-cost pushes', async () => {
     vi.useFakeTimers();
     const hook = renderHook(() =>

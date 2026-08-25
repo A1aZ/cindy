@@ -454,6 +454,37 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
     });
   });
 
+  it('estimatedSessionValueBatchFor: isolates a failed remote device from successful groups', async () => {
+    const { localMessages, invoke } = stubElectron();
+    localMessages.estimatedSessionValueBatch.mockResolvedValue({
+      local: {
+        estimatedValueMoney: null,
+        excludedActualMoney: { amount: 0.42, currency: 'USD' },
+      },
+    });
+    invoke.mockRejectedValueOnce(new Error('remote offline'));
+    const { estimatedSessionValueBatchFor } = await import('@/lib/makerTransport');
+    const { remoteProjectsStore } = await import('@/features/device-link/remoteProjectsStore');
+    remoteProjectsStore.setDeviceSessions('dev-1', 'Mac', [sess('rs')]);
+
+    await expect(
+      estimatedSessionValueBatchFor([
+        { sessionId: 'local', presentation: 'hidden' },
+        { sessionId: 'rs', presentation: 'hidden' },
+      ], false),
+    ).resolves.toEqual({
+      local: {
+        estimatedValueMoney: null,
+        excludedActualMoney: { amount: 0.42, currency: 'USD' },
+      },
+      rs: {
+        projectionVersion: 1,
+        estimatedValueMoney: null,
+        excludedActualMoney: null,
+      },
+    });
+  });
+
   it('customProviderBillingGetFor: remote GET plus fail-closed old remotes', async () => {
     const { invoke } = stubElectron();
     invoke.mockResolvedValueOnce({ showSdkCostForCustomProviders: true, isCustomized: true });

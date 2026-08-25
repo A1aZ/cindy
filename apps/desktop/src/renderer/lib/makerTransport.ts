@@ -663,17 +663,23 @@ export async function estimatedSessionValueBatchFor(
     grouped.set(key, group);
   }
   const merged: Record<string, EstimatedSessionValueSummary> = {};
-  for (const group of grouped.values()) {
-    Object.assign(
-      merged,
-      await estimatedSessionValueBatchOnDevice(
-        group.sessionIds,
-        showSdkEstimate,
-        group.presentations,
-        group.deviceId,
-      ),
-    );
-  }
+  await Promise.all(
+    [...grouped.values()].map(async (group) => {
+      try {
+        Object.assign(
+          merged,
+          await estimatedSessionValueBatchOnDevice(
+            group.sessionIds,
+            showSdkEstimate,
+            group.presentations,
+            group.deviceId,
+          ),
+        );
+      } catch {
+        Object.assign(merged, tokenOnlyEstimatedSessionValueSummaries(group.sessionIds));
+      }
+    }),
+  );
   return merged;
 }
 

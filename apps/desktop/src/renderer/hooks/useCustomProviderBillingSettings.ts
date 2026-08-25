@@ -116,7 +116,13 @@ function installSharedListeners(): void {
     }
   });
   unsubscribeStatus = window.electronAPI?.deviceLink?.onStatusChanged?.(({ status }) => {
-    if (status !== 'online') invalidateAllRemoteSnapshots();
+    if (status !== 'online') {
+      invalidateAllRemoteSnapshots();
+      return;
+    }
+    for (const deviceId of remoteListeners.keys()) {
+      if (deviceId !== LOCAL_KEY) void refresh(deviceId);
+    }
   });
 }
 

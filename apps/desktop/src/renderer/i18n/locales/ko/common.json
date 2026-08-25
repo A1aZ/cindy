@@ -5465,6 +5465,7 @@
   },
   "contentHeader": {
     "toggleSidebar": "사이드바 전환",
+    "exitFullscreen": "전체 화면 종료",
     "collapseSidebar": "사이드바 접기",
     "expandSidebar": "사이드바 펼치기",
     "collapsePanel": "접기",

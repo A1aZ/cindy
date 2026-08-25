@@ -5467,6 +5467,7 @@
   },
   "contentHeader": {
     "toggleSidebar": "Toggle sidebar",
+    "exitFullscreen": "Exit full screen",
     "collapseSidebar": "Collapse Sidebar",
     "expandSidebar": "Expand Sidebar",
     "collapsePanel": "Collapse",

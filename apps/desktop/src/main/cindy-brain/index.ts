@@ -161,6 +161,7 @@ import { mapGhostOauthConnectError } from './ghostOauthSetupError.js';
 import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
 import { getResolvedMainLocale, t } from '../i18n.js';
+import { getDeepLinkMainWindow } from '../deepLink.js';
 import { reconcileGhostSkillLinks, removeGhostSkillLinksForRoots } from './skillSlot.js';
 import { assertGhostSkillProjectionStableOwner } from '../authBoundaryQuarantine.js';
 import { type GhostOwnerScope } from './ghostOwnerScope.js';
@@ -269,6 +270,7 @@ import {
   initGhostConfirmDialogBridge,
 } from './ghostConfirmDialogBridge.js';
 import {
+  createForgeOidcInstallMainWindowSender,
   forgeOidcInstallConfirmFacts,
   getForgeOidcInstallConfirmBridge,
   initForgeOidcInstallConfirmBridge,
@@ -2939,27 +2941,16 @@ let confirmSlotSingleton: GhostConfirmSlot | null = null;
 export const GHOST_CONFIRM_CHANNEL = 'ghosts:confirm-request';
 export const FORGE_OIDC_INSTALL_CONFIRM_CHANNEL = 'forge-oidc-install:confirm-request';
 
-function pickTrustedAppWindow(): Electron.BrowserWindow | undefined {
-  const focused = BrowserWindow.getFocusedWindow();
-  if (focused && !focused.isDestroyed() && isTrustedAppRendererWindow(focused)) return focused;
-  return BrowserWindow.getAllWindows().find(
-    (candidate) => !candidate.isDestroyed() && isTrustedAppRendererWindow(candidate),
-  );
-}
-
-function sendTrustedGhostWindowPush(channel: string, payload: unknown): boolean {
-  const win = pickTrustedAppWindow();
-  if (!win) return false;
-  sendGhostWindowPush(win, channel, payload);
-  return true;
-}
-
 function ensureForgeOidcInstallConfirmBridge() {
   return (
     getForgeOidcInstallConfirmBridge() ??
     initForgeOidcInstallConfirmBridge({
-      sendToWindow: (payload) =>
-        sendTrustedGhostWindowPush(FORGE_OIDC_INSTALL_CONFIRM_CHANNEL, payload),
+      sendToWindow: createForgeOidcInstallMainWindowSender<BrowserWindow>({
+        getMainWindow: getDeepLinkMainWindow,
+        isTrustedMainWindow: isTrustedAppRendererWindow,
+        send: (window, payload) =>
+          sendGhostWindowPush(window, FORGE_OIDC_INSTALL_CONFIRM_CHANNEL, payload),
+      }),
       log,
     })
   );

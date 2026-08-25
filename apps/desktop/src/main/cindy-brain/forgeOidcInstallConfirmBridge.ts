@@ -33,6 +33,27 @@ export interface ForgeOidcInstallConfirmBridgeDeps {
   log?: { warn: (message: string, meta?: Record<string, unknown>) => void };
 }
 
+export interface ForgeOidcInstallMainWindowSenderDeps<TWindow> {
+  getMainWindow(): TWindow | null;
+  isTrustedMainWindow(window: TWindow): boolean;
+  send(window: TWindow, payload: ForgeOidcInstallConfirmPush): void;
+}
+
+/**
+ * 只投挂载 ForgeOidcInstallConfirmHost 的主 App 窗口。辅助窗口即使受信、
+ * 当前聚焦或排在窗口列表最前，也不能替代主窗口接这条确认请求。
+ */
+export function createForgeOidcInstallMainWindowSender<TWindow>(
+  deps: ForgeOidcInstallMainWindowSenderDeps<TWindow>,
+): (payload: ForgeOidcInstallConfirmPush) => boolean {
+  return (payload) => {
+    const mainWindow = deps.getMainWindow();
+    if (!mainWindow || !deps.isTrustedMainWindow(mainWindow)) return false;
+    deps.send(mainWindow, payload);
+    return true;
+  };
+}
+
 interface PendingConfirm {
   resolve: (confirmed: boolean) => void;
   timeoutId: ReturnType<typeof setTimeout>;

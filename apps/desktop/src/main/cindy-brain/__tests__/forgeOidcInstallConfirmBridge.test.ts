@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { GhostManifest } from '../../../shared/ghost';
 import {
+  createForgeOidcInstallMainWindowSender,
   ForgeOidcInstallConfirmBridge,
   forgeOidcInstallConfirmFacts,
   type ForgeOidcInstallConfirmPush,
@@ -28,6 +29,47 @@ const OIDC = manifest([
     inject: { header: 'Authorization', format: 'Bearer {value}', hosts: ['api.acme.test'] },
   },
 ]);
+
+const CONFIRM_PUSH: ForgeOidcInstallConfirmPush = {
+  requestId: 'request-1',
+  ghostId: 'acme-tool',
+  ghostName: 'Acme Tool',
+  hosts: ['api.acme.test'],
+};
+
+describe('createForgeOidcInstallMainWindowSender', () => {
+  it('辅助 sidebar 聚焦时仍只把确认投给主 App 窗口', () => {
+    const mainWindow = { kind: 'main' };
+    const focusedSidebar = { kind: 'sidebar' };
+    const send = vi.fn();
+    const sender = createForgeOidcInstallMainWindowSender({
+      getMainWindow: () => mainWindow,
+      isTrustedMainWindow: () => true,
+      send,
+    });
+
+    expect(sender(CONFIRM_PUSH)).toBe(true);
+    expect(send).toHaveBeenCalledWith(mainWindow, CONFIRM_PUSH);
+    expect(send).not.toHaveBeenCalledWith(focusedSidebar, CONFIRM_PUSH);
+  });
+
+  it('只有受信辅助窗口、没有主 App 窗口时失败关闭', () => {
+    const trustedAuxiliaryWindow = { kind: 'resource-usage' };
+    const isTrustedMainWindow = vi.fn((window: typeof trustedAuxiliaryWindow) =>
+      Boolean(window),
+    );
+    const send = vi.fn();
+    const sender = createForgeOidcInstallMainWindowSender<typeof trustedAuxiliaryWindow>({
+      getMainWindow: () => null,
+      isTrustedMainWindow,
+      send,
+    });
+
+    expect(sender(CONFIRM_PUSH)).toBe(false);
+    expect(isTrustedMainWindow).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+});
 
 describe('forgeOidcInstallConfirmFacts', () => {
   it('requires confirmation only for organization installs that declare oidc-token', () => {

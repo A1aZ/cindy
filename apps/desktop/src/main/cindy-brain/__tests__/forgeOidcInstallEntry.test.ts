@@ -37,4 +37,18 @@ describe('Forge OIDC install entry wiring', () => {
     );
     expect(body).toContain('forgeOidcInstallConfirmFacts(');
   });
+
+  it('wires OIDC confirmation to the registered main App window instead of focused auxiliaries', () => {
+    const start = source.indexOf('function ensureForgeOidcInstallConfirmBridge()');
+    const end = source.indexOf('/**\n * 确认弹窗槽单例', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const wiring = source.slice(start, end);
+
+    expect(wiring).toContain('createForgeOidcInstallMainWindowSender<BrowserWindow>({');
+    expect(wiring).toContain('getMainWindow: getDeepLinkMainWindow');
+    expect(wiring).not.toContain('BrowserWindow.getFocusedWindow');
+    expect(wiring).not.toContain('BrowserWindow.getAllWindows');
+    expect(source).not.toContain('function pickTrustedAppWindow');
+  });
 });

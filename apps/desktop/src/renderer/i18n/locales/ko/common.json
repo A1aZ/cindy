@@ -10656,6 +10656,11 @@
       "count": "{{count}}건",
       "incomplete": "주문 내역이 많아 최근 {{count}}건만 표시합니다.",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "주문 ID 복사",
+        "success": "주문 ID를 복사했습니다",
+        "failed": "주문 ID를 복사하지 못했습니다. 다시 시도해 주세요."
+      },
       "states": {
         "completed": "완료",
         "awaitingPayment": "결제 대기",

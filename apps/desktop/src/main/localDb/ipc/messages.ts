@@ -29,6 +29,7 @@ import {
 } from '../../cindy-media/ledger';
 import { importExternalCodexMessagesForSession } from '../../maker-host/codex-local-sessions';
 import { importExternalClaudeCodeMessagesForSession } from '../../maker-host/claude-local-sessions';
+import { getActiveCatalog } from '../../maker-host/active-catalog.js';
 import { isDeviceLinkInvoke } from '../../device-link/invoke-context';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { onMessageCreated as onChatMessageCreatedForEmbedding } from '../../embedders/chat-history-embedder';
@@ -1872,6 +1873,24 @@ export function summarizeEstimatedSessionValuesBySession(
   return result;
 }
 
+function historicalCustomProviderFlagFromModel(
+  model: string | null | undefined,
+): boolean | undefined {
+  const normalized = model?.trim();
+  if (!normalized) return true;
+  const matchingSources = new Set(
+    getActiveCatalog().providers.flatMap((provider) =>
+      Object.values(provider.models).some((models) =>
+        models?.some((candidate) => candidate.id === normalized),
+      )
+        ? [provider.source]
+        : [],
+    ),
+  );
+  if (matchingSources.size !== 1) return true;
+  return matchingSources.has('user');
+}
+
 export function extractEstimatedSessionValueEntries(
   rows: ReadonlyArray<{ clientId: string; agentMeta: string | null }>,
   presentation: SdkCostPresentation = 'regular',
@@ -1908,12 +1927,21 @@ export function extractEstimatedSessionValueEntries(
     if (!rawMoney) continue;
 
     const turnUsageDetails = normalizeTurnUsageDetails(meta.turnUsageDetails);
+    const historicalProviderFlag =
+      meta.turnCostIsCustomProvider === undefined &&
+      meta.turnCostProviderId === undefined &&
+      meta.turnCostIsEstimate !== true
+        ? historicalCustomProviderFlagFromModel(
+            meta.model ?? turnUsageDetails?.model ?? turnUsageDetails?.models?.[0],
+          )
+        : undefined;
     const entryProviderFlag = resolveCustomProviderCostFlag(
-      meta.turnCostIsCustomProvider,
+      meta.turnCostIsCustomProvider ?? historicalProviderFlag,
       meta.turnCostProviderId,
     );
     const fallbackPresentation =
-      meta.turnCostIsCustomProvider === undefined && meta.turnCostProviderId !== undefined
+      meta.turnCostIsCustomProvider === undefined &&
+      (meta.turnCostProviderId !== undefined || historicalProviderFlag !== undefined)
         ? resolveTurnSdkCostPresentation({
             money: rawMoney,
             isCustomProviderCost: entryProviderFlag,
@@ -1923,7 +1951,7 @@ export function extractEstimatedSessionValueEntries(
         : presentation;
     const turnPresentation = resolveTurnSdkCostPresentation({
       money: rawMoney,
-      isCustomProviderCost: meta.turnCostIsCustomProvider,
+      isCustomProviderCost: meta.turnCostIsCustomProvider ?? historicalProviderFlag,
       fallback: fallbackPresentation,
       showSdkEstimate,
     });

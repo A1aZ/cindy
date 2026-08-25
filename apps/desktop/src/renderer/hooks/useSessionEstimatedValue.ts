@@ -45,6 +45,7 @@ interface EstimatedValueStoreSyncResult {
 export interface SessionEstimatedValueProjection {
   estimatedValueMoney: RegionalMoney | null;
   excludedActualMoney: RegionalMoney | null;
+  authoritative: boolean;
 }
 
 export function resolveEstimatedValueMessageProjection(
@@ -344,7 +345,10 @@ export function useSessionEstimatedValue(
   const [projection, setProjection] = useState<SessionEstimatedValueProjection>({
     estimatedValueMoney: null,
     excludedActualMoney: null,
+    authoritative: false,
   });
+  const authoritativeRef = useRef(false);
+  authoritativeRef.current = projection.authoritative;
   const subscribeSnapshot = useCallback(
     (cb: () => void) =>
       !enabled || !sessionId || displaySnapshot
@@ -367,7 +371,11 @@ export function useSessionEstimatedValue(
     excludedActualCostsRef.current = new Map();
     storeClientIdsRef.current = new Set();
     transcriptClearedRef.current = false;
-    setProjection({ estimatedValueMoney: null, excludedActualMoney: null });
+    setProjection({
+      estimatedValueMoney: null,
+      excludedActualMoney: null,
+      authoritative: false,
+    });
   }, [enabled, presentation, sessionId, showSdkEstimate]);
 
   useEffect(() => {
@@ -396,6 +404,7 @@ export function useSessionEstimatedValue(
     setProjection({
       estimatedValueMoney: sumCosts(result.costs),
       excludedActualMoney: sumCosts(result.excludedActualCosts),
+      authoritative: false,
     });
   }, [enabled, presentation, sessionId, showSdkEstimate, storeSnapshot]);
 
@@ -405,11 +414,13 @@ export function useSessionEstimatedValue(
     const applyCosts = (
       next: Map<string, RegionalMoney>,
       nextExcludedActualCosts: Map<string, RegionalMoney>,
+      authoritative = false,
     ): void => {
       if (
         cancelled ||
         (areCostMapsEqual(costsRef.current, next) &&
-          areCostMapsEqual(excludedActualCostsRef.current, nextExcludedActualCosts))
+          areCostMapsEqual(excludedActualCostsRef.current, nextExcludedActualCosts) &&
+          authoritativeRef.current === authoritative)
       ) {
         return;
       }
@@ -418,6 +429,7 @@ export function useSessionEstimatedValue(
       setProjection({
         estimatedValueMoney: sumCosts(next),
         excludedActualMoney: sumCosts(nextExcludedActualCosts),
+        authoritative,
       });
     };
     const mergeEntry = (entry: {
@@ -483,6 +495,8 @@ export function useSessionEstimatedValue(
     void estimatedSessionValueFor(sessionId, presentation, showSdkEstimate)
       .then((snapshot) => {
         if (cancelled) return;
+        const next = new Map<string, RegionalMoney>();
+        const nextExcludedActualCosts = new Map<string, RegionalMoney>();
         for (const entry of snapshot.entries) {
           const normalized =
             normalizeRegionalMoney(entry.money) ??
@@ -499,22 +513,25 @@ export function useSessionEstimatedValue(
             details?.perModelCost?.map((item) => item.money),
             entryPresentation,
           );
-          mergeEntry({
-            clientId: entry.clientId,
-            money: projected?.kind === 'value-estimate'
-              ? correctStaleUsdEstimate(
-                  asValueEstimate(
-                    projected,
-                    projected.estimateReasons?.includes('sdk-estimate')
-                      ? 'sdk-estimate'
-                      : 'subscription-value',
-                  ),
-                  entry.turnUsageDetails,
-                )
-              : null,
-            excludedActualMoney: entry.excludedActualMoney ?? null,
-          });
+          if (projected?.kind === 'value-estimate') {
+            next.set(
+              entry.clientId,
+              correctStaleUsdEstimate(
+                asValueEstimate(
+                  projected,
+                  projected.estimateReasons?.includes('sdk-estimate')
+                    ? 'sdk-estimate'
+                    : 'subscription-value',
+                ),
+                entry.turnUsageDetails,
+              ),
+            );
+          }
+          if (entry.excludedActualMoney?.amount) {
+            nextExcludedActualCosts.set(entry.clientId, entry.excludedActualMoney);
+          }
         }
+        applyCosts(next, nextExcludedActualCosts, true);
       })
       .catch(() => {
         // 历史汇总失败不影响实时增量；本 hook 只是展示辅助信息。

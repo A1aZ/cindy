@@ -62,13 +62,16 @@ export function useSessionUsageMoney(
   showSdkEstimate: boolean = presentation === 'estimate',
 ): SessionUsageMoney {
   const persistedActualMoney = useSessionSpend(sessionId, initialMoney, initialCostUsd);
-  const { estimatedValueMoney, excludedActualMoney } = useSessionEstimatedValue(
+  const { estimatedValueMoney, excludedActualMoney, authoritative } = useSessionEstimatedValue(
     sessionId,
     Boolean(sessionId),
     presentation,
     showSdkEstimate,
   );
-  const actualMoney = subtractExcludedActualMoney(persistedActualMoney, excludedActualMoney);
+  const shouldFailClosed = presentation !== 'regular' && !authoritative;
+  const actualMoney = shouldFailClosed
+    ? null
+    : subtractExcludedActualMoney(persistedActualMoney, excludedActualMoney);
 
   return useMemo(
     () => combineSessionUsageMoney(actualMoney, estimatedValueMoney),

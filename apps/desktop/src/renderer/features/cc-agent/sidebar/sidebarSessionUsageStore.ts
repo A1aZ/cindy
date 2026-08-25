@@ -37,6 +37,7 @@ interface CacheEntry {
   actualMoney: RegionalMoney | null;
   estimatedValueMoney: RegionalMoney | null;
   excludedActualMoney: RegionalMoney | null;
+  projectionAuthoritative: boolean;
   usage: SessionUsageMoney;
   presentation: SdkCostPresentation;
   showSdkEstimate: boolean;
@@ -62,11 +63,14 @@ function buildUsage(
   actualMoney: RegionalMoney | null,
   estimatedValueMoney: RegionalMoney | null,
   excludedActualMoney: RegionalMoney | null,
+  presentation: SdkCostPresentation,
+  projectionAuthoritative: boolean,
 ): SessionUsageMoney {
-  return combineSessionUsageMoney(
-    subtractExcludedActualMoney(actualMoney, excludedActualMoney),
-    estimatedValueMoney,
-  );
+  const projectedActualMoney =
+    presentation !== 'regular' && !projectionAuthoritative
+      ? null
+      : subtractExcludedActualMoney(actualMoney, excludedActualMoney);
+  return combineSessionUsageMoney(projectedActualMoney, estimatedValueMoney);
 }
 
 function notify(sessionId: string): void {
@@ -95,10 +99,15 @@ function writeCache(
     patch.excludedActualMoney !== undefined
       ? patch.excludedActualMoney
       : (prev?.excludedActualMoney ?? null);
+  const projectionAuthoritative =
+    patch.projectionAuthoritative !== undefined
+      ? patch.projectionAuthoritative
+      : (prev?.projectionAuthoritative ?? false);
   if (
     prev &&
     prev.presentation === patch.presentation &&
     prev.showSdkEstimate === patch.showSdkEstimate &&
+    prev.projectionAuthoritative === projectionAuthoritative &&
     areMoneyEqual(prev.actualMoney, actualMoney) &&
     areMoneyEqual(prev.estimatedValueMoney, estimatedValueMoney) &&
     areMoneyEqual(prev.excludedActualMoney, excludedActualMoney)
@@ -109,9 +118,16 @@ function writeCache(
     actualMoney,
     estimatedValueMoney,
     excludedActualMoney,
+    projectionAuthoritative,
     presentation: patch.presentation,
     showSdkEstimate: patch.showSdkEstimate,
-    usage: buildUsage(actualMoney, estimatedValueMoney, excludedActualMoney),
+    usage: buildUsage(
+      actualMoney,
+      estimatedValueMoney,
+      excludedActualMoney,
+      patch.presentation,
+      projectionAuthoritative,
+    ),
   };
   cache.set(sessionId, next);
   notify(sessionId);
@@ -209,6 +225,7 @@ async function flushPending(): Promise<void> {
           continue;
         }
         writeCache(request.sessionId, {
+          projectionAuthoritative: summary?.projectionVersion === 1,
           estimatedValueMoney: summary?.estimatedValueMoney ?? null,
           excludedActualMoney: summary?.excludedActualMoney ?? null,
           presentation: request.presentation,
@@ -240,7 +257,13 @@ function ensureInterest(
       actualMoney: actualMoney ?? cached?.actualMoney ?? null,
       presentation,
       showSdkEstimate,
-      ...(presentationChanged ? { estimatedValueMoney: null, excludedActualMoney: null } : {}),
+      ...(presentationChanged
+        ? {
+            projectionAuthoritative: false,
+            estimatedValueMoney: null,
+            excludedActualMoney: null,
+          }
+        : {}),
     });
     pending.add(sessionId);
     scheduleFlush();

@@ -278,7 +278,7 @@ describe('extractEstimatedSessionValueEntries', () => {
             },
           }),
         },
-      ]),
+      ]).filter((entry) => entry.money?.estimateReasons?.includes('subscription-value')),
     ).toEqual([
       legacyEstimatedEntry('estimate-1', 0.12),
       legacyEstimatedEntry('estimate-2', 0.03),
@@ -506,6 +506,27 @@ describe('extractEstimatedSessionValueEntries', () => {
         }),
       ]),
     );
+  });
+
+  it('fails closed for pre-upgrade rows whose model ownership is unavailable', () => {
+    const [entry] = extractEstimatedSessionValueEntries(
+      [{
+        clientId: 'legacy-unknown-model',
+        agentMeta: JSON.stringify({
+          model: 'deleted-custom-model',
+          turnCostUsd: 0.42,
+          turnCostIsEstimate: false,
+        }),
+      }],
+      'regular',
+      false,
+    );
+
+    expect(entry).toEqual(expect.objectContaining({
+      clientId: 'legacy-unknown-model',
+      excludedActualMoney: expect.objectContaining({ amount: 0.42 }),
+    }));
+    expect(entry).not.toHaveProperty('money');
   });
 
   it('keeps the reference-priced portion of a mixed SDK/reference estimate', () => {

@@ -287,6 +287,24 @@ describe('messageMarkdown', () => {
       { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
       { type: 'text', text: ') 收尾' },
     ]);
+    expect(parseMobileMarkdownInlines('~https://example.com/~alice')).toEqual([
+      { type: 'text', text: '~' },
+      {
+        type: 'link',
+        text: 'https://example.com/~alice',
+        url: 'https://example.com/~alice',
+      },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://例子。测试。')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://例子。测试', url: 'https://例子。测试' },
+      { type: 'text', text: '。' },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://example.com/path・说明')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
+      { type: 'text', text: '・说明' },
+    ]);
     expect(parseMobileMarkdownInlines('看 http://localhost:3000。然后')).toEqual([
       { type: 'text', text: '看 ' },
       { type: 'link', text: 'http://localhost:3000', url: 'http://localhost:3000' },

@@ -2,6 +2,7 @@ import { normalizeMathDelimiters } from '@cindy/maker-shared/math-markdown';
 import {
   BARE_HTTP_URL_RE_SOURCE,
   clipBareHttpAutolinkText,
+  markdownWrapMarkerFromPrefix,
 } from '@cindy/maker-shared/url-text-boundary';
 import {
   classifyChatPathLinkTarget,
@@ -808,6 +809,12 @@ export function parseMobileMarkdownInlines(
   return out.length > 0 ? out : [{ type: 'text', text: input }];
 }
 
+/** Mobile 只把 `~~` 当删除线，单个 `~` 是普通字符，不能当 URL 包裹标记。 */
+function mobileMarkdownWrapMarker(prefix: string): string | null {
+  const marker = markdownWrapMarkerFromPrefix(prefix);
+  return marker === '~' ? null : marker;
+}
+
 function findNextInlineToken(
   input: string,
   from: number,
@@ -890,7 +897,12 @@ function findNextInlineToken(
         (match) => {
           const rawHref = match[0];
           const href = /^https?:\/\//i.test(rawHref)
-            ? clipBareHttpAutolinkText(rawHref, { prefix: input.slice(0, match.index) })
+            ? clipBareHttpAutolinkText(rawHref, {
+                prefix: input.slice(0, match.index),
+                markdownWrapMarker: mobileMarkdownWrapMarker(
+                  input.slice(0, match.index),
+                ),
+              })
             : trimUrlPunctuation(rawHref);
           return { type: 'link' as const, text: href, url: href };
         },

@@ -347,21 +347,16 @@ export function shrinkAutolinkTrailingJunk(
  * authority 决定。半角括号留给 `clipBareHttpAutolink` 按配对处理。
  */
 export const BARE_HTTP_URL_RE_SOURCE =
-  String.raw`https?://[^\s<>"\u2018-\u201F\u2026\u3000-\u3001\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\uFF01-\uFF0D\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF60\uFF62-\uFF65]+`;
+  String.raw`https?://[^\s<>"\u2013-\u2015\u2018-\u201F\u2022\u2026\u3000-\u3001\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30FB\uFE10-\uFE19\uFF01-\uFF0D\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF60\uFF62-\uFF65]+`;
 
 const MARKDOWN_FORMATTING_STRIP_BOUNDARY =
   /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
-
-const CJK_OR_FULLWIDTH_PUNCT_BLOCK =
-  /(?:[\u3000-\u303F\uFF00-\uFFEF])/u;
 
 function isAutolinkPunctuationBoundary(ch: string): boolean {
   const code = ch.codePointAt(0);
   if (code == null) return false;
   if (ch === '"' || ch === '`') return true;
-  if (code >= 0x2018 && code <= 0x201f) return true;
-  if (code === 0x2026) return true;
-  if (!CJK_OR_FULLWIDTH_PUNCT_BLOCK.test(ch)) return false;
+  if (code < 0x80) return false;
   return /^\p{P}$/u.test(ch) || /^\p{Z}$/u.test(ch);
 }
 
@@ -396,8 +391,18 @@ function hostnameEndIndex(raw: string): number {
   return authEnd;
 }
 
+function isHostLabelChar(ch: string | undefined): boolean {
+  if (ch == null || isIdnDomainDot(ch)) return false;
+  if (ch === '/' || ch === '?' || ch === '#' || ch === ':' || ch === '@') return false;
+  return !isAutolinkPunctuationBoundary(ch);
+}
+
 function isIdnDotInHostname(raw: string, index: number, hostnameEnd: number): boolean {
-  return index < hostnameEnd && isIdnDomainDot(raw[index] ?? '');
+  return (
+    index < hostnameEnd &&
+    isIdnDomainDot(raw[index] ?? '') &&
+    isHostLabelChar(raw[index + 1])
+  );
 }
 
 /**

@@ -94,6 +94,15 @@ describe('clipBareHttpAutolinkText', () => {
     expect(clipBareHttpAutolinkText('https://例子。测试:443/path')).toBe(
       'https://例子。测试:443/path',
     );
+    expect(clipBareHttpAutolinkText('https://例子。测试。')).toBe(
+      'https://例子。测试',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/path・说明')).toBe(
+      'https://example.com/path',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/path—说明')).toBe(
+      'https://example.com/path',
+    );
   });
 });
 

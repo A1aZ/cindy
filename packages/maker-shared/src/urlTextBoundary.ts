@@ -362,38 +362,17 @@ function isAutolinkPunctuationBoundary(ch: string): boolean {
   return false;
 }
 
-function isUrlLetterScript(ch: string): boolean {
-  const code = ch.codePointAt(0);
-  if (code == null) return false;
-  if (code >= 0x3040 && code <= 0x30ff) return true;
-  if (code >= 0x3400 && code <= 0x4dbf) return true;
-  if (code >= 0x4e00 && code <= 0x9fff) return true;
-  if (code >= 0xac00 && code <= 0xd7af) return true;
-  return false;
-}
-
 /**
- * 标点/全角符号永远是正文边界。
- * 汉字假名谚文：跟在 URL 结构符后面算地址（`/路径`、`例子.测试`），
- * 紧贴 ASCII 字母数字则是粘上去的说明（`path这是说明`）。
+ * 只有标点/全角符号是正文边界。汉字假名谚文一律算地址，
+ * 不按「前一个字符是不是 ASCII」猜测（`www.例子.com`、`/2024年报告`
+ * 都是浏览器能打开的 IRI）。无标点的 `path这是说明` 无法和真路径区分，不猜。
  */
-function isAsciiTrailPunct(ch: string | undefined): boolean {
-  return ch != null && ".,;:?!_~'*" .includes(ch);
-}
-
-function isGluedCjkProse(raw: string, index: number): boolean {
-  let cursor = index - 1;
-  while (cursor >= 0 && isAsciiTrailPunct(raw[cursor])) cursor -= 1;
-  return cursor >= 0 && isAsciiAlnum(raw[cursor]);
-}
-
 function findAutolinkProseBoundary(raw: string): number {
   for (let index = 0; index < raw.length; ) {
     const code = raw.codePointAt(index);
     if (code == null) break;
     const char = String.fromCodePoint(code);
     if (isAutolinkPunctuationBoundary(char)) return index;
-    if (isUrlLetterScript(char) && isGluedCjkProse(raw, index)) return index;
     index += char.length;
   }
   return raw.length;

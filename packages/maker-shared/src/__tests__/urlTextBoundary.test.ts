@@ -45,27 +45,25 @@ describe('clipBareHttpAutolinkText', () => {
     );
   });
 
-  it('keeps Unicode domain and path, but still cuts glued CJK prose', () => {
+  it('keeps mixed ASCII/CJK domains and paths that URL can parse', () => {
     expect(clipBareHttpAutolinkText('https://example.com/路径')).toBe(
       'https://example.com/路径',
     );
     expect(clipBareHttpAutolinkText('https://例子.测试/path')).toBe(
       'https://例子.测试/path',
     );
-    expect(clipBareHttpAutolinkText('https://example.com/中文')).toBe(
-      'https://example.com/中文',
+    expect(clipBareHttpAutolinkText('https://www.例子.com/path')).toBe(
+      'https://www.例子.com/path',
     );
-    expect(clipBareHttpAutolinkText('https://example.com/path这是说明')).toBe(
-      'https://example.com/path',
+    expect(clipBareHttpAutolinkText('https://example.com/2024年报告')).toBe(
+      'https://example.com/2024年报告',
     );
-    expect(clipBareHttpAutolinkText('https://x.com/foo.说明')).toBe(
-      'https://x.com/foo',
+    expect(clipBareHttpAutolinkText('https://example.com/abc中文')).toBe(
+      'https://example.com/abc中文',
     );
-    expect(
-      clipBareHttpAutolinkText('https://github.com/makecindy/cindy/pull/90_~说明', {
-        stripMarkdownFormattingPunct: 'auto',
-      }),
-    ).toBe('https://github.com/makecindy/cindy/pull/90');
+    expect(clipBareHttpAutolinkText('https://例子123.测试/path')).toBe(
+      'https://例子123.测试/path',
+    );
   });
 });
 

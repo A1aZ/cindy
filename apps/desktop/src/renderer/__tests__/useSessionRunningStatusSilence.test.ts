@@ -407,6 +407,37 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     expect(onSessionDone).toHaveBeenCalledTimes(1);
   });
 
+  it('restores deferred attention as error when the attempted start fails terminally', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    const { rerender } = renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+
+    await emitSnapshot(new Map([['session-terminal-start-failure', status(true)]]));
+    await emitSnapshot(new Map([['session-terminal-start-failure', status(false)]]));
+    startingMock.sessionIds.add('session-terminal-start-failure');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith(
+      'session-terminal-start-failure',
+      'done',
+    );
+
+    storeMock.terminalErrorSessions.add('session-terminal-start-failure');
+    startingMock.sessionIds = new Set();
+    rerender();
+
+    expect(vi.mocked(addSessionAttention)).toHaveBeenCalledWith(
+      'session-terminal-start-failure',
+      'error',
+    );
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith(
+      'session-terminal-start-failure',
+      'done',
+    );
+    expect(onSessionDone).toHaveBeenCalledTimes(1);
+  });
+
   it('drops deferred done attention when starting becomes a real run', async () => {
     vi.useFakeTimers();
     const onSessionDone = vi.fn();

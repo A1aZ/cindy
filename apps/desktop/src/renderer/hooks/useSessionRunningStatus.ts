@@ -164,9 +164,18 @@ export function useSessionRunningStatus(
     // 期间因此抑制了上一轮 done,starting 清除后必须按当前权威状态收口。
     for (const sessionId of pendingStartingDoneAttentionRef.current) {
       const cur = statusMap.get(sessionId);
+      const hasError = makerChatStore.hasSessionTerminalError(sessionId);
       const isActive = sessionId === activeSessionId;
       const isRunning = cur?.isRunning === true;
       const stillPending = hasPendingInteraction(cur);
+      // 启动失败可能从未进入 running,因此不会再有 running→stopped 转换来把
+      // deferred done 升级成 error。权威终止错误一旦存在就立即收口为红点,
+      // 也不受 active / starting 抑制(done 才有「正在看就不亮」语义)。
+      if (hasError) {
+        pendingStartingDoneAttentionRef.current.delete(sessionId);
+        addSessionAttention(sessionId, 'error');
+        continue;
+      }
       if (isActive || isRunning || stillPending) {
         pendingStartingDoneAttentionRef.current.delete(sessionId);
         continue;

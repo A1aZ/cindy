@@ -144,8 +144,8 @@ function isAwaitingPaymentOrder(order: BillingPaymentOrder): boolean {
 
 /** 订单号展示保留首尾用于对单，中段固定脱敏；复制仍使用服务端返回的完整原值。 */
 function maskedOrderId(orderId: string): string {
-  const visibleEdgeLength = 8;
-  if (orderId.length <= visibleEdgeLength * 2) return orderId;
+  if (orderId.length <= 2) return '*'.repeat(orderId.length);
+  const visibleEdgeLength = Math.min(8, Math.floor((orderId.length - 1) / 2));
   return `${orderId.slice(0, visibleEdgeLength)}****${orderId.slice(-visibleEdgeLength)}`;
 }
 
@@ -1800,15 +1800,17 @@ function OrderHistoryCard({
               <button
                 type="button"
                 onClick={() => void copyOrderId(order.orderId)}
-                aria-label={t('billing.orders.copy.action')}
+                aria-label={t('billing.orders.copy.action', {
+                  id: maskedOrderId(order.orderId),
+                })}
                 className={cn(
-                  '-ml-1.5 mt-0.5 inline-flex cursor-pointer select-none items-center gap-1 rounded-full px-1.5 py-0.5 text-left',
+                  '-ml-1.5 mt-0.5 inline-flex max-w-full cursor-pointer select-none items-center gap-1 rounded-full px-1.5 py-0.5 text-left',
                   'font-mono text-10 text-[var(--text-tertiary)] transition-colors',
                   'hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-secondary)]',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring-soft)]',
                 )}
               >
-                <span className="whitespace-nowrap">
+                <span className="min-w-0 break-all">
                   {t('billing.orders.orderId', { id: maskedOrderId(order.orderId) })}
                 </span>
                 <Copy aria-hidden="true" size={11} className="shrink-0" />

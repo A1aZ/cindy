@@ -10649,7 +10649,7 @@
       "incomplete": "訂單記錄較多，當前僅顯示最近的 {{count}} 筆。",
       "orderId": "NO. {{id}}",
       "copy": {
-        "action": "複製訂單 ID",
+        "action": "複製訂單 ID {{id}}",
         "success": "訂單 ID 已複製",
         "failed": "複製訂單 ID 失敗，請再試一次"
       },

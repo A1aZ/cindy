@@ -2788,7 +2788,9 @@ describe('BillingPage order history', () => {
     expect(screen.getByText('billing.orders.count:{"count":1}')).toBeTruthy();
     expect(screen.getByText('billing.orders.description')).toBeTruthy();
     // 展示首尾并固定脱敏中段，不把完整订单号写进可见文本或原生 title。
-    const orderIdButton = screen.getByRole('button', { name: 'billing.orders.copy.action' });
+    const orderIdButton = screen.getByRole('button', {
+      name: 'billing.orders.copy.action:{"id":"c2309a98****51f13c7f"}',
+    });
     expect(
       within(orderIdButton).getByText('billing.orders.orderId:{"id":"c2309a98****51f13c7f"}'),
     ).toBeTruthy();
@@ -2810,7 +2812,7 @@ describe('BillingPage order history', () => {
     render(<BillingPage />);
 
     const orderIdButton = await screen.findByRole('button', {
-      name: 'billing.orders.copy.action',
+      name: 'billing.orders.copy.action:{"id":"c2309a98****51f13c7f"}',
     });
     const maskedText = within(orderIdButton).getByText(
       'billing.orders.orderId:{"id":"c2309a98****51f13c7f"}',
@@ -2827,12 +2829,38 @@ describe('BillingPage order history', () => {
     await waitFor(() => expect(uiMocks.clipboardWriteText).toHaveBeenCalledWith(fullOrderId));
   });
 
+  it('masks short ids, distinguishes copy targets and keeps the control shrinkable', async () => {
+    const shortOrderId = 'ord_8f21c4de9a';
+    const otherOrderId = '1234567890abcdefghi';
+    install([order({ orderId: shortOrderId }), order({ orderId: otherOrderId })]);
+
+    render(<BillingPage />);
+
+    const shortOrderButton = await screen.findByRole('button', {
+      name: 'billing.orders.copy.action:{"id":"ord_8f****c4de9a"}',
+    });
+    expect(
+      within(shortOrderButton).getByText('billing.orders.orderId:{"id":"ord_8f****c4de9a"}'),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'billing.orders.copy.action:{"id":"12345678****bcdefghi"}',
+      }),
+    ).toBeTruthy();
+    expect(shortOrderButton.className).toContain('max-w-full');
+    expect(shortOrderButton.querySelector('span')?.className).toContain('break-all');
+  });
+
   it('explains how to recover when copying an order id fails', async () => {
     uiMocks.clipboardWriteText.mockRejectedValueOnce(new Error('clipboard denied'));
     install([order()]);
 
     render(<BillingPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'billing.orders.copy.action' }));
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'billing.orders.copy.action:{"id":"ord_8f****c4de9a"}',
+      }),
+    );
 
     await waitFor(() =>
       expect(uiMocks.toastError).toHaveBeenCalledWith('billing.orders.copy.failed'),

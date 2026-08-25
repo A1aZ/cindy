@@ -259,6 +259,7 @@ export function useSessionRunningStatus(
         // 状态判断更 robust。存量 pending 若存在(理论上不会:起新 turn 就清了),覆盖掉。
         const existing = pendingDoneTimersRef.current.get(sessionId);
         if (existing !== undefined) clearTimeout(existing);
+        const wasActiveAtCompletion = sessionId === activeSessionId;
         const timer = setTimeout(() => {
           pendingDoneTimersRef.current.delete(sessionId);
           // 落地前重查一次当前状态:若此刻会话正等待用户输入(ask-user / permission /
@@ -271,7 +272,7 @@ export function useSessionRunningStatus(
           const isRunning = cur?.isRunning === true;
           const isStarting = getStartingSessionIds().has(sessionId);
           const stillPending = hasPendingInteraction(cur);
-          if (!isActive && !isRunning && !stillPending) {
+          if (!wasActiveAtCompletion && !isActive && !isRunning && !stillPending) {
             if (isStarting) {
               pendingStartingDoneAttentionRef.current.add(sessionId);
             } else {

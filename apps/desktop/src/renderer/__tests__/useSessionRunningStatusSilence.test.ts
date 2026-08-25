@@ -324,6 +324,36 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     expect(onSessionDone).toHaveBeenCalledWith('session-active');
   });
 
+  it('does not restore done attention after leaving a session that was active when it completed', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    const initialProps: { activeSessionId: string | undefined } = {
+      activeSessionId: 'session-active-at-completion',
+    };
+    const { rerender } = renderHook(
+      ({ activeSessionId }: { activeSessionId: string | undefined }) =>
+        useSessionRunningStatus(activeSessionId, { onSessionDone }),
+      { initialProps },
+    );
+
+    await emitSnapshot(new Map([['session-active-at-completion', status(true)]]));
+    await emitSnapshot(new Map([['session-active-at-completion', status(false)]]));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    rerender({ activeSessionId: undefined });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith(
+      'session-active-at-completion',
+      'done',
+    );
+    expect(onSessionDone).toHaveBeenCalledOnce();
+    expect(onSessionDone).toHaveBeenCalledWith('session-active-at-completion');
+  });
+
   it('does not restore done attention if a new run is visible when debounce expires', async () => {
     vi.useFakeTimers();
     const onSessionDone = vi.fn();

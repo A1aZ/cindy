@@ -3213,16 +3213,12 @@ export class CodexAgent extends BaseAgent {
       ]);
       const existing = yieldedExecCellsByTurnId.get(turnId) ?? new Map<string, YieldedExecCell[]>();
       if (cells.length === 0) {
-        if (phase === 'completed') {
-          // Named completions drop that item. Nameless completions cannot match
-          // a prior updated snapshot, so they clear the anonymous bucket rather
-          // than invent a synthetic identity — unless this is a wait that settled
-          // one cell_id. That wait shares the anonymous bucket with other yielded
-          // execs; wiping '' would drop still-running cells and skip their claim.
-          if (itemId) existing.delete(itemId);
-          else if (extractSettledYieldCellIdsFromCodexItem(item).length === 0) {
-            existing.delete('');
-          }
+        if (phase === 'completed' && itemId) {
+          // Named completions drop that item. Nameless completions share the
+          // anonymous bucket; an unmarked sibling (short exec Exit 0) must not
+          // wipe still-running cells. Settled waits drop one cell_id via
+          // forgetSettledYieldCells below — never delete('').
+          existing.delete(itemId);
         }
       } else if (itemId) {
         existing.set(itemId, cells);

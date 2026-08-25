@@ -2268,6 +2268,25 @@ describe('GhostManager · update pre-rename recovery', () => {
 });
 
 describe('GhostManager · install', () => {
+  it('only an explicitly tagged Forge install writes agent-forge origin', async () => {
+    const manual = await manager.install(await makeCindy('manual.cindy', goodManifest('manual')));
+    expect(manual).toHaveProperty('ghost');
+    const manualReceipt = JSON.parse(
+      await fs.promises.readFile(path.join(manager.approvalStateRoot(), 'manual.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(manualReceipt).not.toHaveProperty('installOrigin');
+    expect(manager.readEffectiveInstallOrigin('manual')).toBe('manual');
+
+    const forged = await manager.install(
+      await makeCindy('forge.cindy', goodManifest('acme-tool')),
+      {
+        installOrigin: 'agent-forge',
+      },
+    );
+    expect(forged).toHaveProperty('ghost');
+    expect(manager.readEffectiveInstallOrigin('acme-tool')).toBe('agent-forge');
+  });
+
   it('按宿主语言返回本地化清单，切换语言后 list 立即更新，不支持语言固定回退英文', async () => {
     const manifest = {
       ...goodManifest(),
@@ -4520,6 +4539,40 @@ describe('GhostManager · Unix file permissions', () => {
 });
 
 describe('GhostManager · update(原位换版)', () => {
+  it('an explicit Forge update replaces a manual receipt origin', async () => {
+    await manager.install(await makeCindy('manual-v1.cindy', goodManifest()));
+    expect(manager.readEffectiveInstallOrigin('hello')).toBe('manual');
+    const installed = manager.list().find((ghost) => ghost.manifest.id === 'hello');
+    const result = await manager.update(
+      await makeCindy('forge-v2.cindy', { ...goodManifest(), version: '2.0.0' }),
+      {
+        expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval),
+        installOrigin: 'agent-forge',
+      },
+    );
+    expect(result).toHaveProperty('ghost');
+    expect(manager.readEffectiveInstallOrigin('hello')).toBe('agent-forge');
+  });
+
+  it('a manual update clears an earlier Forge origin instead of inheriting privilege', async () => {
+    await manager.install(await makeCindy('forge-v1.cindy', goodManifest()), {
+      installOrigin: 'agent-forge',
+    });
+    expect(manager.readEffectiveInstallOrigin('hello')).toBe('agent-forge');
+
+    const installed = manager.list().find((ghost) => ghost.manifest.id === 'hello');
+    const result = await manager.update(
+      await makeCindy('manual-v2.cindy', { ...goodManifest(), version: '2.0.0' }),
+      { expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval) },
+    );
+    expect(result).toHaveProperty('ghost');
+    const receipt = JSON.parse(
+      await fs.promises.readFile(path.join(manager.approvalStateRoot(), 'hello.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(receipt).not.toHaveProperty('installOrigin');
+    expect(manager.readEffectiveInstallOrigin('hello')).toBe('manual');
+  });
+
   it('happy path:版本替换、旧文件清干净、目录不变、onChanged 广播', async () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
     onChanged.mockClear();

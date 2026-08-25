@@ -158,4 +158,54 @@ describe('ConfirmDialog 长内容布局', () => {
     expect(dialog.querySelectorAll('.overflow-y-auto').length).toBe(0);
     expect(flashScrollbar).not.toHaveBeenCalled();
   });
+
+  it('手输确认逐字匹配且正文可选择，前后空格不能绕过 id 核对', () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="企业身份自测"
+        description="确认域名"
+        content={<div>api.acme.test</div>}
+        contentSelectable
+        confirmText="安装"
+        requireTypedConfirmation={{ expected: 'acme-tool', label: '输入插件 id' }}
+        onConfirm={onConfirm}
+      />,
+    );
+    const input = screen.getByLabelText('输入插件 id');
+    const confirmButton = screen.getByRole('button', { name: '安装' });
+    expect(screen.getByRole('alertdialog').querySelector('.overflow-y-auto')?.className).toContain(
+      'select-text',
+    );
+
+    fireEvent.change(input, { target: { value: ' acme-tool ' } });
+    expect((confirmButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'acme-tool' } });
+    expect((confirmButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(confirmButton);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('手输匹配后按 Enter 仍服从调用方的额外禁用条件', () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="企业身份自测"
+        confirmText="安装"
+        confirmDisabled
+        requireTypedConfirmation={{ expected: 'acme-tool', label: '输入插件 id' }}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    const input = screen.getByLabelText('输入插件 id');
+    fireEvent.change(input, { target: { value: 'acme-tool' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
 });

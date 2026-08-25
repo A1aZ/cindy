@@ -1501,7 +1501,7 @@ describe('FORGE_GUIDE', () => {
     expect(FORGE_GUIDE).toContain("ghost_forge_install({ dir: '<绝对路径>' })");
     expect(FORGE_GUIDE).toContain('不要因为 scaffold 或 pack 成功就自动调用本工具');
     expect(FORGE_GUIDE).toContain('同版本也可覆盖');
-    expect(FORGE_GUIDE).toContain('两种入口走同一安装／更新事务');
+    expect(FORGE_GUIDE).toContain('手动导入不会取得这项 Forge 作者资格');
   });
 
   it('开场白要求读完沙箱红线与打包测试两章', () => {

@@ -4337,6 +4337,16 @@
         "expandDescription": "Show Full Description",
         "collapseDescription": "Hide Full Description"
       },
+      "forgeOidcInstallConfirm": {
+        "title": "Confirm organization identity testing",
+        "description": "After installation, this plugin can use your current organization identity to request Connection JWTs for the hosts below. Confirm that this is the plugin you just built.",
+        "pluginNameLabel": "Plugin",
+        "pluginIdLabel": "Plugin id",
+        "hostsLabel": "Organization identity injection hosts",
+        "typedIdLabel": "Enter the plugin id “{{id}}” to confirm",
+        "confirm": "Install and allow testing",
+        "cancel": "Cancel"
+      },
       "trust": {
         "official": "Official Cindy plugin",
         "officialDetail": "Bundled with Cindy.",

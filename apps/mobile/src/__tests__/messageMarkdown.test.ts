@@ -287,6 +287,12 @@ describe('messageMarkdown', () => {
       { type: 'link', text: 'https://example.com/path', url: 'https://example.com/path' },
       { type: 'text', text: ') 收尾' },
     ]);
+    expect(parseMobileMarkdownInlines('打开 https://example.com/路径 与 https://例子.测试/path')).toEqual([
+      { type: 'text', text: '打开 ' },
+      { type: 'link', text: 'https://example.com/路径', url: 'https://example.com/路径' },
+      { type: 'text', text: ' 与 ' },
+      { type: 'link', text: 'https://例子.测试/path', url: 'https://例子.测试/path' },
+    ]);
   });
 
   it('parses common inline formatting tokens', () => {

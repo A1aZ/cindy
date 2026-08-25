@@ -88,6 +88,13 @@ describe('userMessageLinkify', () => {
     expect(urls('看 https://example.com/path这是说明')).toEqual(['https://example.com/path']);
   });
 
+  it('keeps Unicode domain and path segments', () => {
+    expect(urls('打开 https://example.com/路径 与 https://例子.测试/path')).toEqual([
+      'https://example.com/路径',
+      'https://例子.测试/path',
+    ]);
+  });
+
   it('keeps apostrophes inside URL paths and at URL endings', () => {
     expect(urls("看 https://en.wikipedia.org/wiki/Guns_N'_Roses 然后")).toEqual([
       "https://en.wikipedia.org/wiki/Guns_N'_Roses",

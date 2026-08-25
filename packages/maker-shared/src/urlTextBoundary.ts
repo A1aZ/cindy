@@ -341,29 +341,63 @@ export function shrinkAutolinkTrailingJunk(
 }
 
 /**
- * 扫描器用的裸 http(s) 源。空白 / 尖括号 / ASCII 引号 / 任何非 ASCII
- * （含全角括号与中文）处结束，避免匹配阶段就把说明吃进候选。
+ * 扫描器用的裸 http(s) 源。空白 / 尖括号 / ASCII 引号 / 弯引号 /
+ * CJK 与全角标点处结束。汉字、假名、谚文可以出现在域名和路径里；
  * 半角括号留给 `clipBareHttpAutolink` 按配对/包裹处理。
  */
 export const BARE_HTTP_URL_RE_SOURCE =
-  String.raw`https?://[^\s<>"\u0080-\uFFFF]+`;
-
-const AUTOLINK_PROSE_BOUNDARY = new RegExp(
-  '[' +
-    '"`' +
-    '\\u2018-\\u201F' +
-    '\\u2026' +
-    '\\u3000-\\u303F' +
-    '\\u3040-\\u30FF' +
-    '\\u3400-\\u4DBF' +
-    '\\u4E00-\\u9FFF' +
-    '\\uAC00-\\uD7AF' +
-    '\\uFF00-\\uFFEF' +
-    ']',
-);
+  'https?://[^ \t\r\n<>"\u2018-\u201F\u2026\u3000-\u303F\uFF00-\uFFEF]+';
 
 const MARKDOWN_FORMATTING_STRIP_BOUNDARY =
   /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+
+function isAutolinkPunctuationBoundary(ch: string): boolean {
+  const code = ch.codePointAt(0);
+  if (code == null) return false;
+  if (ch === '"' || ch === '`') return true;
+  if (code >= 0x2018 && code <= 0x201f) return true;
+  if (code === 0x2026) return true;
+  if (code >= 0x3000 && code <= 0x303f) return true;
+  if (code >= 0xff00 && code <= 0xffef) return true;
+  return false;
+}
+
+function isUrlLetterScript(ch: string): boolean {
+  const code = ch.codePointAt(0);
+  if (code == null) return false;
+  if (code >= 0x3040 && code <= 0x30ff) return true;
+  if (code >= 0x3400 && code <= 0x4dbf) return true;
+  if (code >= 0x4e00 && code <= 0x9fff) return true;
+  if (code >= 0xac00 && code <= 0xd7af) return true;
+  return false;
+}
+
+/**
+ * 标点/全角符号永远是正文边界。
+ * 汉字假名谚文：跟在 URL 结构符后面算地址（`/路径`、`例子.测试`），
+ * 紧贴 ASCII 字母数字则是粘上去的说明（`path这是说明`）。
+ */
+function isAsciiTrailPunct(ch: string | undefined): boolean {
+  return ch != null && ".,;:?!_~'*" .includes(ch);
+}
+
+function isGluedCjkProse(raw: string, index: number): boolean {
+  let cursor = index - 1;
+  while (cursor >= 0 && isAsciiTrailPunct(raw[cursor])) cursor -= 1;
+  return cursor >= 0 && isAsciiAlnum(raw[cursor]);
+}
+
+function findAutolinkProseBoundary(raw: string): number {
+  for (let index = 0; index < raw.length; ) {
+    const code = raw.codePointAt(index);
+    if (code == null) break;
+    const char = String.fromCodePoint(code);
+    if (isAutolinkPunctuationBoundary(char)) return index;
+    if (isUrlLetterScript(char) && isGluedCjkProse(raw, index)) return index;
+    index += char.length;
+  }
+  return raw.length;
+}
 
 export function markdownWrapMarkerFromPrefix(prefix: string | null | undefined): string | null {
   if (!prefix) return null;
@@ -396,8 +430,8 @@ export function clipBareHttpAutolink(
     options.markdownWrapMarker === undefined
       ? markdownWrapMarkerFromPrefix(prefix)
       : options.markdownWrapMarker;
-  const boundaryIndex = raw.search(AUTOLINK_PROSE_BOUNDARY);
-  const boundaryCut = boundaryIndex >= 0 ? boundaryIndex : raw.length;
+  const boundaryIndex = findAutolinkProseBoundary(raw);
+  const boundaryCut = boundaryIndex;
   const markdownCut = cutBeforeClosingMarkdownWrap(raw, marker);
   const limited = Math.min(boundaryCut, markdownCut);
   const proseCut = Math.min(
@@ -410,7 +444,7 @@ export function clipBareHttpAutolink(
     (options.stripMarkdownFormattingPunct === 'auto' &&
       (markdownCut < raw.length ||
         hasTrailingMultiCharMarkdownMarkerAfterCodeHostResource(raw, proseCut) ||
-        (boundaryIndex >= 0 &&
+        (boundaryIndex < raw.length &&
           proseCut === boundaryCut &&
           MARKDOWN_FORMATTING_STRIP_BOUNDARY.test(raw[boundaryIndex]))));
   return shrinkAutolinkTrailingJunk(raw, proseCut, {

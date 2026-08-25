@@ -44,10 +44,33 @@ describe('clipBareHttpAutolinkText', () => {
       'https://example.com/path',
     );
   });
+
+  it('keeps Unicode domain and path, but still cuts glued CJK prose', () => {
+    expect(clipBareHttpAutolinkText('https://example.com/路径')).toBe(
+      'https://example.com/路径',
+    );
+    expect(clipBareHttpAutolinkText('https://例子.测试/path')).toBe(
+      'https://例子.测试/path',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/中文')).toBe(
+      'https://example.com/中文',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/path这是说明')).toBe(
+      'https://example.com/path',
+    );
+    expect(clipBareHttpAutolinkText('https://x.com/foo.说明')).toBe(
+      'https://x.com/foo',
+    );
+    expect(
+      clipBareHttpAutolinkText('https://github.com/makecindy/cindy/pull/90_~说明', {
+        stripMarkdownFormattingPunct: 'auto',
+      }),
+    ).toBe('https://github.com/makecindy/cindy/pull/90');
+  });
 });
 
 describe('BARE_HTTP_URL_RE_SOURCE', () => {
-  it('stops the match before non-ASCII prose', () => {
+  it('stops the match before fullwidth / CJK punctuation, not before letters', () => {
     expect(
       matchBareHttp(
         '诊断已写在 https://github.com/example/app/issues/3561#issuecomment-5391602790（无 @）。',
@@ -55,6 +78,12 @@ describe('BARE_HTTP_URL_RE_SOURCE', () => {
     ).toBe('https://github.com/example/app/issues/3561#issuecomment-5391602790');
     expect(matchBareHttp('看 https://example.com/path。然后')).toBe(
       'https://example.com/path',
+    );
+    expect(matchBareHttp('打开 https://example.com/路径 看')).toBe(
+      'https://example.com/路径',
+    );
+    expect(matchBareHttp('打开 https://例子.测试/path 看')).toBe(
+      'https://例子.测试/path',
     );
   });
 

@@ -1029,6 +1029,7 @@ describe('maker:event hot path ordering', () => {
     );
     expect(piDoneSource).toContain('money = resolveTurnCost({');
     expect(piDoneSource).toContain('segments: pricingSegments,');
+    expect(piDoneSource).toContain('sdkCostUsd: piSegmentsReliable ? 0 : piSdkCostDelta');
     expect(piDoneSource).toContain('sdkCostDelta: group.sdkCostUsd');
     expect(piDoneSource).toContain('money ?? unpricedSubscriptionValueMarker()');
     expect(piDoneSource).toContain('money: modelRowMoney,');

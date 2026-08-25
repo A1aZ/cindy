@@ -5493,7 +5493,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             // into one synthetic request for pricing. Keep the aggregate token
             // fact under the selected model while leaving money unavailable.
             if (groupedSegments.size === 0) {
-              groupedSegments.set(pricingModel, { segments: [], tokens, sdkCostUsd: 0 });
+              groupedSegments.set(pricingModel, {
+                segments: [],
+                tokens,
+                sdkCostUsd: piSegmentsReliable ? 0 : piSdkCostDelta,
+              });
             }
 
             const durationMs =

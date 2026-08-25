@@ -323,6 +323,15 @@ describe('messageMarkdown', () => {
       { type: 'link', text: 'https://例子。测试', url: 'https://例子。测试' },
       { type: 'text', text: '。这是说明' },
     ]);
+    expect(parseMobileMarkdownInlines('打开 https://例子。ファッション/path 看')).toEqual([
+      { type: 'text', text: '打开 ' },
+      {
+        type: 'link',
+        text: 'https://例子。ファッション/path',
+        url: 'https://例子。ファッション/path',
+      },
+      { type: 'text', text: ' 看' },
+    ]);
     expect(parseMobileMarkdownInlines('看 https://example.com。这是说明')).toEqual([
       { type: 'text', text: '看 ' },
       { type: 'link', text: 'https://example.com', url: 'https://example.com' },

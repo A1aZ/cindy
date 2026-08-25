@@ -428,10 +428,10 @@ function isIdnDotInHostname(
   // 俄文/拉丁等字母脚本是真 IDN 标签，不限长度。
   if (chars.some((ch) => /^\p{L}$/u.test(ch) && !isCjkLetter(ch))) return true;
   if (chars.some((ch) => /[A-Za-z0-9]/.test(ch))) return true;
-  // 纯汉字标签：后面还有域名分隔符说明主机还没完（`四字域名。测试`）；
-  // 否则只留 1–3 字的 TLD 形标签，避免 `。这是说明` 并进主机名。
+  // 纯汉字标签：后面还有域名分隔符，或已有 path/port/query，说明主机还没完。
+  // 无路径的歧义场景才用 1–3 字 TLD 上限，避免 `。这是说明` 并进主机名。
   const after = raw[labelEnd];
-  if (after === '.' || isIdnDomainDot(after)) return true;
+  if (after === '.' || isIdnDomainDot(after) || hostEnd < raw.length) return true;
   return chars.length <= 3;
 }
 

@@ -399,11 +399,27 @@ function reclassifyLegacyCustomProviderSnapshot(
       sdkEstimatedValueMoney: sdkEstimatedValueMoney ?? null,
     };
   }
+  const existingEstimatedValueMoney =
+    estimatedValueMoney && estimatedValueMoney.amount > 0 ? estimatedValueMoney : null;
   return {
     costMoney: null,
-    estimatedValueMoney: estimatedValueMoney ?? sdkPart,
+    estimatedValueMoney: existingEstimatedValueMoney ?? sdkPart,
     sdkEstimatedValueMoney: sdkPart,
   };
+}
+
+function remainingMoney(
+  total: RegionalMoney | null | undefined,
+  messageValues: readonly RegionalMoney[],
+): RegionalMoney | null {
+  if (!total || total.amount <= 0) return null;
+  if (messageValues.length === 0) return total;
+  const messageTotal = addCompatibleRegionalMoney(messageValues, total.currency);
+  if (!messageTotal) return total;
+  // 历史脏数据的币种不一致时保留持久化金额，不能让整个费用投影抛错。
+  if (messageTotal.currency !== total.currency) return total;
+  const amount = Math.max(0, total.amount - messageTotal.amount);
+  return amount > 0 ? { ...total, amount } : null;
 }
 
 function legacyRunFromSession(
@@ -741,7 +757,49 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         };
       }
       if (run.costAttribution === 'mixed') {
-        return { ...run, costAttribution: 'exact' };
+        const snapshot = reclassifyLegacyCustomProviderSnapshot(
+          run.costMoney,
+          run.estimatedValueMoney,
+          run.sdkEstimatedValueMoney,
+          fallbackProviderId,
+        );
+        const directCostMoney = remainingMoney(snapshot.costMoney, persisted.costValues);
+        const directEstimatedValueMoney = remainingMoney(
+          snapshot.estimatedValueMoney,
+          persisted.estimatedValues,
+        );
+        const directSdkEstimatedValueMoney = remainingMoney(
+          snapshot.sdkEstimatedValueMoney,
+          persisted.sdkEstimatedValues,
+        );
+        return {
+          ...run,
+          costMoney:
+            addCompatibleRegionalMoney(
+              [
+                ...(directCostMoney ? [directCostMoney] : []),
+                ...persisted.costValues,
+              ],
+              run.costMoney?.currency,
+            ) ?? zeroUsageMoney(),
+          estimatedValueMoney:
+            addCompatibleRegionalMoney(
+              [
+                ...(directEstimatedValueMoney ? [directEstimatedValueMoney] : []),
+                ...persisted.estimatedValues,
+              ],
+              run.estimatedValueMoney?.currency,
+            ) ?? zeroUsageMoney('value-estimate'),
+          sdkEstimatedValueMoney:
+            addCompatibleRegionalMoney(
+              [
+                ...(directSdkEstimatedValueMoney ? [directSdkEstimatedValueMoney] : []),
+                ...persisted.sdkEstimatedValues,
+              ],
+              run.sdkEstimatedValueMoney?.currency,
+            ) ?? undefined,
+          costAttribution: 'exact',
+        };
       }
       return {
         ...run,
@@ -1050,19 +1108,6 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       noteLatestCurrency(sessionCost, costMoney, at);
       noteLatestCurrency(sessionCost, estimatedValueMoney, at);
       entry.sessionCosts.set(sessionId, sessionCost);
-    };
-    const remainingMoney = (
-      total: RegionalMoney | null | undefined,
-      messageValues: readonly RegionalMoney[],
-    ): RegionalMoney | null => {
-      if (!total || total.amount <= 0) return null;
-      if (messageValues.length === 0) return total;
-      const messageTotal = addCompatibleRegionalMoney(messageValues, total.currency);
-      if (!messageTotal) return total;
-      // 历史脏数据的币种不一致时保留持久化实际金额，不能让整个 dashboard 抛错。
-      if (messageTotal.currency !== total.currency) return total;
-      const amount = Math.max(0, total.amount - messageTotal.amount);
-      return amount > 0 ? { ...total, amount } : null;
     };
 
     const snapshotFallbackProviderId = (run: (typeof runCostRows)[number]): string | null | undefined =>

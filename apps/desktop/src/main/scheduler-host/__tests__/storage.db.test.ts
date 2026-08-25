@@ -1074,6 +1074,56 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
+  it('reclassifies legacy custom-provider message cost inside a mixed run', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({
+      id: 'sch-mixed-custom',
+      providerId: 'custom-provider',
+      targetSessionId: 'sess-mixed-custom',
+    });
+    try {
+      harness.db.run(sql`
+        INSERT INTO sessions (
+          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd, provider_id
+        ) VALUES (
+          'sess-mixed-custom', 'Mixed custom session', 'desktop', 'dialogue', 1, 1, 0.6,
+          'custom-provider'
+        )
+      `);
+      await harness.storage.insert(schedule);
+      await harness.storage.insertRun({
+        id: 'run-mixed-custom',
+        scheduleId: schedule.id,
+        sessionId: 'sess-mixed-custom',
+        firedAt: 10,
+        finishedAt: 20,
+        status: 'success',
+        costUsd: 0.6,
+        costAttribution: 'mixed',
+      });
+      harness.db.run(sql`
+        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
+        VALUES (
+          'mixed-custom-assistant', 'mixed-custom-assistant', 'sess-mixed-custom', 'assistant', '{}',
+          '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed-custom","runId":"run-mixed-custom"},"turnCostUsd":0.42,"turnCostIsCustomProvider":true}',
+          11
+        )
+      `);
+
+      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
+        expect.objectContaining({
+          id: 'run-mixed-custom',
+          costMoney: expect.objectContaining({ amount: 0 }),
+          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
+          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
+          costAttribution: 'exact',
+        }),
+      ]);
+    } finally {
+      harness.close();
+    }
+  });
+
   it('keeps direct ledger remainder when a run also has message costs', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({ id: 'sch-mixed-ledger', targetSessionId: 'sess-mixed-ledger' });

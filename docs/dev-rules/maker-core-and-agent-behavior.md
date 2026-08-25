@@ -102,8 +102,9 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   通用终态。continuation 的 `turn/start` 已被服务端接受后若本地 Stop，即使
   `turnStarted` 已激活、随后 `interrupted` 被墓碑吞掉，也必须发出一条未认领的
   cancelled `done`，避免 Session 仍握着 `currentTurnAttemptToken`。
-  续段必须继承铸造 claim 时的 `turnPermissionPolicy`，不得把无人值守只读边界
-  重置成普通 Auto。
+  续段必须继承铸造 claim 时的 origin 上下文：`turnPermissionPolicy`、
+  capability selection 与 auto-review intent。不得把无人值守只读边界重置成普通
+  Auto，也不得用固定 wait 提示覆盖原请求的能力选择或审查意图。
   Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。
 
 ## 3. 守住四项核心数据指标

@@ -17472,6 +17472,114 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
+  it('inherits origin capability selection and auto-review intent on the yield continuation turn', async () => {
+    const seenIntents: string[] = [];
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async (request) => {
+      seenIntents.push(request.userIntent);
+      return { verdict: 'allow' as const };
+    });
+    const agent = new CodexAgent(createDeps({}, {
+      capabilityRouting: {
+        overrides: [{
+          capabilityId: 'feishu',
+          source: {
+            kind: 'harness-plugin',
+            harness: 'codex',
+            surface: 'mcp',
+            id: 'cindy-routed-feishu-delegate',
+            artifactId: 'feishu-delegate',
+            containerId: 'feishu-delegate@personal',
+          },
+          invocation: 'explicit-only',
+          explicitSelectors: [
+            '$feishu-delegate:message-feishu-coworkers',
+            '/feishu-delegate:message-feishu-coworkers',
+          ],
+          replacement: { kind: 'cindy-plugin', id: 'xd-feishu' },
+        }],
+      },
+      getMcpToolApprovalPolicy: () => 'auto-approve',
+      reviewAutoPermissionAction,
+    }));
+    let turnSeq = 0;
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        turnSeq += 1;
+        return { turn: { id: `turn-${turnSeq}` } };
+      }
+      return undefined;
+    }, { userAgent: 'mock-codex/0.145.0' });
+    const handle = await agent.startSession({
+      sessionId: 'session-yield-origin-context',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.turnCompleted || !handlers.mcpServerElicitation || !handlers.commandExecutionApproval) {
+      throw new Error('expected item, turn, elicitation, and approval handlers');
+    }
+    await handle.send({
+      type: 'user',
+      content: '用 $feishu-delegate:message-feishu-coworkers 查消息并跑 typecheck',
+    });
+    handlers.itemCompleted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'item-exec-origin-context',
+        type: 'commandExecution',
+        command: 'pnpm --filter desktop run typecheck',
+        status: 'completed',
+        aggregatedOutput: 'Script running with cell ID 226',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      expect(yieldTurnStartCalls(host)).toHaveLength(1);
+    });
+    handlers.turnStarted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-2', status: 'inProgress' },
+    });
+    handlers.itemStarted?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      item: {
+        id: 'item-routed-feishu-yield',
+        type: 'mcpToolCall',
+        server: 'cindy-routed-feishu-delegate',
+        tool: 'feishu_read_messages',
+        pluginId: 'feishu-delegate@personal',
+      },
+    });
+    await expect(handlers.mcpServerElicitation({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      serverName: 'cindy-routed-feishu-delegate',
+      mode: 'form',
+      _meta: {
+        codex_approval_kind: 'mcp_tool_call',
+        tool_name: 'feishu_read_messages',
+      },
+      message: 'Allow tool call',
+      requestedSchema: {},
+    })).resolves.toEqual({ action: 'accept', content: null, _meta: null });
+    await expect(handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-2',
+      itemId: 'item-exec-origin-context-review',
+      command: 'pnpm --filter desktop run typecheck',
+      cwd: '/repo',
+    })).resolves.toEqual({ decision: 'accept' });
+    expect(seenIntents.some((intent) => intent.includes('查消息并跑 typecheck'))).toBe(true);
+    expect(seenIntents.some((intent) => intent.includes('foreground exec cell'))).toBe(false);
+    await handle.close();
+  });
+
   it('detects Responses/proxy function_call(exec_command) yield output', async () => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;

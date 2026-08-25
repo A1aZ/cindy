@@ -1184,6 +1184,8 @@ type YieldContinuationClaim = {
   originTurnId: string;
   continuationTurnId: string | null;
   permissionPolicy: TurnPermissionPolicy | null;
+  capabilitySelectionText: string;
+  autoReviewIntent: string;
   deferredPlanText: string | null;
   deferredPlanTurnId: string | null;
   deferredPlanCapabilitySelectionText: string;
@@ -3264,6 +3266,8 @@ export class CodexAgent extends BaseAgent {
         originTurnId,
         continuationTurnId: null,
         permissionPolicy: activeTurnPermissionPolicy,
+        capabilitySelectionText: '',
+        autoReviewIntent: '',
         deferredPlanText: null,
         deferredPlanTurnId: null,
         deferredPlanCapabilitySelectionText: '',
@@ -3429,6 +3433,12 @@ export class CodexAgent extends BaseAgent {
         signal: abort.signal,
         ...(claim.permissionPolicy
           ? { turnPermissionPolicy: claim.permissionPolicy }
+          : {}),
+        ...(claim.capabilitySelectionText
+          ? { [CODEX_INHERITED_CAPABILITY_SELECTION]: claim.capabilitySelectionText }
+          : {}),
+        ...(claim.autoReviewIntent
+          ? { [CODEX_AUTO_REVIEW_INTENT]: claim.autoReviewIntent }
           : {}),
       };
       try {
@@ -9061,6 +9071,12 @@ export class CodexAgent extends BaseAgent {
         if (yieldedCells.length > 0) {
           yieldClaim.cells = dedupeCells([...yieldClaim.cells, ...yieldedCells]);
         }
+        if (!yieldClaim.capabilitySelectionText && completedCapabilitySelectionText) {
+          yieldClaim.capabilitySelectionText = completedCapabilitySelectionText;
+        }
+        if (!yieldClaim.autoReviewIntent && currentAutoReviewIntent) {
+          yieldClaim.autoReviewIntent = currentAutoReviewIntent;
+        }
       } else if (existingYieldClaim?.state === 'active') {
         existingYieldClaim.settled = true;
         activeYieldContinuationId = null;
@@ -9083,6 +9099,9 @@ export class CodexAgent extends BaseAgent {
           suppressSuccessfulYieldBoundary = true;
         } else {
           yieldClaim = mintYieldContinuationClaim(outstandingCells, turn.id, retryCount);
+          yieldClaim.permissionPolicy = existingYieldClaim.permissionPolicy;
+          yieldClaim.capabilitySelectionText = existingYieldClaim.capabilitySelectionText;
+          yieldClaim.autoReviewIntent = existingYieldClaim.autoReviewIntent;
           yieldClaim.deferredPlanText = existingYieldClaim.deferredPlanText;
           yieldClaim.deferredPlanTurnId = existingYieldClaim.deferredPlanTurnId;
           yieldClaim.deferredPlanCapabilitySelectionText =
@@ -9090,6 +9109,10 @@ export class CodexAgent extends BaseAgent {
         }
       } else if (yieldedCells.length > 0) {
         yieldClaim = mintYieldContinuationClaim(yieldedCells, turn.id, 0);
+        // turn/completed already deleted the origin turn's selection map. Use the
+        // snapshot taken before that delete, plus the still-live review intent.
+        yieldClaim.capabilitySelectionText = completedCapabilitySelectionText;
+        yieldClaim.autoReviewIntent = currentAutoReviewIntent;
       }
       if (!suppressSuccessfulYieldBoundary) {
         const idleStatusEvent: AgentEvent = {

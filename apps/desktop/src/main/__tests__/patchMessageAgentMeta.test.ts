@@ -508,10 +508,10 @@ describe('extractEstimatedSessionValueEntries', () => {
     );
   });
 
-  it('fails closed for pre-upgrade rows with a shared built-in-looking model id', () => {
-    const [entry] = extractEstimatedSessionValueEntries(
+  it('preserves pre-upgrade spend for models with a bundled XD Gateway route', () => {
+    const entries = extractEstimatedSessionValueEntries(
       [{
-        clientId: 'legacy-shared-model',
+        clientId: 'legacy-gateway-model',
         agentMeta: JSON.stringify({
           model: 'claude-sonnet-4-6',
           turnCostUsd: 0.42,
@@ -522,14 +522,10 @@ describe('extractEstimatedSessionValueEntries', () => {
       false,
     );
 
-    expect(entry).toEqual(expect.objectContaining({
-      clientId: 'legacy-shared-model',
-      excludedActualMoney: expect.objectContaining({ amount: 0.42 }),
-    }));
-    expect(entry).not.toHaveProperty('money');
+    expect(entries).toEqual([]);
   });
 
-  it('fails closed for pre-upgrade rows whose model ownership is unavailable', () => {
+  it('fails closed for pre-upgrade rows without a bundled Gateway route', () => {
     const [entry] = extractEstimatedSessionValueEntries(
       [{
         clientId: 'legacy-unknown-model',

@@ -10,6 +10,8 @@ import { ipcMain, BrowserWindow } from 'electron';
 import { and, asc, eq, inArray, lt, lte, gt, gte, desc, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
 
+import { BUNDLED_CATALOG, findModelRegistryRoute } from '@cindy/model-providers';
+
 import { getDbClient } from '../client/current';
 import { latestVisiblePreview, latestVisiblePreviewRow } from '../latestMessageText';
 import { messages, sessions } from '../schema';
@@ -1874,13 +1876,13 @@ export function summarizeEstimatedSessionValuesBySession(
 
 function historicalCustomProviderFlagFromModel(
   model: string | null | undefined,
-): true {
+): boolean {
   const normalized = model?.trim();
   if (!normalized) return true;
-  // Current catalog membership cannot prove historical built-in ownership: a deleted custom
-  // Provider may have exposed the same model id. The model is only supporting evidence for a
-  // custom classification; every unattributed pre-upgrade row still fails closed.
-  return true;
+  // The versioned bundled registry is historical product evidence: an official XD Gateway route
+  // proves that this model could produce trusted billed spend before per-turn attribution existed.
+  // Current active-catalog membership is not evidence because deleted custom Providers disappear.
+  return findModelRegistryRoute(BUNDLED_CATALOG.modelRegistry, 'xd', normalized) === undefined;
 }
 
 export function extractEstimatedSessionValueEntries(

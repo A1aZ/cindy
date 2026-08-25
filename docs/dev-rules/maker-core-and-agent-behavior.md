@@ -92,10 +92,13 @@ timeout 不得触发自动换窗或 replay。Codex 当前没有与 Claude `AutoC
   ask_user／plan 内部续段必须等 yield 空闲后再 `turn/start`，不得并发；Stop／
   close 取消 yield 时，排队中的内部续段必须退出而不是被当成正常空闲继续发送。
   只有 cell 真正结算的成功空闲才能唤醒排队续段；lost-handle、重试耗尽、
-  续段 `turn/start` 失败等产品失败必须以 cancelled 释放 waiter，不得在用户
+  续段 `turn/start` 失败等产品失败必须以 cancelled 释放 waiter，并闩住后续
+  `waitForYieldContinuationIdle()`，同时收掉未完成的 ask_user／plan 卡，不得在用户
   已看到失败后再开 ask_user／plan turn。续段启动失败的产品终态只由续段层
   发送一次（`yield-continuation-start-failed`），`handle.send` 不得再发一组
-  通用终态。
+  通用终态。continuation 的 `turn/start` 已被服务端接受后若本地 Stop，即使
+  `turnStarted` 已激活、随后 `interrupted` 被墓碑吞掉，也必须发出一条未认领的
+  cancelled `done`，避免 Session 仍握着 `currentTurnAttemptToken`。
   续段必须继承铸造 claim 时的 `turnPermissionPolicy`，不得把无人值守只读边界
   重置成普通 Auto。
   Claude wake continuation 与 Codex yield continuation 先分账，不抽公共模块。

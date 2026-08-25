@@ -3137,6 +3137,7 @@ export class CodexAgent extends BaseAgent {
     let yieldContinuationInFlight = false;
     let yieldContinuationAbort: AbortController | null = null;
     let yieldContinuationIdleWaiters: Array<(cancelled: boolean) => void> = [];
+    let yieldContinuationProductFailed = false;
     const emitYieldContinuationState = (
       continuationId: number,
       state: 'awaiting' | 'active' | 'cancelled',
@@ -3259,6 +3260,7 @@ export class CodexAgent extends BaseAgent {
       };
       yieldContinuationClaims.set(claim.id, claim);
       activeYieldContinuationId = claim.id;
+      yieldContinuationProductFailed = false;
       log.info('yield continuation claim created', {
         continuationId: claim.id,
         originTurnId,
@@ -3283,9 +3285,25 @@ export class CodexAgent extends BaseAgent {
       for (const resolve of waiters) resolve(cancelled);
     };
     const waitForYieldContinuationIdle = async (): Promise<boolean> => {
+      if (yieldContinuationProductFailed) return true;
       if (activeYieldContinuationClaim() == null && !yieldContinuationInFlight) return false;
       return await new Promise<boolean>((resolve) => {
         yieldContinuationIdleWaiters.push(resolve);
+      });
+    };
+    const emitCancelledYieldProductDone = (): void => {
+      eventQueue.push({
+        type: 'done',
+        data: {
+          type: 'codex/event/task_complete',
+          cancelled: true,
+        },
+        source: 'codex',
+      });
+      eventQueue.push({
+        type: 'status',
+        data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+        source: 'codex',
       });
     };
     const cancelActiveYieldContinuation = (reason: string): YieldContinuationClaim | null => {
@@ -3357,9 +3375,15 @@ export class CodexAgent extends BaseAgent {
         data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
         source: 'codex',
       });
-      // Failure is a product terminal. Queued ask_user / plan waiters must exit
-      // rather than treat this as idle success and start another turn.
+      // Failure is a product terminal. Latch so later ask_user / plan answers
+      // cannot treat idle as permission to start another turn, and dismiss
+      // unfinished cards from the failed product turn.
+      yieldContinuationProductFailed = true;
       flushYieldContinuationIdleWaiters(true);
+      planCycleActive = false;
+      proposedPlanText = null;
+      dismissAllPending(opts.reason, 'deny');
+      dismissAllPendingUserInput(opts.reason);
     };
     const emitYieldContinuationStartFailure = (error: unknown, cells: YieldedExecCell[]): void => {
       emitYieldContinuationFailure({
@@ -10948,6 +10972,7 @@ export class CodexAgent extends BaseAgent {
         const yieldAttempt = internalOpts?.[CODEX_YIELD_CONTINUATION];
         if (yieldAttempt == null && internalOpts?.[CODEX_INTERNAL_CONTINUATION] !== true) {
           cancelActiveYieldContinuation('new send');
+          yieldContinuationProductFailed = false;
         }
         // 用户开启新 turn = 旧重连序列作废；deadline 不得跨 turn 误伤新请求。
         clearReconnectStall();
@@ -11930,20 +11955,12 @@ export class CodexAgent extends BaseAgent {
 
       async abort() {
         const cancelledYield = cancelActiveYieldContinuation('aborted');
-        if (cancelledYield && !currentTurnId) {
-          eventQueue.push({
-            type: 'done',
-            data: {
-              type: 'codex/event/task_complete',
-              cancelled: true,
-            },
-            source: 'codex',
-          });
-          eventQueue.push({
-            type: 'status',
-            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
-            source: 'codex',
-          });
+        // isolateCancelledTurnStart tombstones the accepted turn and swallows
+        // interrupted turn/completed. Emit the unclaimed cancelled done here so
+        // Session releases currentTurnAttemptToken even if turnStarted already
+        // activated the continuation and the RPC is still pending.
+        if (cancelledYield) {
+          emitCancelledYieldProductDone();
         }
         clearReconnectStall();
         // 用户点 Stop = 明确不想继续这一轮，挂起的过载重投必须一起撤掉。

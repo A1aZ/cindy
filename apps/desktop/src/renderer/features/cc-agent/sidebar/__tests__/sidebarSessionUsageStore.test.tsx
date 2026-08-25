@@ -205,6 +205,50 @@ describe('useSidebarSessionUsageMoney', () => {
     expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(2);
   });
 
+  it('refreshes first-interest cache from the latest props after a row remounts', async () => {
+    vi.useFakeTimers();
+    const first = renderHook(() =>
+      useSidebarSessionUsageMoney(
+        's-1',
+        { amount: 1, currency: 'USD', approximate: false, kind: 'actual-cost' },
+        1,
+        'regular',
+        false,
+      ),
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(first.result.current.actualMoney?.amount).toBe(1);
+    expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    const updated = renderHook(() =>
+      useSidebarSessionUsageMoney(
+        's-1',
+        { amount: 2, currency: 'USD', approximate: false, kind: 'actual-cost' },
+        2,
+        'regular',
+        false,
+      ),
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(updated.result.current.actualMoney?.amount).toBe(2);
+    expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(2);
+    updated.unmount();
+
+    const cleared = renderHook(() =>
+      useSidebarSessionUsageMoney('s-1', null, null, 'regular', false),
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(cleared.result.current.actualMoney).toBeNull();
+    expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(3);
+  });
+
   it('refreshes a remote sidebar row from remote spend and turn-cost pushes', async () => {
     vi.useFakeTimers();
     const hook = renderHook(() =>

@@ -431,6 +431,7 @@ export function useSessionEstimatedValue(
       }
       costsRef.current = next;
       excludedActualCostsRef.current = nextExcludedActualCosts;
+      authoritativeRef.current = authoritative;
       setProjection({
         estimatedValueMoney: sumCosts(next),
         excludedActualMoney: sumCosts(nextExcludedActualCosts),
@@ -461,7 +462,7 @@ export function useSessionEstimatedValue(
       } else if (shouldApplyVisibleEntry) {
         nextExcludedActualCosts.delete(entry.clientId);
       }
-      applyCosts(next, nextExcludedActualCosts);
+      applyCosts(next, nextExcludedActualCosts, authoritativeRef.current);
     };
 
     if (!shouldListenForDirectTurnCost) {

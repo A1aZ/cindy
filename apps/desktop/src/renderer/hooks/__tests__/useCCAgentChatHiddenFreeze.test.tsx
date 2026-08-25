@@ -458,6 +458,86 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
     ).toBe('false');
   });
 
+  it('keeps a versioned Host projection authoritative after merging a realtime turn cost', async () => {
+    const sessionId = sid('authoritative-live-merge');
+    sessionIds.push(sessionId);
+    (
+      window as unknown as {
+        electronAPI: {
+          onUsageMessageTurnCost: (cb: TurnCostListener) => () => void;
+        };
+      }
+    ).electronAPI = {
+      onUsageMessageTurnCost: (cb: TurnCostListener) => {
+        turnCostListener = cb;
+        return () => {
+          if (turnCostListener === cb) turnCostListener = null;
+        };
+      },
+    };
+    vi.mocked(messageService.estimatedSessionValue).mockResolvedValueOnce({
+      projectionVersion: 1,
+      totalValueMoney: usdEstimate(0.12),
+      totalValueUsd: 0.12,
+      entries: [
+        {
+          clientId: 'persisted-estimate',
+          money: usdEstimate(0.12),
+          costUsd: 0.12,
+        },
+      ],
+    });
+
+    function EstimatedValueProbe() {
+      const value = useSessionEstimatedValue(sessionId, true, 'hidden', false);
+      return (
+        <div
+          data-testid="authoritative-live-value"
+          data-authoritative={String(value.authoritative)}
+        >
+          {value.estimatedValueMoney?.amount.toFixed(2) ?? ''}
+        </div>
+      );
+    }
+
+    render(
+      <ChatDisplaySnapshotProvider
+        value={displaySnapshot(sessionId, [], {
+          chatRealtime: true,
+          historyLoaded: false,
+          hasMoreMessages: true,
+        })}
+      >
+        <EstimatedValueProbe />
+      </ChatDisplaySnapshotProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('authoritative-live-value').textContent).toBe('0.12'),
+    );
+    expect(screen.getByTestId('authoritative-live-value').getAttribute('data-authoritative')).toBe(
+      'true',
+    );
+
+    act(() => {
+      turnCostListener?.({
+        sessionId,
+        clientId: 'live-estimate',
+        turnMoney: usdEstimate(0.2),
+        turnCostUsd: 0.2,
+        turnCostIsEstimate: true,
+        turnUsageDetails: TURN_USAGE_DETAILS,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId('authoritative-live-value').textContent).toBe('0.32'),
+    );
+    expect(screen.getByTestId('authoritative-live-value').getAttribute('data-authoritative')).toBe(
+      'true',
+    );
+  });
+
   it('pauses direct turn-cost events while frozen and refreshes once when realtime resumes', async () => {
     const sessionId = sid('frozen-provider');
     sessionIds.push(sessionId);

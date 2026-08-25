@@ -248,16 +248,19 @@ function ensureInterest(
   actualMoney: RegionalMoney | null,
 ): void {
   const prev = interestParams.get(sessionId);
+  const firstInterest = !prev;
   const presentationChanged =
-    !prev || prev.presentation !== presentation || prev.showSdkEstimate !== showSdkEstimate;
+    prev != null &&
+    (prev.presentation !== presentation || prev.showSdkEstimate !== showSdkEstimate);
+  const projectionNeedsRefresh = firstInterest || presentationChanged;
   interestParams.set(sessionId, { presentation, showSdkEstimate });
   const cached = cache.get(sessionId);
-  if (!cached || presentationChanged) {
+  if (!cached || projectionNeedsRefresh) {
     writeCache(sessionId, {
-      actualMoney: actualMoney ?? cached?.actualMoney ?? null,
+      actualMoney: firstInterest ? actualMoney : (actualMoney ?? cached?.actualMoney ?? null),
       presentation,
       showSdkEstimate,
-      ...(presentationChanged
+      ...(projectionNeedsRefresh
         ? {
             projectionAuthoritative: false,
             estimatedValueMoney: null,

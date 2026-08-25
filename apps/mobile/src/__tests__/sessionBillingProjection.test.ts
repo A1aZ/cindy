@@ -288,6 +288,48 @@ describe('mobile custom-provider billing projection', () => {
     });
   });
 
+  it('fails closed for a mixed cumulative total on an estimated closing segment', () => {
+    const closing = assistantMessage('estimated-closing-segment', {
+      turnCost: {
+        amount: 0.4,
+        currency: 'USD',
+        approximate: true,
+        kind: 'value-estimate',
+        estimateReasons: ['reference-price'],
+      },
+      turnCostIsEstimate: true,
+      userTurnCost: {
+        amount: 0.6,
+        currency: 'USD',
+        approximate: false,
+        kind: 'actual-cost',
+      },
+    });
+
+    const [hidden] = projectMobileMessageBilling([closing], {
+      presentation: 'regular',
+      showSdkEstimate: false,
+      entries: [],
+    });
+    expect(hidden.agentMeta?.turnCost).toMatchObject({
+      amount: 0.4,
+      kind: 'value-estimate',
+      estimateReasons: ['reference-price'],
+    });
+    expect(hidden.agentMeta).not.toHaveProperty('userTurnCost');
+
+    const [estimated] = projectMobileMessageBilling([closing], {
+      presentation: 'regular',
+      showSdkEstimate: true,
+      entries: [],
+    });
+    expect(estimated.agentMeta?.userTurnCost).toMatchObject({
+      amount: 0.6,
+      kind: 'value-estimate',
+      estimateReasons: ['sdk-estimate'],
+    });
+  });
+
   it('preserves reference-price portions and rebuilds multi-segment user totals across auto-resume', () => {
     const messages: RemoteMessage[] = [
       {

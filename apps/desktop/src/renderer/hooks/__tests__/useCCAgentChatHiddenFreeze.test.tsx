@@ -402,6 +402,62 @@ describe('useCCAgentChat hidden chat snapshot freeze', () => {
     await waitFor(() => expect(screen.getByTestId('estimated-value').textContent).toBe('2.50'));
   });
 
+  it('keeps an unversioned Host value snapshot non-authoritative', async () => {
+    const sessionId = sid('legacy-value-projection');
+    sessionIds.push(sessionId);
+    (
+      window as unknown as {
+        electronAPI: {
+          onUsageMessageTurnCost: (cb: TurnCostListener) => () => void;
+        };
+      }
+    ).electronAPI = {
+      onUsageMessageTurnCost: () => () => undefined,
+    };
+    vi.mocked(messageService.estimatedSessionValue).mockResolvedValueOnce({
+      totalValueMoney: usdEstimate(0.42),
+      totalValueUsd: 0.42,
+      entries: [
+        {
+          clientId: 'legacy-estimate',
+          money: usdEstimate(0.42),
+          costUsd: 0.42,
+        },
+      ],
+    });
+
+    function EstimatedValueProbe() {
+      const value = useSessionEstimatedValue(sessionId, true, 'estimate', true);
+      return (
+        <div
+          data-testid="estimated-value-authority"
+          data-authoritative={String(value.authoritative)}
+        >
+          {value.estimatedValueMoney?.amount.toFixed(2) ?? ''}
+        </div>
+      );
+    }
+
+    render(
+      <ChatDisplaySnapshotProvider
+        value={displaySnapshot(sessionId, [], {
+          chatRealtime: true,
+          historyLoaded: false,
+          hasMoreMessages: true,
+        })}
+      >
+        <EstimatedValueProbe />
+      </ChatDisplaySnapshotProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('estimated-value-authority').textContent).toBe('0.42'),
+    );
+    expect(
+      screen.getByTestId('estimated-value-authority').getAttribute('data-authoritative'),
+    ).toBe('false');
+  });
+
   it('pauses direct turn-cost events while frozen and refreshes once when realtime resumes', async () => {
     const sessionId = sid('frozen-provider');
     sessionIds.push(sessionId);

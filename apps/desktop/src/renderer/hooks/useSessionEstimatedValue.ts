@@ -548,7 +548,11 @@ export function useSessionEstimatedValue(
           }
         }
         authoritativeClientIdsRef.current = authoritativeClientIds;
-        applyCosts(next, nextExcludedActualCosts, true);
+        applyCosts(
+          next,
+          nextExcludedActualCosts,
+          snapshot.projectionVersion === 1,
+        );
       })
       .catch(() => {
         // 历史汇总失败不影响实时增量；本 hook 只是展示辅助信息。

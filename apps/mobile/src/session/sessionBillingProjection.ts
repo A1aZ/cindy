@@ -219,11 +219,17 @@ export function projectMobileMessageBilling(
       normalizeRemoteMoney(originalMeta.userTurnCost) ||
       positiveNumber(originalMeta.userTurnCostUsd) !== null,
     );
+    // A paged window can contain the closing assistant without its user boundary. Its cumulative
+    // total may include earlier segments from another Provider, so the closing segment's own
+    // presentation cannot prove attribution for that total.
     const projectedUserTurnMoney = hasUserBoundary
       ? hasPersistedUserTotal && roundValues.length > 0
         ? addCompatibleRemoteMoney(roundValues, roundValues[0].currency)
         : null
-      : projectSdkCostMoney(userTurnMoney, presentation);
+      : projectSdkCostMoney(
+          userTurnMoney,
+          projection.showSdkEstimate ? 'estimate' : 'hidden',
+        );
     const projectedUsageDetails = projectUsageDetails(usageDetails, presentation);
 
     const nextMeta: Record<string, unknown> = { ...originalMeta };

@@ -397,11 +397,25 @@ function isHostLabelChar(ch: string | undefined): boolean {
   return !isAutolinkPunctuationBoundary(ch);
 }
 
-function hasEarlierIdnDot(raw: string, hostStart: number, index: number): boolean {
-  for (let cursor = hostStart; cursor < index; cursor += 1) {
-    if (isIdnDomainDot(raw[cursor] ?? '')) return true;
+function nextHostLabelEnd(raw: string, from: number, hostEnd: number): number {
+  let index = from;
+  while (index < hostEnd) {
+    const code = raw.codePointAt(index);
+    if (code == null) break;
+    const char = String.fromCodePoint(code);
+    if (isIdnDomainDot(char) || char === '.') break;
+    if (!isHostLabelChar(char)) break;
+    index += char.length;
   }
-  return false;
+  return index;
+}
+
+/** ASCII 标签或 1–3 个汉字/假名/谚文，当作域名标签；更长的 CJK 当正文。 */
+function isLikelyIdnHostLabel(raw: string, from: number, to: number): boolean {
+  if (from >= to) return false;
+  const chars = [...raw.slice(from, to)];
+  if (chars.some((ch) => /[A-Za-z0-9]/.test(ch))) return true;
+  return chars.length <= 3 && chars.every((ch) => isHostLabelChar(ch));
 }
 
 function isIdnDotInHostname(
@@ -411,15 +425,16 @@ function isIdnDotInHostname(
   hostEnd: number,
 ): boolean {
   if (index < hostStart || index >= hostEnd) return false;
-  if (!isIdnDomainDot(raw[index] ?? '') || !isHostLabelChar(raw[index + 1])) return false;
-  if (!hasEarlierIdnDot(raw, hostStart, index)) return true;
-  // 已经有过 IDN 点号后，再出现的 `。这是说明` 当句号；后面还有 path/port 才继续当域名。
-  return hostEnd < raw.length;
+  if (!isIdnDomainDot(raw[index] ?? '') || !isHostLabelChar(raw[index + 1])) {
+    return false;
+  }
+  const labelEnd = nextHostLabelEnd(raw, index + 1, hostEnd);
+  return isLikelyIdnHostLabel(raw, index + 1, labelEnd);
 }
 
 /**
- * 标点/全角符号是正文边界；hostname 里第一处 IDN 点号（`例子。测试`）留下。
- * 端口、IPv6 `]`、路径、以及第二个句末 `。` 之后仍当句号切掉。
+ * 标点/全角符号是正文边界。hostname 里后面还像域名标签的 IDN 点号留下
+ * （`子域。例子。测试`）；`。这是说明` 这种长 CJK 仍当句号。
  */
 function findAutolinkProseBoundary(raw: string): number {
   const { start: hostStart, end: hostEnd } = hostnameRange(raw);

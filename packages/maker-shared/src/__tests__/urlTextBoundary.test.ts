@@ -100,6 +100,12 @@ describe('clipBareHttpAutolinkText', () => {
     expect(clipBareHttpAutolinkText('https://例子。测试。这是说明')).toBe(
       'https://例子。测试',
     );
+    expect(clipBareHttpAutolinkText('https://子域。例子。测试')).toBe(
+      'https://子域。例子。测试',
+    );
+    expect(clipBareHttpAutolinkText('https://www。例子。测试')).toBe(
+      'https://www。例子。测试',
+    );
     expect(clipBareHttpAutolinkText('https://example.com/path・说明')).toBe(
       'https://example.com/path',
     );

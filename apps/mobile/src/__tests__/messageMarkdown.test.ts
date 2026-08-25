@@ -309,10 +309,23 @@ describe('messageMarkdown', () => {
       { type: 'link', text: 'https://子域。例子。测试', url: 'https://子域。例子。测试' },
       { type: 'text', text: ' 看' },
     ]);
-    expect(parseMobileMarkdownInlines('看 https://例子。测试。这是说明')).toEqual([
-      { type: 'text', text: '看 ' },
-      { type: 'link', text: 'https://例子。测试', url: 'https://例子。测试' },
-      { type: 'text', text: '。这是说明' },
+    expect(parseMobileMarkdownInlines('打开 https://пример。онлайн/path 看')).toEqual([
+      { type: 'text', text: '打开 ' },
+      {
+        type: 'link',
+        text: 'https://пример。онлайн/path',
+        url: 'https://пример。онлайн/path',
+      },
+      { type: 'text', text: ' 看' },
+    ]);
+    expect(parseMobileMarkdownInlines('打开 https://子域。四字域名。测试 看')).toEqual([
+      { type: 'text', text: '打开 ' },
+      {
+        type: 'link',
+        text: 'https://子域。四字域名。测试',
+        url: 'https://子域。四字域名。测试',
+      },
+      { type: 'text', text: ' 看' },
     ]);
     expect(parseMobileMarkdownInlines('看 https://例子。测试。')).toEqual([
       { type: 'text', text: '看 ' },

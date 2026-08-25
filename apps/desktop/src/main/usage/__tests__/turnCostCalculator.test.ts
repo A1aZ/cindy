@@ -913,6 +913,49 @@ describe('resolveClaudeTurnCostSinks', () => {
     expect(result.perModel[0]?.segments).toEqual([]);
   });
 
+  it('keeps a custom Pi SDK estimate when incomplete request segments cannot be quoted', () => {
+    const result = resolveClaudeTurnCostSinks(
+      [
+        delta('custom-model', {
+          costUsdDelta: 2,
+          inputTokensDelta: 1_000,
+          outputTokensDelta: 100,
+        }),
+      ],
+      catalog(
+        quote('custom-model', 2, 10, {
+          providerId: 'custom-pi',
+          source: 'user-override',
+          approximate: true,
+        }),
+      ),
+      {
+        providerId: 'custom-pi',
+        billingRoute: 'provider-api',
+        region: 'global',
+        pricingAgent: 'pi',
+        customProviderSdkEstimate: 'shown',
+      },
+      [],
+      false,
+    );
+
+    expect(result.turnMoney).toBeNull();
+    expect(result.estimatedTurnMoney).toMatchObject({
+      amount: 2,
+      currency: 'USD',
+      kind: 'value-estimate',
+      estimateReasons: ['sdk-estimate'],
+    });
+    expect(result.perModel).toMatchObject([
+      {
+        source: 'sdk',
+        money: { amount: 2, kind: 'value-estimate', estimateReasons: ['sdk-estimate'] },
+        segments: [],
+      },
+    ]);
+  });
+
   it('keeps observed Claude tokens when the first cumulative snapshot is unpriceable', () => {
     const result = resolveClaudeTurnCostSinks(
       [],

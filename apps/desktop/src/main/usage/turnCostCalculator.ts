@@ -350,16 +350,13 @@ export function resolveTurnCost(args: {
     tokens.outputTokens > 0 ||
     tokens.cacheReadTokens > 0 ||
     tokens.cacheCreateTokens > 0;
+  const isCustomProvider = context.customProviderSdkEstimate !== undefined;
   // DeepSeek 的缓存命中价与未命中价相差数十倍。Claude SDK 的 costUSD 是客户端
   // 对第三方模型的估值，不是 DeepSeek 账单事实；一旦把缓存 token 按普通输入价算，
   // 前台金额就会被成倍放大。有 token 增量且官方参考价存在时，按实际 token/cache
   // 分桶重算并保留 value-estimate 标记；只有 cost 增量或目录价格不覆盖本轮时仍退回
   // SDK，避免把有费用但无 token 明细的轮次误算成 $0。
-  if (
-    (context.customProviderSdkEstimate !== undefined || context.providerId === 'deepseek') &&
-    providerQuote &&
-    hasTokenDeltas
-  ) {
+  if ((isCustomProvider || context.providerId === 'deepseek') && providerQuote && hasTokenDeltas) {
     const referenceMoney = computePriceQuoteTurnMoney(
       tokens,
       providerQuote,
@@ -369,7 +366,7 @@ export function resolveTurnCost(args: {
     if (referenceMoney) {
       return { model, money: referenceMoney, source: 'reference' };
     }
-    if (segments !== undefined) {
+    if (segments !== undefined && !isCustomProvider) {
       return { model, money: null, source: 'reference' };
     }
   }

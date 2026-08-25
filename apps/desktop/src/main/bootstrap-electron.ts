@@ -1588,6 +1588,14 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
     // 后续 owner 的正常收尾写全部吞掉,中断横幅会在每个正常完成的任务上误弹。
     const releaseEndedSuppression = beginSessionTurnEndedSuppression();
     try {
+      // GoalController captures the Maker and owner DB at construction time.
+      // Dispose it before replacing the Maker so a relogin cannot dispatch
+      // goals through a shutting-down runtime from the previous account.
+      try {
+        await resetGoalController();
+      } catch (err) {
+        authBoundaryLog.error(`resetGoalController on ${reason} failed (non-fatal):`, err);
+      }
     // Same fence, same ordering argument, as quit and the update relaunch: raised
     // before `maker.shutdown` so it covers the shutdown *and* the sweep below.
     // `Maker.shutdown` reports per-session detach failures rather than throwing,

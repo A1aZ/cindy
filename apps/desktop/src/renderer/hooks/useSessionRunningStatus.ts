@@ -53,7 +53,6 @@ import {
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
 } from '@/lib/silencedSessionDoneStore';
-import { getStartingSessionIds } from '@/lib/sessionStartingStore';
 
 // Codex maker 化后, codex session 也走 makerChatStore;
 // 不再需要双 store 合并 —— 直接订阅 makerChatStore 即可。
@@ -134,9 +133,7 @@ export function useSessionRunningStatus(
    * QUEUE_DEBOUNCE_MS 内若同 session 又开新 turn,取消这次 fire(是自动衔接);
    * 时限内没起新 turn 才真正弹通知 + 亮角标。
    */
-  const pendingDoneTimersRef = useRef(
-    new Map<string, ReturnType<typeof setTimeout>>(),
-  );
+  const pendingDoneTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const notifications = useSessionAttentionSnapshot();
 
@@ -239,7 +236,11 @@ export function useSessionRunningStatus(
           const cur = makerChatStore.getRunningSnapshot().get(sessionId);
           const isActive = sessionId === activeSessionIdRef.current;
           const isRunning = cur?.isRunning === true;
-          const isStarting = getStartingSessionIds().has(sessionId);
+          // debounce 期间下一轮可能在真正进入 running 前失败并写入 terminal error。
+          // error 红点由现有告警 owner 投影；这里必须避免旧 run 的延迟 done 把它
+          // 覆盖成橙点，或再发一条过期的完成通知。starting 本身不作为抑制条件：
+          // 侧栏已把它显示为 running，保留旧 done 才能在启动失败时继续提醒用户。
+          const hasTerminalError = makerChatStore.hasSessionTerminalError(sessionId);
           const stillPending =
             !!cur &&
             (cur.hasPendingAskUser ||
@@ -250,12 +251,14 @@ export function useSessionRunningStatus(
             !wasActiveAtCompletion &&
             !isActive &&
             !isRunning &&
-            !isStarting &&
+            !hasTerminalError &&
             !stillPending
           ) {
             addSessionAttention(sessionId, 'done');
           }
-          if (!notificationOwnedByScheduler) onSessionDoneRef.current?.(sessionId);
+          if (!notificationOwnedByScheduler && !hasTerminalError) {
+            onSessionDoneRef.current?.(sessionId);
+          }
         }, QUEUE_DEBOUNCE_MS);
         pendingDoneTimersRef.current.set(sessionId, timer);
       }
@@ -345,13 +348,10 @@ export function useSessionRunningStatus(
     }
   }, [activeSessionId]);
 
-  const clearNotification = useCallback(
-    (sessionId: string) => {
-      // 默认 passive:点击会话卡片只导航,'error' 红角标由 store 保住。
-      clearSessionAttention(sessionId);
-    },
-    [],
-  );
+  const clearNotification = useCallback((sessionId: string) => {
+    // 默认 passive:点击会话卡片只导航,'error' 红角标由 store 保住。
+    clearSessionAttention(sessionId);
+  }, []);
 
   // Derive running set for the return value (outside effect, for rendering).
   // 必须 memo:裸调用每渲染都 new Set,会顺着 effectiveRunningSessionIds →
@@ -371,9 +371,7 @@ export function useSessionRunningStatus(
 }
 
 /** Extract the set of currently-running session IDs from the status map. */
-function deriveRunningSet(
-  statusMap: ReadonlyMap<string, SessionStatusInfo>,
-): ReadonlySet<string> {
+function deriveRunningSet(statusMap: ReadonlyMap<string, SessionStatusInfo>): ReadonlySet<string> {
   const set = new Set<string>();
   for (const [id, info] of statusMap) {
     if (info.isRunning) set.add(id);

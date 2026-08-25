@@ -341,6 +341,10 @@ export function useSessionEstimatedValue(
   const costsRef = useRef<Map<string, RegionalMoney>>(new Map());
   const excludedActualCostsRef = useRef<Map<string, RegionalMoney>>(new Map());
   const storeClientIdsRef = useRef<Set<string>>(new Set());
+  // IDs supplied by the last Host-authoritative history query.  Keep this
+  // separate from storeClientIds so a query can replace only its own rows and
+  // preserve live/transcript costs that were not persisted yet.
+  const authoritativeClientIdsRef = useRef<Set<string>>(new Set());
   const transcriptClearedRef = useRef(false);
   const [projection, setProjection] = useState<SessionEstimatedValueProjection>({
     estimatedValueMoney: null,
@@ -370,6 +374,7 @@ export function useSessionEstimatedValue(
     costsRef.current = new Map();
     excludedActualCostsRef.current = new Map();
     storeClientIdsRef.current = new Set();
+    authoritativeClientIdsRef.current = new Set();
     transcriptClearedRef.current = false;
     setProjection({
       estimatedValueMoney: null,
@@ -495,9 +500,20 @@ export function useSessionEstimatedValue(
     void estimatedSessionValueFor(sessionId, presentation, showSdkEstimate)
       .then((snapshot) => {
         if (cancelled) return;
-        const next = new Map<string, RegionalMoney>();
-        const nextExcludedActualCosts = new Map<string, RegionalMoney>();
+        // The Host query is authoritative only for the rows it returned.  A
+        // visible transcript can contain a just-created/live assistant row
+        // that is not in that query yet (or a frozen snapshot row supplied by
+        // the display provider).  Remove the previous query's rows, retain
+        // everything else, then overlay the fresh query result.
+        const next = new Map(costsRef.current);
+        const nextExcludedActualCosts = new Map(excludedActualCostsRef.current);
+        for (const clientId of authoritativeClientIdsRef.current) {
+          next.delete(clientId);
+          nextExcludedActualCosts.delete(clientId);
+        }
+        const authoritativeClientIds = new Set<string>();
         for (const entry of snapshot.entries) {
+          authoritativeClientIds.add(entry.clientId);
           const normalized =
             normalizeRegionalMoney(entry.money) ??
             (typeof entry.costUsd === 'number' ? legacyEstimateMoney(entry.costUsd) : null);
@@ -531,6 +547,7 @@ export function useSessionEstimatedValue(
             nextExcludedActualCosts.set(entry.clientId, entry.excludedActualMoney);
           }
         }
+        authoritativeClientIdsRef.current = authoritativeClientIds;
         applyCosts(next, nextExcludedActualCosts, true);
       })
       .catch(() => {

@@ -363,7 +363,9 @@ export function registerMessageIpc(): void {
       )
       .limit(limit);
     const orderedRows = afterCursor ? rows.slice().reverse() : rows;
-    return hydrateLegacyUserTurnCosts(orderedRows.map(messageToCamelWithRowid));
+    return projectLegacyMessageBilling(
+      await hydrateLegacyUserTurnCosts(orderedRows.map(messageToCamelWithRowid)),
+    );
   });
 
   ipcMain.handle(
@@ -442,8 +444,10 @@ export function registerMessageIpc(): void {
         .orderBy(asc(messages.createdAt), asc(messageRowid))
         .limit(radius);
 
-      return hydrateLegacyUserTurnCosts(
-        [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
+      return projectLegacyMessageBilling(
+        await hydrateLegacyUserTurnCosts(
+          [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
+        ),
       );
     },
   );
@@ -526,8 +530,10 @@ export function registerMessageIpc(): void {
         .orderBy(asc(messages.createdAt), asc(messageRowid))
         .limit(radius);
 
-      const rows = await hydrateLegacyUserTurnCosts(
-        [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
+      const rows = await projectLegacyMessageBilling(
+        await hydrateLegacyUserTurnCosts(
+          [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
+        ),
       );
       return capReferenceMessageRows(rows, contentCharLimit);
     },
@@ -797,7 +803,12 @@ export function broadcastMessageRow(
   msg: Message,
   ownerScope?: DataOwnerBroadcastScope | null,
 ): void {
-  broadcastOwnedPayload('local-db:messages:created', { sessionId, message: msg }, ownerScope);
+  const [projectedMessage] = projectLegacyMessageBilling([msg]);
+  broadcastOwnedPayload(
+    'local-db:messages:created',
+    { sessionId, message: projectedMessage ?? msg },
+    ownerScope,
+  );
 }
 
 export interface MessageDeletedPayload {
@@ -1885,6 +1896,74 @@ function historicalCustomProviderFlagFromModel(
   return findModelRegistryRoute(BUNDLED_CATALOG.modelRegistry, 'xd', normalized) === undefined;
 }
 
+function historicalCustomProviderFlagFromMeta(meta: AgentMeta): boolean | undefined {
+  if (meta.turnCostIsEstimate === true) return undefined;
+  if (typeof meta.turnCostIsCustomProvider === 'boolean') return undefined;
+  // A partially migrated row may have the immutable Provider id but not the boolean flag.  The
+  // id is still stronger evidence than the session's current Provider, so derive the flag from it
+  // instead of falling back to session-wide presentation.
+  if (meta.turnCostProviderId !== undefined) {
+    return resolveCustomProviderCostFlag(undefined, meta.turnCostProviderId);
+  }
+
+  const details = normalizeTurnUsageDetails(meta.turnUsageDetails);
+  const modelCandidates = [
+    typeof meta.model === 'string' ? meta.model : undefined,
+    details?.model,
+    ...(details?.models ?? []),
+    ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
+  ].filter((model): model is string => typeof model === 'string' && model.trim().length > 0);
+
+  // A missing/ambiguous historical model intentionally fails closed.  A bundled Gateway route
+  // is the only positive evidence that an unattributed pre-upgrade amount was real provider spend.
+  return modelCandidates.length === 0
+    ? historicalCustomProviderFlagFromModel(undefined)
+    : modelCandidates.some((model) => historicalCustomProviderFlagFromModel(model));
+}
+
+/**
+ * Read-only history projection for the transcript renderer.
+ *
+ * Older assistant rows predate the immutable per-turn billing fields.  Do not
+ * classify those rows from the session's current provider: a session may have
+ * switched providers since the row was written.  Use the same versioned
+ * bundled Gateway evidence as the session-value projection instead, and mark
+ * unknown/ambiguous rows as custom so the renderer fails closed.  The returned
+ * objects are fresh clones; this never writes the derived attribution back to
+ * SQLite.
+ */
+export function projectLegacyMessageBilling(history: Message[]): Message[] {
+  let projected: Message[] | null = null;
+  for (let index = 0; index < history.length; index++) {
+    const message = history[index];
+    if (message.role !== 'assistant') continue;
+    const meta = message.agentMeta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    if (typeof meta.turnCostIsCustomProvider === 'boolean') continue;
+    if (meta.turnCostIsEstimate === true) continue;
+    const money = normalizeRegionalMoney(meta.turnCost);
+    const hasLegacyActualCost =
+      (money?.kind === 'actual-cost' && money.amount > 0) ||
+      (typeof meta.turnCostUsd === 'number' &&
+        Number.isFinite(meta.turnCostUsd) &&
+        meta.turnCostUsd > 0);
+    if (!hasLegacyActualCost) continue;
+    // Reuse the same immutable model evidence as the session-value projection.  Unknown or
+    // multi-model rows fail closed as custom-provider SDK cost; the session's current Provider is
+    // deliberately never consulted here.
+    const turnCostIsCustomProvider = historicalCustomProviderFlagFromMeta(meta) ?? true;
+    projected ??= history.slice();
+    projected[index] = {
+      ...message,
+      agentMeta: {
+        ...meta,
+        turnCostIsCustomProvider,
+      },
+    };
+  }
+  return projected ?? history;
+}
+
 export function extractEstimatedSessionValueEntries(
   rows: ReadonlyArray<{ clientId: string; agentMeta: string | null }>,
   presentation: SdkCostPresentation = 'regular',
@@ -1921,14 +2000,7 @@ export function extractEstimatedSessionValueEntries(
     if (!rawMoney) continue;
 
     const turnUsageDetails = normalizeTurnUsageDetails(meta.turnUsageDetails);
-    const historicalProviderFlag =
-      meta.turnCostIsCustomProvider === undefined &&
-      meta.turnCostProviderId === undefined &&
-      meta.turnCostIsEstimate !== true
-        ? historicalCustomProviderFlagFromModel(
-            meta.model ?? turnUsageDetails?.model ?? turnUsageDetails?.models?.[0],
-          )
-        : undefined;
+    const historicalProviderFlag = historicalCustomProviderFlagFromMeta(meta);
     const entryProviderFlag = resolveCustomProviderCostFlag(
       meta.turnCostIsCustomProvider ?? historicalProviderFlag,
       meta.turnCostProviderId,
@@ -1992,7 +2064,9 @@ export function extractEstimatedSessionValueEntries(
       ...(excludedActualMoney ? { excludedActualMoney } : {}),
       ...(typeof meta.turnCostIsCustomProvider === 'boolean'
         ? { turnCostIsCustomProvider: meta.turnCostIsCustomProvider }
-        : {}),
+        : historicalProviderFlag !== undefined
+          ? { turnCostIsCustomProvider: entryProviderFlag }
+          : {}),
       ...(typeof meta.turnCostProviderId === 'string' || meta.turnCostProviderId === null
         ? { turnCostProviderId: meta.turnCostProviderId }
         : {}),

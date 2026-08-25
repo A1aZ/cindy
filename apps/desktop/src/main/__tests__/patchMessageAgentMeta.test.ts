@@ -81,8 +81,10 @@ import {
   findVisibleToolUseMessageByAliases,
   mergeEstimatedSessionValueEntriesWithLifetimeExclusions,
   patchMessageAgentMeta,
+  projectLegacyMessageBilling,
   summarizeEstimatedSessionValuesBySession,
 } from '../localDb/ipc/messages.js';
+import type { Message } from '../../renderer/lib/ccAgent.types';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -172,6 +174,92 @@ describe('patchMessageAgentMeta', () => {
         }),
       }),
     );
+  });
+
+  it.each([
+    ['unknown custom model', 'deleted-custom-model', true],
+    ['bundled Gateway model', 'claude-sonnet-4-6', false],
+  ] as const)('实时广播按逐轮模型投影 legacy 费用归属: %s', async (_label, model, expected) => {
+    selectQueue.push([
+      {
+        id: `row-${model}`,
+        sessionId: 's1',
+        clientId: `message-${model}`,
+        role: 'assistant',
+        content: JSON.stringify('answer'),
+        toolUseId: null,
+        agentMeta: JSON.stringify({
+          model,
+          turnCostUsd: 0.42,
+          turnCostIsEstimate: false,
+        }),
+        agentKind: 'cc',
+        createdAt: 1,
+        rewindAt: null,
+      },
+    ]);
+
+    await expect(broadcastMessageAgentMetaUpdate('s1', `message-${model}`)).resolves.toBe(true);
+    expect(mockSend).toHaveBeenCalledWith(
+      'local-db:messages:created',
+      expect.objectContaining({
+        sessionId: 's1',
+        message: expect.objectContaining({
+          clientId: `message-${model}`,
+          agentMeta: expect.objectContaining({ turnCostIsCustomProvider: expected }),
+        }),
+      }),
+    );
+  });
+});
+
+describe('projectLegacyMessageBilling', () => {
+  const assistant = (clientId: string, model: string): Message => ({
+    id: clientId,
+    clientId,
+    sessionId: 'session-1',
+    role: 'assistant',
+    content: 'answer',
+    toolUseId: null,
+    agentMeta: {
+      model,
+      turnCostUsd: 0.42,
+      turnCostIsEstimate: false,
+    },
+    createdAt: '2026-08-25T00:00:00.000Z',
+  });
+
+  it('attributes legacy rows per model instead of using the session current Provider', () => {
+    const history = [
+      assistant('custom-before-switch', 'deleted-custom-model'),
+      assistant('builtin-after-switch', 'claude-sonnet-4-6'),
+    ];
+
+    const projected = projectLegacyMessageBilling(history);
+
+    expect(projected[0].agentMeta).toMatchObject({ turnCostIsCustomProvider: true });
+    expect(projected[1].agentMeta).toMatchObject({ turnCostIsCustomProvider: false });
+    expect(history[0].agentMeta).not.toHaveProperty('turnCostIsCustomProvider');
+    expect(history[1].agentMeta).not.toHaveProperty('turnCostIsCustomProvider');
+  });
+
+  it('uses all historical model evidence for a mixed legacy turn', () => {
+    const mixed = assistant('mixed', 'claude-sonnet-4-6');
+    mixed.agentMeta = {
+      ...mixed.agentMeta,
+      turnUsageDetails: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheCreateTokens: 0,
+        totalTokens: 2,
+        cacheHitRate: null,
+        models: ['claude-sonnet-4-6', 'deleted-custom-model'],
+      },
+    };
+
+    const [projected] = projectLegacyMessageBilling([mixed]);
+    expect(projected.agentMeta).toMatchObject({ turnCostIsCustomProvider: true });
   });
 });
 

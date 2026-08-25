@@ -1250,16 +1250,18 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
           ...projectedLegacyCost,
           amount: legacyCost,
         };
-        if (legacyCost > 0) {
-          entry.costValues.push(legacyMoney);
-          noteLatestCurrency(entry, legacyMoney, 0);
-        }
-        const sessionCost = entry.sessionCosts.get(session.id) ?? emptyScheduleMoneyValues();
-        if (legacyCost > 0) {
-          sessionCost.costValues.push(legacyMoney);
-          noteLatestCurrency(sessionCost, legacyMoney, 0);
-        }
-        entry.sessionCosts.set(session.id, sessionCost);
+        // The aggregate residual has no immutable per-turn Provider evidence. The session's
+        // current Provider may have changed since these costs were recorded, so even a bundled id
+        // must not reopen the historical amount as actual spend.
+        const residual = reclassifyLegacyCustomProviderSnapshot(legacyMoney, null, null, true);
+        appendRunMoney(
+          entry,
+          session.id,
+          residual.costMoney,
+          residual.estimatedValueMoney,
+          residual.sdkEstimatedValueMoney,
+          0,
+        );
       }
       bySchedule.set(scheduleId, entry);
     }

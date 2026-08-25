@@ -368,7 +368,7 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     });
 
     expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-running', 'done');
-    expect(onSessionDone).toHaveBeenCalledWith('session-running');
+    expect(onSessionDone).not.toHaveBeenCalled();
   });
 
   it('does not restore done attention while the next turn is starting', async () => {
@@ -384,7 +384,7 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     });
 
     expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-starting', 'done');
-    expect(onSessionDone).toHaveBeenCalledWith('session-starting');
+    expect(onSessionDone).not.toHaveBeenCalled();
   });
 
   it('restores deferred done attention when starting clears without a new run', async () => {
@@ -435,7 +435,7 @@ describe('useSessionRunningStatus silenced completion handling', () => {
       'session-terminal-start-failure',
       'done',
     );
-    expect(onSessionDone).toHaveBeenCalledTimes(1);
+    expect(onSessionDone).not.toHaveBeenCalled();
   });
 
   it('drops deferred done attention when starting becomes a real run', async () => {
@@ -454,7 +454,30 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     await emitSnapshot(new Map([['session-started', status(true)]]));
 
     expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-started', 'done');
-    expect(onSessionDone).toHaveBeenCalledTimes(1);
+    expect(onSessionDone).not.toHaveBeenCalled();
+  });
+
+  it('does not emit stale done when a failed start has already recorded a terminal error', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+
+    await emitSnapshot(new Map([['session-preparation-error', status(true)]]));
+    await emitSnapshot(new Map([['session-preparation-error', status(false)]]));
+    storeMock.terminalErrorSessions.add('session-preparation-error');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(vi.mocked(addSessionAttention)).toHaveBeenCalledWith(
+      'session-preparation-error',
+      'error',
+    );
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith(
+      'session-preparation-error',
+      'done',
+    );
+    expect(onSessionDone).not.toHaveBeenCalled();
   });
 
   it('coalesces multiple queue-drain transitions into a single final notification', async () => {

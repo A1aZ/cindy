@@ -12309,6 +12309,19 @@ function isRemoteMediaSession(sessionId: string): boolean {
   return Boolean(getOrCreateState(sessionId).remoteHostId ?? getStickySessionDeviceId(sessionId));
 }
 
+/** 发送前准备失败也属于本轮终止错误,供错误横幅与侧栏红点读取。 */
+function recordSendPreparationError(sessionId: string, error: unknown): void {
+  const message = decodeRemoteErrorMessage(error instanceof Error ? error.message : String(error));
+  setState(sessionId, (s) => ({
+    ...s,
+    error: message,
+    usageLimitRecovery: null,
+    errorReason: null,
+    recoverableError: null,
+    errorRetryText: null,
+  }));
+}
+
 /**
  * 共享发送边界：同步完成「无切换在途」检查与发送 token 登记，并保证同步抛错和
  * Promise settle 两条路径都会释放。`task` 仍在当前调用栈内启动，保留 sendMessage
@@ -12447,6 +12460,9 @@ function sendMessage(
         null,
         materializeAnnotatedAttachmentsForSend(files, sessionId, {
           stripAnnotationMeta: isRemoteMediaSession(sessionId),
+        }).catch((error) => {
+          recordSendPreparationError(sessionId, error);
+          throw error;
         }),
         (prepared) =>
           sendMessageCore(

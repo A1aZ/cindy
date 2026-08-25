@@ -76,11 +76,11 @@ function hasPendingInteraction(info: SessionStatusInfo | undefined): boolean {
 
 interface UseSessionRunningStatusOptions {
   /**
-   * Fired when a session transitions running → done. Filters out errored
-   * sessions only — does NOT filter out the active session, because the
-   * "should we actually notify the user" decision (focus state, etc.) is
-   * the consumer's. The in-app dot still skips active session via its own
-   * branch; the callback fires for any non-error done.
+   * Fired after a session transitions running → done and remains idle through
+   * the queue debounce. A next turn that is already running or starting
+   * suppresses the stale completion; a failed optimistic start restores it.
+   * Active-session focus remains the consumer's decision, while the in-app dot
+   * separately skips completions the user already viewed.
    */
   onSessionDone?: (sessionId: string) => void;
   /**
@@ -97,6 +97,13 @@ interface UseSessionRunningStatusOptions {
    * Like onSessionDone, no active-session filter; the consumer decides.
    */
   onSessionNeedsReply?: (sessionId: string) => void;
+}
+
+interface DeferredStartingCompletion {
+  /** Whether the in-app done attention was still eligible when debounce expired. */
+  restoreAttention: boolean;
+  /** Scheduler-owned runs keep their external completion notification suppressed. */
+  notify: boolean;
 }
 
 /**
@@ -148,10 +155,12 @@ export function useSessionRunningStatus(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
 
-  // debounce 到期时下一轮仍处于 starting,先暂缓上一轮 done 角标。starting
-  // 若随后失败 / 暂停 / TTL 清除且没有权威运行态,再恢复该角标;成功进入
-  // running 则丢弃。系统通知 callback 已在 debounce 到期时触发,这里只补角标。
-  const pendingStartingDoneAttentionRef = useRef(new Set<string>());
+  // debounce 到期时下一轮仍处于 starting,把上一轮 done 角标与系统通知一起
+  // 暂缓。starting 若随后失败 / 暂停 / TTL 清除且没有权威运行态,再恢复;
+  // 成功进入 running 则两者一起丢弃,避免新一轮已经开始后补发旧完成通知。
+  const pendingStartingCompletionsRef = useRef(
+    new Map<string, DeferredStartingCompletion>(),
+  );
 
   const notifications = useSessionAttentionSnapshot();
 
@@ -162,7 +171,7 @@ export function useSessionRunningStatus(
 
     // starting 是乐观态,可能以失败 / 暂停结束而从未进入 running。若 debounce
     // 期间因此抑制了上一轮 done,starting 清除后必须按当前权威状态收口。
-    for (const sessionId of pendingStartingDoneAttentionRef.current) {
+    for (const [sessionId, deferred] of pendingStartingCompletionsRef.current) {
       const cur = statusMap.get(sessionId);
       const hasError = makerChatStore.hasSessionTerminalError(sessionId);
       const isActive = sessionId === activeSessionId;
@@ -172,17 +181,20 @@ export function useSessionRunningStatus(
       // deferred done 升级成 error。权威终止错误一旦存在就立即收口为红点,
       // 也不受 active / starting 抑制(done 才有「正在看就不亮」语义)。
       if (hasError) {
-        pendingStartingDoneAttentionRef.current.delete(sessionId);
+        pendingStartingCompletionsRef.current.delete(sessionId);
         addSessionAttention(sessionId, 'error');
         continue;
       }
-      if (isActive || isRunning || stillPending) {
-        pendingStartingDoneAttentionRef.current.delete(sessionId);
+      if (isRunning) {
+        pendingStartingCompletionsRef.current.delete(sessionId);
         continue;
       }
       if (startingSessionIds.has(sessionId)) continue;
-      pendingStartingDoneAttentionRef.current.delete(sessionId);
-      addSessionAttention(sessionId, 'done');
+      pendingStartingCompletionsRef.current.delete(sessionId);
+      if (deferred.restoreAttention && !isActive && !stillPending) {
+        addSessionAttention(sessionId, 'done');
+      }
+      if (deferred.notify) onSessionDoneRef.current?.(sessionId);
     }
 
     // --- 1. Detect new turn starts ---
@@ -281,13 +293,21 @@ export function useSessionRunningStatus(
           const isRunning = cur?.isRunning === true;
           const isStarting = getStartingSessionIds().has(sessionId);
           const stillPending = hasPendingInteraction(cur);
-          if (!wasActiveAtCompletion && !isActive && !isRunning && !stillPending) {
-            if (isStarting) {
-              pendingStartingDoneAttentionRef.current.add(sessionId);
-            } else {
-              addSessionAttention(sessionId, 'done');
-            }
+          const hasError = makerChatStore.hasSessionTerminalError(sessionId);
+          if (hasError) {
+            addSessionAttention(sessionId, 'error');
+            return;
           }
+          if (isRunning) return;
+          const restoreAttention = !wasActiveAtCompletion && !isActive && !stillPending;
+          if (isStarting) {
+            pendingStartingCompletionsRef.current.set(sessionId, {
+              restoreAttention,
+              notify: !notificationOwnedByScheduler,
+            });
+            return;
+          }
+          if (restoreAttention) addSessionAttention(sessionId, 'done');
           if (!notificationOwnedByScheduler) onSessionDoneRef.current?.(sessionId);
         }, QUEUE_DEBOUNCE_MS);
         pendingDoneTimersRef.current.set(sessionId, timer);
@@ -355,7 +375,7 @@ export function useSessionRunningStatus(
     return () => {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
-      pendingStartingDoneAttentionRef.current.clear();
+      pendingStartingCompletionsRef.current.clear();
     };
   }, []);
 

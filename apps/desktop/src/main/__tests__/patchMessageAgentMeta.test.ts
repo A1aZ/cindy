@@ -508,6 +508,27 @@ describe('extractEstimatedSessionValueEntries', () => {
     );
   });
 
+  it('fails closed for pre-upgrade rows with a shared built-in-looking model id', () => {
+    const [entry] = extractEstimatedSessionValueEntries(
+      [{
+        clientId: 'legacy-shared-model',
+        agentMeta: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          turnCostUsd: 0.42,
+          turnCostIsEstimate: false,
+        }),
+      }],
+      'hidden',
+      false,
+    );
+
+    expect(entry).toEqual(expect.objectContaining({
+      clientId: 'legacy-shared-model',
+      excludedActualMoney: expect.objectContaining({ amount: 0.42 }),
+    }));
+    expect(entry).not.toHaveProperty('money');
+  });
+
   it('fails closed for pre-upgrade rows whose model ownership is unavailable', () => {
     const [entry] = extractEstimatedSessionValueEntries(
       [{

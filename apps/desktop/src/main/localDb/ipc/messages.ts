@@ -29,7 +29,6 @@ import {
 } from '../../cindy-media/ledger';
 import { importExternalCodexMessagesForSession } from '../../maker-host/codex-local-sessions';
 import { importExternalClaudeCodeMessagesForSession } from '../../maker-host/claude-local-sessions';
-import { getActiveCatalog } from '../../maker-host/active-catalog.js';
 import { isDeviceLinkInvoke } from '../../device-link/invoke-context';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { onMessageCreated as onChatMessageCreatedForEmbedding } from '../../embedders/chat-history-embedder';
@@ -1875,20 +1874,13 @@ export function summarizeEstimatedSessionValuesBySession(
 
 function historicalCustomProviderFlagFromModel(
   model: string | null | undefined,
-): boolean | undefined {
+): true {
   const normalized = model?.trim();
   if (!normalized) return true;
-  const matchingSources = new Set(
-    getActiveCatalog().providers.flatMap((provider) =>
-      Object.values(provider.models).some((models) =>
-        models?.some((candidate) => candidate.id === normalized),
-      )
-        ? [provider.source]
-        : [],
-    ),
-  );
-  if (matchingSources.size !== 1) return true;
-  return matchingSources.has('user');
+  // Current catalog membership cannot prove historical built-in ownership: a deleted custom
+  // Provider may have exposed the same model id. The model is only supporting evidence for a
+  // custom classification; every unattributed pre-upgrade row still fails closed.
+  return true;
 }
 
 export function extractEstimatedSessionValueEntries(

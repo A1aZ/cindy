@@ -208,11 +208,18 @@ export function projectCustomProviderMessages(
       normalizeRegionalMoney(message.userTurnMoney) ||
       (typeof message.userTurnCostUsd === 'number' && message.userTurnCostUsd > 0),
     );
+    // Without the round's user boundary, this cumulative total may include earlier segments that
+    // are outside the loaded page and used a different Provider. The closing segment's own
+    // presentation cannot prove attribution for that total, so keep independent estimates but
+    // fail closed for any SDK-like actual amount.
     const projectedUserTurnMoney = hasUserBoundary
       ? hasPersistedUserTotal && roundValues.length > 0
         ? addCompatibleRegionalMoney(roundValues, roundValues[0].currency)
         : null
-      : projectCustomProviderMoney(userMoneyFromMessage(message), presentation);
+      : projectCustomProviderMoney(
+          userMoneyFromMessage(message),
+          showSdkEstimate ? 'estimate' : 'hidden',
+        );
     return withProjectedCosts(message, presentation, projectedUserTurnMoney);
   });
 }

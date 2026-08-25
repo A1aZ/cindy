@@ -167,6 +167,31 @@ describe('custom provider cost presentation', () => {
     }
   });
 
+  it('fails closed for a mixed cumulative total on an estimated closing segment', () => {
+    const closing = message({
+      clientId: 'legacy-estimated-closing-segment',
+      model: 'claude-sonnet-4-6',
+      turnMoney: money(4, 'value-estimate', ['reference-price']),
+      turnCostIsEstimate: true,
+      userTurnMoney: money(6, 'actual-cost'),
+    });
+
+    const [hidden] = projectCustomProviderMessages([closing], 'regular', false);
+    expect(hidden.turnMoney).toMatchObject({
+      amount: 4,
+      kind: 'value-estimate',
+      estimateReasons: ['reference-price'],
+    });
+    expect(hidden.userTurnMoney).toBeUndefined();
+
+    const [estimated] = projectCustomProviderMessages([closing], 'regular', true);
+    expect(estimated.userTurnMoney).toMatchObject({
+      amount: 6,
+      kind: 'value-estimate',
+      estimateReasons: ['sdk-estimate'],
+    });
+  });
+
   it('keeps reference-priced portions of a mixed custom-provider estimate', () => {
     const [projected] = projectCustomProviderMessages(
       [

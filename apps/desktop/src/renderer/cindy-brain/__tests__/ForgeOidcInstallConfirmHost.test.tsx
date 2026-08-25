@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 import { ForgeOidcInstallConfirmHost } from '../ForgeOidcInstallConfirmHost';
+import enCommon from '../../i18n/locales/en/common.json';
+import jaCommon from '../../i18n/locales/ja/common.json';
+import koCommon from '../../i18n/locales/ko/common.json';
+import zhCNCommon from '../../i18n/locales/zh-CN/common.json';
+import zhTWCommon from '../../i18n/locales/zh-TW/common.json';
 
 const mocks = vi.hoisted(() => ({ confirm: vi.fn() }));
 
@@ -12,6 +17,7 @@ vi.mock('@/components/ui/confirm-dialog-provider', () => ({
 }));
 
 vi.mock('react-i18next', () => ({
+  Trans: () => null,
   useTranslation: () => ({
     t: (key: string, options?: { id?: string }) => (options?.id ? `${key}:${options.id}` : key),
   }),
@@ -62,13 +68,19 @@ describe('ForgeOidcInstallConfirmHost', () => {
     const options = mocks.confirm.mock.calls[0][0] as {
       content: ReactNode;
       contentSelectable: boolean;
-      requireTypedConfirmation: { expected: string; label: string };
+      requireTypedConfirmation: { expected: string; label: ReactNode };
     };
     expect(options.contentSelectable).toBe(true);
-    expect(options.requireTypedConfirmation).toEqual({
-      expected: 'acme-tool',
-      label: 'settings.ghosts.forgeOidcInstallConfirm.typedIdLabel:acme-tool',
-    });
+    expect(options.requireTypedConfirmation.expected).toBe('acme-tool');
+    const label = options.requireTypedConfirmation.label as ReactElement<{
+      i18nKey: string;
+      values: { id: string };
+      components: { strong: ReactElement<{ className?: string }> };
+    }>;
+    expect(label.props.i18nKey).toBe('settings.ghosts.forgeOidcInstallConfirm.typedIdLabel');
+    expect(label.props.values).toEqual({ id: 'acme-tool' });
+    expect(label.props.components.strong.type).toBe('strong');
+    expect(label.props.components.strong.props.className).toContain('font-semibold');
 
     render(<>{options.content}</>);
     expect(screen.getByText('Acme Tool')).toBeTruthy();
@@ -77,5 +89,18 @@ describe('ForgeOidcInstallConfirmHost', () => {
     expect(screen.getByText('files.acme.test')).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
     expect(resolveConfirm).toHaveBeenCalledWith('request-1', true);
+  });
+
+  it.each([
+    ['zh-CN', zhCNCommon],
+    ['zh-TW', zhTWCommon],
+    ['en', enCommon],
+    ['ja', jaCommon],
+    ['ko', koCommon],
+  ])('%s 的手输提示用加粗 id 且不再用引号包裹', (_locale, common) => {
+    const label = common.settings.ghosts.forgeOidcInstallConfirm.typedIdLabel;
+    // 直接读每个 locale，排除缺 key 后被英文 fallback 掩盖。
+    expect(label).toContain(' <strong>{{id}}</strong> ');
+    expect(label).not.toMatch(/[“”「」]/);
   });
 });

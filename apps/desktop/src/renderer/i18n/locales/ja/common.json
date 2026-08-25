@@ -4342,7 +4342,7 @@
         "pluginNameLabel": "プラグイン",
         "pluginIdLabel": "プラグイン id",
         "hostsLabel": "組織 ID の注入先ホスト",
-        "typedIdLabel": "確認するにはプラグイン id「{{id}}」を入力",
+        "typedIdLabel": "確認するにはプラグイン id <strong>{{id}}</strong> を入力",
         "confirm": "インストールしてテストを許可",
         "cancel": "キャンセル"
       },

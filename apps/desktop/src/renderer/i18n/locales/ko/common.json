@@ -4342,7 +4342,7 @@
         "pluginNameLabel": "플러그인",
         "pluginIdLabel": "플러그인 id",
         "hostsLabel": "조직 ID 삽입 호스트",
-        "typedIdLabel": "확인하려면 플러그인 id “{{id}}” 입력",
+        "typedIdLabel": "확인하려면 플러그인 id <strong>{{id}}</strong> 입력",
         "confirm": "설치 및 테스트 허용",
         "cancel": "취소"
       },

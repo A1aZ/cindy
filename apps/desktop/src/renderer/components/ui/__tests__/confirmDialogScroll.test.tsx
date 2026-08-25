@@ -156,6 +156,9 @@ describe('ConfirmDialog 长内容布局', () => {
     render(<ConfirmDialog open onOpenChange={() => {}} title="确定退出？" confirmText="退出" />);
     const dialog = screen.getByRole('alertdialog');
     expect(dialog.querySelectorAll('.overflow-y-auto').length).toBe(0);
+    // 对照项：没有显式开放框选的普通确认框仍保持防误选行为。
+    expect(dialog.className).toContain('select-none');
+    expect(dialog.className).not.toContain('select-text');
     expect(flashScrollbar).not.toHaveBeenCalled();
   });
 
@@ -176,9 +179,11 @@ describe('ConfirmDialog 长内容布局', () => {
     );
     const input = screen.getByLabelText('输入插件 id');
     const confirmButton = screen.getByRole('button', { name: '安装' });
-    expect(screen.getByRole('alertdialog').querySelector('.overflow-y-auto')?.className).toContain(
-      'select-text',
-    );
+    const dialog = screen.getByRole('alertdialog');
+    // 根节点必须撤掉 select-none；只在子滚动区加 select-text 无法保证展示 id 可框选。
+    expect(dialog.className).toContain('select-text');
+    expect(dialog.className).not.toContain('select-none');
+    expect(dialog.querySelector('.overflow-y-auto')?.className).toContain('select-text');
 
     fireEvent.change(input, { target: { value: ' acme-tool ' } });
     expect((confirmButton as HTMLButtonElement).disabled).toBe(true);

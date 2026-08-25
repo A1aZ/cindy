@@ -38,7 +38,7 @@ export interface ConfirmOptions {
   /** 逐字输入 expected 才可确认；由 ConfirmDialog 持有本轮输入状态。 */
   requireTypedConfirmation?: {
     expected: string;
-    label: string;
+    label: ReactNode;
     placeholder?: string;
   };
   /** 允许确认正文与富内容被框选复制。 */

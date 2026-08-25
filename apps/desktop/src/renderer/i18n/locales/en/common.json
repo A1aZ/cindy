@@ -4343,7 +4343,7 @@
         "pluginNameLabel": "Plugin",
         "pluginIdLabel": "Plugin id",
         "hostsLabel": "Organization identity injection hosts",
-        "typedIdLabel": "Enter the plugin id “{{id}}” to confirm",
+        "typedIdLabel": "Enter the plugin id <strong>{{id}}</strong> to confirm",
         "confirm": "Install and allow testing",
         "cancel": "Cancel"
       },

@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 
@@ -61,9 +61,15 @@ export function ForgeOidcInstallConfirmHost() {
             describeContent: true,
             requireTypedConfirmation: {
               expected: payload.ghostId,
-              label: t('settings.ghosts.forgeOidcInstallConfirm.typedIdLabel', {
-                id: payload.ghostId,
-              }),
+              label: (
+                <Trans
+                  i18nKey="settings.ghosts.forgeOidcInstallConfirm.typedIdLabel"
+                  values={{ id: payload.ghostId }}
+                  components={{
+                    strong: <strong className="font-semibold text-[var(--confirm-title)]" />,
+                  }}
+                />
+              ),
             },
             confirmText: t('settings.ghosts.forgeOidcInstallConfirm.confirm'),
             cancelText: t('settings.ghosts.forgeOidcInstallConfirm.cancel'),

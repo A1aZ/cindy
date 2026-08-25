@@ -52,7 +52,7 @@ export interface ConfirmDialogProps {
   /** 要求逐字输入 expected 才能确认；匹配不做 trim 或大小写折叠。 */
   requireTypedConfirmation?: {
     expected: string;
-    label: string;
+    label: ReactNode;
     placeholder?: string;
   };
   /** 允许正文和富内容被框选复制；缺省保持普通确认框的防误选行为。 */
@@ -183,7 +183,8 @@ export function ConfirmDialog({
               // inset-0 + m-auto + h-fit：布局矩形即视觉矩形，挖洞与弹窗严格重合。
               'fixed inset-0 z-[10000] m-auto h-fit',
               'flex max-h-[85vh] flex-col',
-              'w-full select-none rounded-xl p-4',
+              'w-full rounded-xl p-4',
+              contentSelectable ? 'select-text' : 'select-none',
               'bg-[var(--confirm-bg)] shadow-[var(--confirm-shadow)]',
               // 布局居中弹窗用无 translate 的 layout keyframes;共享
               // confirm-content-in/out 的每一帧都烘 translate(-50%, -50%),

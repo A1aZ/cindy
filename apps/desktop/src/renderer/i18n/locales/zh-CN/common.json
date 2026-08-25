@@ -4334,7 +4334,7 @@
         "pluginNameLabel": "插件",
         "pluginIdLabel": "插件 id",
         "hostsLabel": "企业身份注入域名",
-        "typedIdLabel": "输入插件 id“{{id}}”以确认",
+        "typedIdLabel": "输入插件 id <strong>{{id}}</strong> 以确认",
         "confirm": "安装并允许自测",
         "cancel": "取消"
       },

@@ -1184,6 +1184,9 @@ type YieldContinuationClaim = {
   originTurnId: string;
   continuationTurnId: string | null;
   permissionPolicy: TurnPermissionPolicy | null;
+  deferredPlanText: string | null;
+  deferredPlanTurnId: string | null;
+  deferredPlanCapabilitySelectionText: string;
 };
 const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
   'no_listener_attached',
@@ -3211,9 +3214,13 @@ export class CodexAgent extends BaseAgent {
         if (phase === 'completed') {
           // Named completions drop that item. Nameless completions cannot match
           // a prior updated snapshot, so they clear the anonymous bucket rather
-          // than invent a synthetic identity.
+          // than invent a synthetic identity — unless this is a wait that settled
+          // one cell_id. That wait shares the anonymous bucket with other yielded
+          // execs; wiping '' would drop still-running cells and skip their claim.
           if (itemId) existing.delete(itemId);
-          else existing.delete('');
+          else if (extractSettledYieldCellIdsFromCodexItem(item).length === 0) {
+            existing.delete('');
+          }
         }
       } else if (itemId) {
         existing.set(itemId, cells);
@@ -3257,6 +3264,9 @@ export class CodexAgent extends BaseAgent {
         originTurnId,
         continuationTurnId: null,
         permissionPolicy: activeTurnPermissionPolicy,
+        deferredPlanText: null,
+        deferredPlanTurnId: null,
+        deferredPlanCapabilitySelectionText: '',
       };
       yieldContinuationClaims.set(claim.id, claim);
       activeYieldContinuationId = claim.id;
@@ -3318,6 +3328,10 @@ export class CodexAgent extends BaseAgent {
       emitYieldContinuationState(claim.id, 'cancelled');
       releaseSettledYieldContinuationClaim(claim);
       flushYieldContinuationIdleWaiters(true);
+      // Cancel is a product terminal. Do not leak a deferred plan cycle into the
+      // next user send after Stop / owned-turn failure / replacement send.
+      planCycleActive = false;
+      proposedPlanText = null;
       return claim;
     };
     const discardYieldContinuationClaims = (reason: string): void => {
@@ -9069,6 +9083,10 @@ export class CodexAgent extends BaseAgent {
           suppressSuccessfulYieldBoundary = true;
         } else {
           yieldClaim = mintYieldContinuationClaim(outstandingCells, turn.id, retryCount);
+          yieldClaim.deferredPlanText = existingYieldClaim.deferredPlanText;
+          yieldClaim.deferredPlanTurnId = existingYieldClaim.deferredPlanTurnId;
+          yieldClaim.deferredPlanCapabilitySelectionText =
+            existingYieldClaim.deferredPlanCapabilitySelectionText;
         }
       } else if (yieldedCells.length > 0) {
         yieldClaim = mintYieldContinuationClaim(yieldedCells, turn.id, 0);
@@ -9118,24 +9136,47 @@ export class CodexAgent extends BaseAgent {
       }
       latestPlanByTurn.delete(turn.id);
       if (yieldClaim?.state === 'awaiting') {
+        if (completedTurnWasPlanMode && planCycleActive) {
+          const livePlan = proposedPlanText?.trim() || null;
+          if (livePlan) {
+            yieldClaim.deferredPlanText = livePlan;
+            yieldClaim.deferredPlanTurnId = turn.id;
+            yieldClaim.deferredPlanCapabilitySelectionText = completedCapabilitySelectionText;
+          } else if (!yieldClaim.deferredPlanText) {
+            yieldClaim.deferredPlanTurnId = turn.id;
+            yieldClaim.deferredPlanCapabilitySelectionText = completedCapabilitySelectionText;
+          }
+        }
+        proposedPlanText = null;
         void startYieldContinuation(yieldClaim);
-      }
-      // 计划模式: plan turn 正常收尾且产出了 proposed plan → 发起审批闭环。
-      // 放在 done 之后 (AsyncQueue FIFO), renderer 先做完 turn 收尾再挂 plan 卡片。
-      // 空跑(模型没产出 <proposed_plan>, 例如直接回答了问题) → 循环结束,
-      // 下一 turn 经 threadTouchedPlanMode 复位 default。
-      const planForReview = proposedPlanText?.trim();
-      proposedPlanText = null;
-      if (completedTurnWasPlanMode && planCycleActive) {
-        if (planForReview) {
-          void runPlanReviewFlow(
-            planForReview,
-            turn.id,
-            completedCapabilitySelectionText,
-          );
-        } else {
-          log.debug('plan turn produced no proposed plan — plan cycle ends', { turnId: turn.id });
-          planCycleActive = false;
+      } else {
+        // 计划模式: 只在产品终态审批。awaiting yield claim 时 SDK turn 边界不是
+        // 产品结束 —— 空跑不得把 planCycleActive 关掉，已有计划也等续段结算后再挂卡。
+        // 放在 done 之后 (AsyncQueue FIFO), renderer 先做完 turn 收尾再挂 plan 卡片。
+        // 空跑(模型没产出 <proposed_plan>, 例如直接回答了问题) → 循环结束,
+        // 下一 turn 经 threadTouchedPlanMode 复位 default。
+        const livePlan = proposedPlanText?.trim() || null;
+        proposedPlanText = null;
+        const deferredPlan = existingYieldClaim?.deferredPlanText?.trim() || null;
+        const planForReview = livePlan ?? deferredPlan;
+        const planReviewTurnId = livePlan
+          ? turn.id
+          : (existingYieldClaim?.deferredPlanTurnId ?? turn.id);
+        const planCapabilitySelection = livePlan
+          ? completedCapabilitySelectionText
+          : (existingYieldClaim?.deferredPlanCapabilitySelectionText
+            || completedCapabilitySelectionText);
+        if (planCycleActive && (completedTurnWasPlanMode || deferredPlan)) {
+          if (planForReview) {
+            void runPlanReviewFlow(
+              planForReview,
+              planReviewTurnId,
+              planCapabilitySelection,
+            );
+          } else {
+            log.debug('plan turn produced no proposed plan — plan cycle ends', { turnId: turn.id });
+            planCycleActive = false;
+          }
         }
       }
       flushDeferredTerminalTurnCompletionsIfIdle();

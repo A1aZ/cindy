@@ -35,6 +35,15 @@ export function subtractExcludedActualMoney(
   return amount > 0 ? { ...actualMoney, amount } : null;
 }
 
+export function projectSessionActualMoney(
+  actualMoney: RegionalMoney | null,
+  excludedActualMoney: RegionalMoney | null,
+  authoritative: boolean,
+): RegionalMoney | null {
+  if (!authoritative) return null;
+  return subtractExcludedActualMoney(actualMoney, excludedActualMoney);
+}
+
 export function combineSessionUsageMoney(
   actualMoney: RegionalMoney | null,
   estimatedValueMoney: RegionalMoney | null,
@@ -68,10 +77,11 @@ export function useSessionUsageMoney(
     presentation,
     showSdkEstimate,
   );
-  const shouldFailClosed = presentation !== 'regular' && !authoritative;
-  const actualMoney = shouldFailClosed
-    ? null
-    : subtractExcludedActualMoney(persistedActualMoney, excludedActualMoney);
+  const actualMoney = projectSessionActualMoney(
+    persistedActualMoney,
+    excludedActualMoney,
+    authoritative,
+  );
 
   return useMemo(
     () => combineSessionUsageMoney(actualMoney, estimatedValueMoney),

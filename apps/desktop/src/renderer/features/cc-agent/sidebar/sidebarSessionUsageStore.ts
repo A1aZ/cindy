@@ -11,12 +11,10 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
 import { isDataOwnerPushCurrent } from '@/contexts/dataOwnerGeneration';
 import { getStickySessionDeviceId } from '@/features/device-link/stickySessionOrigin';
-import {
-  isDeviceLinkRemotePushCurrent,
-} from '@/lib/remoteDataOwnerPushFence';
+import { isDeviceLinkRemotePushCurrent } from '@/lib/remoteDataOwnerPushFence';
 import {
   combineSessionUsageMoney,
-  subtractExcludedActualMoney,
+  projectSessionActualMoney,
   type SessionUsageMoney,
 } from '@/hooks/useSessionUsageMoney';
 import { estimatedSessionValueBatchFor } from '@/lib/makerTransport';
@@ -63,13 +61,13 @@ function buildUsage(
   actualMoney: RegionalMoney | null,
   estimatedValueMoney: RegionalMoney | null,
   excludedActualMoney: RegionalMoney | null,
-  presentation: SdkCostPresentation,
   projectionAuthoritative: boolean,
 ): SessionUsageMoney {
-  const projectedActualMoney =
-    presentation !== 'regular' && !projectionAuthoritative
-      ? null
-      : subtractExcludedActualMoney(actualMoney, excludedActualMoney);
+  const projectedActualMoney = projectSessionActualMoney(
+    actualMoney,
+    excludedActualMoney,
+    projectionAuthoritative,
+  );
   return combineSessionUsageMoney(projectedActualMoney, estimatedValueMoney);
 }
 
@@ -90,7 +88,8 @@ function writeCache(
   patch: Partial<Omit<CacheEntry, 'usage'>> & Pick<CacheEntry, 'presentation' | 'showSdkEstimate'>,
 ): CacheEntry {
   const prev = cache.get(sessionId);
-  const actualMoney = patch.actualMoney !== undefined ? patch.actualMoney : (prev?.actualMoney ?? null);
+  const actualMoney =
+    patch.actualMoney !== undefined ? patch.actualMoney : (prev?.actualMoney ?? null);
   const estimatedValueMoney =
     patch.estimatedValueMoney !== undefined
       ? patch.estimatedValueMoney
@@ -125,7 +124,6 @@ function writeCache(
       actualMoney,
       estimatedValueMoney,
       excludedActualMoney,
-      patch.presentation,
       projectionAuthoritative,
     ),
   };
@@ -139,7 +137,13 @@ function remoteSessionIdFor(sessionId: string): string | undefined {
 }
 
 function invalidateSessionProjection(sessionId: string): void {
-  if (!interestParams.has(sessionId)) return;
+  const params = interestParams.get(sessionId);
+  if (!params) return;
+  writeCache(sessionId, {
+    projectionAuthoritative: false,
+    presentation: params.presentation,
+    showSdkEstimate: params.showSdkEstimate,
+  });
   pending.add(sessionId);
   scheduleFlush();
 }
@@ -155,20 +159,29 @@ function installSharedListeners(): void {
       actualMoney:
         normalizeRegionalMoney(res.totalMoney) ??
         (typeof res.totalCostUsd === 'number' ? legacyUsdMoney(res.totalCostUsd) : null),
+      projectionAuthoritative: false,
       presentation: params.presentation,
       showSdkEstimate: params.showSdkEstimate,
     });
+    pending.add(res.sessionId);
+    scheduleFlush();
   });
   unsubscribeTurnCost = window.electronAPI.onUsageMessageTurnCost?.((payload, ownerStamp) => {
     if (!isDataOwnerPushCurrent(ownerStamp)) return;
-    if (!interestParams.has(payload.sessionId)) return;
-    pending.add(payload.sessionId);
-    scheduleFlush();
+    invalidateSessionProjection(payload.sessionId);
   });
   unsubscribeRemotePush = window.electronAPI.deviceLink?.onRemotePush?.((push, localOwnerStamp) => {
-    if (push.channel !== 'usage:session-spend-changed' && push.channel !== 'usage:message-turn-cost') return;
+    if (
+      push.channel !== 'usage:session-spend-changed' &&
+      push.channel !== 'usage:message-turn-cost'
+    )
+      return;
     if (!isDeviceLinkRemotePushCurrent(push, localOwnerStamp)) return;
-    const payload = push.payload as { sessionId?: string; totalMoney?: unknown; totalCostUsd?: unknown } | null;
+    const payload = push.payload as {
+      sessionId?: string;
+      totalMoney?: unknown;
+      totalCostUsd?: unknown;
+    } | null;
     if (!payload?.sessionId) return;
     const deviceId = remoteSessionIdFor(payload.sessionId);
     if (deviceId !== push.deviceId) return;
@@ -179,9 +192,12 @@ function installSharedListeners(): void {
         actualMoney:
           normalizeRegionalMoney(payload.totalMoney) ??
           (typeof payload.totalCostUsd === 'number' ? legacyUsdMoney(payload.totalCostUsd) : null),
+        projectionAuthoritative: false,
         presentation: params.presentation,
         showSdkEstimate: params.showSdkEstimate,
       });
+      pending.add(payload.sessionId);
+      scheduleFlush();
       return;
     }
     invalidateSessionProjection(payload.sessionId);
@@ -203,7 +219,9 @@ async function flushPending(): Promise<void> {
   for (const sessionId of sessionIds) inflight.add(sessionId);
   const requests = sessionIds.flatMap((sessionId) => {
     const params = interestParams.get(sessionId);
-    return params ? [{ sessionId, presentation: params.presentation, showSdkEstimate: params.showSdkEstimate }] : [];
+    return params
+      ? [{ sessionId, presentation: params.presentation, showSdkEstimate: params.showSdkEstimate }]
+      : [];
   });
   const grouped = new Map<boolean, typeof requests>();
   for (const request of requests) {
@@ -218,6 +236,7 @@ async function flushPending(): Promise<void> {
         const summary = summaries[request.sessionId];
         const params = interestParams.get(request.sessionId);
         if (
+          pending.has(request.sessionId) ||
           !params ||
           params.presentation !== request.presentation ||
           params.showSdkEstimate !== request.showSdkEstimate
@@ -315,10 +334,13 @@ export function useSidebarSessionUsageMoney(
     return undefined;
   }, [presentation, sessionId, showSdkEstimate]);
 
-  const subscribe = useCallback((listener: () => void) => {
-    if (!sessionId) return () => undefined;
-    return subscribeSession(sessionId, listener);
-  }, [sessionId]);
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      if (!sessionId) return () => undefined;
+      return subscribeSession(sessionId, listener);
+    },
+    [sessionId],
+  );
 
   const getSnapshot = useCallback(
     () => (sessionId ? getSessionSnapshot(sessionId) : EMPTY_SIDEBAR_SESSION_USAGE),

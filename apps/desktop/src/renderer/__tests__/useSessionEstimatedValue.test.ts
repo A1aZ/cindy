@@ -7,6 +7,7 @@ import {
 } from '@/hooks/useSessionEstimatedValue';
 import {
   combineSessionUsageMoney,
+  projectSessionActualMoney,
   subtractExcludedActualMoney,
 } from '@/hooks/useSessionUsageMoney';
 import type { ChatMessage } from '@/lib/makerChatStore';
@@ -413,5 +414,49 @@ describe('subtractExcludedActualMoney', () => {
         { amount: 2, currency: 'USD', approximate: false, kind: 'actual-cost' },
       ),
     ).toBeNull();
+  });
+});
+
+describe('projectSessionActualMoney', () => {
+  const actual = {
+    amount: 1,
+    currency: 'USD',
+    approximate: false,
+    kind: 'actual-cost',
+  } as const;
+
+  it('fails closed until a versioned Host projection proves the SDK exclusion', () => {
+    expect(
+      projectSessionActualMoney(
+        actual,
+        {
+          amount: 0.25,
+          currency: 'USD',
+          approximate: false,
+          kind: 'actual-cost',
+        },
+        false,
+      ),
+    ).toBeNull();
+  });
+
+  it('shows only the projected actual ledger after the Host result is authoritative', () => {
+    expect(
+      projectSessionActualMoney(
+        actual,
+        {
+          amount: 0.25,
+          currency: 'USD',
+          approximate: false,
+          kind: 'actual-cost',
+        },
+        true,
+      ),
+    ).toEqual({
+      amount: 0.75,
+      currency: 'USD',
+      approximate: false,
+      kind: 'actual-cost',
+    });
   });
 });

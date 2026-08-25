@@ -418,7 +418,6 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
       estimatedSessionValueBatchFor([{ sessionId: 'rs', presentation: 'regular' }], false),
     ).resolves.toEqual({
       rs: {
-        projectionVersion: 1,
         estimatedValueMoney: null,
         excludedActualMoney: null,
         totalValueUsd: 0,
@@ -447,7 +446,6 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
     remoteProjectsStore.setDeviceSessions('dev-1', 'Mac', [sess('rs')]);
 
     await expect(estimatedSessionValueFor('rs', 'regular', false)).resolves.toEqual({
-      projectionVersion: 1,
       totalValueMoney: null,
       totalValueUsd: 0,
       entries: [],
@@ -478,7 +476,6 @@ describe('makerApiFor 路由(完整对等会话级操作)', () => {
         excludedActualMoney: { amount: 0.42, currency: 'USD' },
       },
       rs: {
-        projectionVersion: 1,
         estimatedValueMoney: null,
         excludedActualMoney: null,
       },

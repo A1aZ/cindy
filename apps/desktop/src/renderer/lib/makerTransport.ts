@@ -480,7 +480,7 @@ export interface EstimatedSessionValueSnapshot {
 }
 
 function tokenOnlyEstimatedSessionValueSnapshot(): EstimatedSessionValueSnapshot {
-  return { projectionVersion: 1, totalValueMoney: null, totalValueUsd: 0, entries: [] };
+  return { totalValueMoney: null, totalValueUsd: 0, entries: [] };
 }
 
 function isAuthoritativeEstimatedSessionValueSnapshot(
@@ -562,7 +562,7 @@ function tokenOnlyEstimatedSessionValueSummaries(
   return Object.fromEntries(
     sessionIds.map((sessionId) => [
       sessionId,
-      { projectionVersion: 1, estimatedValueMoney: null, excludedActualMoney: null },
+      { estimatedValueMoney: null, excludedActualMoney: null },
     ]),
   );
 }

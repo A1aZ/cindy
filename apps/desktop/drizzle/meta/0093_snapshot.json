@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "142745ef-3120-4a03-9bd0-46fada6a01f6",
+  "id": "69107681-c10d-468b-ab20-f20b5cacd802",
   "prevId": "ba4a24fc-8903-415b-9bf9-fee4bd54f907",
   "tables": {
     "account_usage_snapshots": {
@@ -2002,14 +2002,6 @@
           "autoincrement": false,
           "default": 0
         },
-        "sdk_estimated_value_amount": {
-          "name": "sdk_estimated_value_amount",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "cost_currency": {
           "name": "cost_currency",
           "type": "text",
@@ -3581,6 +3573,27 @@
           "notNull": false,
           "autoincrement": false
         },
+        "returned_result": {
+          "name": "returned_result",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "returned_result_empty": {
+          "name": "returned_result_empty",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "returned_result_truncated": {
+          "name": "returned_result_truncated",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "model": {
           "name": "model",
           "type": "text",
@@ -3612,6 +3625,13 @@
         "duration_ms": {
           "name": "duration_ms",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cost_usd": {
+          "name": "cost_usd",
+          "type": "real",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

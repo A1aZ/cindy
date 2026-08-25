@@ -410,7 +410,10 @@ describe('useSessionRunningStatus silenced completion handling', () => {
   it('restores deferred attention as error when the attempted start fails terminally', async () => {
     vi.useFakeTimers();
     const onSessionDone = vi.fn();
-    const { rerender } = renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+    const onSessionError = vi.fn();
+    const { rerender } = renderHook(() =>
+      useSessionRunningStatus(undefined, { onSessionDone, onSessionError }),
+    );
 
     await emitSnapshot(new Map([['session-terminal-start-failure', status(true)]]));
     await emitSnapshot(new Map([['session-terminal-start-failure', status(false)]]));
@@ -436,6 +439,8 @@ describe('useSessionRunningStatus silenced completion handling', () => {
       'done',
     );
     expect(onSessionDone).not.toHaveBeenCalled();
+    expect(onSessionError).toHaveBeenCalledOnce();
+    expect(onSessionError).toHaveBeenCalledWith('session-terminal-start-failure');
   });
 
   it('drops deferred done attention when starting becomes a real run', async () => {
@@ -460,7 +465,8 @@ describe('useSessionRunningStatus silenced completion handling', () => {
   it('does not emit stale done when a failed start has already recorded a terminal error', async () => {
     vi.useFakeTimers();
     const onSessionDone = vi.fn();
-    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+    const onSessionError = vi.fn();
+    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone, onSessionError }));
 
     await emitSnapshot(new Map([['session-preparation-error', status(true)]]));
     await emitSnapshot(new Map([['session-preparation-error', status(false)]]));
@@ -478,6 +484,8 @@ describe('useSessionRunningStatus silenced completion handling', () => {
       'done',
     );
     expect(onSessionDone).not.toHaveBeenCalled();
+    expect(onSessionError).toHaveBeenCalledOnce();
+    expect(onSessionError).toHaveBeenCalledWith('session-preparation-error');
   });
 
   it('coalesces multiple queue-drain transitions into a single final notification', async () => {

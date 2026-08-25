@@ -136,6 +136,13 @@ export function useSessionRunningStatus(
     onSessionNeedsReplyRef.current = options?.onSessionNeedsReply;
   }, [options?.onSessionDone, options?.onSessionError, options?.onSessionNeedsReply]);
 
+  const settleSessionError = useCallback((sessionId: string) => {
+    addSessionAttention(sessionId, 'error');
+    if (!isSessionTerminalNotificationOwnedByScheduler(sessionId)) {
+      onSessionErrorRef.current?.(sessionId);
+    }
+  }, []);
+
   // Track previous running set to detect running -> done transitions
   const prevRunningRef = useRef(new Set<string>());
 
@@ -182,7 +189,7 @@ export function useSessionRunningStatus(
       // 也不受 active / starting 抑制(done 才有「正在看就不亮」语义)。
       if (hasError) {
         pendingStartingCompletionsRef.current.delete(sessionId);
-        addSessionAttention(sessionId, 'error');
+        settleSessionError(sessionId);
         continue;
       }
       if (isRunning) {
@@ -263,8 +270,7 @@ export function useSessionRunningStatus(
           // 即使是当前活跃会话也挂红角标:红点跟随「告警未处理」而非「是否看到」,
           // 横幅就在眼前时列表同样亮点(2026-07 统一决策)。不能沿用「活跃会话不亮」
           // 的 done 语义。清除只能来自用户处置横幅或 pending-alerts 派生收敛。
-          addSessionAttention(sessionId, 'error');
-          if (!notificationOwnedByScheduler) onSessionErrorRef.current?.(sessionId);
+          settleSessionError(sessionId);
           continue;
         }
 
@@ -295,7 +301,7 @@ export function useSessionRunningStatus(
           const stillPending = hasPendingInteraction(cur);
           const hasError = makerChatStore.hasSessionTerminalError(sessionId);
           if (hasError) {
-            addSessionAttention(sessionId, 'error');
+            settleSessionError(sessionId);
             return;
           }
           if (isRunning) return;
@@ -365,7 +371,7 @@ export function useSessionRunningStatus(
 
     prevRunningRef.current = new Set(currentRunningSet);
     prevPendingRef.current = currentPendingSet;
-  }, [statusMap, activeSessionId, startingSessionIds]);
+  }, [statusMap, activeSessionId, startingSessionIds, settleSessionError]);
 
   // Unmount cleanup:清掉所有还没 fire 的 done debounce 定时器,避免 hook 卸载后
   // 定时器仍触发 addSessionAttention / onSessionDone(referring stale refs 后果小,

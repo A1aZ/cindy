@@ -1,5 +1,5 @@
 {
-  "id": "593c2df7-55d4-4ff5-98c4-755f768194ef",
+  "id": "90063e36-1470-45d3-84d6-4bb6139dd4a5",
   "prevId": "270033b2-a162-45d5-88a7-0d8bc92d6a95",
   "version": "6",
   "dialect": "sqlite",
@@ -1996,14 +1996,6 @@
         },
         "estimated_value_amount": {
           "name": "estimated_value_amount",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "sdk_estimated_value_amount": {
-          "name": "sdk_estimated_value_amount",
           "type": "real",
           "primaryKey": false,
           "notNull": true,

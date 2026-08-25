@@ -39,6 +39,50 @@ export interface UseScheduleCostSummariesResult {
   loaded: boolean;
 }
 
+function projectEstimatedValue(
+  estimatedValueMoney: RegionalMoney,
+  sdkEstimatedValueMoney: RegionalMoney | undefined,
+  showSdkCostForCustomProviders: boolean,
+): RegionalMoney {
+  return (
+    subtractSdkEstimatedValue(
+      estimatedValueMoney,
+      sdkEstimatedValueMoney,
+      showSdkCostForCustomProviders,
+    ) ?? {
+      ...estimatedValueMoney,
+      amount: 0,
+      estimateReasons: undefined,
+    }
+  );
+}
+
+function projectScheduleCostSummary(
+  summary: ScheduleCostSummary,
+  showSdkCostForCustomProviders: boolean,
+): ScheduleCostSummary {
+  return {
+    ...summary,
+    totalEstimatedValueMoney: projectEstimatedValue(
+      summary.totalEstimatedValueMoney,
+      summary.totalSdkEstimatedValueMoney,
+      showSdkCostForCustomProviders,
+    ),
+    ...(summary.sessions
+      ? {
+          sessions: summary.sessions.map((session) => ({
+            ...session,
+            totalEstimatedValueMoney: projectEstimatedValue(
+              session.totalEstimatedValueMoney,
+              session.totalSdkEstimatedValueMoney,
+              showSdkCostForCustomProviders,
+            ),
+          })),
+        }
+      : {}),
+  };
+}
+
 export function useScheduleCostSummaries(
   schedules: readonly Schedule[],
 ): UseScheduleCostSummariesResult {
@@ -46,19 +90,29 @@ export function useScheduleCostSummaries(
     () => schedules.map((schedule) => schedule.id).join('\u0000'),
     [schedules],
   );
-  const [summaries, setSummaries] = useState<ReadonlyMap<string, ScheduleCostSummary>>(
+  const [rawSummaries, setRawSummaries] = useState<ReadonlyMap<string, ScheduleCostSummary>>(
     () => new Map(),
   );
   const [loaded, setLoaded] = useState(false);
   const { showSdkCostForCustomProviders } = useCustomProviderBillingSettings();
   const refreshSeqRef = useRef(0);
+  const summaries = useMemo(() => {
+    const next = new Map<string, ScheduleCostSummary>();
+    for (const [scheduleId, summary] of rawSummaries) {
+      next.set(
+        scheduleId,
+        projectScheduleCostSummary(summary, showSdkCostForCustomProviders),
+      );
+    }
+    return next;
+  }, [rawSummaries, showSdkCostForCustomProviders]);
 
   const refresh = useCallback(async () => {
     const scheduleIds = scheduleIdsKey ? scheduleIdsKey.split('\u0000') : [];
     const seq = refreshSeqRef.current + 1;
     refreshSeqRef.current = seq;
     if (scheduleIds.length === 0) {
-      setSummaries(new Map());
+      setRawSummaries(new Map());
       setLoaded(true);
       return;
     }
@@ -72,46 +126,16 @@ export function useScheduleCostSummaries(
       const next = new Map<string, ScheduleCostSummary>();
       for (const row of rows) {
         if (!visibleScheduleIds.has(row.scheduleId)) continue;
-        const projectEstimatedValue = (
-          estimatedValueMoney: RegionalMoney,
-          sdkEstimatedValueMoney: RegionalMoney | undefined,
-        ): RegionalMoney =>
-          subtractSdkEstimatedValue(
-            estimatedValueMoney,
-            sdkEstimatedValueMoney,
-            showSdkCostForCustomProviders,
-          ) ?? {
-            ...estimatedValueMoney,
-            amount: 0,
-            estimateReasons: undefined,
-          };
-        next.set(row.scheduleId, {
-          ...row,
-          totalEstimatedValueMoney: projectEstimatedValue(
-            row.totalEstimatedValueMoney,
-            row.totalSdkEstimatedValueMoney,
-          ),
-          ...(row.sessions
-            ? {
-                sessions: row.sessions.map((session) => ({
-                  ...session,
-                  totalEstimatedValueMoney: projectEstimatedValue(
-                    session.totalEstimatedValueMoney,
-                    session.totalSdkEstimatedValueMoney,
-                  ),
-                })),
-              }
-            : {}),
-        });
+        next.set(row.scheduleId, row);
       }
-      setSummaries(next);
+      setRawSummaries(next);
       setLoaded(true);
     } catch (error) {
       log.warn('failed to refresh schedule cost summaries', {
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [scheduleIdsKey, showSdkCostForCustomProviders]);
+  }, [scheduleIdsKey]);
 
   useEffect(() => {
     void refresh();

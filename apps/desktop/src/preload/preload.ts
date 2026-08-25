@@ -936,6 +936,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDeviceId: (): Promise<string> => ipcRenderer.invoke('get-device-id'),
   windowMinimize: () => ipcRenderer.send('window-minimize'),
   windowMaximize: () => ipcRenderer.send('window-maximize'),
+  windowExitFullscreen: () => ipcRenderer.send('window-exit-fullscreen'),
   windowClose: () => ipcRenderer.send('window-close'),
   /**
    * 手动窗口拖拽(no-drag 元素上"按住拖动移动窗口"):start 后 main 用光标
@@ -6224,6 +6225,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
       defaultEnabled: boolean;
       effective: 'immediate';
     }> => ipcRenderer.invoke('maker:silent-encrypted-retry:reset'),
+    sessionRuntimeFallbackGet: (): Promise<{
+      enabled: boolean;
+      isCustomized?: boolean;
+      defaultEnabled?: boolean;
+    }> => ipcRenderer.invoke('maker:session-runtime-fallback:get'),
+    sessionRuntimeFallbackSet: (
+      enabled: boolean,
+    ): Promise<{
+      enabled: boolean;
+      isCustomized: boolean;
+      defaultEnabled: boolean;
+      effective: 'immediate';
+    }> => ipcRenderer.invoke('maker:session-runtime-fallback:set', enabled),
+    sessionRuntimeFallbackReset: (): Promise<{
+      enabled: boolean;
+      isCustomized: boolean;
+      defaultEnabled: boolean;
+      effective: 'immediate';
+    }> => ipcRenderer.invoke('maker:session-runtime-fallback:reset'),
 
     // Claude Code 自动上下文压缩阈值。仅对新建会话生效。
     compactionGetPct: (): Promise<number> => ipcRenderer.invoke('maker:compaction:get-pct'),

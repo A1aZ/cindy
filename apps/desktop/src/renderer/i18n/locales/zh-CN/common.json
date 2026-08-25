@@ -1947,6 +1947,7 @@
     },
     "betaChannel": {
       "title": "Beta 测试渠道",
+      "badge": "Beta",
       "description": "加入 Beta 测试渠道，提前接收即将发布的客户端更新。开启后需重启客户端生效。",
       "toggleAria": "Beta 测试渠道开关",
       "restartTitle": "重启客户端",
@@ -3160,6 +3161,18 @@
         "enabled": "已开启静默加密内容重试。",
         "disabled": "已关闭静默加密内容重试。",
         "toggleFailed": "切换静默加密内容重试失败"
+      }
+    },
+    "sessionRuntimeFallback": {
+      "cell": {
+        "label": "任务模型自动降级",
+        "description": "连接或容量故障连续发生时，先切换到同名模型的其他已连接来源，再尝试当前 Agent 明确推荐的模型；不会切换 Agent，也不会改掉你保存的选择。默认关闭。"
+      },
+      "toggleAria": "切换任务模型自动降级",
+      "toast": {
+        "enabled": "已开启任务模型自动降级。",
+        "disabled": "已关闭任务模型自动降级。",
+        "toggleFailed": "切换任务模型自动降级失败"
       }
     },
     "remoteControl": {
@@ -5466,6 +5479,7 @@
   },
   "contentHeader": {
     "toggleSidebar": "切换侧边栏",
+    "exitFullscreen": "退出全屏",
     "collapseSidebar": "收起侧边栏",
     "expandSidebar": "展开侧边栏",
     "collapsePanel": "收起",
@@ -6363,6 +6377,7 @@
     },
     "user": {
       "settingsLink": "设置，当前用户：{{name}}",
+      "settingsLinkBeta": "设置，当前用户：{{name}}，Beta 测试渠道已开启",
       "canaryBadge": "灰度用户",
       "regionCodeCn": "CN",
       "regionCodeDev": "Dev",
@@ -10660,6 +10675,11 @@
       "count": "{{count}} 笔",
       "incomplete": "订单记录较多，当前仅显示最近的 {{count}} 笔。",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "复制订单 ID {{id}}",
+        "success": "订单 ID 已复制",
+        "failed": "复制订单 ID 失败，请重试"
+      },
       "states": {
         "completed": "已完成",
         "awaitingPayment": "待支付",

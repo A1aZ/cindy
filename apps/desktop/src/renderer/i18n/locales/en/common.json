@@ -1956,6 +1956,7 @@
     },
     "betaChannel": {
       "title": "Beta channel",
+      "badge": "Beta",
       "description": "Join the beta channel to receive upcoming client updates early. Takes effect after restart.",
       "toggleAria": "Beta channel toggle",
       "restartTitle": "Restart Cindy",
@@ -3169,6 +3170,18 @@
         "enabled": "Silent encrypted-content retry is on.",
         "disabled": "Silent encrypted-content retry is off.",
         "toggleFailed": "Failed to switch silent encrypted-content retry"
+      }
+    },
+    "sessionRuntimeFallback": {
+      "cell": {
+        "label": "Automatic task model fallback",
+        "description": "After repeated connection or capacity failures, try another connected source for the same model, then a model explicitly recommended for the current agent. It never switches agents or changes your saved selection. Off by default."
+      },
+      "toggleAria": "Toggle automatic task model fallback",
+      "toast": {
+        "enabled": "Automatic task model fallback is on.",
+        "disabled": "Automatic task model fallback is off.",
+        "toggleFailed": "Failed to change automatic task model fallback"
       }
     },
     "remoteControl": {
@@ -5476,6 +5489,7 @@
   },
   "contentHeader": {
     "toggleSidebar": "Toggle sidebar",
+    "exitFullscreen": "Exit full screen",
     "collapseSidebar": "Collapse Sidebar",
     "expandSidebar": "Expand Sidebar",
     "collapsePanel": "Collapse",
@@ -6373,6 +6387,7 @@
     },
     "user": {
       "settingsLink": "Settings, current user: {{name}}",
+      "settingsLinkBeta": "Settings, current user: {{name}}, Beta channel enabled",
       "canaryBadge": "Canary user",
       "regionCodeCn": "CN",
       "regionCodeDev": "Dev",
@@ -10682,6 +10697,11 @@
       "count": "{{count}} orders",
       "incomplete": "There are many order records. Only the latest {{count}} are shown.",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "Copy Order ID {{id}}",
+        "success": "Order ID copied",
+        "failed": "Order ID wasn’t copied — try again"
+      },
       "states": {
         "completed": "Completed",
         "awaitingPayment": "Awaiting payment",

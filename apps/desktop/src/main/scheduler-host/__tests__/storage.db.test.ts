@@ -1571,7 +1571,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
-  it('preserves legacy baseline when a scheduler session later gains turn costs', async () => {
+  it('preserves legacy baseline when a scheduler session later gains turn costs and estimates', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({
       id: 'sch-mixed',
@@ -1594,6 +1594,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
         VALUES
           ('mixed-user', 'mixed-user', 'sess-legacy', 'user', '{}', '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed","scheduleName":"legacy task"}}', 40),
           ('mixed-assistant', 'mixed-assistant', 'sess-legacy', 'assistant', '{}', '{"model":"claude-sonnet-4-6","turnCostUsd":1.25}', 50),
+          ('estimate-assistant', 'estimate-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCostUsd":0.5,"turnCostIsEstimate":true}', 51),
           ('structured-assistant', 'structured-assistant', 'sess-legacy', 'assistant', '{}', '{"model":"claude-sonnet-4-6","turnCost":{"amount":5,"currency":"USD","approximate":false,"kind":"actual-cost"}}', 52),
           ('manual-user', 'manual-user', 'sess-legacy', 'user', '{}', NULL, 55),
           ('manual-assistant', 'manual-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCostUsd":2}', 60)
@@ -1606,9 +1607,9 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
             ...actualMoneyFromLegacyUsd(2.25),
             amount: expect.closeTo(2.25 + 5, 10),
           },
-          totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+          totalEstimatedValueMoney: estimatedMoneyFromLegacyUsd(0.5),
           totalCostUsd: expect.closeTo(2.25 + 5, 10),
-          totalEstimatedValueUsd: 0,
+          totalEstimatedValueUsd: expect.closeTo(0.5, 10),
           sessionCount: 1,
           sessions: [
             {
@@ -1617,9 +1618,9 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
                 ...actualMoneyFromLegacyUsd(2.25),
                 amount: expect.closeTo(2.25 + 5, 10),
               },
-              totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+              totalEstimatedValueMoney: estimatedMoneyFromLegacyUsd(0.5),
               totalCostUsd: expect.closeTo(2.25 + 5, 10),
-              totalEstimatedValueUsd: 0,
+              totalEstimatedValueUsd: expect.closeTo(0.5, 10),
             },
           ],
         },

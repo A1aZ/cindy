@@ -1955,6 +1955,7 @@
     },
     "betaChannel": {
       "title": "Beta チャンネル",
+      "badge": "Beta",
       "description": "Beta チャンネルに参加すると、今後のクライアント更新を先行して受け取れます。再起動後に反映されます。",
       "toggleAria": "Beta チャンネルの切り替え",
       "restartTitle": "クライアントを再起動",
@@ -3168,6 +3169,18 @@
         "enabled": "暗号化コンテンツの静かな再試行をオンにしました。",
         "disabled": "暗号化コンテンツの静かな再試行をオフにしました。",
         "toggleFailed": "暗号化コンテンツの静かな再試行の切り替えに失敗しました"
+      }
+    },
+    "sessionRuntimeFallback": {
+      "cell": {
+        "label": "タスクモデルの自動フォールバック",
+        "description": "接続または容量エラーが続くと、同じモデルの別の接続済みプロバイダー、次に現在の Agent で明示的に推奨されたモデルを試します。Agent や保存済みの選択は変更しません。デフォルトはオフです。"
+      },
+      "toggleAria": "タスクモデルの自動フォールバックを切り替え",
+      "toast": {
+        "enabled": "タスクモデルの自動フォールバックをオンにしました。",
+        "disabled": "タスクモデルの自動フォールバックをオフにしました。",
+        "toggleFailed": "タスクモデルの自動フォールバックの切り替えに失敗しました"
       }
     },
     "remoteControl": {
@@ -5474,6 +5487,7 @@
   },
   "contentHeader": {
     "toggleSidebar": "サイドバーを切り替え",
+    "exitFullscreen": "フルスクリーンを終了",
     "collapseSidebar": "サイドバーを折りたたむ",
     "expandSidebar": "サイドバーを展開",
     "collapsePanel": "折りたたみ",
@@ -6371,6 +6385,7 @@
     },
     "user": {
       "settingsLink": "設定, 現在のユーザー: {{name}}",
+      "settingsLinkBeta": "設定, 現在のユーザー: {{name}}, Beta チャンネル有効",
       "canaryBadge": "Canary ユーザー",
       "regionCodeCn": "CN",
       "regionCodeDev": "Dev",
@@ -10668,6 +10683,11 @@
       "count": "{{count}}件",
       "incomplete": "注文履歴が多いため、最新の{{count}}件のみ表示しています。",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "注文 ID {{id}} をコピー",
+        "success": "注文 ID をコピーしました",
+        "failed": "注文 ID をコピーできませんでした。もう一度お試しください。"
+      },
       "states": {
         "completed": "完了",
         "awaitingPayment": "支払い待ち",

@@ -2101,11 +2101,16 @@ describe('db worker tx handlers', () => {
         }
 
         await expect(
-          client.tx('orca.archiveWorkersByTeam', { teamId: 'active-team', now: 100 }),
+          client.tx('orca.archiveWorkersByTeam', {
+            teamId: 'active-team',
+            sessionIds: ['active-worker'],
+            now: 100,
+          }),
         ).resolves.toEqual(['active-worker']);
         await expect(
           client.tx('orca.reconcileInactiveTeamWorkersForLead', {
             leadSessionId: 'lead',
+            sessionIds: ['orphan-worker'],
             now: 200,
           }),
         ).resolves.toEqual(['orphan-worker']);
@@ -2164,6 +2169,35 @@ describe('db worker tx handlers', () => {
       expect(results).toContainEqual({ ok: true, occupiedSlotsBefore: 0 });
       expect(results).toContainEqual({ ok: false, errorCode: 'WORKER_CREATION_IN_PROGRESS' });
     });
+  });
+
+  it.each([
+    { label: 'bundled worker', useInlineWorker: false },
+    { label: 'inline worker', useInlineWorker: true },
+  ])('rejects a worker link persisted after its team has ended in the $label tx path', async ({ useInlineWorker }) => {
+    await withClient(async (client) => {
+      await seedSession(client, 'lead');
+      await seedSession(client, 'late-worker', { orcaRole: 'worker' });
+      await client.exec(
+        'INSERT INTO orca_teams (id, lead_session_id, status, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ['team-1', 'lead', 'completed', 1, 2, 2],
+      );
+
+      await expect(client.tx('orca.upsertWorker', {
+        id: 'late-worker-link',
+        teamId: 'team-1',
+        sessionId: 'late-worker',
+        status: 'idle',
+        label: 'late',
+        role: 'reviewer',
+        focused: false,
+        now: 3,
+      })).rejects.toThrow('Orca team team-1 is no longer active');
+
+      await expect(
+        client.queryOne('SELECT id FROM orca_workers WHERE id = ?', ['late-worker-link']),
+      ).resolves.toBeUndefined();
+    }, { useInlineWorker });
   });
 
   it('counts terminal workers until their sessions are archived', async () => {

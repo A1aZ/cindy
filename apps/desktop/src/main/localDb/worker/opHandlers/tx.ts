@@ -1559,22 +1559,24 @@ function orcaCancelStaleTeams(db: Database.Database, args: unknown): void {
 function orcaArchiveWorkersByTeam(db: Database.Database, args: unknown): string[] {
   const payload = asRecord(args, 'orca.archiveWorkersByTeam args');
   const teamId = expectString(payload.teamId, 'teamId');
-  const now = expectNumber(payload.now, 'now');
-  const selectCandidates = db.prepare(
-    `SELECT sessions.id
-       FROM orca_workers
-       INNER JOIN sessions ON orca_workers.session_id = sessions.id
-      WHERE orca_workers.team_id = ? AND sessions.status = 'active'
-      ORDER BY sessions.id`,
+  const sessionIds = expectArray(payload.sessionIds, 'sessionIds').map((value, index) =>
+    expectString(value, `sessionIds[${index}]`),
   );
+  const now = expectNumber(payload.now, 'now');
   const archiveSession = db.prepare(
-    "UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ? AND status = 'active'",
+    `UPDATE sessions
+        SET status = 'archived', updated_at = ?
+      WHERE id = ? AND status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM orca_workers
+           WHERE orca_workers.session_id = sessions.id
+             AND orca_workers.team_id = ?
+        )`,
   );
   const transaction = db.transaction(() => {
-    const candidates = selectCandidates.all(teamId) as Array<{ id: string }>;
     const updatedIds: string[] = [];
-    for (const { id } of candidates) {
-      if (archiveSession.run(now, id).changes > 0) updatedIds.push(id);
+    for (const id of sessionIds) {
+      if (archiveSession.run(now, id, teamId).changes > 0) updatedIds.push(id);
     }
     return updatedIds;
   });
@@ -1587,17 +1589,10 @@ function orcaReconcileInactiveTeamWorkersForLead(
 ): string[] {
   const payload = asRecord(args, 'orca.reconcileInactiveTeamWorkersForLead args');
   const leadSessionId = expectString(payload.leadSessionId, 'leadSessionId');
-  const now = expectNumber(payload.now, 'now');
-  const selectCandidates = db.prepare(
-    `SELECT sessions.id
-       FROM orca_workers
-       INNER JOIN orca_teams ON orca_workers.team_id = orca_teams.id
-       INNER JOIN sessions ON orca_workers.session_id = sessions.id
-      WHERE orca_teams.lead_session_id = ?
-        AND orca_teams.status != 'active'
-        AND sessions.status = 'active'
-      ORDER BY sessions.id`,
+  const sessionIds = expectArray(payload.sessionIds, 'sessionIds').map((value, index) =>
+    expectString(value, `sessionIds[${index}]`),
   );
+  const now = expectNumber(payload.now, 'now');
   const finishWorkers = db.prepare(
     `UPDATE orca_workers
         SET status = 'done', updated_at = ?
@@ -1607,14 +1602,23 @@ function orcaReconcileInactiveTeamWorkersForLead(
       )`,
   );
   const archiveSession = db.prepare(
-    "UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ? AND status = 'active'",
+    `UPDATE sessions
+        SET status = 'archived', updated_at = ?
+      WHERE id = ? AND status = 'active'
+        AND EXISTS (
+          SELECT 1
+            FROM orca_workers
+            INNER JOIN orca_teams ON orca_workers.team_id = orca_teams.id
+           WHERE orca_workers.session_id = sessions.id
+             AND orca_teams.lead_session_id = ?
+             AND orca_teams.status != 'active'
+        )`,
   );
   const transaction = db.transaction(() => {
-    const candidates = selectCandidates.all(leadSessionId) as Array<{ id: string }>;
     finishWorkers.run(now, leadSessionId);
     const updatedIds: string[] = [];
-    for (const { id } of candidates) {
-      if (archiveSession.run(now, id).changes > 0) updatedIds.push(id);
+    for (const id of sessionIds) {
+      if (archiveSession.run(now, id, leadSessionId).changes > 0) updatedIds.push(id);
     }
     return updatedIds;
   });
@@ -1628,6 +1632,12 @@ function orcaUpsertWorker(db: Database.Database, args: unknown): void {
   const sessionId = expectString(payload.sessionId, 'sessionId');
   const now = expectNumber(payload.now, 'now');
   db.transaction(() => {
+    const activeTeam = db.prepare(
+      "SELECT 1 FROM orca_teams WHERE id = ? AND status = 'active' LIMIT 1",
+    ).get(teamId);
+    if (!activeTeam) {
+      throw new Error(`Orca team ${teamId} is no longer active`);
+    }
     if (payload.focused === true) {
       db.prepare('UPDATE orca_workers SET focused = 0, updated_at = ? WHERE team_id = ? AND focused = 1').run(now, teamId);
     }

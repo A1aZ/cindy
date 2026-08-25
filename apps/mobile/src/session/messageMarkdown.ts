@@ -902,6 +902,7 @@ function findNextInlineToken(
                 markdownWrapMarker: mobileMarkdownWrapMarker(
                   input.slice(0, match.index),
                 ),
+                cutPathBrackets: false,
               })
             : trimUrlPunctuation(rawHref);
           return { type: 'link' as const, text: href, url: href };

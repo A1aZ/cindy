@@ -295,6 +295,20 @@ describe('messageMarkdown', () => {
         url: 'https://example.com/~alice',
       },
     ]);
+    expect(parseMobileMarkdownInlines('打开 https://example.com/api/[id] 看')).toEqual([
+      { type: 'text', text: '打开 ' },
+      {
+        type: 'link',
+        text: 'https://example.com/api/[id]',
+        url: 'https://example.com/api/[id]',
+      },
+      { type: 'text', text: ' 看' },
+    ]);
+    expect(parseMobileMarkdownInlines('看 https://例子。测试。这是说明')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'link', text: 'https://例子。测试', url: 'https://例子。测试' },
+      { type: 'text', text: '。这是说明' },
+    ]);
     expect(parseMobileMarkdownInlines('看 https://例子。测试。')).toEqual([
       { type: 'text', text: '看 ' },
       { type: 'link', text: 'https://例子。测试', url: 'https://例子。测试' },

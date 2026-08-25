@@ -375,7 +375,7 @@ function firstAuthDelimiterIndex(text: string, from = 0): number {
 }
 
 /** IDN 点号只在 hostname 内保留；端口和 IPv6 `]` 之后仍是正文边界。 */
-function hostnameEndIndex(raw: string): number {
+function hostnameRange(raw: string): { start: number; end: number } {
   const scheme = raw.match(/^https?:\/\//i);
   let start = scheme ? scheme[0].length : 0;
   const authEnd = firstAuthDelimiterIndex(raw, start);
@@ -383,12 +383,12 @@ function hostnameEndIndex(raw: string): number {
   if (at >= start) start = at + 1;
   if (raw[start] === '[') {
     const close = raw.indexOf(']', start + 1);
-    return close >= 0 && close < authEnd ? close + 1 : authEnd;
+    return { start, end: close >= 0 && close < authEnd ? close + 1 : authEnd };
   }
   for (let index = start; index < authEnd; index += 1) {
-    if (raw[index] === ':') return index;
+    if (raw[index] === ':') return { start, end: index };
   }
-  return authEnd;
+  return { start, end: authEnd };
 }
 
 function isHostLabelChar(ch: string | undefined): boolean {
@@ -397,27 +397,39 @@ function isHostLabelChar(ch: string | undefined): boolean {
   return !isAutolinkPunctuationBoundary(ch);
 }
 
-function isIdnDotInHostname(raw: string, index: number, hostnameEnd: number): boolean {
-  return (
-    index < hostnameEnd &&
-    isIdnDomainDot(raw[index] ?? '') &&
-    isHostLabelChar(raw[index + 1])
-  );
+function hasEarlierIdnDot(raw: string, hostStart: number, index: number): boolean {
+  for (let cursor = hostStart; cursor < index; cursor += 1) {
+    if (isIdnDomainDot(raw[cursor] ?? '')) return true;
+  }
+  return false;
+}
+
+function isIdnDotInHostname(
+  raw: string,
+  index: number,
+  hostStart: number,
+  hostEnd: number,
+): boolean {
+  if (index < hostStart || index >= hostEnd) return false;
+  if (!isIdnDomainDot(raw[index] ?? '') || !isHostLabelChar(raw[index + 1])) return false;
+  if (!hasEarlierIdnDot(raw, hostStart, index)) return true;
+  // 已经有过 IDN 点号后，再出现的 `。这是说明` 当句号；后面还有 path/port 才继续当域名。
+  return hostEnd < raw.length;
 }
 
 /**
- * 标点/全角符号是正文边界；hostname 里的 IDN 点号（`例子。测试`）留下。
- * 端口、IPv6 `]`、路径之后的 `。` 仍当句号切掉。
+ * 标点/全角符号是正文边界；hostname 里第一处 IDN 点号（`例子。测试`）留下。
+ * 端口、IPv6 `]`、路径、以及第二个句末 `。` 之后仍当句号切掉。
  */
 function findAutolinkProseBoundary(raw: string): number {
-  const hostnameEnd = hostnameEndIndex(raw);
+  const { start: hostStart, end: hostEnd } = hostnameRange(raw);
   for (let index = 0; index < raw.length; ) {
     const code = raw.codePointAt(index);
     if (code == null) break;
     const char = String.fromCodePoint(code);
     if (
       isAutolinkPunctuationBoundary(char) &&
-      !isIdnDotInHostname(raw, index, hostnameEnd)
+      !isIdnDotInHostname(raw, index, hostStart, hostEnd)
     ) {
       return index;
     }
@@ -441,6 +453,8 @@ export type ClipBareHttpAutolinkOptions = {
   prefix?: string | null;
   markdownWrapMarker?: string | null;
   stripMarkdownFormattingPunct?: boolean | 'auto';
+  /** Desktop GFM 会把 path 里的 `[]`/`{}` 当说明；Mobile 原匹配器会保留。 */
+  cutPathBrackets?: boolean;
 };
 
 /**
@@ -464,7 +478,7 @@ export function clipBareHttpAutolink(
   const proseCut = Math.min(
     limited,
     cutBeforeUnbalancedParenProse(raw, limited, { wrappingParenCount }),
-    cutBeforePathBracketProse(raw),
+    options.cutPathBrackets === false ? raw.length : cutBeforePathBracketProse(raw),
   );
   const stripMarkdown =
     options.stripMarkdownFormattingPunct === true ||

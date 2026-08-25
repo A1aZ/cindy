@@ -2979,7 +2979,7 @@ Auth 的企业服务。主机只在当前登录账号属于组织 Membership，�
 保有本次包的完整 sha256。两路都要求清单声明目标服务域名。
 audience 与组织身份由主机推导,插件清单和运行时代码都不能选择、读取或保存
 audience/token；audience 固定为 \`\${orgSlug}:\${ghostId}\`,总长不得超过 64 字符。
-个人身份与手动导入不签发；Forge 安装前会展示插件名、id 与精确域名，并要求手输相同 id
+个人身份与手动导入不签发；企业身份的 Forge 安装前会展示插件名、id 与精确域名，并要求手输相同 id
 确认。市场与 Forge 两条组织基座都只给 Broker 与 oidc-token、不给宿主原语。
 该凭证必须固定声明
 \`"inject": { "header": "Authorization", "format": "Bearer {value}", "hosts": [...] }\`,
@@ -4378,9 +4378,9 @@ const opened = await cindy.iosSimulator.request({
    \`ghost_forge_install({ dir: '<绝对路径>' })\`。它会重新校验并打包当前源码，再把这次
    产生的确切包直接安装；首次安装会启用，同 id 已安装时原位更新并保留启用状态、配置、
    数据与面板位置，同版本也可覆盖。不要因为 scaffold 或 pack 成功就自动调用本工具。
-   企业身份下若清单声明 \`source:"oidc-token"\`，提交安装前会展示插件名、id 与精确注入
-   域名，并要求用户手输相同 id；取消不会安装。确认后的企业作者自测可签发 Connection JWT。
-   用户也可以自己导入上一步的 \`.cindy\`，但手动导入不会取得这项 Forge 作者资格；
+   企业身份下若清单声明 \`source:"oidc-token"\`，提交安装前会展示插件名、id 与精确请求
+   域名，并要求用户手输相同 id；取消不会安装。只有确认后的企业作者自测才会取得 Forge
+   作者资格并可签发 Connection JWT；个人身份下的 Forge 安装和手动导入都不会取得这项资格；
 4. 安装后再让用户 \`$<command> <内容>\` 试一单，看聊天图卡/面板是否符合预期。
 
 企业组织成员需要发布时，调用 \`ghost_forge_pack({ dir: '<绝对路径>', intent: 'publish' })\`。

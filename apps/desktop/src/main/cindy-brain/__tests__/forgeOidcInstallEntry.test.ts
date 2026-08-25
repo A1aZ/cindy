@@ -13,7 +13,7 @@ function forgeInstallBody(): string {
 }
 
 describe('Forge OIDC install entry wiring', () => {
-  it('finishes the narrow confirmation before any install/update mutation begins', () => {
+  it('企业取消在任何 install/update 与 receipt 写入前收口', () => {
     const body = forgeInstallBody();
     const confirm = body.indexOf(
       'await ensureForgeOidcInstallConfirmBridge().request(confirmFacts)',
@@ -22,19 +22,23 @@ describe('Forge OIDC install entry wiring', () => {
     expect(confirm).toBeGreaterThanOrEqual(0);
     expect(mutation).toBeGreaterThan(confirm);
     expect(body).toContain("throwIpcError('MUTATION_CANCELLED'");
+    const beforeMutation = body.slice(0, mutation);
+    expect(beforeMutation).not.toContain('installAndDockLocked(');
+    expect(beforeMutation).not.toContain('updateLocalGhostPackageLocked(');
   });
 
-  it('marks both new installs and in-place updates as explicit agent-forge', () => {
+  it('新装与原位更新都只在本次企业身份下传 agent-forge', () => {
     const body = forgeInstallBody();
-    expect(body).toContain("installOrigin: 'agent-forge'");
-    expect(body).toContain("getActiveAppSession(),\n        'agent-forge',");
+    expect(body).toContain("const membershipKind = user?.membershipKind ?? 'personal';");
+    expect(body).toContain('const installOrigin = forgeInstallOriginForMembership(membershipKind);');
+    expect(body).toContain('...(installOrigin ? { installOrigin } : {})');
+    expect(body).toContain('getActiveAppSession(),\n        installOrigin,');
+    expect(body).not.toContain("installOrigin: 'agent-forge'");
   });
 
-  it('authorizes tokenBroker against Forge facts without making it trigger the OIDC dialog', () => {
+  it('tokenBroker 只在企业身份下拿 Forge facts，且不触发 OIDC 确认窗', () => {
     const body = forgeInstallBody();
-    expect(body).toContain(
-      "rejectUnauthorizedTokenBroker(inspected.manifest, { installOrigin: 'agent-forge' })",
-    );
+    expect(body).toContain('installOrigin ? { installOrigin } : undefined');
     expect(body).toContain('forgeOidcInstallConfirmFacts(');
   });
 

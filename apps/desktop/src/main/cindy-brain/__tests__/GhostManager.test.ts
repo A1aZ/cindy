@@ -20,6 +20,7 @@ import {
 } from '../ghostZipPermissions';
 import { signGhostPackage } from '../ghostSignature';
 import { GhostInstallReceiptStore, hashApprovedSkillContent } from '../ghostInstallReceipt';
+import { forgeInstallOriginForMembership } from '../forgeOidcInstallConfirmBridge';
 import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -2268,22 +2269,29 @@ describe('GhostManager · update pre-rename recovery', () => {
 });
 
 describe('GhostManager · install', () => {
-  it('only an explicitly tagged Forge install writes agent-forge origin', async () => {
-    const manual = await manager.install(await makeCindy('manual.cindy', goodManifest('manual')));
-    expect(manual).toHaveProperty('ghost');
-    const manualReceipt = JSON.parse(
-      await fs.promises.readFile(path.join(manager.approvalStateRoot(), 'manual.json'), 'utf8'),
+  it('个人 Forge 新装不写来源，企业确认后的 Forge 新装才写 agent-forge', async () => {
+    const personalOrigin = forgeInstallOriginForMembership('personal');
+    const personal = await manager.install(
+      await makeCindy('personal.cindy', goodManifest('personal')),
+      personalOrigin ? { installOrigin: personalOrigin } : undefined,
+    );
+    expect(personal).toHaveProperty('ghost');
+    const personalReceipt = JSON.parse(
+      await fs.promises.readFile(path.join(manager.approvalStateRoot(), 'personal.json'), 'utf8'),
     ) as Record<string, unknown>;
-    expect(manualReceipt).not.toHaveProperty('installOrigin');
-    expect(manager.readEffectiveInstallOrigin('manual')).toBe('manual');
+    expect(personalReceipt).not.toHaveProperty('installOrigin');
+    expect(manager.readEffectiveInstallOrigin('personal')).toBe('manual');
 
+    const organizationOrigin = forgeInstallOriginForMembership('org');
     const forged = await manager.install(
       await makeCindy('forge.cindy', goodManifest('acme-tool')),
-      {
-        installOrigin: 'agent-forge',
-      },
+      organizationOrigin ? { installOrigin: organizationOrigin } : undefined,
     );
     expect(forged).toHaveProperty('ghost');
+    const organizationReceipt = JSON.parse(
+      await fs.promises.readFile(path.join(manager.approvalStateRoot(), 'acme-tool.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(organizationReceipt).toHaveProperty('installOrigin', 'agent-forge');
     expect(manager.readEffectiveInstallOrigin('acme-tool')).toBe('agent-forge');
   });
 
@@ -4554,16 +4562,20 @@ describe('GhostManager · update(原位换版)', () => {
     expect(manager.readEffectiveInstallOrigin('hello')).toBe('agent-forge');
   });
 
-  it('a manual update clears an earlier Forge origin instead of inheriting privilege', async () => {
+  it('个人 Forge 更新清掉旧企业 Forge 来源而不是继承资格', async () => {
     await manager.install(await makeCindy('forge-v1.cindy', goodManifest()), {
       installOrigin: 'agent-forge',
     });
     expect(manager.readEffectiveInstallOrigin('hello')).toBe('agent-forge');
 
     const installed = manager.list().find((ghost) => ghost.manifest.id === 'hello');
+    const personalOrigin = forgeInstallOriginForMembership('personal');
     const result = await manager.update(
-      await makeCindy('manual-v2.cindy', { ...goodManifest(), version: '2.0.0' }),
-      { expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval) },
+      await makeCindy('personal-forge-v2.cindy', { ...goodManifest(), version: '2.0.0' }),
+      {
+        expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval),
+        ...(personalOrigin ? { installOrigin: personalOrigin } : {}),
+      },
     );
     expect(result).toHaveProperty('ghost');
     const receipt = JSON.parse(

@@ -272,6 +272,7 @@ import {
 import {
   createForgeOidcInstallMainWindowSender,
   forgeOidcInstallConfirmFacts,
+  forgeInstallOriginForMembership,
   getForgeOidcInstallConfirmBridge,
   initForgeOidcInstallConfirmBridge,
 } from './forgeOidcInstallConfirmBridge.js';
@@ -5584,14 +5585,16 @@ export async function installOrUpdateLocalGhostPackageFromForge(
   }
   rejectReservedGhostId(inspected.manifest.id);
   rejectBrokerWithoutDeclaredRedirectPort(inspected.manifest);
-  rejectUnauthorizedTokenBroker(inspected.manifest, { installOrigin: 'agent-forge' });
 
   const authState = getAuthState();
   const user = authState.isAuthenticated ? authState.user : null;
-  const confirmFacts = forgeOidcInstallConfirmFacts(
+  const membershipKind = user?.membershipKind ?? 'personal';
+  const installOrigin = forgeInstallOriginForMembership(membershipKind);
+  rejectUnauthorizedTokenBroker(
     inspected.manifest,
-    user?.membershipKind ?? 'personal',
+    installOrigin ? { installOrigin } : undefined,
   );
+  const confirmFacts = forgeOidcInstallConfirmFacts(inspected.manifest, membershipKind);
   if (confirmFacts) {
     let confirmed = false;
     try {
@@ -5612,7 +5615,7 @@ export async function installOrUpdateLocalGhostPackageFromForge(
           ghostId: inspected.manifest.id,
           enable: true,
           expectedPackageSha256: expected.packageSha256,
-          installOrigin: 'agent-forge',
+          ...(installOrigin ? { installOrigin } : {}),
         }),
         action: 'installed',
       };
@@ -5625,7 +5628,7 @@ export async function installOrUpdateLocalGhostPackageFromForge(
         expected.packageSha256,
         ghostInstallApprovalToken(installed.approval),
         getActiveAppSession(),
-        'agent-forge',
+        installOrigin,
       ),
       action: 'updated',
     };

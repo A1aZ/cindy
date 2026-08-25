@@ -5,6 +5,7 @@ import {
   createForgeOidcInstallMainWindowSender,
   ForgeOidcInstallConfirmBridge,
   forgeOidcInstallConfirmFacts,
+  forgeInstallOriginForMembership,
   type ForgeOidcInstallConfirmPush,
 } from '../forgeOidcInstallConfirmBridge';
 
@@ -68,6 +69,13 @@ describe('createForgeOidcInstallMainWindowSender', () => {
     expect(sender(CONFIRM_PUSH)).toBe(false);
     expect(isTrustedMainWindow).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('forgeInstallOriginForMembership', () => {
+  it('只给本次企业身份的 Forge 安装写作者自测来源', () => {
+    expect(forgeInstallOriginForMembership('org')).toBe('agent-forge');
+    expect(forgeInstallOriginForMembership('personal')).toBeUndefined();
   });
 });
 

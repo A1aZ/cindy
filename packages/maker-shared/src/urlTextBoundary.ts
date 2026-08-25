@@ -361,8 +361,8 @@ function isAutolinkPunctuationBoundary(ch: string): boolean {
 }
 
 /** URL 标准会把这三者归一成 `.` 的域名分隔符。 */
-function isIdnDomainDot(ch: string): boolean {
-  const code = ch.codePointAt(0);
+function isIdnDomainDot(ch: string | undefined): boolean {
+  const code = ch?.codePointAt(0);
   return code === 0x3002 || code === 0xff0e || code === 0xff61;
 }
 
@@ -397,23 +397,46 @@ function isHostLabelChar(ch: string | undefined): boolean {
   return !isAutolinkPunctuationBoundary(ch);
 }
 
+function isCjkLetter(ch: string): boolean {
+  return /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]/u.test(ch);
+}
+
+function nextHostLabelEnd(raw: string, from: number, hostEnd: number): number {
+  let index = from;
+  while (index < hostEnd) {
+    const code = raw.codePointAt(index);
+    if (code == null) break;
+    const char = String.fromCodePoint(code);
+    if (isIdnDomainDot(char) || char === '.') break;
+    if (!isHostLabelChar(char)) break;
+    index += char.length;
+  }
+  return index;
+}
+
 function isIdnDotInHostname(
   raw: string,
   index: number,
   hostStart: number,
   hostEnd: number,
 ): boolean {
-  return (
-    index >= hostStart &&
-    index < hostEnd &&
-    isIdnDomainDot(raw[index] ?? '') &&
-    isHostLabelChar(raw[index + 1])
-  );
+  if (index < hostStart || index >= hostEnd) return false;
+  if (!isIdnDomainDot(raw[index] ?? '') || !isHostLabelChar(raw[index + 1])) return false;
+  const labelEnd = nextHostLabelEnd(raw, index + 1, hostEnd);
+  const chars = [...raw.slice(index + 1, labelEnd)];
+  if (chars.length === 0) return false;
+  // 俄文/拉丁等字母脚本是真 IDN 标签，不限长度。
+  if (chars.some((ch) => /^\p{L}$/u.test(ch) && !isCjkLetter(ch))) return true;
+  if (chars.some((ch) => /[A-Za-z0-9]/.test(ch))) return true;
+  // 纯汉字标签：后面还有域名分隔符说明主机还没完（`四字域名。测试`）；
+  // 否则只留 1–3 字的 TLD 形标签，避免 `。这是说明` 并进主机名。
+  const after = raw[labelEnd];
+  if (after === '.' || isIdnDomainDot(after)) return true;
+  return chars.length <= 3;
 }
 
 /**
- * 标点/全角符号是正文边界。hostname 里后面还跟标签的 IDN 点号一律留下
- * （`пример。онлайн`、`子域。四字域名。测试`）。句末单独的 `。` 仍切掉。
+ * 标点是正文边界。hostname 里真 IDN 点号留下；完整主机后的 `。这是说明` 切掉。
  */
 function findAutolinkProseBoundary(raw: string): number {
   const { start: hostStart, end: hostEnd } = hostnameRange(raw);

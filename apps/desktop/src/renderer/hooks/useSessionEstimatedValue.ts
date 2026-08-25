@@ -376,6 +376,7 @@ export function useSessionEstimatedValue(
     storeClientIdsRef.current = new Set();
     authoritativeClientIdsRef.current = new Set();
     transcriptClearedRef.current = false;
+    authoritativeRef.current = false;
     setProjection({
       estimatedValueMoney: null,
       excludedActualMoney: null,
@@ -409,7 +410,11 @@ export function useSessionEstimatedValue(
     setProjection({
       estimatedValueMoney: sumCosts(result.costs),
       excludedActualMoney: sumCosts(result.excludedActualCosts),
-      authoritative: false,
+      // Remote device-link turn-cost pushes update makerChatStore instead of
+      // reaching this hook's direct IPC listener.  Once a versioned Host query
+      // has established the persisted-history baseline, explicit transcript
+      // rows can be merged without discarding that authority.
+      authoritative: authoritativeRef.current,
     });
   }, [enabled, presentation, sessionId, showSdkEstimate, storeSnapshot]);
 
@@ -438,11 +443,13 @@ export function useSessionEstimatedValue(
         authoritative,
       });
     };
-    const mergeEntry = (entry: {
-      clientId: string;
-      money?: RegionalMoney | null;
-      excludedActualMoney?: RegionalMoney | null;
-    } | null): void => {
+    const mergeEntry = (
+      entry: {
+        clientId: string;
+        money?: RegionalMoney | null;
+        excludedActualMoney?: RegionalMoney | null;
+      } | null,
+    ): void => {
       if (cancelled || !entry || !entry.clientId) return;
       const snapshot = displaySnapshotRef.current ?? makerChatStore.getSnapshot(sessionId);
       const shouldApplyVisibleEntry = shouldApplyEstimatedValueEntry(
@@ -549,11 +556,7 @@ export function useSessionEstimatedValue(
           }
         }
         authoritativeClientIdsRef.current = authoritativeClientIds;
-        applyCosts(
-          next,
-          nextExcludedActualCosts,
-          snapshot.projectionVersion === 1,
-        );
+        applyCosts(next, nextExcludedActualCosts, snapshot.projectionVersion === 1);
       })
       .catch(() => {
         // 历史汇总失败不影响实时增量；本 hook 只是展示辅助信息。

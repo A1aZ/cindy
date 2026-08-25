@@ -10656,6 +10656,11 @@
       "count": "{{count}}件",
       "incomplete": "注文履歴が多いため、最新の{{count}}件のみ表示しています。",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "注文 ID {{id}} をコピー",
+        "success": "注文 ID をコピーしました",
+        "failed": "注文 ID をコピーできませんでした。もう一度お試しください。"
+      },
       "states": {
         "completed": "完了",
         "awaitingPayment": "支払い待ち",

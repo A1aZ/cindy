@@ -10648,6 +10648,11 @@
       "count": "{{count}} 笔",
       "incomplete": "订单记录较多，当前仅显示最近的 {{count}} 笔。",
       "orderId": "NO. {{id}}",
+      "copy": {
+        "action": "复制订单 ID {{id}}",
+        "success": "订单 ID 已复制",
+        "failed": "复制订单 ID 失败，请重试"
+      },
       "states": {
         "completed": "已完成",
         "awaitingPayment": "待支付",

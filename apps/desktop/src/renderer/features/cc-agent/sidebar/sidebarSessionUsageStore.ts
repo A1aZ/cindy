@@ -44,6 +44,7 @@ interface CacheEntry {
 interface Interest {
   presentation: SdkCostPresentation;
   showSdkEstimate: boolean;
+  actualMoney: RegionalMoney | null;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -271,12 +272,14 @@ function ensureInterest(
   const presentationChanged =
     prev != null &&
     (prev.presentation !== presentation || prev.showSdkEstimate !== showSdkEstimate);
-  const projectionNeedsRefresh = firstInterest || presentationChanged;
-  interestParams.set(sessionId, { presentation, showSdkEstimate });
+  const actualMoneyChanged = prev != null && !areMoneyEqual(prev.actualMoney, actualMoney);
+  const projectionNeedsRefresh = firstInterest || presentationChanged || actualMoneyChanged;
+  interestParams.set(sessionId, { presentation, showSdkEstimate, actualMoney });
   const cached = cache.get(sessionId);
   if (!cached || projectionNeedsRefresh) {
     writeCache(sessionId, {
-      actualMoney: firstInterest ? actualMoney : (actualMoney ?? cached?.actualMoney ?? null),
+      actualMoney:
+        firstInterest || actualMoneyChanged ? actualMoney : (cached?.actualMoney ?? actualMoney),
       presentation,
       showSdkEstimate,
       ...(projectionNeedsRefresh
@@ -326,13 +329,23 @@ export function useSidebarSessionUsageMoney(
   const actualMoney =
     normalizeRegionalMoney(initialMoney) ??
     (typeof initialCostUsd === 'number' ? legacyUsdMoney(initialCostUsd) : null);
+  const actualMoneyAmount = actualMoney?.amount;
+  const actualMoneyCurrency = actualMoney?.currency;
+  const actualMoneyKind = actualMoney?.kind;
   const actualRef = useRef(actualMoney);
   actualRef.current = actualMoney;
   useEffect(() => {
     if (!sessionId) return undefined;
     ensureInterest(sessionId, presentation, showSdkEstimate, actualRef.current);
     return undefined;
-  }, [presentation, sessionId, showSdkEstimate]);
+  }, [
+    actualMoneyAmount,
+    actualMoneyCurrency,
+    actualMoneyKind,
+    presentation,
+    sessionId,
+    showSdkEstimate,
+  ]);
 
   const subscribe = useCallback(
     (listener: () => void) => {

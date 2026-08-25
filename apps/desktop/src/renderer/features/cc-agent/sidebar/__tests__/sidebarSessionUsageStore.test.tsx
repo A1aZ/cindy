@@ -413,6 +413,64 @@ describe('useSidebarSessionUsageMoney', () => {
     expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(3);
   });
 
+  it('refreshes a mounted remote row when reconciled session money props change', async () => {
+    vi.useFakeTimers();
+    const hook = renderHook(
+      ({ totalMoney, totalCostUsd }) =>
+        useSidebarSessionUsageMoney('remote-1', totalMoney, totalCostUsd, 'regular', false),
+      {
+        initialProps: {
+          totalMoney: {
+            amount: 1,
+            currency: 'USD' as const,
+            approximate: false,
+            kind: 'actual-cost' as const,
+          } as {
+            amount: number;
+            currency: 'USD';
+            approximate: boolean;
+            kind: 'actual-cost';
+          } | null,
+          totalCostUsd: 1 as number | null,
+        },
+      },
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(hook.result.current.actualMoney?.amount).toBe(1);
+
+    hook.rerender({
+      totalMoney: {
+        amount: 2,
+        currency: 'USD',
+        approximate: false,
+        kind: 'actual-cost',
+      },
+      totalCostUsd: 2,
+    });
+    expect(hook.result.current.actualMoney).toBeNull();
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(hook.result.current.actualMoney?.amount).toBe(2);
+
+    hook.rerender({ totalMoney: null, totalCostUsd: 3 });
+    expect(hook.result.current.actualMoney).toBeNull();
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(hook.result.current.actualMoney?.amount).toBe(3);
+
+    hook.rerender({ totalMoney: null, totalCostUsd: null });
+    expect(hook.result.current.actualMoney).toBeNull();
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(hook.result.current.actualMoney).toBeNull();
+    expect(estimatedSessionValueBatchFor).toHaveBeenCalledTimes(4);
+  });
+
   it('refreshes a remote sidebar row from remote spend and turn-cost pushes', async () => {
     vi.useFakeTimers();
     const hook = renderHook(() =>

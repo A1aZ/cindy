@@ -561,40 +561,6 @@ describe('makerChatStore text delta batching', () => {
     unsubscribe();
   });
 
-  it('records an unexpected annotation materialization failure as a terminal error', async () => {
-    let annotationReads = 0;
-    const attachment = {
-      id: 'broken-annotation',
-      name: 'broken.png',
-      path: '',
-      ext: '.png',
-      size: 1,
-      category: 'image',
-      mimeType: 'image/png',
-      url: 'xdt-image://source/broken.png',
-      get annotationStrokes() {
-        annotationReads += 1;
-        if (annotationReads === 1) return [{}];
-        throw new Error('annotation materialization failed');
-      },
-    } as AttachedFile;
-
-    await expect(
-      makerChatStore.sendMessage(
-        SESSION_ID,
-        'annotated send',
-        MODEL,
-        EFFORT,
-        PERMISSION_MODE,
-        WORKING_DIR,
-        [attachment],
-      ),
-    ).rejects.toThrow('annotation materialization failed');
-
-    expect(makerChatStore.getSnapshot(SESSION_ID).error).toBe('annotation materialization failed');
-    expect(makerChatStore.hasSessionTerminalError(SESSION_ID)).toBe(true);
-  });
-
   it('drops stale ghost pushes before they mutate the current owner slice', () => {
     const staleOwnerStamp = { dataOwnerId: 'owner-b', ownerGeneration: 1 };
     const currentOwnerStamp = { dataOwnerId: 'owner-a', ownerGeneration: 1 };

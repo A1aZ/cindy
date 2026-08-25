@@ -15,7 +15,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 import { dropStaleRemoteTerminalActivity } from '@/features/device-link/remoteSessionActivityStore';
-import { clearCompletedRunMarkersForNewActivity } from '@/lib/silencedSessionDoneStore';
 
 /** 发送失败 / 状态一直不到时的兜底;正常路径应在 agent 开跑时就被吸收。 */
 export const SESSION_STARTING_TTL_MS = 120_000;
@@ -54,11 +53,8 @@ export function markSessionStarting(sessionId: string): void {
   if (!sessionId) return;
   const already = startingIds.has(sessionId);
   if (!already) {
-    // starting 是早于真实 running 的新 activity 边界。先清上一轮已终态 marker,
-    // 避免它在 linger 内把本轮准备失败误认成 scheduler-owned / silenced；仍在
-    // 飞行的 marker 没有 linger timer,不会被清。重复 mark 只刷新 TTL,不能再
-    // 删除本轮后续建立的新 run marker 或新到达的远程终态。
-    clearCompletedRunMarkersForNewActivity(sessionId);
+    // 先丢掉上一轮远程终态,再置 starting。否则 absorb 会把旧 completed/error
+    // 当成新权威立刻清掉。重复 mark 只刷新 TTL,不能再删本轮新到达的终态。
     dropStaleRemoteTerminalActivity(sessionId);
     startingIds.add(sessionId);
   }

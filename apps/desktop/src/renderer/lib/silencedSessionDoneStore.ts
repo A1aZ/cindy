@@ -17,7 +17,7 @@
  * 次真 done 会当成普通完成,把 macOS toast / 飞书 / 手机推送全发一遍。
  *
  * 清除只有三条路径:scheduler 的 completed / failed / notified 事件、run 已终态后该
- * session 又起新 activity、以及对账权威 run 状态(`reconcileRunMarkers`,治事件丢失)。前两条
+ * session 又起新 turn、以及对账权威 run 状态(`reconcileRunMarkers`,治事件丢失)。前两条
  * 与第三条统一走 `MARKER_TERMINAL_LINGER_MS` 的退场窗口。main 侧灵动岛
  * (`main/agent-island/service.ts` 的 `isCompletionEventSilenced`)是同一套语义,
  * 两边不要再分叉。
@@ -231,7 +231,7 @@ export function clearSchedulerOwnedRun(runId: string): string | undefined {
 }
 
 /**
- * run 已终态(completed/failed 排了 linger)后该 session 又起新 activity:那是用户手动
+ * run 已终态(completed/failed 排了 linger)后该 session 又起新 turn:那是用户手动
  * 对话或下一个 run,立刻交回普通通知路径。run 还在跑时不清 —— 判据是
  * `schedulerOwnedClearTimers` 有没有 linger 定时器,而不是任何时间或 running 推断。
  */
@@ -256,16 +256,6 @@ export function clearCompletedSilencedRunForNewActivity(sessionId: string): void
   const runId = silencedSessionRunIds.get(sessionId);
   if (!runId || !clearTimers.has(runId)) return;
   clearSilencedRun(runId);
-}
-
-/**
- * 新 activity 的统一边界。starting 在真实 running 之前调用,因此也覆盖附件准备
- * 失败等永远不会进入 running 的尝试；仍在飞行的 marker 没有 linger timer,
- * 两个 clear 函数都会保持它。
- */
-export function clearCompletedRunMarkersForNewActivity(sessionId: string): void {
-  clearCompletedSilencedRunForNewActivity(sessionId);
-  clearCompletedSchedulerOwnedRunForNewActivity(sessionId);
 }
 
 export function clearSilencedRun(runId: string): string | undefined {
@@ -321,6 +311,3 @@ function clearSchedulerOwnedTimer(runId: string | undefined): void {
   clearTimeout(timer);
   schedulerOwnedClearTimers.delete(runId);
 }
-
-
-

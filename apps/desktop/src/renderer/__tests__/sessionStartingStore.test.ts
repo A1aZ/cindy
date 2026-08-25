@@ -16,27 +16,16 @@ import {
   resetSessionStartingStoreForTests,
   SESSION_STARTING_TTL_MS,
 } from '@/lib/sessionStartingStore';
-import {
-  isSessionDoneSilenced,
-  isSessionTerminalNotificationOwnedByScheduler,
-  markNextSessionDoneSilenced,
-  markNextSessionTerminalNotificationOwnedByScheduler,
-  resetSilencedSessionDoneStoreForTests,
-  scheduleClearSchedulerOwnedRun,
-  scheduleClearSilencedRun,
-} from '@/lib/silencedSessionDoneStore';
 
 describe('sessionStartingStore', () => {
   beforeEach(() => {
     resetSessionStartingStoreForTests();
-    resetSilencedSessionDoneStoreForTests();
     clearRemoteSessionActivity();
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     resetSessionStartingStoreForTests();
-    resetSilencedSessionDoneStoreForTests();
     clearRemoteSessionActivity();
     vi.useRealTimers();
   });
@@ -87,22 +76,6 @@ describe('sessionStartingStore', () => {
     expect(getRemoteSessionActivity('s1')).toMatchObject({ phase: 'completed' });
     absorbSessionStarting(['s1']);
     expect([...getStartingSessionIds()]).toEqual([]);
-  });
-
-  it('clears only terminal-linger run markers on the first starting mark', () => {
-    markNextSessionDoneSilenced('old-silent-run', 's1');
-    markNextSessionTerminalNotificationOwnedByScheduler('old-owned-run', 's1');
-    scheduleClearSilencedRun('old-silent-run', 2_000);
-    scheduleClearSchedulerOwnedRun('old-owned-run', 2_000);
-
-    markSessionStarting('s1');
-
-    expect(isSessionDoneSilenced('s1')).toBe(false);
-    expect(isSessionTerminalNotificationOwnedByScheduler('s1')).toBe(false);
-
-    markNextSessionTerminalNotificationOwnedByScheduler('current-run', 's2');
-    markSessionStarting('s2');
-    expect(isSessionTerminalNotificationOwnedByScheduler('s2')).toBe(true);
   });
 
   it('expires a starting mark that never becomes running', () => {

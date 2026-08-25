@@ -261,6 +261,20 @@ describe('projectLegacyMessageBilling', () => {
     const [projected] = projectLegacyMessageBilling([mixed]);
     expect(projected.agentMeta).toMatchObject({ turnCostIsCustomProvider: true });
   });
+
+  it('fails closed when a partial page starts with a user-total-only closing segment', () => {
+    const closing = assistant('user-total-only', 'claude-sonnet-4-6');
+    closing.agentMeta = {
+      model: 'claude-sonnet-4-6',
+      userTurnCostUsd: 1.25,
+      userTurnCostIsEstimate: false,
+    };
+
+    const [projected] = projectLegacyMessageBilling([closing]);
+
+    expect(projected.agentMeta).toMatchObject({ turnCostIsCustomProvider: true });
+    expect(closing.agentMeta).not.toHaveProperty('turnCostIsCustomProvider');
+  });
 });
 
 describe('extractEstimatedSessionValueEntries', () => {

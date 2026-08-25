@@ -13,6 +13,54 @@ const BUILTIN_PROVIDER_IDS = new Set([
 ]);
 
 /**
+ * Renderer-safe snapshot of the versioned bundled XD Gateway routes.
+ *
+ * Importing the complete bundled model registry here would add the full catalog JSON to the
+ * renderer bundle. The shared contract test keeps this compact evidence list exactly aligned with
+ * packages/model-providers/catalog/model-registry.json.
+ */
+export const BUNDLED_XD_GATEWAY_MODEL_IDS = [
+  'bytedance-seed/seed-2.1-pro',
+  'claude-fable-5',
+  'claude-haiku-4-5',
+  'claude-opus-4-5',
+  'claude-opus-4-6',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-sonnet-4-5',
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+  'codex/gpt-5.4',
+  'codex/gpt-5.4-mini',
+  'codex/gpt-5.5',
+  'codex/gpt-5.5:auto',
+  'codex/gpt-5.6-sol',
+  'codex/gpt-5.6-terra',
+  'deepseek/deepseek-v4-flash',
+  'deepseek/deepseek-v4-pro',
+  'gemini-3.1-pro-preview',
+  'gemini-3.5-flash',
+  'gemini-3-flash-preview',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+  'gpt-5.4-nano',
+  'gpt-5.5',
+  'gpt-5.6-luna',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'moonshotai/kimi-k2.6',
+  'moonshotai/kimi-k3',
+  'qwen/qwen3.6-plus',
+  'qwen/qwen3.7-max',
+  'qwen/qwen3.8-max-preview',
+  'z-ai/glm-5.1',
+  'z-ai/glm-5.2',
+] as const;
+
+const BUNDLED_XD_GATEWAY_MODEL_ID_SET = new Set<string>(BUNDLED_XD_GATEWAY_MODEL_IDS);
+
+/**
  * Billing must fail closed for a non-empty provider id that no longer exists in the active
  * catalog. That covers deleted custom providers and older/remote catalog snapshots without
  * briefly exposing their persisted SDK amounts as actual spend.
@@ -36,6 +84,39 @@ export function resolveCustomProviderCostFlag(
   if (explicit === true) return true;
   if (explicit === false) return false;
   return isCustomProviderForBilling(fallbackProviderId, []);
+}
+
+/**
+ * Compatibility inference for pre-upgrade turns that lack immutable Provider attribution.
+ *
+ * A bundled XD Gateway route is the only stable historical evidence that an SDK-reported amount
+ * was real provider spend. Unknown, deleted, missing, or mixed custom models fail closed. This is
+ * shared by Main history projection and Renderer projection of responses from older remote Hosts.
+ */
+export function inferLegacyCustomProviderCostFlag(args: {
+  turnCostIsEstimate?: boolean;
+  turnCostIsCustomProvider?: boolean;
+  turnCostProviderId?: string | null;
+  hasPerTurnCost?: boolean;
+  modelCandidates?: readonly unknown[];
+}): boolean | undefined {
+  if (args.turnCostIsEstimate === true) return undefined;
+  if (typeof args.turnCostIsCustomProvider === 'boolean') return undefined;
+  if (args.turnCostProviderId !== undefined) {
+    return resolveCustomProviderCostFlag(undefined, args.turnCostProviderId);
+  }
+  // A user-round total on a cost-free closing segment can include earlier segments from other
+  // Providers. The closing segment's model cannot prove the attribution of that cumulative value.
+  if (args.hasPerTurnCost === false) return true;
+
+  const models = (args.modelCandidates ?? []).filter(
+    (model): model is string => typeof model === 'string' && model.trim().length > 0,
+  );
+  if (models.length === 0) return true;
+  return models.some((model) => {
+    const normalized = model.trim().replace(/\[1m\]$/, '');
+    return !BUNDLED_XD_GATEWAY_MODEL_ID_SET.has(normalized);
+  });
 }
 
 export function isSdkEstimateMoney(money: RegionalMoney | null | undefined): boolean {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import { BUNDLED_CATALOG } from '@cindy/model-providers';
+
 import {
+  BUNDLED_XD_GATEWAY_MODEL_IDS,
+  inferLegacyCustomProviderCostFlag,
   resolveCustomProviderCostFlag,
   sdkEstimatedValuePart,
 } from '../customProviderBilling.js';
@@ -23,6 +27,41 @@ describe('resolveCustomProviderCostFlag', () => {
     expect(resolveCustomProviderCostFlag(undefined, 'my-openrouter')).toBe(true);
     expect(resolveCustomProviderCostFlag(undefined, 'anthropic')).toBe(false);
     expect(resolveCustomProviderCostFlag(undefined, null)).toBe(false);
+  });
+});
+
+describe('legacy bundled Gateway evidence', () => {
+  it('stays aligned with the versioned model registry without bundling it in Renderer code', () => {
+    const registryIds = BUNDLED_CATALOG.modelRegistry?.models.flatMap((entry) =>
+      entry.routes
+        .filter((route) => route.providerId === 'xd')
+        .map((route) => route.modelId),
+    ) ?? [];
+
+    expect([...BUNDLED_XD_GATEWAY_MODEL_IDS].sort()).toEqual(
+      [...new Set(registryIds)].sort(),
+    );
+  });
+
+  it('does not use a cost-free closing segment model to classify a user-round total', () => {
+    expect(
+      inferLegacyCustomProviderCostFlag({
+        hasPerTurnCost: false,
+        modelCandidates: ['claude-sonnet-4-6'],
+      }),
+    ).toBe(true);
+    expect(
+      inferLegacyCustomProviderCostFlag({
+        hasPerTurnCost: true,
+        modelCandidates: ['claude-sonnet-4-6'],
+      }),
+    ).toBe(false);
+    expect(
+      inferLegacyCustomProviderCostFlag({
+        hasPerTurnCost: true,
+        modelCandidates: ['claude-sonnet-4-6[1m]'],
+      }),
+    ).toBe(false);
   });
 });
 

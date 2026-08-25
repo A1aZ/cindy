@@ -10,6 +10,7 @@ import {
 } from '../../shared/regionalMoney';
 import { normalizeTurnUsageDetails, type TurnUsageDetails } from '../../shared/turnUsageDetails';
 import {
+  inferLegacyCustomProviderCostFlag,
   isCustomProviderForBilling,
   projectSdkCostMoney,
   projectSdkCostMoneyWithBreakdown,
@@ -107,13 +108,30 @@ export function resolveMessageCustomProviderCostPresentation(
     | 'userTurnCostUsd'
     | 'userTurnCostIsEstimate'
     | 'turnCostIsCustomProvider'
+    | 'turnCostProviderId'
+    | 'turnUsageDetails'
+    | 'model'
   >,
   fallback: CustomProviderCostPresentation,
   showSdkEstimate: boolean,
 ): CustomProviderCostPresentation {
+  const details = normalizeTurnUsageDetails(message.turnUsageDetails);
+  const turnMoney = moneyFromMessage(message);
+  const historicalProviderFlag = inferLegacyCustomProviderCostFlag({
+    turnCostIsEstimate: message.turnCostIsEstimate,
+    turnCostIsCustomProvider: message.turnCostIsCustomProvider,
+    turnCostProviderId: message.turnCostProviderId,
+    hasPerTurnCost: turnMoney !== null,
+    modelCandidates: [
+      message.model,
+      details?.model,
+      ...(details?.models ?? []),
+      ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
+    ],
+  });
   return resolveTurnSdkCostPresentation({
-    money: moneyFromMessage(message) ?? userMoneyFromMessage(message),
-    isCustomProviderCost: message.turnCostIsCustomProvider,
+    money: turnMoney ?? userMoneyFromMessage(message),
+    isCustomProviderCost: message.turnCostIsCustomProvider ?? historicalProviderFlag,
     fallback,
     showSdkEstimate,
   });

@@ -10,8 +10,6 @@ import { ipcMain, BrowserWindow } from 'electron';
 import { and, asc, eq, inArray, lt, lte, gt, gte, desc, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
 
-import { BUNDLED_CATALOG, findModelRegistryRoute } from '@cindy/model-providers';
-
 import { getDbClient } from '../client/current';
 import { latestVisiblePreview, latestVisiblePreviewRow } from '../latestMessageText';
 import { messages, sessions } from '../schema';
@@ -42,6 +40,7 @@ import {
 import { resolveStaleCodexSubscriptionValueEstimate } from '../../../shared/codexSubscriptionValue.js';
 import { normalizeTurnUsageDetails } from '../../../shared/turnUsageDetails.js';
 import {
+  inferLegacyCustomProviderCostFlag,
   projectSdkCostMoneyWithBreakdown,
   resolveCustomProviderCostFlag,
   resolveTurnSdkCostPresentation,
@@ -1885,40 +1884,23 @@ export function summarizeEstimatedSessionValuesBySession(
   return result;
 }
 
-function historicalCustomProviderFlagFromModel(
-  model: string | null | undefined,
-): boolean {
-  const normalized = model?.trim();
-  if (!normalized) return true;
-  // The versioned bundled registry is historical product evidence: an official XD Gateway route
-  // proves that this model could produce trusted billed spend before per-turn attribution existed.
-  // Current active-catalog membership is not evidence because deleted custom Providers disappear.
-  return findModelRegistryRoute(BUNDLED_CATALOG.modelRegistry, 'xd', normalized) === undefined;
-}
-
-function historicalCustomProviderFlagFromMeta(meta: AgentMeta): boolean | undefined {
-  if (meta.turnCostIsEstimate === true) return undefined;
-  if (typeof meta.turnCostIsCustomProvider === 'boolean') return undefined;
-  // A partially migrated row may have the immutable Provider id but not the boolean flag.  The
-  // id is still stronger evidence than the session's current Provider, so derive the flag from it
-  // instead of falling back to session-wide presentation.
-  if (meta.turnCostProviderId !== undefined) {
-    return resolveCustomProviderCostFlag(undefined, meta.turnCostProviderId);
-  }
-
+function historicalCustomProviderFlagFromMeta(
+  meta: AgentMeta,
+  hasPerTurnCost?: boolean,
+): boolean | undefined {
   const details = normalizeTurnUsageDetails(meta.turnUsageDetails);
-  const modelCandidates = [
-    typeof meta.model === 'string' ? meta.model : undefined,
-    details?.model,
-    ...(details?.models ?? []),
-    ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
-  ].filter((model): model is string => typeof model === 'string' && model.trim().length > 0);
-
-  // A missing/ambiguous historical model intentionally fails closed.  A bundled Gateway route
-  // is the only positive evidence that an unattributed pre-upgrade amount was real provider spend.
-  return modelCandidates.length === 0
-    ? historicalCustomProviderFlagFromModel(undefined)
-    : modelCandidates.some((model) => historicalCustomProviderFlagFromModel(model));
+  return inferLegacyCustomProviderCostFlag({
+    turnCostIsEstimate: meta.turnCostIsEstimate,
+    turnCostIsCustomProvider: meta.turnCostIsCustomProvider,
+    turnCostProviderId: meta.turnCostProviderId,
+    hasPerTurnCost,
+    modelCandidates: [
+      meta.model,
+      details?.model,
+      ...(details?.models ?? []),
+      ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
+    ],
+  });
 }
 
 /**
@@ -1947,11 +1929,20 @@ export function projectLegacyMessageBilling(history: Message[]): Message[] {
       (typeof meta.turnCostUsd === 'number' &&
         Number.isFinite(meta.turnCostUsd) &&
         meta.turnCostUsd > 0);
-    if (!hasLegacyActualCost) continue;
+    const userMoney = normalizeRegionalMoney(meta.userTurnCost);
+    const hasLegacyActualUserCost = userMoney
+      ? userMoney.kind === 'actual-cost' && userMoney.amount > 0
+      : meta.userTurnCostIsEstimate !== true &&
+        typeof meta.userTurnCostUsd === 'number' &&
+        Number.isFinite(meta.userTurnCostUsd) &&
+        meta.userTurnCostUsd > 0;
+    if (!hasLegacyActualCost && !hasLegacyActualUserCost) continue;
     // Reuse the same immutable model evidence as the session-value projection.  Unknown or
-    // multi-model rows fail closed as custom-provider SDK cost; the session's current Provider is
-    // deliberately never consulted here.
-    const turnCostIsCustomProvider = historicalCustomProviderFlagFromMeta(meta) ?? true;
+    // multi-model rows fail closed as custom-provider SDK cost. A cost-free closing segment with
+    // only the user-round total also fails closed because its model cannot classify prior segments.
+    // The session's current Provider is deliberately never consulted here.
+    const turnCostIsCustomProvider =
+      historicalCustomProviderFlagFromMeta(meta, hasLegacyActualCost) ?? true;
     projected ??= history.slice();
     projected[index] = {
       ...message,

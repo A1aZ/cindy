@@ -140,6 +140,33 @@ describe('custom provider cost presentation', () => {
     expect(customThenBuiltIn[1].turnMoney).toMatchObject({ amount: 1, kind: 'actual-cost' });
   });
 
+  it('projects unattributed legacy rows safely when an older remote Host lacks per-turn fields', () => {
+    const legacyRows = [
+      message({
+        clientId: 'legacy-custom',
+        model: 'deleted-custom-model',
+        turnMoney: money(2, 'actual-cost'),
+      }),
+      message({
+        clientId: 'legacy-gateway',
+        model: 'claude-sonnet-4-6',
+        turnMoney: money(1, 'actual-cost'),
+      }),
+      message({
+        clientId: 'legacy-user-total-only',
+        model: 'claude-sonnet-4-6',
+        userTurnMoney: money(3, 'actual-cost'),
+      }),
+    ];
+
+    for (const fallback of ['regular', 'hidden'] as const) {
+      const projected = projectCustomProviderMessages(legacyRows, fallback, false);
+      expect(projected[0].turnMoney).toBeUndefined();
+      expect(projected[1].turnMoney).toMatchObject({ amount: 1, kind: 'actual-cost' });
+      expect(projected[2].userTurnMoney).toBeUndefined();
+    }
+  });
+
   it('keeps reference-priced portions of a mixed custom-provider estimate', () => {
     const [projected] = projectCustomProviderMessages(
       [

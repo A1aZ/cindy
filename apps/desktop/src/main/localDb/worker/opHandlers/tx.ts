@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 
 import type { DbTxName } from '../../client/tx/types.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
+import { capImportedToolResultContent } from '../../../../shared/toolResultPersistCap.js';
 import {
   wechatActivateBindingEpoch,
   wechatCancelForCommand,
@@ -648,7 +649,7 @@ function codexImportMessages(db: Database.Database, args: unknown): { changed: n
         clientId,
         sessionId,
         role,
-        content: stringifyContent(row.content),
+        content: stringifyImportedContent(role, row.content),
         agentMeta: JSON.stringify({ sdkSessionId, model }),
         createdAt,
       }).changes;
@@ -691,12 +692,13 @@ function claudeImportMessages(db: Database.Database, args: unknown): { changed: 
     for (const rawRow of rows) {
       const row = asRecord(rawRow, 'claude row');
       const key = `${expectNumber(row.lineNo, 'row.lineNo')}-${expectNumber(row.partIndex, 'row.partIndex')}`;
+      const role = expectString(row.role, 'row.role');
       changed += upsert.run({
         id: `claude-import-${sdkSessionId}-${key}`,
         clientId: `${importClientIdPrefix}${key}`,
         sessionId,
-        role: expectString(row.role, 'row.role'),
-        content: stringifyContent(row.content),
+        role,
+        content: stringifyImportedContent(role, row.content),
         toolUseId: nullableString(row.toolUseId),
         agentMeta: row.agentMeta ? stringifyContent(row.agentMeta) : null,
         createdAt: expectNumber(row.createdAt, 'row.createdAt'),
@@ -1996,6 +1998,15 @@ function truncate(value: string, max: number): string {
 function stringifyContent(value: unknown): string {
   const json = JSON.stringify(value);
   return json === undefined ? 'null' : json;
+}
+
+/**
+ * 外部 CLI 历史导入与 live 落库同口径:tool_result 正文截到 8KB。
+ * 不截会让 rollout / transcript 重导入"复活"全文。媒体挂账在 main 导入层
+ * 对原文执行(本函数跑在 DB worker,碰不到 cindy-media ledger)。
+ */
+function stringifyImportedContent(role: string, content: unknown): string {
+  return stringifyContent(capImportedToolResultContent(role, content));
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {

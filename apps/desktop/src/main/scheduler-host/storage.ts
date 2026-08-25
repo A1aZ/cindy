@@ -41,7 +41,6 @@ import {
 } from '../../shared/regionalMoney.js';
 import {
   inferLegacyCustomProviderCostFlag,
-  resolveCustomProviderCostFlag,
   sdkEstimatedValuePart,
 } from '../../shared/customProviderBilling.js';
 import { normalizeTurnUsageDetails } from '../../shared/turnUsageDetails.js';
@@ -94,6 +93,11 @@ interface ScheduleMoneyValues {
   latestCurrencyAt?: number;
 }
 
+interface ScheduleRunMessageMoneyValues extends ScheduleMoneyValues {
+  snapshotCostValues: RegionalMoney[];
+  snapshotEstimatedValueValues: RegionalMoney[];
+}
+
 /**
  * 记录「当前账本币种」:跨币种切换的 schedule 汇总必须偏好最新片段的币种,
  * 静态 USD 偏好会让任意历史 USD 片段把切换后的新币种 run 整段挤出汇总。
@@ -121,6 +125,14 @@ function emptyScheduleMoneyValues(): ScheduleMoneyValues {
     costValues: [],
     estimatedValueValues: [],
     sdkEstimatedValueValues: [],
+  };
+}
+
+function emptyScheduleRunMessageMoneyValues(): ScheduleRunMessageMoneyValues {
+  return {
+    ...emptyScheduleMoneyValues(),
+    snapshotCostValues: [],
+    snapshotEstimatedValueValues: [],
   };
 }
 
@@ -173,6 +185,7 @@ interface LegacyScheduleSessionAlias {
 
 const LEGACY_SCHEDULE_TITLE_PREFIX = '[Schedule] ';
 const LEGACY_SESSION_RUN_ID_PREFIX = 'legacy-session:';
+const CURRENT_COST_PROVIDER_ATTRIBUTION_VERSION = 1;
 
 const UNREAD_TERMINAL_RUN_STATUSES: ScheduleRun['status'][] = [
   'success',
@@ -244,6 +257,8 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
   costMoney: RegionalMoney | null;
   estimatedValueMoney: RegionalMoney | null;
   sdkEstimatedValueMoney: RegionalMoney | null;
+  snapshotCostMoney: RegionalMoney | null;
+  snapshotEstimatedValueMoney: RegionalMoney | null;
   legacyProjectedActualAmount: number;
 } {
   if (!agentMeta) {
@@ -251,6 +266,8 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
       costMoney: null,
       estimatedValueMoney: null,
       sdkEstimatedValueMoney: null,
+      snapshotCostMoney: null,
+      snapshotEstimatedValueMoney: null,
       legacyProjectedActualAmount: 0,
     };
   }
@@ -277,9 +294,13 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
         costMoney: null,
         estimatedValueMoney: null,
         sdkEstimatedValueMoney: null,
+        snapshotCostMoney: null,
+        snapshotEstimatedValueMoney: null,
         legacyProjectedActualAmount: 0,
       };
     }
+    const snapshotIsEstimate =
+      parsed.turnCostIsEstimate === true || money.kind === 'value-estimate';
     const turnUsageDetails = normalizeTurnUsageDetails(parsed.turnUsageDetails);
     const turnCostIsCustomProvider =
       typeof parsed.turnCostIsCustomProvider === 'boolean'
@@ -319,6 +340,8 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
           : asValueEstimateMoney(money)
         : null,
       sdkEstimatedValueMoney: isEstimate ? sdkEstimatedValueMoney : null,
+      snapshotCostMoney: snapshotIsEstimate ? null : money,
+      snapshotEstimatedValueMoney: snapshotIsEstimate ? asValueEstimateMoney(money) : null,
       legacyProjectedActualAmount:
         !structured && parsed.turnCostIsEstimate !== true ? money.amount : 0,
     };
@@ -327,6 +350,8 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
       costMoney: null,
       estimatedValueMoney: null,
       sdkEstimatedValueMoney: null,
+      snapshotCostMoney: null,
+      snapshotEstimatedValueMoney: null,
       legacyProjectedActualAmount: 0,
     };
   }
@@ -342,48 +367,6 @@ function chunkArray<T>(items: readonly T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
-}
-
-async function sessionProviderIdsById(
-  db: SchedulerDrizzleDb,
-  sessionIds: Iterable<string>,
-): Promise<Map<string, string | null>> {
-  const ids = [...new Set(sessionIds)].filter((id) => id.length > 0);
-  const map = new Map<string, string | null>();
-  if (ids.length === 0) return map;
-  const rows = (
-    await Promise.all(
-      chunkArray(ids, SQLITE_IN_CHUNK_SIZE).map((chunk) =>
-        db
-          .select({ id: sessions.id, providerId: sessions.providerId })
-          .from(sessions)
-          .where(inArray(sessions.id, chunk)),
-      ),
-    )
-  ).flat();
-  for (const row of rows) map.set(row.id, row.providerId ?? null);
-  return map;
-}
-
-async function scheduleProviderIdsById(
-  db: SchedulerDrizzleDb,
-  scheduleIds: Iterable<string>,
-): Promise<Map<string, string | null>> {
-  const ids = [...new Set(scheduleIds)].filter((id) => id.length > 0);
-  const map = new Map<string, string | null>();
-  if (ids.length === 0) return map;
-  const rows = (
-    await Promise.all(
-      chunkArray(ids, SQLITE_IN_CHUNK_SIZE).map((chunk) =>
-        db
-          .select({ id: schedules.id, providerId: schedules.providerId })
-          .from(schedules)
-          .where(inArray(schedules.id, chunk)),
-      ),
-    )
-  ).flat();
-  for (const row of rows) map.set(row.id, row.providerId ?? null);
-  return map;
 }
 
 function reclassifyLegacyCustomProviderSnapshot(
@@ -616,7 +599,11 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       // 最近的一次在前，便于 UI 抽屉直接展示
       .orderBy(desc(scheduleRuns.firedAt))
       .limit(cap);
-    const runs = await this.hydrateRunCostsFromMessages(db, rows.map(scheduleRunToCamel));
+    const runs = await this.hydrateRunCostsFromMessages(
+      db,
+      rows.map(scheduleRunToCamel),
+      new Map(rows.map((row) => [row.id, row.costProviderAttributionVersion])),
+    );
     if (!scheduleRow) return runs;
 
     const linkedSessionIds = new Set(
@@ -641,6 +628,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
   private async hydrateRunCostsFromMessages(
     db: SchedulerDrizzleDb,
     runs: ScheduleRun[],
+    costProviderAttributionVersionByRunId: ReadonlyMap<string, number>,
   ): Promise<ScheduleRun[]> {
     if (runs.length === 0) return runs;
 
@@ -649,11 +637,6 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       runs.map((run) => run.sessionId).filter((id): id is string => Boolean(id)),
     );
 
-    const providerBySessionId = await sessionProviderIdsById(db, sessionIds);
-    const providerByScheduleId = await scheduleProviderIdsById(
-      db,
-      runs.map((run) => run.scheduleId),
-    );
     const rows =
       sessionIds.size === 0
         ? []
@@ -678,6 +661,8 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         costValues: RegionalMoney[];
         estimatedValues: RegionalMoney[];
         sdkEstimatedValues: RegionalMoney[];
+        snapshotCostValues: RegionalMoney[];
+        snapshotEstimatedValues: RegionalMoney[];
       }
     >();
     for (const row of rows) {
@@ -688,6 +673,8 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         costValues: [],
         estimatedValues: [],
         sdkEstimatedValues: [],
+        snapshotCostValues: [],
+        snapshotEstimatedValues: [],
       };
       if (cost.costMoney) current.costValues.push(cost.costMoney);
       if (cost.estimatedValueMoney) {
@@ -696,18 +683,20 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       if (cost.sdkEstimatedValueMoney) {
         current.sdkEstimatedValues.push(cost.sdkEstimatedValueMoney);
       }
+      if (cost.snapshotCostMoney) current.snapshotCostValues.push(cost.snapshotCostMoney);
+      if (cost.snapshotEstimatedValueMoney) {
+        current.snapshotEstimatedValues.push(cost.snapshotEstimatedValueMoney);
+      }
       ledger.set(origin.runId, current);
     }
 
     return runs.map((run) => {
       const persisted = ledger.get(run.id);
-      const fallbackProviderId =
-        (run.sessionId ? providerBySessionId.get(run.sessionId) : undefined) ??
-        providerByScheduleId.get(run.scheduleId);
+      const snapshotHasCurrentProviderAttribution =
+        costProviderAttributionVersionByRunId.get(run.id) ===
+        CURRENT_COST_PROVIDER_ATTRIBUTION_VERSION;
       const snapshotIsCustomProviderCost =
-        run.costAttribution === 'legacy'
-          ? true
-          : resolveCustomProviderCostFlag(undefined, fallbackProviderId);
+        run.costAttribution === 'legacy' || !snapshotHasCurrentProviderAttribution;
       if (!persisted) {
         const reclassified = reclassifyLegacyCustomProviderSnapshot(
           run.costMoney,
@@ -715,19 +704,11 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
           run.sdkEstimatedValueMoney,
           snapshotIsCustomProviderCost,
         );
-        const {
-          costMoney: _costMoney,
-          estimatedValueMoney: _estimatedValueMoney,
-          sdkEstimatedValueMoney: _sdkEstimatedValueMoney,
-          ...runWithoutMoney
-        } = run;
         return {
-          ...runWithoutMoney,
+          ...run,
           costMoney: reclassified.costMoney ?? zeroUsageMoney(),
           estimatedValueMoney: reclassified.estimatedValueMoney ?? zeroUsageMoney('value-estimate'),
-          ...(reclassified.sdkEstimatedValueMoney
-            ? { sdkEstimatedValueMoney: reclassified.sdkEstimatedValueMoney }
-            : {}),
+          sdkEstimatedValueMoney: reclassified.sdkEstimatedValueMoney ?? undefined,
         };
       }
       if (run.costAttribution === 'direct') {
@@ -767,32 +748,39 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         };
       }
       if (run.costAttribution === 'mixed') {
-        const snapshot = reclassifyLegacyCustomProviderSnapshot(
+        const directSnapshotCostMoney = remainingMoney(
           run.costMoney,
+          snapshotHasCurrentProviderAttribution
+            ? persisted.costValues
+            : persisted.snapshotCostValues,
+        );
+        const directSnapshotEstimatedValueMoney = remainingMoney(
           run.estimatedValueMoney,
+          snapshotHasCurrentProviderAttribution
+            ? persisted.estimatedValues
+            : persisted.snapshotEstimatedValues,
+        );
+        const directSnapshotSdkEstimatedValueMoney = remainingMoney(
           run.sdkEstimatedValueMoney,
-          snapshotIsCustomProviderCost,
-        );
-        const directCostMoney = remainingMoney(snapshot.costMoney, persisted.costValues);
-        const directEstimatedValueMoney = remainingMoney(
-          snapshot.estimatedValueMoney,
-          persisted.estimatedValues,
-        );
-        const directSdkEstimatedValueMoney = remainingMoney(
-          snapshot.sdkEstimatedValueMoney,
           persisted.sdkEstimatedValues,
+        );
+        const snapshot = reclassifyLegacyCustomProviderSnapshot(
+          directSnapshotCostMoney,
+          directSnapshotEstimatedValueMoney,
+          directSnapshotSdkEstimatedValueMoney,
+          snapshotIsCustomProviderCost,
         );
         return {
           ...run,
           costMoney:
             addCompatibleRegionalMoney(
-              [...(directCostMoney ? [directCostMoney] : []), ...persisted.costValues],
+              [...(snapshot.costMoney ? [snapshot.costMoney] : []), ...persisted.costValues],
               run.costMoney?.currency,
             ) ?? zeroUsageMoney(),
           estimatedValueMoney:
             addCompatibleRegionalMoney(
               [
-                ...(directEstimatedValueMoney ? [directEstimatedValueMoney] : []),
+                ...(snapshot.estimatedValueMoney ? [snapshot.estimatedValueMoney] : []),
                 ...persisted.estimatedValues,
               ],
               run.estimatedValueMoney?.currency,
@@ -800,7 +788,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
           sdkEstimatedValueMoney:
             addCompatibleRegionalMoney(
               [
-                ...(directSdkEstimatedValueMoney ? [directSdkEstimatedValueMoney] : []),
+                ...(snapshot.sdkEstimatedValueMoney ? [snapshot.sdkEstimatedValueMoney] : []),
                 ...persisted.sdkEstimatedValues,
               ],
               run.sdkEstimatedValueMoney?.currency,
@@ -925,7 +913,10 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
    */
   async listCostSummaries(): Promise<ScheduleCostSummary[]> {
     const db = this.getDb();
-    const runCostRows = (await db.select().from(scheduleRuns)).map(scheduleRunToCamel);
+    const runCostRows = (await db.select().from(scheduleRuns)).map((row) => ({
+      ...scheduleRunToCamel(row),
+      costProviderAttributionVersion: row.costProviderAttributionVersion,
+    }));
 
     const bySchedule = new Map<string, ScheduleTurnCostState>();
     const linkedSessionIds = new Set<string>();
@@ -966,8 +957,6 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       linkedScheduleIds.add(schedule.id);
     }
 
-    const providerBySessionId = await sessionProviderIdsById(db, scanSessionIds);
-    const providerByScheduleId = await scheduleProviderIdsById(db, linkedScheduleIds);
     const messageRows =
       scanSessionIds.size === 0
         ? []
@@ -1004,7 +993,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
     let activeSessionId: string | null = null;
     let activeScheduleId: string | null = null;
     const messageCostRunIds = new Set<string>();
-    const messageCostByRunId = new Map<string, ScheduleMoneyValues>();
+    const messageCostByRunId = new Map<string, ScheduleRunMessageMoneyValues>();
     const legacyMessageCostBySessionId = new Map<string, number>();
     for (const row of messageRows) {
       if (row.sessionId !== activeSessionId) {
@@ -1036,13 +1025,20 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       }
       if (assistantRunId) {
         messageCostRunIds.add(assistantRunId);
-        const runCost = messageCostByRunId.get(assistantRunId) ?? emptyScheduleMoneyValues();
+        const runCost =
+          messageCostByRunId.get(assistantRunId) ?? emptyScheduleRunMessageMoneyValues();
         if (turnCost.costMoney) runCost.costValues.push(turnCost.costMoney);
         if (turnCost.estimatedValueMoney) {
           runCost.estimatedValueValues.push(turnCost.estimatedValueMoney);
         }
         if (turnCost.sdkEstimatedValueMoney) {
           runCost.sdkEstimatedValueValues.push(turnCost.sdkEstimatedValueMoney);
+        }
+        if (turnCost.snapshotCostMoney) {
+          runCost.snapshotCostValues.push(turnCost.snapshotCostMoney);
+        }
+        if (turnCost.snapshotEstimatedValueMoney) {
+          runCost.snapshotEstimatedValueValues.push(turnCost.snapshotEstimatedValueMoney);
         }
         messageCostByRunId.set(assistantRunId, runCost);
       }
@@ -1111,13 +1107,8 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
     };
 
     const snapshotCustomProviderFlag = (run: (typeof runCostRows)[number]): boolean =>
-      run.costAttribution === 'legacy'
-        ? true
-        : resolveCustomProviderCostFlag(
-            undefined,
-            (run.sessionId ? providerBySessionId.get(run.sessionId) : undefined) ??
-              providerByScheduleId.get(run.scheduleId),
-          );
+      run.costAttribution === 'legacy' ||
+      run.costProviderAttributionVersion !== CURRENT_COST_PROVIDER_ATTRIBUTION_VERSION;
 
     for (const run of runCostRows) {
       if (run.costAttribution === 'unavailable' && run.status !== 'running') {
@@ -1181,34 +1172,46 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       }
       if (run.costAttribution === 'direct' || run.costAttribution === 'mixed') {
         const messageCost = messageCostByRunId.get(run.id);
-        const snapshot = reclassifyLegacyCustomProviderSnapshot(
-          run.costMoney,
-          run.estimatedValueMoney,
-          run.sdkEstimatedValueMoney,
-          snapshotCustomProviderFlag(run),
-        );
-        const costMoney =
+        const snapshotHasCurrentProviderAttribution =
+          run.costProviderAttributionVersion === CURRENT_COST_PROVIDER_ATTRIBUTION_VERSION;
+        const directSnapshotCostMoney =
           run.costAttribution === 'direct'
-            ? snapshot.costMoney
-            : remainingMoney(snapshot.costMoney, messageCost?.costValues ?? []);
-        const estimatedValueMoney =
-          run.costAttribution === 'direct'
-            ? snapshot.estimatedValueMoney
-            : remainingMoney(snapshot.estimatedValueMoney, messageCost?.estimatedValueValues ?? []);
-        const sdkEstimatedValueMoney =
-          run.costAttribution === 'direct'
-            ? snapshot.sdkEstimatedValueMoney
+            ? run.costMoney
             : remainingMoney(
-                snapshot.sdkEstimatedValueMoney,
+                run.costMoney,
+                snapshotHasCurrentProviderAttribution
+                  ? (messageCost?.costValues ?? [])
+                  : (messageCost?.snapshotCostValues ?? []),
+              );
+        const directSnapshotEstimatedValueMoney =
+          run.costAttribution === 'direct'
+            ? run.estimatedValueMoney
+            : remainingMoney(
+                run.estimatedValueMoney,
+                snapshotHasCurrentProviderAttribution
+                  ? (messageCost?.estimatedValueValues ?? [])
+                  : (messageCost?.snapshotEstimatedValueValues ?? []),
+              );
+        const directSnapshotSdkEstimatedValueMoney =
+          run.costAttribution === 'direct'
+            ? run.sdkEstimatedValueMoney
+            : remainingMoney(
+                run.sdkEstimatedValueMoney,
                 messageCost?.sdkEstimatedValueValues ?? [],
               );
+        const snapshot = reclassifyLegacyCustomProviderSnapshot(
+          directSnapshotCostMoney,
+          directSnapshotEstimatedValueMoney,
+          directSnapshotSdkEstimatedValueMoney,
+          snapshotCustomProviderFlag(run),
+        );
         const entry = bySchedule.get(run.scheduleId) ?? emptyScheduleTurnCostState();
         appendRunMoney(
           entry,
           run.sessionId,
-          costMoney,
-          estimatedValueMoney,
-          sdkEstimatedValueMoney,
+          snapshot.costMoney,
+          snapshot.estimatedValueMoney,
+          snapshot.sdkEstimatedValueMoney,
           run.firedAt,
         );
         bySchedule.set(run.scheduleId, entry);

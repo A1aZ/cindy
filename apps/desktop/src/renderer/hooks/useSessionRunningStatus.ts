@@ -48,8 +48,7 @@ import {
   useSessionAttentionSnapshot,
 } from '@/lib/sessionAttentionStore';
 import {
-  clearCompletedSchedulerOwnedRunForNewActivity,
-  clearCompletedSilencedRunForNewActivity,
+  clearCompletedRunMarkersForNewActivity,
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
 } from '@/lib/silencedSessionDoneStore';
@@ -210,8 +209,7 @@ export function useSessionRunningStatus(
         // 只清「run 已终态」的标记(用户手动起的新对话或下一个 run);run 还在跑时
         // 是 subagent 续 turn / silent-stop 自动续跑,标记必须留着。兜底定时器不在
         // 这里动 —— 统一由本 effect 末尾的对账按当前 running 状态处理。
-        clearCompletedSilencedRunForNewActivity(sessionId);
-        clearCompletedSchedulerOwnedRunForNewActivity(sessionId);
+        clearCompletedRunMarkersForNewActivity(sessionId);
         // error 红角标与真实错误态同步:新 turn 启动会清掉 store 的终止错误
         // (staleErrorClearedOnTurnStart),若此时角标还是 'error' 就成了 orphan——
         // 活跃会话的 done 分支不覆写它,角标会永久残留。错误已不存在,这里显式清除

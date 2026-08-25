@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import {
   DeviceLinkOwnershipArbiter,
   createSqliteExclusiveFileLock,
+  isSqliteLockContention,
   type OwnershipLock,
 } from '../ownership';
 
@@ -170,6 +171,24 @@ describe('DeviceLinkOwnershipArbiter', () => {
     }
   });
 
+  it('锁初始化失败(非竞争)→ 不假装他人持有,下一轮再试', () => {
+    const lock: OwnershipLock = {
+      tryAcquire() {
+        throw Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' });
+      },
+      release() {},
+      isHeld() {
+        return false;
+      },
+    };
+    const { arbiter, onAcquire, onStandbyChanged } = makeArbiter({ lock });
+    arbiter.tick();
+    expect(arbiter.isOwner()).toBe(false);
+    expect(arbiter.isStandby()).toBe(false);
+    expect(onAcquire).not.toHaveBeenCalled();
+    expect(onStandbyChanged).not.toHaveBeenCalled();
+  });
+
   it('失去持有权、接管和 stop 都会翻转待命状态', () => {
     const lock = memoryLock();
     const { arbiter, onStandbyChanged } = makeArbiter({ lock });
@@ -229,6 +248,35 @@ describe('createSqliteExclusiveFileLock', () => {
       b.release();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('SQLITE_BUSY 视为竞争;其它 sqlite 错误向上抛', () => {
+    const { dir, lockPath } = openTempLock();
+    try {
+      const busy = createSqliteExclusiveFileLock(lockPath, () => {
+        throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      });
+      expect(busy.tryAcquire()).toBe(false);
+
+      const io = createSqliteExclusiveFileLock(lockPath, () => {
+        throw Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' });
+      });
+      expect(() => io.tryAcquire()).toThrow(/disk I\/O error/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('isSqliteLockContention 只认忙/锁,不把 IO 错误当占用', () => {
+    expect(
+      isSqliteLockContention(
+        Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }),
+      ),
+    ).toBe(true);
+    expect(
+      isSqliteLockContention(Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' })),
+    ).toBe(false);
+    expect(isSqliteLockContention(new Error('database is locked'))).toBe(true);
   });
 
   it('双仲裁器共享同一文件锁:任意时刻至多一个持有者', () => {

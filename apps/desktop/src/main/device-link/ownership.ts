@@ -18,6 +18,11 @@
  *
  * 锁文件按 userId 隔离,不打开聊天库。历史表 device_link_ownership 不再读写。
  *
+ * 混版本不回写旧租约:旧进程只认那张表,新进程只认文件锁,两边互相看不见。
+ * 同 userData 的 official+dev 若一个仍走心跳、一个已换文件锁,会双连 relay
+ * (4409)。同版本之间由文件锁仲裁;跨版本请用 --isolated,或先退出旧进程。
+ * 不双写旧表 —— 那会重新绑上聊天库,并让「谁是持有者」出现两套判据。
+ *
  * 分层:本模块是纯 main 侧业务逻辑,锁依赖注入(可用内存实现单测),
  * packages/device-link 保持纯传输层不感知仲裁。
  */
@@ -32,6 +37,29 @@ const log = createLogger('device-link-ownership');
 
 /** 被动实例重试抢锁的间隔。崩溃后接管延迟由这一拍决定,不是过期窗口。 */
 export const DEFAULT_LOCK_RETRY_MS = 500;
+
+function sqliteErrorCode(err: unknown): string {
+  if (!err || typeof err !== 'object' || !('code' in err)) return '';
+  return String((err as { code: unknown }).code);
+}
+
+/** SQLITE_BUSY / LOCKED 是同伴持锁;其它错误不能当成「有人占用」。 */
+export function isSqliteLockContention(err: unknown): boolean {
+  const code = sqliteErrorCode(err);
+  if (
+    code === 'SQLITE_BUSY' ||
+    code === 'SQLITE_LOCKED' ||
+    code === 'SQLITE_BUSY_SNAPSHOT' ||
+    code === 'SQLITE_BUSY_RECOVERY' ||
+    code === 'SQLITE_BUSY_TIMEOUT' ||
+    code === '5' ||
+    code === '6'
+  ) {
+    return true;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return /database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(message);
+}
 
 export interface OwnershipLock {
   /** 非阻塞:拿到返回 true,已被他人持有返回 false */
@@ -211,9 +239,11 @@ export function createSqliteExclusiveFileLock(
         handle.exec('CREATE TABLE IF NOT EXISTS ownership_lock (id INTEGER PRIMARY KEY NOT NULL)');
         db = handle;
         return true;
-      } catch {
+      } catch (err) {
         if (handle) closeQuietly(handle);
-        return false;
+        if (isSqliteLockContention(err)) return false;
+        log.warn('ownership lock initialize failed', err);
+        throw err;
       }
     },
     release() {

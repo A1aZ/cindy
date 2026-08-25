@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const source = fs.readFileSync(fileURLToPath(new URL('../index.ts', import.meta.url)), 'utf8');
+const source = fs
+  .readFileSync(fileURLToPath(new URL('../index.ts', import.meta.url)), 'utf8')
+  .replace(/\r\n/g, '\n');
 
 function forgeInstallBody(): string {
   const start = source.indexOf('export async function installOrUpdateLocalGhostPackageFromForge');

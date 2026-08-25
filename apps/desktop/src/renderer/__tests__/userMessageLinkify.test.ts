@@ -99,6 +99,9 @@ describe('userMessageLinkify', () => {
     expect(urls('打开 https://例子。测试/path')).toEqual([
       'https://例子。测试/path',
     ]);
+    expect(urls('看 http://localhost:3000。然后')).toEqual([
+      'http://localhost:3000',
+    ]);
     expect(urls('打开 https://example.com/ＡＢＣ 与 https://example.com/ｶﾀｶﾅ')).toEqual([
       'https://example.com/ＡＢＣ',
       'https://example.com/ｶﾀｶﾅ',

@@ -371,29 +371,48 @@ function isIdnDomainDot(ch: string): boolean {
   return code === 0x3002 || code === 0xff0e || code === 0xff61;
 }
 
-function authorityEndIndex(raw: string): number {
-  const scheme = raw.match(/^https?:\/\//i);
-  const start = scheme ? scheme[0].length : 0;
-  for (let index = start; index < raw.length; index += 1) {
-    const ch = raw[index];
+function firstAuthDelimiterIndex(text: string, from = 0): number {
+  for (let index = from; index < text.length; index += 1) {
+    const ch = text[index];
     if (ch === '/' || ch === '?' || ch === '#') return index;
   }
-  return raw.length;
+  return text.length;
+}
+
+/** IDN 点号只在 hostname 内保留；端口和 IPv6 `]` 之后仍是正文边界。 */
+function hostnameEndIndex(raw: string): number {
+  const scheme = raw.match(/^https?:\/\//i);
+  let start = scheme ? scheme[0].length : 0;
+  const authEnd = firstAuthDelimiterIndex(raw, start);
+  const at = raw.lastIndexOf('@', authEnd - 1);
+  if (at >= start) start = at + 1;
+  if (raw[start] === '[') {
+    const close = raw.indexOf(']', start + 1);
+    return close >= 0 && close < authEnd ? close + 1 : authEnd;
+  }
+  for (let index = start; index < authEnd; index += 1) {
+    if (raw[index] === ':') return index;
+  }
+  return authEnd;
+}
+
+function isIdnDotInHostname(raw: string, index: number, hostnameEnd: number): boolean {
+  return index < hostnameEnd && isIdnDomainDot(raw[index] ?? '');
 }
 
 /**
- * 标点/全角符号是正文边界；authority 里的 IDN 点号（`例子。测试`）留下。
- * 路径开始后的 `。` 仍当句号切掉。无标点的 `path这是说明` 不猜。
+ * 标点/全角符号是正文边界；hostname 里的 IDN 点号（`例子。测试`）留下。
+ * 端口、IPv6 `]`、路径之后的 `。` 仍当句号切掉。
  */
 function findAutolinkProseBoundary(raw: string): number {
-  const authorityEnd = authorityEndIndex(raw);
+  const hostnameEnd = hostnameEndIndex(raw);
   for (let index = 0; index < raw.length; ) {
     const code = raw.codePointAt(index);
     if (code == null) break;
     const char = String.fromCodePoint(code);
     if (
       isAutolinkPunctuationBoundary(char) &&
-      !(index < authorityEnd && isIdnDomainDot(char))
+      !isIdnDotInHostname(raw, index, hostnameEnd)
     ) {
       return index;
     }

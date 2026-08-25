@@ -85,6 +85,15 @@ describe('clipBareHttpAutolinkText', () => {
     expect(clipBareHttpAutolinkText('https://example.com/path。然后')).toBe(
       'https://example.com/path',
     );
+    expect(clipBareHttpAutolinkText('http://localhost:3000。然后')).toBe(
+      'http://localhost:3000',
+    );
+    expect(clipBareHttpAutolinkText('https://[::1]:3000。然后')).toBe(
+      'https://[::1]:3000',
+    );
+    expect(clipBareHttpAutolinkText('https://例子。测试:443/path')).toBe(
+      'https://例子。测试:443/path',
+    );
   });
 });
 

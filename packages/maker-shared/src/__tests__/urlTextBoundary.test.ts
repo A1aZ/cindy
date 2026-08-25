@@ -73,6 +73,18 @@ describe('clipBareHttpAutolinkText', () => {
     expect(clipBareHttpAutolinkText('https://example.com/abc々def')).toBe(
       'https://example.com/abc々def',
     );
+    expect(clipBareHttpAutolinkText('https://例子。测试/path')).toBe(
+      'https://例子。测试/path',
+    );
+    expect(clipBareHttpAutolinkText('https://例子．测试/path')).toBe(
+      'https://例子．测试/path',
+    );
+    expect(clipBareHttpAutolinkText('https://例子｡测试/path')).toBe(
+      'https://例子｡测试/path',
+    );
+    expect(clipBareHttpAutolinkText('https://example.com/path。然后')).toBe(
+      'https://example.com/path',
+    );
   });
 });
 
@@ -83,8 +95,11 @@ describe('BARE_HTTP_URL_RE_SOURCE', () => {
         '诊断已写在 https://github.com/example/app/issues/3561#issuecomment-5391602790（无 @）。',
       ),
     ).toBe('https://github.com/example/app/issues/3561#issuecomment-5391602790');
+    expect(matchBareHttp('打开 https://例子。测试/path 看')).toBe(
+      'https://例子。测试/path',
+    );
     expect(matchBareHttp('看 https://example.com/path。然后')).toBe(
-      'https://example.com/path',
+      'https://example.com/path。然后',
     );
     expect(matchBareHttp('打开 https://example.com/路径 看')).toBe(
       'https://example.com/路径',

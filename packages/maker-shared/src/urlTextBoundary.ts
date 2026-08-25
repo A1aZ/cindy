@@ -343,11 +343,11 @@ export function shrinkAutolinkTrailingJunk(
 /**
  * 扫描器用的裸 http(s) 源。任意 Unicode 空白 / 尖括号 / 引号 / 省略号 /
  * 真正的 CJK·全角标点处结束。全角字母、半角片假名、々 等字母
- * 留在地址里；半角括号留给 `clipBareHttpAutolink` 按配对处理。
- * 标点范围与 `isAutolinkPunctuationBoundary` 的 P/Z 判定对齐，不是整块 Unicode block。
+ * 留在地址里；U+3002 / U+FF0E / U+FF61 是 IDN 点号，留给 clip 按
+ * authority 决定。半角括号留给 `clipBareHttpAutolink` 按配对处理。
  */
 export const BARE_HTTP_URL_RE_SOURCE =
-  String.raw`https?://[^\s<>"\u2018-\u201F\u2026\u3000-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]+`;
+  String.raw`https?://[^\s<>"\u2018-\u201F\u2026\u3000-\u3001\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\uFF01-\uFF0D\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF60\uFF62-\uFF65]+`;
 
 const MARKDOWN_FORMATTING_STRIP_BOUNDARY =
   /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
@@ -365,17 +365,38 @@ function isAutolinkPunctuationBoundary(ch: string): boolean {
   return /^\p{P}$/u.test(ch) || /^\p{Z}$/u.test(ch);
 }
 
+/** URL 标准会把这三者归一成 `.` 的域名分隔符。 */
+function isIdnDomainDot(ch: string): boolean {
+  const code = ch.codePointAt(0);
+  return code === 0x3002 || code === 0xff0e || code === 0xff61;
+}
+
+function authorityEndIndex(raw: string): number {
+  const scheme = raw.match(/^https?:\/\//i);
+  const start = scheme ? scheme[0].length : 0;
+  for (let index = start; index < raw.length; index += 1) {
+    const ch = raw[index];
+    if (ch === '/' || ch === '?' || ch === '#') return index;
+  }
+  return raw.length;
+}
+
 /**
- * 只有标点/全角符号是正文边界。汉字假名谚文一律算地址，
- * 不按「前一个字符是不是 ASCII」猜测（`www.例子.com`、`/2024年报告`
- * 都是浏览器能打开的 IRI）。无标点的 `path这是说明` 无法和真路径区分，不猜。
+ * 标点/全角符号是正文边界；authority 里的 IDN 点号（`例子。测试`）留下。
+ * 路径开始后的 `。` 仍当句号切掉。无标点的 `path这是说明` 不猜。
  */
 function findAutolinkProseBoundary(raw: string): number {
+  const authorityEnd = authorityEndIndex(raw);
   for (let index = 0; index < raw.length; ) {
     const code = raw.codePointAt(index);
     if (code == null) break;
     const char = String.fromCodePoint(code);
-    if (isAutolinkPunctuationBoundary(char)) return index;
+    if (
+      isAutolinkPunctuationBoundary(char) &&
+      !(index < authorityEnd && isIdnDomainDot(char))
+    ) {
+      return index;
+    }
     index += char.length;
   }
   return raw.length;

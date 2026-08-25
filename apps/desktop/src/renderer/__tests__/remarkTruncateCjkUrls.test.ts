@@ -160,6 +160,15 @@ describe('remarkTruncateCjkUrls', () => {
     expect(tail.value).toBe('（无 @）');
   });
 
+  it('authority 里的 IDN 点号保留：https://例子。测试/path', () => {
+    const tree = autolinkTree('https://例子。测试/path');
+    transform(tree);
+    const para = tree.children[0] as Paragraph;
+    const link = para.children[0] as Link;
+    expect(link.url).toBe('https://例子。测试/path');
+    expect(para.children).toHaveLength(1);
+  });
+
   it('URL 路径里的汉字保留：https://example.com/路径', () => {
     const tree = autolinkTree('https://example.com/路径');
     transform(tree);

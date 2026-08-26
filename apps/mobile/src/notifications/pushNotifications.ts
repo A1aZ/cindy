@@ -9,6 +9,7 @@ import {
   getMobileEndpointForRealm,
   loadMobileEndpointsForRealm,
 } from '@/config/env';
+import { getDevServerEnvironment } from '@/config/devServerEnvironment';
 import Notifications from './nativeNotifications';
 import { buildPushTokenRegistrationBody } from './pushRegistrationModel';
 
@@ -42,6 +43,22 @@ interface PushRealmState {
   realms: ClientEndpointRegion[];
 }
 
+function pushStateStorageKeys(baseKey: string): {
+  primary: string;
+  migrationFallback: string | null;
+} {
+  if (AUTH_REGION !== 'dev') {
+    return { primary: baseKey, migrationFallback: null };
+  }
+  const environment = getDevServerEnvironment();
+  return {
+    primary: `${baseKey}.${environment}`,
+    // 旧 CindyDev 只连接 Dev；无环境后缀的存量状态只能归到 Dev，绝不能
+    // 在首次切到 Release 时误迁移过去。
+    migrationFallback: environment === 'dev' ? baseKey : null,
+  };
+}
+
 /** React effects / token listener / 设置页可能同时触发，串行化避免注册与撤销倒序。 */
 let pushMutationTail: Promise<void> = Promise.resolve();
 /**
@@ -72,7 +89,13 @@ async function readPushRealms(
   legacyRealm: ClientEndpointRegion = BUILD_AUTH_REGION,
 ): Promise<Set<ClientEndpointRegion>> {
   try {
-    const raw = await AsyncStorage.getItem(key);
+    const storageKeys = pushStateStorageKeys(key);
+    const primaryRaw = await AsyncStorage.getItem(storageKeys.primary);
+    const raw =
+      primaryRaw ??
+      (storageKeys.migrationFallback
+        ? await AsyncStorage.getItem(storageKeys.migrationFallback)
+        : null);
     if (!raw || raw === '0') return new Set();
     if (raw === '1') return new Set([legacyRealm]);
     const parsed: unknown = JSON.parse(raw);
@@ -96,15 +119,26 @@ async function writePushRealms(
   key: string,
   realms: ReadonlySet<ClientEndpointRegion>,
 ): Promise<void> {
+  const storageKeys = pushStateStorageKeys(key);
   if (realms.size === 0) {
-    await AsyncStorage.removeItem(key);
+    await AsyncStorage.removeItem(storageKeys.primary);
+    if (storageKeys.migrationFallback) {
+      await AsyncStorage.removeItem(storageKeys.migrationFallback).catch(
+        () => undefined,
+      );
+    }
     return;
   }
   const state: PushRealmState = {
     version: PUSH_REALM_STATE_VERSION,
     realms: (['cn', 'global'] as const).filter((realm) => realms.has(realm)),
   };
-  await AsyncStorage.setItem(key, JSON.stringify(state));
+  await AsyncStorage.setItem(storageKeys.primary, JSON.stringify(state));
+  if (storageKeys.migrationFallback) {
+    await AsyncStorage.removeItem(storageKeys.migrationFallback).catch(
+      () => undefined,
+    );
+  }
 }
 
 async function addPushRealm(

@@ -11,7 +11,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { isTestFlightBuild } from '@/platform/appDistribution';
 import { runStartupEndpointResolve } from './clientEndpointStartup';
-import { resolveEnvFlag } from './env';
+import {
+  BUILD_AUTH_REGION,
+  DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL,
+  ENDPOINT_MANIFEST_BASE_URL,
+  resolveEnvFlag,
+} from './env';
+import {
+  DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED,
+  buildDevServerEndpointStartupSteps,
+  hydrateDevServerEnvironment,
+} from './devServerEnvironment';
 
 export type StartupEndpointGateStatus = 'pending' | 'ready' | 'error';
 
@@ -24,8 +34,13 @@ export interface StartupEndpointGate {
 }
 
 export function useStartupEndpointGate(): StartupEndpointGate {
-  const enabled = !__DEV__ || resolveEnvFlag(process.env.EXPO_PUBLIC_ENDPOINTS_CDN);
-  const [status, setStatus] = useState<StartupEndpointGateStatus>(enabled ? 'pending' : 'ready');
+  const defaultEndpointGateEnabled =
+    !__DEV__ || resolveEnvFlag(process.env.EXPO_PUBLIC_ENDPOINTS_CDN);
+  const enabled =
+    defaultEndpointGateEnabled || DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED;
+  const [status, setStatus] = useState<StartupEndpointGateStatus>(
+    enabled ? 'pending' : 'ready',
+  );
   const [reason, setReason] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const running = useRef(false);
@@ -35,12 +50,32 @@ export function useStartupEndpointGate(): StartupEndpointGate {
     if (status === 'error') return; // 等用户点重试
     running.current = true;
     let cancelled = false;
-    void runStartupEndpointResolve({ resolveIsTestFlight: isTestFlightBuild }).then((outcome) => {
+    void (async () => {
+      const environment = DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED
+        ? await hydrateDevServerEnvironment()
+        : 'dev';
+      const steps = buildDevServerEndpointStartupSteps({
+        buildManifestBaseUrl: ENDPOINT_MANIFEST_BASE_URL,
+        defaultEndpointGateEnabled,
+        environment,
+        releaseManifestBaseUrl: DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL,
+        switchEnabled: DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED,
+      });
+      for (const step of steps) {
+        const outcome = await runStartupEndpointResolve({
+          expectedRegion: BUILD_AUTH_REGION,
+          manifestBaseUrl: step.manifestBaseUrl,
+          preserveBuildReleaseMetadata: step.preserveBuildReleaseMetadata,
+          resolveIsTestFlight: isTestFlightBuild,
+        });
+        if (!outcome.ok) return outcome;
+      }
+      return { ok: true as const, source: 'cdn' as const };
+    })().then((outcome) => {
       running.current = false;
       if (cancelled) return;
-      if (outcome.ok) {
-        setStatus('ready');
-      } else {
+      if (outcome.ok) setStatus('ready');
+      else {
         setReason(outcome.reason);
         setStatus('error');
       }
@@ -48,7 +83,7 @@ export function useStartupEndpointGate(): StartupEndpointGate {
     return () => {
       cancelled = true;
     };
-  }, [enabled, status, attempt]);
+  }, [defaultEndpointGateEnabled, enabled, status, attempt]);
 
   const retry = useCallback(() => {
     setReason(null);

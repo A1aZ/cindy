@@ -94,6 +94,21 @@ test('Mobile bundling 进程环境只在 CindyDev 保留 Release 清单基址', 
   );
 });
 
+test('Mobile 构建入口不把动态异常或环境变量值写入失败日志', () => {
+  for (const relativePath of [
+    'apps/mobile/scripts/build-android.mjs',
+    'apps/mobile/scripts/build-ios.mjs',
+  ]) {
+    const source = fs.readFileSync(path.resolve(relativePath), 'utf8');
+    const catchBlock = source.slice(source.lastIndexOf('main().catch('));
+
+    assert.match(catchBlock, /main\(\)\.catch\(\(\) => \{/);
+    assert.doesNotMatch(catchBlock, /process\.env/);
+    assert.doesNotMatch(catchBlock, /err(?:or)?\??\.(?:message|stack)/i);
+    assert.doesNotMatch(catchBlock, /scrubSecretsFromText/);
+  }
+});
+
 test('端点清单自举基址缺失、非法协议或携带凭据时 fail closed', () => {
   const repoRoot = writeRepoFixtures();
   const cnPath = path.join(repoRoot, 'config', 'endpoint.json');

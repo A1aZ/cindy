@@ -252,7 +252,7 @@ import { ThinkingCard } from './ThinkingCard';
 import { AgentActionsBlock } from './AgentActionsBlock';
 import { AgentTaskCard } from './AgentTaskCard';
 import { TurnChangesCard } from './TurnChangesCard';
-import { GeneratedFilesCard } from './GeneratedFilesCard';
+import { GeneratedFilesCard, generatedFilesCheckKey } from './GeneratedFilesCard';
 import { WorkGroupBlock, type WorkGroupChild } from './WorkGroupBlock';
 import {
   extractAnchorCardId,
@@ -493,6 +493,8 @@ type GeneratedFilesRenderItem = {
   files: GeneratedFileRef[];
   turnStartMs: number | null;
   turnEndMs: number | null;
+  /** 最新一轮没有后续 user 边界时 turnEndMs 仍为空，用封口信号触发完成后复核。 */
+  turnSealed?: boolean;
 };
 
 /** 原子工作子项:tool / agent task / thinking / assistant 工作文字。 */
@@ -950,6 +952,35 @@ function isCompletedAssistantMessage(message: ChatMessage): boolean {
     // 与费用字段一样是等价的收尾信号 —— 少这一条,无金额轮就挂不出 action bar。
     message.turnUsageDetails !== undefined
   );
+}
+
+function isGeneratedFilesSubTurnTerminal(message: ChatMessage): boolean {
+  // 显式失败也是子轮终态:后续没有新工作就该封口复核,不能把失败当成「还在跑」。
+  return message.turnCompleted === false || isCompletedAssistantMessage(message);
+}
+
+/**
+ * 产物卡封口只看当前尾部子轮。同一可见 user turn 在 turnCompleted 后自动续跑时,
+ * 前一子轮的收尾信号不得让后续 ready:false 的文件立刻 stat。
+ * export 仅供单测使用。
+ */
+export function isGeneratedFilesTurnSealed(
+  slice: readonly ChatMessage[],
+  hasFollowingUser: boolean,
+): boolean {
+  if (hasFollowingUser) return true;
+  let lastTerminalIdx = -1;
+  for (let i = 0; i < slice.length; i++) {
+    if (isGeneratedFilesSubTurnTerminal(slice[i])) lastTerminalIdx = i;
+  }
+  if (lastTerminalIdx < 0) return false;
+  for (let i = lastTerminalIdx + 1; i < slice.length; i++) {
+    const message = slice[i];
+    if (message.role === 'tool_use') return false;
+    if (message.role === 'user' && message.isSyntheticTrigger === true) return false;
+    if (message.role === 'assistant' && !message.systemCardType) return false;
+  }
+  return true;
 }
 
 export function collectTurnFinalAssistantClientIds(messages: readonly ChatMessage[]): Set<string> {
@@ -1727,12 +1758,15 @@ export function buildRenderItems(
       }
     }
     const boundaryTimestamp = Date.parse(messages[hi]?.createdAt ?? '');
+    const hasFollowingUser = hi < messages.length;
+    const turnSealed = isGeneratedFilesTurnSealed(slice, hasFollowingUser);
     items.push({
       type: 'generated_files',
       key: `genfiles-${messages[lo].clientId}`,
       files: generatedFiles,
       turnStartMs,
       turnEndMs: Number.isFinite(boundaryTimestamp) ? boundaryTimestamp : null,
+      turnSealed,
     });
   };
   let i = 0;
@@ -2121,6 +2155,43 @@ export function buildRenderItems(
   }
 
   return { items, singleResultMap };
+}
+
+type GeneratedFilesRenderItemRef = Extract<RenderItem, { type: 'generated_files' }>;
+
+/**
+ * 产物卡内容没变时沿用上一轮 item。buildRenderItems 每次都 new 一个 files
+ * 数组,不收口的话 memo 住的 GeneratedFilesCard 仍会因 props 引用变化而重渲。
+ */
+export function reuseGeneratedFilesRenderItems(
+  items: RenderItem[],
+  cache: Map<string, GeneratedFilesRenderItemRef>,
+): RenderItem[] {
+  const seen = new Set<string>();
+  let swapped = false;
+  const next = items.map((item) => {
+    if (item.type !== 'generated_files') return item;
+    seen.add(item.key);
+    const previous = cache.get(item.key);
+    if (
+      previous &&
+      generatedFilesCheckKey(
+        previous.files,
+        previous.turnStartMs,
+        previous.turnEndMs,
+        previous.turnSealed,
+      ) === generatedFilesCheckKey(item.files, item.turnStartMs, item.turnEndMs, item.turnSealed)
+    ) {
+      if (previous !== item) swapped = true;
+      return previous;
+    }
+    cache.set(item.key, item);
+    return item;
+  });
+  for (const key of cache.keys()) {
+    if (!seen.has(key)) cache.delete(key);
+  }
+  return swapped ? next : items;
 }
 
 // ---------------------------------------------------------------------------
@@ -3198,25 +3269,29 @@ export function MessageStream({
   // 全量 build:折叠 / 丢弃 / 反向膨胀的所有规则一次性吸收 — 窗口看到的就是
   // 用户看到的。流式中每 token messages 引用变 → 这里跑一次 O(n) 单线性扫描,
   // 实测 N=1000 < 2ms (Windows),如果未来发现瓶颈再走增量化(out of scope)。
-  const { items: ungroupedRenderItems, singleResultMap } = useMemo(
-    () =>
-      buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
-        historyWindowIncomplete:
-          !historyLoaded || Boolean(hasMoreMessages) || historyWindowHasIsland,
-        turnChangeSets,
-        workingDir,
-      }),
-    [
-      messages,
-      taskUpdates,
-      ghostCardSnapshot,
-      historyLoaded,
-      hasMoreMessages,
-      historyWindowHasIsland,
+  const generatedFilesItemCacheRef = useRef(
+    new Map<string, Extract<RenderItem, { type: 'generated_files' }>>(),
+  );
+  const { items: ungroupedRenderItems, singleResultMap } = useMemo(() => {
+    const built = buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
+      historyWindowIncomplete: !historyLoaded || Boolean(hasMoreMessages) || historyWindowHasIsland,
       turnChangeSets,
       workingDir,
-    ],
-  );
+    });
+    return {
+      items: reuseGeneratedFilesRenderItems(built.items, generatedFilesItemCacheRef.current),
+      singleResultMap: built.singleResultMap,
+    };
+  }, [
+    messages,
+    taskUpdates,
+    ghostCardSnapshot,
+    historyLoaded,
+    hasMoreMessages,
+    historyWindowHasIsland,
+    turnChangeSets,
+    workingDir,
+  ]);
   const assistantsWithFollowingUserBoundary = useMemo(
     () => collectAssistantsWithFollowingUserBoundary(visibleMessages),
     [visibleMessages],
@@ -5870,6 +5945,7 @@ export function MessageStream({
                           files={item.files}
                           turnStartMs={item.turnStartMs}
                           turnEndMs={item.turnEndMs}
+                          turnSealed={item.turnSealed === true}
                         />
                       );
                     }

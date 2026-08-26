@@ -184,6 +184,34 @@ export async function replaceSessionTurnLease(
   return result.changes === 1;
 }
 
+/** Refresh one live generation's owner proof without changing its turn identity. */
+export async function refreshSessionTurnLeaseOwner(
+  dbClient: Pick<DbClient, 'exec'>,
+  input: {
+    sessionId: string;
+    turnId: string;
+    owner: ReviewRunOwner;
+  },
+): Promise<boolean> {
+  const lease: SessionTurnLease = {
+    version: 1,
+    turnId: input.turnId,
+    owner: input.owner,
+  };
+  const result = await dbClient.exec(
+    `UPDATE messages
+        SET agent_meta = ?
+      WHERE session_id = ? AND client_id = ? AND content = ?`,
+    [
+      sessionTurnLeaseAgentMeta(lease),
+      input.sessionId,
+      sessionTurnLeaseClientId(input.owner),
+      sessionTurnLeaseToken(lease),
+    ],
+  );
+  return result.changes === 1;
+}
+
 /** Delete only the exact turn that acquired the row; a delayed end cannot delete its successor. */
 export async function releaseSessionTurnLease(
   dbClient: Pick<DbClient, 'exec'>,
@@ -198,9 +226,10 @@ export async function releaseSessionTurnLease(
   return result.changes === 1;
 }
 
-export async function listPersistedSessionTurnLeases(
+/** Read and recover turn leases only when that exact task needs them. */
+export async function readPersistedSessionTurnLeases(
   dbClient: Pick<DbClient, 'query'>,
-  sessionId?: string,
+  sessionId: string,
 ): Promise<PersistedSessionTurnLeaseRow[]> {
   const rows = await dbClient.query<{
     id: string;
@@ -210,10 +239,8 @@ export async function listPersistedSessionTurnLeases(
   }>(
     `SELECT id, client_id AS clientId, session_id AS sessionId, agent_meta AS agentMeta
        FROM messages
-      WHERE client_id LIKE ?${sessionId ? ' AND session_id = ?' : ''}`,
-    sessionId
-      ? [`${SESSION_TURN_LEASE_CLIENT_ID_PREFIX}%`, sessionId]
-      : [`${SESSION_TURN_LEASE_CLIENT_ID_PREFIX}%`],
+      WHERE session_id = ? AND client_id LIKE ?`,
+    [sessionId, `${SESSION_TURN_LEASE_CLIENT_ID_PREFIX}%`],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -221,13 +248,6 @@ export async function listPersistedSessionTurnLeases(
     sessionId: row.sessionId,
     lease: readSessionTurnLeaseFromAgentMeta(row.agentMeta),
   }));
-}
-
-export function readPersistedSessionTurnLeases(
-  dbClient: Pick<DbClient, 'query'>,
-  sessionId: string,
-): Promise<PersistedSessionTurnLeaseRow[]> {
-  return listPersistedSessionTurnLeases(dbClient, sessionId);
 }
 
 /** Remove a malformed row only while its immutable id still identifies the same lease row. */
@@ -378,6 +398,26 @@ export class SessionTurnLeaseTracker {
     });
   }
 
+  /** Add newly available exact-instance liveness to this process's active leases only. */
+  async refreshActiveLeaseOwners(): Promise<void> {
+    const activeTurns = [...this.activeTurnIds.entries()];
+    await Promise.all(
+      activeTurns.map(([sessionId, turnId]) =>
+        this.enqueue(sessionId, async () => {
+          if (this.activeTurnIds.get(sessionId) !== turnId) return;
+          const refreshed = await refreshSessionTurnLeaseOwner(this.deps.getDbClient(), {
+            sessionId,
+            turnId,
+            owner: this.deps.owner,
+          });
+          if (!refreshed && this.activeTurnIds.get(sessionId) === turnId) {
+            throw new Error('could not refresh the active turn lease owner');
+          }
+        }),
+      ),
+    );
+  }
+
   /** End one exact generation and report whether no local/shared successor remains. */
   async markTurnEndedAndCheckIdle(sessionId: string, expectedTurnId: string): Promise<boolean> {
     await this.markTurnEnded(sessionId, expectedTurnId);
@@ -394,11 +434,5 @@ export class SessionTurnLeaseTracker {
       if (!(await this.clearRecoverableLease(dbClient, row))) active = true;
     }
     return active;
-  }
-
-  async reconcileStaleLeases(): Promise<void> {
-    const dbClient = this.deps.getDbClient();
-    const rows = await listPersistedSessionTurnLeases(dbClient);
-    for (const row of rows) await this.clearRecoverableLease(dbClient, row);
   }
 }

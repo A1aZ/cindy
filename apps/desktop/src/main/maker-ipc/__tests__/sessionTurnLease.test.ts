@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../localDb/client/DbClient.js';
 import {
   readPersistedSessionTurnLeases,
+  refreshSessionTurnLeaseOwner,
   releaseSessionTurnLease,
   replaceSessionTurnLease,
   SESSION_TURN_LEASE_CLIENT_ID_PREFIX,
@@ -56,7 +57,7 @@ describe('shared-process session turn lease', () => {
         ON messages(session_id, client_id);
       INSERT INTO sessions
         (id, status, active_turn_started_at, last_turn_ended_at)
-      VALUES ('source-1', 'active', 20, 10);
+      VALUES ('source-1', 'active', 20, 10), ('source-2', 'active', 20, 10);
     `);
     const second = new Database(dbPath);
     second.pragma('foreign_keys = ON');
@@ -222,6 +223,49 @@ describe('shared-process session turn lease', () => {
     await expect(readPersistedSessionTurnLeases(first, 'source-1')).resolves.toEqual([]);
   });
 
+  it('refreshes active PID-only leases with exact liveness without overwriting a successor', async () => {
+    const { first } = setup();
+    const owner = { instanceId: 'first', processId: 101 } as {
+      instanceId: string;
+      processId: number;
+      liveness?: { version: 1; port: number; token: string };
+    };
+    const tracker = new SessionTurnLeaseTracker({
+      getDbClient: () => first,
+      owner,
+      createTurnId: () => 'fallback',
+      now: () => 1,
+      ownerProcessEnded: () => false,
+    });
+
+    await tracker.markTurnStarted('source-1', 'generation-1');
+    const initialLease = (await readPersistedSessionTurnLeases(first, 'source-1'))[0]?.lease;
+    expect(initialLease).toMatchObject({ turnId: 'generation-1' });
+    expect(initialLease?.owner).not.toHaveProperty('liveness');
+
+    owner.liveness = {
+      version: 1,
+      port: 31_337,
+      token: 'current-instance-token',
+    };
+    await tracker.refreshActiveLeaseOwners();
+    await expect(readPersistedSessionTurnLeases(first, 'source-1')).resolves.toMatchObject([
+      { lease: { turnId: 'generation-1', owner: { liveness: owner.liveness } } },
+    ]);
+
+    await tracker.markTurnStarted('source-1', 'generation-2');
+    await expect(
+      refreshSessionTurnLeaseOwner(first, {
+        sessionId: 'source-1',
+        turnId: 'generation-1',
+        owner,
+      }),
+    ).resolves.toBe(false);
+    await expect(readPersistedSessionTurnLeases(first, 'source-1')).resolves.toMatchObject([
+      { lease: { turnId: 'generation-2', owner: { liveness: owner.liveness } } },
+    ]);
+  });
+
   it('makes a peer turn visible until its exact lifecycle ends', async () => {
     const { first, second } = setup();
     const firstTracker = new SessionTurnLeaseTracker({
@@ -245,12 +289,18 @@ describe('shared-process session turn lease', () => {
     await expect(secondTracker.isTurnActive('source-1')).resolves.toBe(false);
   });
 
-  it('reclaims dead and malformed leases without acknowledging interrupted-turn markers', async () => {
+  it('reclaims dead and malformed leases only for the requested task', async () => {
     const { first, raw } = setup();
     const deadOwner = { instanceId: 'dead', processId: 303 };
     await tryAcquireSessionTurnLease(first, {
       sessionId: 'source-1',
       turnId: 'dead-turn',
+      owner: deadOwner,
+      createdAt: 1,
+    });
+    await tryAcquireSessionTurnLease(first, {
+      sessionId: 'source-2',
+      turnId: 'other-dead-turn',
       owner: deadOwner,
       createdAt: 1,
     });
@@ -269,7 +319,6 @@ describe('shared-process session turn lease', () => {
       ownerProcessEnded: (owner) => owner.instanceId === deadOwner.instanceId,
     });
 
-    await tracker.reconcileStaleLeases();
     await expect(tracker.isTurnActive('source-1')).resolves.toBe(false);
     expect(
       raw
@@ -280,5 +329,8 @@ describe('shared-process session turn lease', () => {
         .get(),
     ).toEqual({ startedAt: 20, endedAt: 10 });
     await expect(readPersistedSessionTurnLeases(first, 'source-1')).resolves.toEqual([]);
+    await expect(readPersistedSessionTurnLeases(first, 'source-2')).resolves.toMatchObject([
+      { lease: { turnId: 'other-dead-turn' } },
+    ]);
   });
 });

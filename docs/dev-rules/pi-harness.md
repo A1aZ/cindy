@@ -130,6 +130,22 @@ Claude Code 仍用独立百分比。env:`CINDY_PI_API_KEY`、
    extension(`cindy-bridge` / `cindy-subagent`)源码字节必须进入 launch identity:
    `CINDY_PI_EXTENSION_BUNDLE_HASH` 只由源码确定,禁止随机数或时间戳;字节不变可 reattach,
    字节变化必须 restart。
+11. **正式包后台脚本启动边界**:Desktop 正式包保持 `RunAsNode=false`,因此 Main 的
+   `process.execPath` 是 Cindy 应用程序,**不是 Node 可执行文件**。Pi Subagent 的 durable
+   runner 必须经 host 注入的 `spawnPiSubagentRunner` 交给 Desktop
+   `utilityProcess.fork` 固定入口执行;扩展与 maker-core 不得再拼
+   `ELECTRON_RUN_AS_NODE=1` 或把 `process.execPath` 写入子代理 env。开发版 / Vitest 里
+   `process.execPath` 恰好可执行 JavaScript 不构成生产证据。打包契约测试必须同时断言
+   `RunAsNode=false`、固定 utility-process 入口在 forge 清单中、Pi host 使用该入口，避免
+   两份各自正确的测试再次掩盖跨模块矛盾。身份校验必须读未截断命令行（POSIX `ps -ww`
+   / Linux `/proc/<pid>/cmdline`）；成功读到的命令行不含本 run 的 `runnerScript` 即
+   视为 gone，只有读失败才 unverifiable。紧急停止和就绪超时都先对 runner pid 发 SIGTERM
+   再 SIGKILL，禁止 `kill(-pid)` 把 utility-process 当成独立进程组。未确认退出不得写
+   failed 终态（控制协议要带回 unconfirmed），否则 quit / 账号边界 sweep 会跳过仍可能活着的 runner。
+   真正 spawn 前必须再读一次账号边界，并把在途 launch 纳入 teardown 收敛。Host 只用
+   realpath 校验包含关系，传给 runner 的 argv 必须与 `config.runDir` 同一套原始绝对路径。
+   dispose 未确认 runner 退出必须失败；Host 观察到的退出要能通过控制协议通知前台等待，不能只靠 status.json。
+   Windows 上 SIGTERM 不得带 taskkill /F；前台若已读到终态必须先返回，不得被 Host 退出通知盖成失败。
 
 ## 5. 已交付(2026-07 里程碑)
 

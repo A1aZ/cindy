@@ -96,6 +96,19 @@ const noopLogger: Logger = {
   child: () => noopLogger,
 };
 
+function testSubagentRunnerHost() {
+  const handle = {
+    pid: 4321,
+    killed: false,
+    once(event: 'spawn' | 'error' | 'exit' | 'close', listener: (...args: unknown[]) => void) {
+      if (event === 'spawn') queueMicrotask(listener);
+      return handle;
+    },
+    kill: () => true,
+  };
+  return handle as never;
+}
+
 describe('Pi provider-aware model routing', () => {
   let agentHome = '';
 
@@ -289,6 +302,7 @@ describe('Pi provider-aware model routing', () => {
       logger: noopLogger,
       capabilityAdditions: { availableModels },
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: testSubagentRunnerHost,
       resolvePiGatewayModelApi: () => 'openai-responses',
       registerPiProxySession: (_sessionId, token, resolveProviderId, options) => {
         if (options?.scope !== 'subagent-route') resolveProxyProviderId = resolveProviderId;
@@ -581,6 +595,7 @@ describe('Pi provider-aware model routing', () => {
         }],
       },
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: testSubagentRunnerHost,
       resolvePiNativeProviders: async () => ({
         providers: [
           {
@@ -655,6 +670,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: testSubagentRunnerHost,
       resolvePiNativeProviders: async () => ({
         providers: [
           {
@@ -821,6 +837,7 @@ describe('Pi provider-aware model routing', () => {
         }],
       },
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: testSubagentRunnerHost,
       resolvePiNativeProviders: async () => ({
         providers: [{
           id: 'xai',
@@ -873,6 +890,7 @@ describe('Pi provider-aware model routing', () => {
         }],
       },
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: testSubagentRunnerHost,
       resolvePiNativeProviders: async () => ({
         providers: [{
           id: 'xai',
@@ -2365,6 +2383,7 @@ describe('Pi provider-aware model routing', () => {
       availableModels,
     },
     resolvePiAgentHome: () => agentHome,
+    spawnPiSubagentRunner: testSubagentRunnerHost,
     resolvePiGatewayModelApi: () => 'anthropic-messages',
     resolvePiNativeProviders,
   });

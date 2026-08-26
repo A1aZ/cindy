@@ -68,6 +68,8 @@ const REGISTERED_KEY = 'cindy.push.registered';
 const PENDING_KEY = 'cindy.push.pendingUnregister';
 const DEV_REGISTERED_KEY = `${REGISTERED_KEY}.dev`;
 const RELEASE_REGISTERED_KEY = `${REGISTERED_KEY}.release`;
+const DEV_PENDING_KEY = `${PENDING_KEY}.dev`;
+const RELEASE_PENDING_KEY = `${PENDING_KEY}.release`;
 
 function setStoredRealms(key: string, realms: Array<'cn' | 'global'>): void {
   store.set(key, JSON.stringify({ version: 1, realms }));
@@ -160,6 +162,35 @@ describe('push notification realm routing', () => {
     expect(readStoredRealms(DEV_REGISTERED_KEY)).toEqual(['cn']);
     expect(readStoredRealms(RELEASE_REGISTERED_KEY)).toEqual(['cn']);
     expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('注册期间切换 CindyDev 环境仍把补偿状态留在原 namespace', async () => {
+    envState.buildRegion = 'dev';
+    let releaseRead: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    mocks.asyncGetItem.mockImplementationOnce(async (key: string) => {
+      expect(key).toBe(DEV_REGISTERED_KEY);
+      await readGate;
+      return null;
+    });
+    const apiFetch = vi.fn();
+
+    const registration = syncPushRegistration({ enabled: true, apiFetch });
+    await vi.waitFor(() => {
+      expect(mocks.asyncGetItem).toHaveBeenCalledWith(DEV_REGISTERED_KEY);
+    });
+    await unregisterPushTokenBestEffort(null, 'cn');
+    devEnvironmentState.active = 'release';
+    releaseRead?.();
+
+    await expect(registration).resolves.toBe('skipped');
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(readStoredRealms(DEV_REGISTERED_KEY)).toEqual(['cn']);
+    expect(readStoredRealms(DEV_PENDING_KEY)).toEqual(['cn']);
+    expect(store.has(RELEASE_REGISTERED_KEY)).toBe(false);
+    expect(store.has(RELEASE_PENDING_KEY)).toBe(false);
   });
 
   it('Release 环境不读取旧 CindyDev 的无后缀状态', async () => {

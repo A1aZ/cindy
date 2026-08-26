@@ -5766,8 +5766,9 @@ async function installOrUpdateMarketGhostPackageLocked(
     releaseMutation = beginGhostMutation(mutationOwner);
     if (!installed) {
       // 市场首装一律装完即开(defaultInstall 与手动安装归一)，用户不必再手动
-      // 点一次开关。市场包走服务端校验 + sha256 下载校验，并受目录 manifest
-      // 能力上限约束；本地 .cindy 由明确的文件选择、拖入或双击动作直接装入。
+      // 点一次开关。市场包走服务端校验 + sha256 下载校验；自定义 Git/本地市场
+      // 额外受发现 Manifest 上限约束。本地 .cindy 由明确的文件选择、拖入或双击
+      // 动作直接装入。
       // expectedPackageSha256 把"检查过的字节"与"落位的字节"钉死为同一份:
       // inspect 与 install 各自重读磁盘,临时 .cindy 在两读之间被替换时,
       // 所有前置校验(保留前缀/能力上限/签名/解压上限)都会作用在旧字节上。

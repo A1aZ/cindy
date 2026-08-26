@@ -958,6 +958,12 @@ export function buildPiSettingsJsonContent(
     : Math.max(1, Math.ceil(effectiveContextWindow * (1 - piCompactionPct / 100)));
   return JSON.stringify({
     transport: 'sse',
+    retry: {
+      enabled: true,
+      maxRetries: 6,
+      baseDelayMs: 2000,
+      provider: { maxRetries: 0 },
+    },
     ...(reserveTokens !== undefined
       ? { compaction: { reserveTokens } }
       : {}),
@@ -1239,7 +1245,7 @@ export class PiAgent extends BaseAgent {
   ): Promise<{
     gatewayImageInputByModel: Map<string, boolean>;
     gatewayApiByModel: Map<string, 'anthropic-messages' | 'openai-responses'>;
-    /** models.json 内容 sha256 —— 远端 daemon 启动身份的一部分(轮 42 P1)。 */
+    /** models.json + settings.json 内容 sha256 —— 远端 daemon 启动身份的一部分。 */
     modelsJsonHash: string;
   }> {
     // 远端:baseUrl 用 host 注入的 upstream endpoint(remoteEndpoint,gateway key 同源),
@@ -1370,12 +1376,20 @@ export class PiAgent extends BaseAgent {
     }
     const modelsJsonPath = joinRemotePosixPath(agentHome, 'models.json');
     const modelsJsonContent = JSON.stringify({ providers }, null, 2) + '\n';
-    const modelsJsonHash = createHash('sha256').update(modelsJsonContent).digest('hex');
     const settingsJsonPath = joinRemotePosixPath(agentHome, 'settings.json');
     // The native ChatGPT adapter prefers WebSocket in auto mode. Cindy's
     // authenticated loopback proxy is an HTTP/SSE boundary, so pin SSE for the
     // isolated embedded runtime. Other PI providers ignore this transport knob.
+    // Agent-level retries stay with Pi (provider maxRetries stays 0 — Pi docs:
+    // SDK retries can swallow quota errors before the agent sees them).
     const settingsJsonContent = this.buildCurrentPiSettingsJson(opts.contextWindow, opts.piCompactionPct);
+    // 远端 launch identity 必须覆盖进程启动才读的快照。只 hash models.json 时，
+    // retry/transport/compaction 改写会落到旧 configHome，daemon 纯 attach。
+    const modelsJsonHash = createHash('sha256')
+      .update(modelsJsonContent)
+      .update('\n')
+      .update(settingsJsonContent)
+      .digest('hex');
     if (!opts.preview) {
       // 诊断(排查 LAZY_CREATE_FAILED):远端写前留痕 —— 确认 writeModelsJson 是否
       // 执行、endpoint 是否有值、路径形态。
@@ -1405,9 +1419,8 @@ export class PiAgent extends BaseAgent {
     return {
       gatewayImageInputByModel,
       gatewayApiByModel,
-      // 轮 42 P1(codex-connector):models.json 内容 hash 纳入远端 daemon 启动身份
-      // —— BYOM baseUrl/wire 或 gateway endpoint 变更会改写此文件, 但 env/cmd
-      // 可能不变; 不加这个 daemon 会误判纯 attach 用旧配置。
+      // 远端 daemon 启动身份:models.json + settings.json。BYOM/gateway 或 retry
+      // 策略变更都必须杀旧进程，不能纯 attach 沿用内存里的旧快照。
       modelsJsonHash,
     };
   }
@@ -1930,9 +1943,9 @@ export class PiAgent extends BaseAgent {
     // → 纯 attach 复用同一路径, 无并发写; envHash 不同(如模型变更) → kill
     // 先于 spawn, 旧进程已死, 路径复用安全。本地会话无 envHash 约束, 保持
     // randomBytes 隔离(多实例并发启动)。
-    // 远端再叠 models.json hash:startSession 在 pi/ensure 之前就会写
-    // models.json, 若只按 sessionId 分目录, 另一实例改路由会先覆盖仍在跑的
-    // 旧 Pi / 子代理热读快照。
+    // 远端再叠 models.json+settings.json hash:startSession 在 pi/ensure 之前就会写
+    // 这两份快照。若只按 sessionId 分目录, 另一实例改路由或 retry 策略会先覆盖
+    // 仍在跑的旧 Pi / 子代理热读快照。
     let configHome = remote
       ? joinRemotePosixPath(agentHome, 'run-tmp', stableSessionPathSegment(opts.sessionId))
       : joinRemotePosixPath(agentHome, 'run-tmp', randomBytes(8).toString('hex'));
@@ -3732,8 +3745,8 @@ export class PiAgent extends BaseAgent {
         if (key.toLowerCase() === PI_MANAGED_RG_PATH_ENV.toLowerCase()) delete spawnEnv[key];
       }
       if (managedRipgrepPath) spawnEnv[PI_MANAGED_RG_PATH_ENV] = managedRipgrepPath;
-      // 轮 42 P1:models.json 内容 hash 进 spawn env —— 远端 daemon 的 envHash
-      // 覆盖它, 配置变更(models.json 改写)时条件 restart 判定生效, 不误 attach。
+      // models.json + settings.json 内容 hash 进 spawn env —— 远端 daemon 的
+      // envHash 覆盖它, 路由或 retry/transport 改写时条件 restart, 不误 attach。
       // 仅远端注入(本地无 envHash 机制); 值本身无凭证(只是内容指纹)。
       if (remote) {
         spawnEnv[PI_MODELS_JSON_HASH_ENV] = modelsJsonHash;

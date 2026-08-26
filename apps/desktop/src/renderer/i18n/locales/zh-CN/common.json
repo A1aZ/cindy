@@ -7527,6 +7527,7 @@
       "promptSend": "发送",
       "promptCancel": "取消"
     },
+    "toolResultCompacted": "Full tool output was released (original size {{size}})",
     "agentActionRow": {
       "noContent": "无可展示内容",
       "fileChange": {

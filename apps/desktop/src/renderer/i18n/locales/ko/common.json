@@ -7535,6 +7535,7 @@
       "promptSend": "보내기",
       "promptCancel": "취소"
     },
+    "toolResultCompacted": "Full tool output was released (original size {{size}})",
     "agentActionRow": {
       "noContent": "표시할 내용이 없음",
       "fileChange": {

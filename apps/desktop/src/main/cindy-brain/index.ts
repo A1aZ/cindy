@@ -3436,7 +3436,6 @@ function getMediaPreferenceConfig(
   capability: GhostMediaCapability,
 ): CindyMediaPreferenceConfig {
   const kind = capability.startsWith('image.') ? 'image' : 'video';
-  const videoRegistry = kind === 'video' ? getVideoProviderRegistry() : null;
   const coreCapability: MediaCapability =
     capability === 'video.edit' ? 'video.image_to_video' : capability;
   const providers = new Map(
@@ -3446,9 +3445,7 @@ function getMediaPreferenceConfig(
     .filter(
       (model) =>
         model.mode === (kind === 'image' ? 'image_generation' : 'video_generation') &&
-        supportsMediaCapability(model.modalities, coreCapability) &&
-        (kind !== 'video' ||
-          (videoRegistry?.hasAlias(model.id, model.providerId) ?? false)),
+        supportsMediaCapability(model.modalities, coreCapability),
     )
     .map((model) => {
       const provider = providers.get(model.providerId);
@@ -3470,11 +3467,7 @@ function getMediaPreferenceConfig(
     coreCapability,
     readModelDisableOverrides(),
   )
-    .filter(
-      (model) =>
-        isMediaModelExecutable(model.id, coreCapability) &&
-        (kind !== 'video' || (videoRegistry?.hasAlias(model.id, 'xd') ?? false)),
-    )
+    .filter((model) => isMediaModelExecutable(model.id, coreCapability))
     .map((model) => {
       const provider = providers.get('xd');
       const providerName = provider?.name ?? 'Cindy AI';
@@ -3638,13 +3631,7 @@ async function getGhostConfigurableMediaModels(
     // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
     const availability = await listExecutableMediaModels();
     const mode = type === 'image' ? 'image_generation' : 'video_generation';
-    const videoRegistry = type === 'video' ? getVideoProviderRegistry() : null;
-    const candidates = availability.models.filter(
-      (model) =>
-        model.mode === mode &&
-        (type !== 'video' ||
-          (videoRegistry?.hasAlias(model.id, model.providerId) ?? false)),
-    );
+    const candidates = availability.models.filter((model) => model.mode === mode);
     const models = isProviderBlindCoreArt(ghost)
       ? collapseProviderBlindMediaModels(candidates, (model) => model.id)
       : candidates;

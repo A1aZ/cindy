@@ -563,34 +563,28 @@ export default function SettingsScreen() {
       ) {
         return;
       }
+      const reload = __DEV__
+        ? () => DevSettings.reload()
+        : Updates.isEnabled
+          ? () => Updates.reloadAsync()
+          : null;
+      if (!reload) {
+        Alert.alert(
+          t('settings.devServerEnvironment.title'),
+          t('settings.devServerEnvironment.switchFailed'),
+        );
+        return;
+      }
       setDevServerEnvironmentBusy(true);
       try {
         // 旧环境的 push 注销、token 与账号缓存必须先在旧端点仍生效时清理。
         await auth.logout();
-        if (__DEV__) {
-          await switchDevServerEnvironmentAndReload({
-            current: devServerEnvironment,
-            next,
-            reload: () => DevSettings.reload(),
-            setEnvironment: setDevServerEnvironment,
-          });
-          return;
-        }
-        if (Updates.isEnabled) {
-          await switchDevServerEnvironmentAndReload({
-            current: devServerEnvironment,
-            next,
-            reload: () => Updates.reloadAsync(),
-            setEnvironment: setDevServerEnvironment,
-          });
-          return;
-        }
-        await setDevServerEnvironment(next);
-        router.replace('/login');
-        Alert.alert(
-          t('settings.devServerEnvironment.title'),
-          t('settings.devServerEnvironment.restartRequired'),
-        );
+        await switchDevServerEnvironmentAndReload({
+          current: devServerEnvironment,
+          next,
+          reload,
+          setEnvironment: setDevServerEnvironment,
+        });
       } catch {
         Alert.alert(
           t('settings.devServerEnvironment.title'),
@@ -605,7 +599,6 @@ export default function SettingsScreen() {
       devServerEnvironment,
       devServerEnvironmentBusy,
       devServerEnvironmentReady,
-      router,
       setDevServerEnvironment,
       t,
     ],

@@ -98,7 +98,6 @@
     "cancel": "キャンセル",
     "switchAction": "切り替える",
     "switching": "切り替え中",
-    "restartRequired": "サーバー環境を切り替えました。App を完全に終了してから再度開いてください。",
     "switchFailed": "サーバー環境を切り替えられませんでした。もう一度お試しください。"
   },
   "updateInfo": {

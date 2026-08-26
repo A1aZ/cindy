@@ -40,12 +40,16 @@ describe('mobile settings overview', () => {
       'await auth.logout();',
       switchStart,
     );
+    const reloadUnavailableIndex = settingsSource.indexOf(
+      'if (!reload) {',
+      switchStart,
+    );
     const transactionalReloadIndex = settingsSource.indexOf(
       'await switchDevServerEnvironmentAndReload({',
       switchStart,
     );
     const reloadIndex = settingsSource.indexOf(
-      'reload: () => DevSettings.reload(),',
+      '? () => DevSettings.reload()',
       switchStart,
     );
 
@@ -60,9 +64,15 @@ describe('mobile settings overview', () => {
     );
     expect(environmentSource).not.toContain('TextInput');
     expect(switchStart).toBeGreaterThan(-1);
+    expect(reloadUnavailableIndex).toBeGreaterThan(switchStart);
+    expect(reloadUnavailableIndex).toBeLessThan(logoutIndex);
     expect(logoutIndex).toBeGreaterThan(switchStart);
     expect(transactionalReloadIndex).toBeGreaterThan(logoutIndex);
-    expect(reloadIndex).toBeGreaterThan(transactionalReloadIndex);
+    expect(reloadIndex).toBeGreaterThan(switchStart);
+    expect(reloadIndex).toBeLessThan(reloadUnavailableIndex);
+    expect(settingsSource).not.toContain(
+      'settings.devServerEnvironment.restartRequired',
+    );
   });
 
   it('keeps the device-link hello name and settings device name on one source', () => {

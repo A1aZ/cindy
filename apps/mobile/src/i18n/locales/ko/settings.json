@@ -98,7 +98,6 @@
     "cancel": "취소",
     "switchAction": "전환",
     "switching": "전환 중",
-    "restartRequired": "서버 환경을 전환했습니다. App을 완전히 종료한 후 다시 열어 주세요.",
     "switchFailed": "서버 환경을 전환하지 못했습니다. 다시 시도해 주세요."
   },
   "updateInfo": {

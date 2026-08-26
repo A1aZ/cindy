@@ -98,7 +98,6 @@
     "cancel": "取消",
     "switchAction": "切换",
     "switching": "切换中",
-    "restartRequired": "服务器环境已切换。请完全退出 App 后重新打开。",
     "switchFailed": "切换服务器环境失败，请重试。"
   },
   "updateInfo": {

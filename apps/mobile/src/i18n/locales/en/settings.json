@@ -98,7 +98,6 @@
     "cancel": "Cancel",
     "switchAction": "Switch",
     "switching": "Switching",
-    "restartRequired": "The server environment has changed. Fully quit and reopen the app.",
     "switchFailed": "Could not switch the server environment. Try again."
   },
   "updateInfo": {

@@ -98,7 +98,6 @@
     "cancel": "取消",
     "switchAction": "切換",
     "switching": "切換中",
-    "restartRequired": "伺服器環境已切換。請完全結束 App 後重新開啟。",
     "switchFailed": "切換伺服器環境失敗，請再試一次。"
   },
   "updateInfo": {

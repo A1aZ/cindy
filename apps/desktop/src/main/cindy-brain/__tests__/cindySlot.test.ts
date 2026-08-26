@@ -839,33 +839,6 @@ describe('视频代办(gen_video / edit_video)', () => {
     expect(saveGhostMedia).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'video/mp4' }));
   });
 
-  it('Core 视频偏好不在 legacy 白名单时回落可执行默认,不让旧插件卡死', async () => {
-    const { slot, generateVideo } = makeSlot({
-      getMediaOverride: vi.fn(() => ({
-        modelId: 'minimax/minimax-h3',
-        providerId: 'xd',
-        label: 'MiniMax H3',
-      })),
-      getVideoConfig: vi.fn(() => ({
-        models: [{ id: 'seedance-fast', label: 'Seedance 快速', providerId: 'xd' }],
-        defaults: {
-          standard: 'seedance-fast',
-          draft: 'seedance-fast',
-          best: 'seedance-fast',
-        },
-      })),
-    });
-
-    const result = await slot.handleModelRequest('art', VREQ);
-
-    expect(result).toMatchObject({ ok: true, model: 'seedance-fast' });
-    expect(generateVideo).toHaveBeenCalledWith({
-      prompt: '一只猫奔跑',
-      model: 'seedance-fast',
-      providerId: 'xd',
-    });
-  });
-
   it('tier 档位查视频翻译表(best → seedance-pro);失效点名回落默认', async () => {
     const { slot, generateVideo } = makeSlot();
     await slot.handleModelRequest('art', { ...VREQ, tier: 'best' });

@@ -861,27 +861,10 @@ export class GhostCindySlot {
     }
     const capability = `${info.category}.${info.action}`;
     const mediaOverride = this.deps.getMediaOverride?.(ghostId, capability) ?? null;
-    const legacyVideoOverrideAvailable =
-      !mediaOverride ||
-      info.category !== 'video' ||
-      cfg.models.some(
-        (candidate) =>
-          candidate.id === mediaOverride.modelId &&
-          (!candidate.providerId || candidate.providerId === mediaOverride.providerId),
-      );
-    if (mediaOverride && legacyVideoOverrideAvailable) {
+    if (mediaOverride) {
       model = mediaOverride.modelId;
       providerId = mediaOverride.providerId;
       providerModelLabel = mediaOverride.label;
-    } else if (mediaOverride) {
-      // Core 目录可以比旧 cindy-request 视频执行器先支持新协议模型。旧插件
-      // 命中这种偏好时回落其当前可执行默认，不让版本组合把整项能力卡死。
-      this.deps.log?.warn('ghost cindy video override unavailable to legacy executor, using fallback', {
-        ghostId,
-        modelId: mediaOverride.modelId,
-        providerId: mediaOverride.providerId,
-        fallbackModel: model,
-      });
     } else {
       const override = this.deps.getOverride(ghostId, capability);
       if (override !== null) {

@@ -128,6 +128,34 @@ describe('CindyDev server environment preference', () => {
     ).rejects.toBe(reloadError);
     expect(calls).toEqual(['persist:release', 'reload', 'persist:dev']);
   });
+
+  it('restores in-memory state and preserves the reload error when persistence rollback also fails', async () => {
+    const environment = await freshModule();
+    const reloadError = new Error('reload unavailable');
+    storage.removeItem.mockRejectedValueOnce(
+      new Error('rollback storage unavailable'),
+    );
+
+    await expect(
+      environment.switchDevServerEnvironmentAndReload({
+        current: 'dev',
+        next: 'release',
+        reload: async () => {
+          throw reloadError;
+        },
+        setEnvironment: environment.setDevServerEnvironment,
+      }),
+    ).rejects.toBe(reloadError);
+
+    expect(storage.setItem).toHaveBeenCalledWith(
+      environment.__testing.storageKey,
+      'release',
+    );
+    expect(storage.removeItem).toHaveBeenCalledWith(
+      environment.__testing.storageKey,
+    );
+    expect(environment.getDevServerEnvironment()).toBe('dev');
+  });
 });
 
 describe('CindyDev startup endpoint steps', () => {
@@ -209,5 +237,52 @@ describe('CindyDev startup endpoint steps', () => {
         preserveBuildReleaseMetadata: true,
       },
     ]);
+  });
+
+  it('allows returning to Dev only when the Release overlay step fails', async () => {
+    const environment = await freshModule();
+    const steps = environment.buildDevServerEndpointStartupSteps({
+      buildManifestBaseUrl: 'https://dev.example',
+      defaultEndpointGateEnabled: true,
+      environment: 'release',
+      releaseManifestBaseUrl: 'https://release.example',
+      switchEnabled: true,
+    });
+
+    const outcome = await environment.runDevServerEndpointStartupSteps(
+      steps,
+      async (step) =>
+        step.preserveBuildReleaseMetadata
+          ? { ok: false as const, reason: 'fetch-failed' }
+          : { ok: true as const },
+    );
+
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'fetch-failed',
+      canResetToDev: true,
+    });
+  });
+
+  it('keeps the ordinary retry path when the packaged Dev manifest fails', async () => {
+    const environment = await freshModule();
+    const steps = environment.buildDevServerEndpointStartupSteps({
+      buildManifestBaseUrl: 'https://dev.example',
+      defaultEndpointGateEnabled: true,
+      environment: 'release',
+      releaseManifestBaseUrl: 'https://release.example',
+      switchEnabled: true,
+    });
+
+    await expect(
+      environment.runDevServerEndpointStartupSteps(steps, async () => ({
+        ok: false as const,
+        reason: 'invalid-json',
+      })),
+    ).resolves.toEqual({
+      ok: false,
+      reason: 'invalid-json',
+      canResetToDev: false,
+    });
   });
 });

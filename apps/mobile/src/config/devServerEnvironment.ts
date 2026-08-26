@@ -21,6 +21,10 @@ export interface DevServerEnvironmentReloadSwitch {
   setEnvironment: (environment: DevServerEnvironment) => Promise<void>;
 }
 
+export type DevServerEndpointStartupRunOutcome =
+  | { ok: true }
+  | { ok: false; reason: string; canResetToDev: boolean };
+
 export const DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED =
   process.env.EXPO_PUBLIC_CINDY_AUTH_REGION === 'dev';
 
@@ -41,6 +45,12 @@ function notifyListeners(): void {
       // A broken view subscriber must not break the persisted environment state.
     }
   }
+}
+
+function restoreActiveEnvironment(environment: DevServerEnvironment): void {
+  activeEnvironment = environment;
+  hydrated = true;
+  notifyListeners();
 }
 
 export function hydrateDevServerEnvironment(): Promise<DevServerEnvironment> {
@@ -110,6 +120,25 @@ export function buildDevServerEndpointStartupSteps(input: {
   return steps;
 }
 
+/** 执行启动步骤，并标记失败是否发生在可撤销的 Release 业务端点覆盖阶段。 */
+export async function runDevServerEndpointStartupSteps(
+  steps: readonly DevServerEndpointStartupStep[],
+  runStep: (
+    step: DevServerEndpointStartupStep,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>,
+): Promise<DevServerEndpointStartupRunOutcome> {
+  for (const step of steps) {
+    const outcome = await runStep(step);
+    if (!outcome.ok) {
+      return {
+        ...outcome,
+        canResetToDev: step.preserveBuildReleaseMetadata,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 /** 重载失败时恢复旧选择，避免当前进程端点与持久化环境不一致。 */
 export async function switchDevServerEnvironmentAndReload(
   input: DevServerEnvironmentReloadSwitch,
@@ -118,7 +147,13 @@ export async function switchDevServerEnvironmentAndReload(
   try {
     await input.reload();
   } catch (error) {
-    await input.setEnvironment(input.current);
+    try {
+      await input.setEnvironment(input.current);
+    } catch {
+      // 持久化层不可用时仍须让当前 JS 进程与实际未重载的旧端点保持一致。
+      // 最终继续抛出原始 reload 错误，避免回滚错误掩盖首要故障。
+      restoreActiveEnvironment(input.current);
+    }
     throw error;
   }
 }

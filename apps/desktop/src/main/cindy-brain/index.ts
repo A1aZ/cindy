@@ -225,6 +225,7 @@ import { submitAndAwaitVideo } from '../cindy-proxy-media/video/run.js';
 
 import {
   deriveCindyMediaConfig,
+  selectExecutableCoreMediaModels,
   type CindyCapabilityKind,
   type CindyMediaCatalogConfig,
 } from './cindyMediaCatalog.js';
@@ -3441,12 +3442,11 @@ function getMediaPreferenceConfig(
   const providers = new Map(
     getActiveCatalog().providers.map((provider) => [provider.id, provider] as const),
   );
-  const providerModels: CindyMediaPreferenceModel[] = listProviderMediaModels()
-    .filter(
-      (model) =>
-        model.mode === (kind === 'image' ? 'image_generation' : 'video_generation') &&
-        supportsMediaCapability(model.modalities, coreCapability),
-    )
+  const providerModels: CindyMediaPreferenceModel[] = selectExecutableCoreMediaModels(
+    listProviderMediaModels(),
+    kind,
+    (model) => supportsMediaCapability(model.modalities, coreCapability),
+  )
     .map((model) => {
       const provider = providers.get(model.providerId);
       const providerName = provider?.name ?? model.providerId;
@@ -3462,12 +3462,15 @@ function getMediaPreferenceConfig(
         supportsEdit: supportsMediaCapability(model.modalities, 'image.edit'),
       };
     });
-  const gatewayModels: CindyMediaPreferenceModel[] = filterEnabledGatewayMediaModels(
-    getXdGatewayModels(),
-    coreCapability,
-    readModelDisableOverrides(),
+  const gatewayModels: CindyMediaPreferenceModel[] = selectExecutableCoreMediaModels(
+    filterEnabledGatewayMediaModels(
+      getXdGatewayModels(),
+      coreCapability,
+      readModelDisableOverrides(),
+    ),
+    kind,
+    (model) => isMediaModelExecutable(model.id, coreCapability),
   )
-    .filter((model) => isMediaModelExecutable(model.id, coreCapability))
     .map((model) => {
       const provider = providers.get('xd');
       const providerName = provider?.name ?? 'Cindy AI';
@@ -3630,8 +3633,7 @@ async function getGhostConfigurableMediaModels(
     // 类型目录返回该大类所有至少有一种可执行操作的模型；具体支持动作由
     // Gateway modalities 透传给插件判断，不能把插件声明的多个动作取交集。
     const availability = await listExecutableMediaModels();
-    const mode = type === 'image' ? 'image_generation' : 'video_generation';
-    const candidates = availability.models.filter((model) => model.mode === mode);
+    const candidates = selectExecutableCoreMediaModels(availability.models, type);
     const models = isProviderBlindCoreArt(ghost)
       ? collapseProviderBlindMediaModels(candidates, (model) => model.id)
       : candidates;

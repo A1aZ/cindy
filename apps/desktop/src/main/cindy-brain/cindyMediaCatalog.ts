@@ -24,6 +24,21 @@
  */
 export type CindyCapabilityKind = 'image' | 'video' | 'embed';
 
+export type CindyCoreMediaType = 'image' | 'video';
+
+/**
+ * Core 媒体目录只按媒体类型与 Core 可执行性筛选。旧视频 alias Registry 属于
+ * `cindy-request` 执行器实现细节，不能参与这里的模型可见性判断。
+ */
+export function selectExecutableCoreMediaModels<T extends { mode?: string }>(
+  models: readonly T[],
+  type: CindyCoreMediaType,
+  isExecutable: (model: T) => boolean = () => true,
+): T[] {
+  const mode = type === 'image' ? 'image_generation' : 'video_generation';
+  return models.filter((model) => model.mode === mode && isExecutable(model));
+}
+
 /** 目录里与媒体能力相关的供应商字段(只取本模块用得到的那几个)。 */
 export interface CindyMediaProviderSlice {
   /** 供应商 id —— 停用过滤(isModelDisabled)按 (供应商, 模型) 定位 override。 */

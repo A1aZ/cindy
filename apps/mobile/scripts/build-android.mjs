@@ -90,6 +90,47 @@ const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 function log(msg) { console.error(msg); }
 
+const ANDROID_BUILD_FAILURE_STAGE = Object.freeze({
+  arguments: 'arguments',
+  regionConfig: 'region-config',
+  buildPlan: 'build-plan',
+  preflight: 'preflight',
+  toolchain: 'toolchain',
+  artifactValidation: 'artifact-validation',
+  output: 'output',
+});
+
+let androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.arguments;
+
+// 只按脚本控制的阶段输出固定诊断，不打印异常消息或环境变量值。
+function reportAndroidBuildFailure() {
+  switch (androidBuildFailureStage) {
+    case ANDROID_BUILD_FAILURE_STAGE.arguments:
+      console.error('Android 构建失败（参数检查）：请确认已传 --region cn|global|dev，且 --artifacts、--version-code 等参数合法。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.regionConfig:
+      console.error('Android 构建失败（区域配置）：请检查 apps/mobile/scripts/self-host-regions.json 及对应 endpoint 配置是否存在且有效。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.buildPlan:
+      console.error('Android 构建失败（构建计划）：请检查 apps/mobile/app.json、android-version.json 与区域产物配置。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.preflight:
+      console.error('Android 构建失败（构建前检查）：请检查 Git 门禁、签名配置、JDK 17+ 与必需的 EXPO_PUBLIC_* 配置。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.toolchain:
+      console.error('Android 构建失败（工具链）：请查看上方 Expo/Gradle 输出；若无输出，请检查 npx、JDK 17+、Android SDK 与 Gradle wrapper。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.artifactValidation:
+      console.error('Android 构建失败（产物校验）：请检查 APK/AAB 路径、包名、versionCode、runtimeVersion 与签名证书配置。');
+      break;
+    case ANDROID_BUILD_FAILURE_STAGE.output:
+      console.error('Android 构建失败（复制产物）：请检查 --out 目录权限与磁盘空间。');
+      break;
+    default:
+      console.error('Android 构建失败；未能确定失败阶段。');
+  }
+}
+
 // self-host 变体的构建环境(与原发布线同源),注入 versionCode。
 function selfhostEnv(region, versionCode, desktopVersion) {
   const env = {
@@ -321,6 +362,7 @@ function validateAabSignature(aabPath, javaEnv, expectedCertificateSha256) {
 }
 
 async function main() {
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.arguments;
   const args = parseArgs(process.argv.slice(2));
   // --region 必填(cn|global|dev):选出本次出包身份 + 签名配置(见 lib/self-host-region.mjs)。
   // 不走 resolveSelfHostRegion:它对 dev 强校验发布专用的 npkgExpectBundle,与纯构建
@@ -334,10 +376,12 @@ async function main() {
   if (!SELF_HOST_REGIONS.includes(rawRegion)) {
     throw new Error(`--region 只能是 ${SELF_HOST_REGIONS.join(' 或 ')},收到: ${rawRegion}`);
   }
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.regionConfig;
   const region = loadSelfHostRegions({ mode: 'local' })[rawRegion];
   if (!region.androidPackage?.trim()) {
     throw new Error(`self-host-regions.json 的 ${region.authRegion}.androidPackage 未填(构建必需)`);
   }
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.buildPlan;
   const artifactKinds = resolveAndroidArtifactKinds(region.authRegion, args.artifacts);
   const appJson = readAppJson();
   const version = appJson?.expo?.version ?? '';
@@ -359,6 +403,7 @@ async function main() {
   // git 闸门只管真构建:dry-run 纯本地(不做 origin/main 远端比对,分支/离线可跑)。
   let expectedUploadCertificateSha256 = null;
   if (args.execute) {
+    androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.preflight;
     if (!args.skipGitGate) assertProductionGitGate();
     else log('  warn: --skip-git-gate,跳过 main/clean/HEAD 校验(仅本地迭代用)');
     if (missingBake.length) {
@@ -409,12 +454,15 @@ async function main() {
     return;
   }
 
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.preflight;
   // region / endpoint manifest 自举基址必须齐全(读仓内 config/endpoint*.json,离线可用)。
   assertPublicEnv(env, { variant: 'production', requiredKeys: SELF_HOST_PUBLIC_ENV_KEYS });
 
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.toolchain;
   const built = buildAndroidArtifacts(env, region, artifactKinds);
   for (const kind of artifactKinds) log(`  ✓ ${kind}: ${built.artifacts[kind]}`);
 
+  androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.artifactValidation;
   // 权威 runtimeVersion 始终从真正烤进产物的 fingerprint 回读。双产物必须一致,
   // 否则同一个 versionCode 会出现两条不兼容 OTA runtime,直接中止。
   const runtimeVersions = {};
@@ -447,6 +495,7 @@ async function main() {
 
   const finalArtifacts = { ...built.artifacts };
   if (typeof args.out === 'string' && args.out) {
+    androidBuildFailureStage = ANDROID_BUILD_FAILURE_STAGE.output;
     const outDir = resolve(String(args.out));
     if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
     for (const kind of artifactKinds) {
@@ -469,7 +518,6 @@ async function main() {
 }
 
 main().catch(() => {
-  // 子进程已继承 stdout/stderr；这里只输出固定提示，避免异常消息夹带签名口令等 env 值。
-  console.error('Android 构建失败；详细原因请查看上方构建工具输出。');
+  reportAndroidBuildFailure();
   process.exit(1);
 });

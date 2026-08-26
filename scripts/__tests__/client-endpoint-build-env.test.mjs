@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -107,6 +108,27 @@ test('Mobile 构建入口不把动态异常或环境变量值写入失败日志'
     assert.doesNotMatch(catchBlock, /err(?:or)?\??\.(?:message|stack)/i);
     assert.doesNotMatch(catchBlock, /scrubSecretsFromText/);
   }
+});
+
+test('Android 构建在子进程启动前失败时输出安全且可执行的诊断', () => {
+  const fakeSecret = 'fake-keystore-password-that-must-not-leak';
+  const result = spawnSync(
+    process.execPath,
+    [path.resolve('apps/mobile/scripts/build-android.mjs'), '--region', 'invalid'],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        XDT_ANDROID_KEYSTORE_PASSWORD_DEV: fakeSecret,
+      },
+    },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Android 构建失败（参数检查）/);
+  assert.match(result.stderr, /--region cn\|global\|dev/);
+  assert.doesNotMatch(result.stderr, new RegExp(fakeSecret));
+  assert.doesNotMatch(result.stderr, /详细原因请查看上方构建工具输出/);
 });
 
 test('端点清单自举基址缺失、非法协议或携带凭据时 fail closed', () => {

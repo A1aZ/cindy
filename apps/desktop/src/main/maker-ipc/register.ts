@@ -4254,7 +4254,13 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // invalid api key / 401 的情形。本地会话（无 remoteHostId）无 auto-retry，不跳过。
         isRemoteAuthRetry = isRemoteAuthRetryErrorEvent(session, event);
         isGatewayProxyTokenRecovery = isGatewayProxyTokenRecoveryErrorEvent(session.id, event);
-        if (!isPlannedUpgradeClose) {
+        if (isPlannedUpgradeClose) {
+          agentInputCoordinatorHolder?.noteSuppressedTerminalError(session.id, {
+            generation: event.sessionTurnGeneration,
+            reason: 'remote_daemon_closed',
+            instanceId: event.sessionInstanceId ?? session.instanceId,
+          });
+        } else {
           agentInputCoordinatorHolder?.onTurnEvent(
             session.id,
             'error',
@@ -12885,6 +12891,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     getTurnGeneration: (sessionId) =>
       getStableSessionForTurnBoundary(sessionId)?.getTurnGeneration() ?? null,
+    getObservedCurrentTurnTerminal: (sessionId) => {
+      const lookup = lookupStableSessionForTurnBoundary(sessionId);
+      if (lookup.status !== 'found') return undefined;
+      try {
+        return lookup.session.getObservedCurrentTurnTerminal();
+      } catch {
+        return undefined;
+      }
+    },
     getTurnSessionIdentity: (sessionId) => getStableSessionForTurnBoundary(sessionId) ?? null,
     reconcileTurnIdle: (sessionId) => {
       // steer 拿到 maker-core 权威 NO_ACTIVE_TURN、或 abort 已让 vendor 停止

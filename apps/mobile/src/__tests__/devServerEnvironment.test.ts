@@ -107,6 +107,27 @@ describe('CindyDev server environment preference', () => {
     ).rejects.toThrow('storage unavailable');
     expect(environment.getDevServerEnvironment()).toBe('dev');
   });
+
+  it('restores the previous environment when app reload fails', async () => {
+    const environment = await freshModule();
+    const calls: string[] = [];
+    const reloadError = new Error('reload unavailable');
+
+    await expect(
+      environment.switchDevServerEnvironmentAndReload({
+        current: 'dev',
+        next: 'release',
+        reload: async () => {
+          calls.push('reload');
+          throw reloadError;
+        },
+        setEnvironment: async (next) => {
+          calls.push(`persist:${next}`);
+        },
+      }),
+    ).rejects.toBe(reloadError);
+    expect(calls).toEqual(['persist:release', 'reload', 'persist:dev']);
+  });
 });
 
 describe('CindyDev startup endpoint steps', () => {

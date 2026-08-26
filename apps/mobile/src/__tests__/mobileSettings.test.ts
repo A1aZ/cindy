@@ -40,12 +40,12 @@ describe('mobile settings overview', () => {
       'await auth.logout();',
       switchStart,
     );
-    const persistIndex = settingsSource.indexOf(
-      'await setDevServerEnvironment(next);',
+    const transactionalReloadIndex = settingsSource.indexOf(
+      'await switchDevServerEnvironmentAndReload({',
       switchStart,
     );
     const reloadIndex = settingsSource.indexOf(
-      'DevSettings.reload();',
+      'reload: () => DevSettings.reload(),',
       switchStart,
     );
 
@@ -61,8 +61,8 @@ describe('mobile settings overview', () => {
     expect(environmentSource).not.toContain('TextInput');
     expect(switchStart).toBeGreaterThan(-1);
     expect(logoutIndex).toBeGreaterThan(switchStart);
-    expect(persistIndex).toBeGreaterThan(logoutIndex);
-    expect(reloadIndex).toBeGreaterThan(persistIndex);
+    expect(transactionalReloadIndex).toBeGreaterThan(logoutIndex);
+    expect(reloadIndex).toBeGreaterThan(transactionalReloadIndex);
   });
 
   it('keeps the device-link hello name and settings device name on one source', () => {

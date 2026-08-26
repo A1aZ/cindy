@@ -56,6 +56,7 @@ import {
 } from '@/config/env';
 import {
   DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED,
+  switchDevServerEnvironmentAndReload,
   type DevServerEnvironment,
 } from '@/config/devServerEnvironment';
 import { useDevServerEnvironment } from '@/config/useDevServerEnvironment';
@@ -566,15 +567,25 @@ export default function SettingsScreen() {
       try {
         // 旧环境的 push 注销、token 与账号缓存必须先在旧端点仍生效时清理。
         await auth.logout();
-        await setDevServerEnvironment(next);
         if (__DEV__) {
-          DevSettings.reload();
+          await switchDevServerEnvironmentAndReload({
+            current: devServerEnvironment,
+            next,
+            reload: () => DevSettings.reload(),
+            setEnvironment: setDevServerEnvironment,
+          });
           return;
         }
         if (Updates.isEnabled) {
-          await Updates.reloadAsync();
+          await switchDevServerEnvironmentAndReload({
+            current: devServerEnvironment,
+            next,
+            reload: () => Updates.reloadAsync(),
+            setEnvironment: setDevServerEnvironment,
+          });
           return;
         }
+        await setDevServerEnvironment(next);
         router.replace('/login');
         Alert.alert(
           t('settings.devServerEnvironment.title'),

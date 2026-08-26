@@ -14,6 +14,13 @@ export interface DevServerEndpointStartupStep {
   preserveBuildReleaseMetadata: boolean;
 }
 
+export interface DevServerEnvironmentReloadSwitch {
+  current: DevServerEnvironment;
+  next: DevServerEnvironment;
+  reload: () => Promise<void> | void;
+  setEnvironment: (environment: DevServerEnvironment) => Promise<void>;
+}
+
 export const DEV_SERVER_ENVIRONMENT_SWITCH_ENABLED =
   process.env.EXPO_PUBLIC_CINDY_AUTH_REGION === 'dev';
 
@@ -101,6 +108,19 @@ export function buildDevServerEndpointStartupSteps(input: {
     });
   }
   return steps;
+}
+
+/** 重载失败时恢复旧选择，避免当前进程端点与持久化环境不一致。 */
+export async function switchDevServerEnvironmentAndReload(
+  input: DevServerEnvironmentReloadSwitch,
+): Promise<void> {
+  await input.setEnvironment(input.next);
+  try {
+    await input.reload();
+  } catch (error) {
+    await input.setEnvironment(input.current);
+    throw error;
+  }
 }
 
 export async function setDevServerEnvironment(

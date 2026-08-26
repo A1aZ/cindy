@@ -120,6 +120,8 @@ describe('mobile native app config', () => {
     );
 
     process.env.EXPO_PUBLIC_CINDY_AUTH_REGION = 'cn';
+    process.env.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL =
+      'https://stale-release.example.invalid/app';
     const cn = buildConfig({ config: appJson.expo });
     expect(
       process.env.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL,
@@ -129,6 +131,8 @@ describe('mobile native app config', () => {
     );
 
     process.env.EXPO_PUBLIC_CINDY_AUTH_REGION = 'global';
+    process.env.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL =
+      'https://stale-release.example.invalid/app';
     const global = buildConfig({ config: appJson.expo });
     expect(
       process.env.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL,

@@ -62,7 +62,10 @@ import {
 import { buildExportOptionsPlist, resolveIosSigningEnv } from './lib/ios-local.mjs';
 import { clearBundlerCache } from './lib/bundler-cache.mjs';
 import { readEmbeddedRuntimeVersionFromIpa } from './lib/embedded-runtime.mjs';
-import { mobileClientBundleEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
+import {
+  mobileClientBundleEnv,
+  mobileClientBundleProcessEnv,
+} from '../../../scripts/shared/client-endpoint-build-env.mjs';
 import { SELF_HOST_REGIONS, loadSelfHostRegions, missingSelfHostBakeFields, stripSelfHostRegionEnv } from './lib/self-host-region.mjs';
 
 const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,8 +76,7 @@ function log(msg) { console.error(msg); }
 // self-host 变体的构建环境(与原发布线同源:prebuild/fingerprint 与安装包一致)。
 function selfhostEnv(region, desktopVersion) {
   const env = {
-    ...process.env,
-    ...mobileClientBundleEnv({ authRegion: region.authRegion }),
+    ...mobileClientBundleProcessEnv({ authRegion: region.authRegion }),
     EXPO_PUBLIC_XDT_OTA_SELFHOST: '1',
   };
   // 防止本机 shell / 旧 .env 残留变量混入构建;真实地址只认 config/endpoint*.json。

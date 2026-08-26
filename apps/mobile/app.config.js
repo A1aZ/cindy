@@ -221,6 +221,15 @@ module.exports = (context = {}) => {
   for (const [key, value] of Object.entries(mobileBundleEnv)) {
     if (!process.env[key]?.trim()) process.env[key] = value;
   }
+  // 该值只允许由 CindyDev 构建从仓内 CN 清单派生。Dev 构建覆盖 runner
+  // 残留值，CN / Global 构建主动清除，确保正式包不会误烘焙 Dev-only 配置。
+  if (region === 'dev') {
+    process.env.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL =
+      mobileBundleEnv.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL;
+  } else {
+    delete process.env
+      .EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL;
+  }
   // xdtProductionEnv 是既有 Expo config / runtime fingerprint 的一部分。对端清单
   // 基址只需通过上面的 EXPO_PUBLIC_* 环境变量进入 Metro bundle；不要把它追加到
   // extra，否则本次纯 JS 登录路由会无意要求一次冷构建，并切断旧 runtime 的 OTA 链。

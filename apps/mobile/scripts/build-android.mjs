@@ -79,7 +79,10 @@ import {
   readEmbeddedRuntimeVersionFromAab,
   readEmbeddedRuntimeVersionFromApk,
 } from './lib/embedded-runtime.mjs';
-import { mobileClientBundleEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
+import {
+  mobileClientBundleEnv,
+  mobileClientBundleProcessEnv,
+} from '../../../scripts/shared/client-endpoint-build-env.mjs';
 import { SELF_HOST_REGIONS, loadSelfHostRegions, missingSelfHostBakeFields, stripSelfHostRegionEnv } from './lib/self-host-region.mjs';
 
 const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -90,8 +93,7 @@ function log(msg) { console.error(msg); }
 // self-host 变体的构建环境(与原发布线同源),注入 versionCode。
 function selfhostEnv(region, versionCode, desktopVersion) {
   const env = {
-    ...process.env,
-    ...mobileClientBundleEnv({ authRegion: region.authRegion }),
+    ...mobileClientBundleProcessEnv({ authRegion: region.authRegion }),
     EXPO_PUBLIC_XDT_OTA_SELFHOST: '1',
     XDT_ANDROID_VERSION_CODE: String(versionCode),
   };

@@ -9,6 +9,7 @@ import {
   loadEndpointManifestBaseUrl,
   loadPeerEndpointManifestBaseUrl,
   mobileClientBundleEnv,
+  mobileClientBundleProcessEnv,
   mobileClientBuildEnv,
 } from '../shared/client-endpoint-build-env.mjs';
 import { resolveReleaseCdnBaseUrl } from '../shared/release-env.mjs';
@@ -47,9 +48,49 @@ test('desktop/mobile 构建从 region 清单的 cdnBaseUrl 生成自举环境变
     EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: 'https://hotfix-global.example.invalid/app',
     EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL: 'https://hotfix-cn.example.invalid/app',
   });
+  assert.deepEqual(mobileClientBundleEnv({ authRegion: 'dev', repoRoot }), {
+    EXPO_PUBLIC_CINDY_AUTH_REGION: 'dev',
+    EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: 'https://hotfix-dev.example.invalid/app',
+    EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL: 'https://hotfix-global.example.invalid/app',
+    EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL:
+      'https://hotfix-cn.example.invalid/app',
+  });
   assert.equal(
     loadPeerEndpointManifestBaseUrl({ authRegion: 'cn', repoRoot }),
     'https://hotfix-global.example.invalid/app',
+  );
+});
+
+test('Mobile bundling 进程环境只在 CindyDev 保留 Release 清单基址', () => {
+  const repoRoot = writeRepoFixtures();
+  const staleBaseEnv = {
+    KEEP_ME: '1',
+    EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL:
+      'https://stale-release.example.invalid/app',
+  };
+
+  const cn = mobileClientBundleProcessEnv({
+    authRegion: 'cn',
+    baseEnv: staleBaseEnv,
+    repoRoot,
+  });
+  assert.equal(cn.KEEP_ME, '1');
+  assert.equal(
+    Object.hasOwn(
+      cn,
+      'EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL',
+    ),
+    false,
+  );
+
+  const dev = mobileClientBundleProcessEnv({
+    authRegion: 'dev',
+    baseEnv: staleBaseEnv,
+    repoRoot,
+  });
+  assert.equal(
+    dev.EXPO_PUBLIC_CINDY_DEV_RELEASE_ENDPOINT_MANIFEST_BASE_URL,
+    'https://hotfix-cn.example.invalid/app',
   );
 });
 
@@ -92,6 +133,10 @@ function writeRepoFixtures() {
   fs.writeFileSync(
     path.join(configDir, 'endpoint.global.json'),
     JSON.stringify({ schemaVersion: 1, cdnBaseUrl: 'https://hotfix-global.example.invalid/app/' }),
+  );
+  fs.writeFileSync(
+    path.join(configDir, 'endpoint.dev.json'),
+    JSON.stringify({ schemaVersion: 1, cdnBaseUrl: 'https://hotfix-dev.example.invalid/app/' }),
   );
   return repoRoot;
 }

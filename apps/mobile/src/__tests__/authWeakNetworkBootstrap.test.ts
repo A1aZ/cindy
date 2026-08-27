@@ -147,23 +147,32 @@ describe('auth weak-network bootstrap', () => {
   });
 
   it('换账号或区域时先用旧会话撤销旧区域推送，再激活新区域', () => {
+    const teardownStart = authSource.indexOf(
+      'const clearAccountScopedRuntimeForSwitch = useCallback',
+    );
+    const teardownBody = authSource.slice(
+      teardownStart,
+      authSource.indexOf('\n  const clearAuthError', teardownStart),
+    );
     const acceptStart = authSource.indexOf('const acceptOutcome = useCallback');
     const acceptBody = authSource.slice(
       acceptStart,
       authSource.indexOf('const refresh = useCallback', acceptStart),
     );
-    const revokeAt = acceptBody.indexOf('await unregisterPushTokenBestEffort(');
+    const teardownAt = acceptBody.indexOf(
+      'await clearAccountScopedRuntimeForSwitch();',
+    );
     const activateAt = acceptBody.indexOf(
       'activateMobileSessionRealm(committedRealm);',
     );
+    expect(teardownBody).toContain('unregisterPushTokenBestEffort(');
+    expect(teardownBody).toContain('accessTokenRef.current');
+    expect(teardownBody).toContain('activeAuthRealmRef.current');
     expect(acceptBody).toContain(
       'const previousRealm = activeAuthRealmRef.current;',
     );
-    expect(acceptBody).toMatch(
-      /unregisterPushTokenBestEffort\(\s*previousAccessToken,\s*previousRealm,?\s*\)/,
-    );
-    expect(revokeAt).toBeGreaterThanOrEqual(0);
-    expect(activateAt).toBeGreaterThan(revokeAt);
+    expect(teardownAt).toBeGreaterThanOrEqual(0);
+    expect(activateAt).toBeGreaterThan(teardownAt);
   });
 
   it('自愈路径处理 refresh 无异常返回 null:凭证确不在才登出,读取异常只退避(不静默卡死、不误登出)', () => {

@@ -52,6 +52,7 @@ export function HomeChromeDrawer({
   onClose,
   onClosed,
   onOpenSearch,
+  onOpenAccounts,
   onOpenSettings,
   open,
   user,
@@ -61,9 +62,17 @@ export function HomeChromeDrawer({
   onClose(): void;
   onClosed?(): void;
   onOpenSearch(): void;
+  onOpenAccounts(): void;
   onOpenSettings(): void;
   open: boolean;
-  user: { avatar: string | null; email: string | null; name: string } | null;
+  user: {
+    avatar: string | null;
+    email: string | null;
+    membershipKind: 'personal' | 'org';
+    name: string;
+    orgLogoUrl: string | null;
+    orgName: string | null;
+  } | null;
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
@@ -195,10 +204,15 @@ export function HomeChromeDrawer({
   }, [onOpenSettings]);
 
   const accountName = user?.name.trim() || user?.email?.trim() || t('settings.header.notSignedIn');
-  const accountEmail = user?.email?.trim() && user.email.trim() !== accountName
-    ? user.email.trim()
-    : null;
-  const avatarLabel = (accountName.trim()[0] ?? '?').toUpperCase();
+  const isOrg = user?.membershipKind === 'org';
+  const accountTitle = isOrg ? user?.orgName?.trim() || accountName : accountName;
+  const accountSubtitle = isOrg
+    ? accountName
+    : user?.email?.trim() && user.email.trim() !== accountName
+      ? user.email.trim()
+      : null;
+  const accountImage = isOrg ? user?.orgLogoUrl : user?.avatar;
+  const avatarLabel = (accountTitle.trim()[0] ?? '?').toUpperCase();
 
   if (!mounted) return null;
 
@@ -228,23 +242,23 @@ export function HomeChromeDrawer({
           testID="home.chromeMenu.panel"
         >
           <Pressable
-            accessibilityLabel={accountEmail ? `${accountName}, ${accountEmail}` : accountName}
+            accessibilityLabel={accountSubtitle ? `${accountTitle}, ${accountSubtitle}` : accountTitle}
             accessibilityRole="button"
-            onPress={openSettingsImmediately}
+            onPress={onOpenAccounts}
             style={({ pressed }) => [styles.accountRow, pressed && styles.pressed]}
             testID="home.chromeDrawer.account"
           >
             <View style={styles.avatar}>
-              {user?.avatar ? (
-                <Image source={{ uri: user.avatar }} style={styles.avatarImage} />
+              {accountImage ? (
+                <Image source={{ uri: accountImage }} style={styles.avatarImage} />
               ) : (
                 <Text style={styles.avatarText}>{avatarLabel}</Text>
               )}
             </View>
             <View style={styles.accountTexts}>
-              <Text numberOfLines={1} style={styles.accountName}>{accountName}</Text>
-              {accountEmail ? (
-                <Text numberOfLines={1} style={styles.accountEmail}>{accountEmail}</Text>
+              <Text numberOfLines={1} style={styles.accountName}>{accountTitle}</Text>
+              {accountSubtitle ? (
+                <Text numberOfLines={1} style={styles.accountEmail}>{accountSubtitle}</Text>
               ) : null}
             </View>
           </Pressable>

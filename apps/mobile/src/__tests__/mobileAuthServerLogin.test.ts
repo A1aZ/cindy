@@ -239,7 +239,7 @@ describe('mobile auth-server login', () => {
     expect(autoStartAt).toBeGreaterThan(rememberAt);
   });
 
-  it('keeps account tokens inside membership selection and private tickets off screen', () => {
+  it('keeps short-lived account tokens and private tickets out of the screen and business API', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
       'utf8',
@@ -265,8 +265,10 @@ describe('mobile auth-server login', () => {
     expect(authSource).toContain(
       'client.verifySsoVerification(ticket, action.code)',
     );
-    expect(authSource).not.toContain('.logoutAccount(');
-    expect(authSource).not.toContain('.refreshAccount(');
+    expect(authSource).toContain('pendingAccountRefreshTokenRef');
+    expect(authSource).toContain('rememberMobilePassportSession({');
+    expect(authSource).toContain('.refreshAccount(');
+    expect(authSource).toContain('.logoutAccount(');
     expect(authSource).not.toContain(
       'setSecureItem(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY',
     );
@@ -279,6 +281,8 @@ describe('mobile auth-server login', () => {
     const apiFetchBody = authSource.slice(apiFetchStart, apiFetchEnd);
     expect(apiFetchBody).toContain('const token = await getAccessToken();');
     expect(apiFetchBody).not.toContain('pendingAccountTokenRef');
+    expect(apiFetchBody).not.toContain('pendingAccountRefreshTokenRef');
+    expect(apiFetchBody).not.toContain('accountRefreshToken');
   });
 
   it('serializes rotated-token writes and keeps identity on auth-server only', () => {
@@ -296,8 +300,11 @@ describe('mobile auth-server login', () => {
     expect(authSource).toMatch(
       /if \(authGenerationRef\.current !== generation\)\s+throw authCodeError\('AUTH_FLOW_SUPERSEDED'\)/,
     );
-    expect(authSource).toMatch(
-      /if \(authGenerationRef\.current !== generation\) return null;\s+setToken\(pair\.accessToken\)/,
+    const refreshStart = authSource.indexOf('const refresh = useCallback');
+    const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
+    const refreshBody = authSource.slice(refreshStart, refreshEnd);
+    expect(refreshBody).toMatch(
+      /if \(authGenerationRef\.current !== generation\) return null;\s+const passportId =[\s\S]*?setToken\(pair\.accessToken\);/,
     );
     // 2026-07 产品 /api/user/me 退役:身份只经 auth-server getMe,防复活。
     expect(authSource).not.toContain("'/api/user/me'");

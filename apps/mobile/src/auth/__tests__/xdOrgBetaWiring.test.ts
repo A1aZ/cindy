@@ -59,10 +59,10 @@ describe('AuthContext xd org beta wiring', () => {
   it('schedules the xd default after both login and refresh identity are applied', () => {
     expect(
       source.match(/scheduleCanaryChannelSync\([^)]*generation\);/g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(
       source.match(/scheduleXdOrgBetaDefault\([^)]*generation\);/g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
 
     const loginApply = source.indexOf(
       'mergeMembershipWithExisting(outcome.membership',

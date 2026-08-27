@@ -1072,6 +1072,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       if (clientRef.current === client) clientRef.current = null;
     };
   }, [
+    auth.accountGeneration,
     auth.getAccessToken,
     auth.isAuthenticated,
     clearRehydrateRetry,

@@ -57,6 +57,7 @@ import {
 } from '@/components/MobilePrimitives';
 import { RemoteAccessGuide } from '@/components/RemoteAccessGuide';
 import { HomeChromeDrawer } from '@/session/HomeChromeDrawer';
+import { AccountSwitcherSheet } from '@/session/AccountSwitcherSheet';
 import { HomeChromeFrost } from '@/session/HomeChromeFrost';
 import { HomeGlassMenuPanel, HomeMenuScrim } from '@/session/HomeGlassMenuPanel';
 import { HomeHeaderGlassButton } from '@/session/HomeHeaderGlassButton';
@@ -232,7 +233,8 @@ export default function HomeScreen() {
   // 连点会各自触发一次裸 push,把同一页压进栈 N 层(返回也要 N 次)。
   const guardedPush = useGuardedPush();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { apiFetch, deviceId: selfDeviceId, user } = useAuth();
+  const auth = useAuth();
+  const { apiFetch, deviceId: selfDeviceId, user } = auth;
   // 首页列表持久缓存按账号键控(401 掉线换号不串数据);首页仅登录后可达,user 理应非空。
   const homeCacheUserId = user?.id ?? '';
   const { connectionEpoch, connectionIssue, invoke, lastPresenceSnapshot, status, subscribe } = useDeviceLink();
@@ -282,11 +284,13 @@ export default function HomeScreen() {
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
   const [chromeMenuOpen, setChromeMenuOpen] = useState(false);
+  const [accountSwitcherOpen, setAccountSwitcherOpen] = useState(false);
   const [chromeMenuCloseInstant, setChromeMenuCloseInstant] = useState(false);
   // 菜单关闭动画完成(Modal 卸载)后要执行的动作。iOS 上两个兄弟 Modal 重叠时,第二个 Modal
   // 是叠在菜单 Modal 的 VC 上 present 的,菜单淡出后卸载会把它连带 dismiss 掉——所以从菜单里
   // 打开重命名 / 撤销授权弹窗必须等菜单完全卸载(onClosed)后再挂载,不能同一帧直接 set。
   const pendingMenuActionRef = useRef<(() => void) | null>(null);
+  const pendingAccountSwitcherActionRef = useRef<(() => void) | null>(null);
   const [renameTarget, setRenameTarget] = useState<MobileHomeDeviceFilterItem | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
@@ -1990,6 +1994,11 @@ export default function HomeScreen() {
           setChromeMenuCloseInstant(false);
           setChromeMenuOpen(false);
         }}
+        onOpenAccounts={() => {
+          pendingMenuActionRef.current = () => setAccountSwitcherOpen(true);
+          setChromeMenuCloseInstant(false);
+          setChromeMenuOpen(false);
+        }}
         onOpenSettings={() => {
           pendingMenuActionRef.current = null;
           guardedPush('/settings');
@@ -1998,6 +2007,23 @@ export default function HomeScreen() {
         }}
         open={chromeMenuOpen}
         user={user}
+      />
+      <AccountSwitcherSheet
+        hasRunningTasks={runningSessionIds.size > 0}
+        onAddAccount={() => {
+          pendingAccountSwitcherActionRef.current = () => {
+            void auth.beginAddAccount();
+            guardedPush('/add-account');
+          };
+          setAccountSwitcherOpen(false);
+        }}
+        onClose={() => setAccountSwitcherOpen(false)}
+        onClosed={() => {
+          const action = pendingAccountSwitcherActionRef.current;
+          pendingAccountSwitcherActionRef.current = null;
+          action?.();
+        }}
+        visible={accountSwitcherOpen}
       />
       <ConversationSearchFilterSheet
         activeCount={indexedSearch.activeFilterCount}

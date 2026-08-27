@@ -1,4 +1,5 @@
 import { Stack } from 'expo-router';
+import { X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Animated, Easing, Keyboard, Linking, Platform, Pressable, StyleSheet, View } from 'react-native';
@@ -85,7 +86,7 @@ import {
 } from '@/components/MobileLoginHandoffStage';
 import { AUTH_REGION, BUILD_AUTH_REGION, getMobileConfigIssues } from '@/config/env';
 import { resolveIdentifierMethod } from '@/auth/loginIdentifierMethod';
-import { fontWeight, lineHeight, loginPalettes, loginSizes, radius, spacing, typeScale } from '@/theme/tokens';
+import { fontWeight, iconSize, iconStroke, lineHeight, loginPalettes, loginSizes, radius, spacing, typeScale } from '@/theme/tokens';
 
 /**
  * Auth-server login presentation(PR4a 全登录态皮肤化,implementation-plan Step 5 WHAT3)。
@@ -94,16 +95,24 @@ import { fontWeight, lineHeight, loginPalettes, loginSizes, radius, spacing, typ
  * 布局改为 MobileLoginHandoffStage(背景+品牌)+ 750 stage 坐标的 Log_in 组
  * (x=35,loginY,680×560,figma §5.1 移动帧;键盘位移归 PR4b)。
  */
-export default function LoginScreen() {
+export interface LoginScreenProps {
+  additionalAccount?: boolean;
+  onClose?: () => void;
+}
+
+export function LoginScreen({
+  additionalAccount = false,
+  onClose,
+}: LoginScreenProps = {}) {
   // 订阅语言变化:本屏文案走 loginText()(非响应式),useTranslation 保证
   // 手动语言 override 恢复/切换时本屏跟着重渲(P2-a:不依赖 auth 重渲兜底)。
-  useTranslation();
+  const { t } = useTranslation();
   const auth = useAuth();
   const stage = useLoginSurface();
   const insets = useSafeAreaInsets();
   // 舞台有效主题(首启亮色门可强制 light,与系统主题可能不一致):状态栏样式
   // 必须跟舞台而不是系统,经 screen option 走 VC-based 通道(见 _layout 注释)。
-  const { mode: systemTheme } = useTheme();
+  const { colors, mode: systemTheme } = useTheme();
   const firstLaunchGate = useLoginFirstLaunchLight();
   const stageTheme =
     resolveStartupSplashHandoff(firstLaunchGate, systemTheme).targetTheme ??
@@ -185,7 +194,11 @@ export default function LoginScreen() {
     Keyboard.dismiss();
     pendingConsentAction.current = {
       action,
-      stamp: makeConsentStamp(auth.loginState?.step, auth.isBusy, auth.isAuthenticated),
+      stamp: makeConsentStamp(
+        auth.loginState?.step,
+        auth.isBusy,
+        auth.isAuthenticated && !additionalAccount,
+      ),
     };
     setConsentDialogOpen(true);
   };
@@ -199,7 +212,11 @@ export default function LoginScreen() {
     pendingConsentAction.current = null;
     if (!pending) return;
     // 复验:弹窗期间认证状态被异步推进(深链回调/另一路完成/步骤切换)则丢弃动作
-    const current = makeConsentStamp(auth.loginState?.step, auth.isBusy, auth.isAuthenticated);
+    const current = makeConsentStamp(
+      auth.loginState?.step,
+      auth.isBusy,
+      auth.isAuthenticated && !additionalAccount,
+    );
     if (canResumePendingConsent(pending.stamp, current)) pending.action();
   };
   const dismissConsent = () => {
@@ -212,12 +229,25 @@ export default function LoginScreen() {
   useEffect(() => {
     if (!consentDialogOpen) return;
     const pending = pendingConsentAction.current;
-    const current = makeConsentStamp(auth.loginState?.step, auth.isBusy, auth.isAuthenticated);
-    if (auth.isAuthenticated || (pending && current.step !== pending.stamp.step)) {
+    const current = makeConsentStamp(
+      auth.loginState?.step,
+      auth.isBusy,
+      auth.isAuthenticated && !additionalAccount,
+    );
+    if (
+      (auth.isAuthenticated && !additionalAccount) ||
+      (pending && current.step !== pending.stamp.step)
+    ) {
       pendingConsentAction.current = null;
       setConsentDialogOpen(false);
     }
-  }, [consentDialogOpen, auth.isAuthenticated, auth.isBusy, auth.loginState?.step]);
+  }, [
+    additionalAccount,
+    consentDialogOpen,
+    auth.isAuthenticated,
+    auth.isBusy,
+    auth.loginState?.step,
+  ]);
   const openLegalLink = (kind: 'terms' | 'privacy') => {
     // 系统默认浏览器打开(settings.tsx 同款 Linking 模式);URL 按构建区域分流
     void Linking.openURL(
@@ -265,13 +295,13 @@ export default function LoginScreen() {
   useEffect(() => {
     if (
       !auth.initialized ||
-      auth.isAuthenticated ||
+      (!additionalAccount && auth.isAuthenticated) ||
       initializedLoginRef.current
     )
       return;
     initializedLoginRef.current = true;
     void auth.dispatchLoginAction({ type: 'reset' });
-  }, [auth]);
+  }, [additionalAccount, auth]);
 
   useEffect(() => {
     if (auth.loginState?.step !== 'identifier') return;
@@ -299,7 +329,8 @@ export default function LoginScreen() {
     if (
       !auth.initialized ||
       auth.isAuthenticated ||
-      !auth.accountDeletionReceipt
+      !auth.accountDeletionReceipt ||
+      additionalAccount
     ) {
       setAccountDeletionStatus(null);
       return;
@@ -357,6 +388,7 @@ export default function LoginScreen() {
     auth.getAccountDeletionStatus,
     auth.initialized,
     auth.isAuthenticated,
+    additionalAccount,
   ]);
 
   const reset = () => {
@@ -1305,6 +1337,29 @@ export default function LoginScreen() {
           }}
         />
       ) : null}
+      {additionalAccount && onClose ? (
+        <Pressable
+          accessibilityLabel={t('shared.closePanel')}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: auth.isBusy }}
+          disabled={auth.isBusy}
+          hitSlop={8}
+          onPress={onClose}
+          style={({ pressed }) => [
+            styles.closeButton,
+            { top: insets.top + spacing.sm },
+            pressed && styles.closeButtonPressed,
+            auth.isBusy && styles.closeButtonDisabled,
+          ]}
+          testID="login.closeButton"
+        >
+          <X
+            color={colors.textPrimary}
+            size={iconSize.lg}
+            strokeWidth={iconStroke.regular}
+          />
+        </Pressable>
+      ) : null}
       {/* 外层未变换测量 wrapper(v5 冻结拓扑):持布局基线,不参与任何 translate */}
       <View
         collapsable={false}
@@ -1428,6 +1483,10 @@ export default function LoginScreen() {
       ) : null}
     </MobileLoginHandoffStage>
   );
+}
+
+export default function LoginRoute() {
+  return <LoginScreen />;
 }
 
 /**
@@ -1640,6 +1699,21 @@ const configIssueStyles = {
 
 const makeStyles = (colors: ThemeColors) =>
   StyleSheet.create({
+    closeButton: {
+      alignItems: 'center',
+      backgroundColor: colors.surfaceElevated,
+      borderColor: colors.border,
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 44,
+      justifyContent: 'center',
+      position: 'absolute',
+      right: spacing.lg,
+      width: 44,
+      zIndex: 20,
+    },
+    closeButtonPressed: { opacity: 0.72 },
+    closeButtonDisabled: { opacity: 0.48 },
     flex: { flex: 1 },
     safeArea: {
       backgroundColor: colors.surface,

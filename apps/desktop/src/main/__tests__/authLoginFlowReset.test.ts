@@ -177,6 +177,8 @@ describe('auth login-flow reset', () => {
 
     for (const helper of [
       'async function rememberResourceSession(',
+      'async function replaceResourceSessionIfCurrent(',
+      'async function removeRejectedResourceSession(',
       'async function rememberPassportSession(',
       'async function replacePassportSessionIfCurrent(',
       'async function removePassportSessionIfCurrent(',
@@ -284,14 +286,30 @@ describe('auth login-flow reset', () => {
     expect(policyGuard).toBeGreaterThan(-1);
     expect(commitRealm).toBeGreaterThan(policyGuard);
     expect(switchBody).toContain('refreshPassportSessionSingleFlight(');
+    expect(switchBody).toContain('refreshSavedResourceSession({');
+    expect(switchBody).not.toContain('client.refresh(resource.refreshToken)');
+    expect(switchBody).not.toContain('removeVaultAccount(parsedKey)');
     expect(switchBody).toContain("'REGION_MISMATCH'");
     expect(switchBody).toContain('const switchLoginFlowEpoch = loginFlowEpoch;');
     expect(switchBody).toContain(
-      'validateBeforeWrite: () => assertLoginFlowCurrent(switchLoginFlowEpoch)',
-    );
-    expect(switchBody).toContain(
       "await completeLogin({ status: 'ok', ...pair }, switchLoginFlowEpoch);",
     );
+
+    const resourceRefreshStart = source.indexOf('async function refreshSavedResourceSession(');
+    const resourceRefreshEnd = source.indexOf(
+      '\n}\n\nfunction readPersistedAuthSession()',
+      resourceRefreshStart,
+    );
+    const resourceRefreshBody = source.slice(resourceRefreshStart, resourceRefreshEnd);
+    expect(resourceRefreshBody).toContain('runRefreshWithReplacementRetry<RefreshAttemptData>(');
+    expect(resourceRefreshBody).toContain(
+      'readAuthAccountVault().resources[input.accountKey]?.refreshToken',
+    );
+    expect(resourceRefreshBody).toContain('replaceResourceSessionIfCurrent({');
+    expect(resourceRefreshBody).toContain('removeRejectedResourceSession({');
+    expect(resourceRefreshBody).toContain("if (removal === 'stale')");
+    expect(resourceRefreshBody).toContain("'AUTH_FLOW_SUPERSEDED'");
+    expect(resourceRefreshBody).toContain("lastRefreshError.code === 'DEVICE_MISMATCH'");
   });
 
   it('keeps account refresh out of resource-token cold-start initialization', () => {
@@ -335,6 +353,8 @@ describe('auth login-flow reset', () => {
     expect(coldPolicyGuard).toBeGreaterThan(-1);
     expect(coldRealmActivation).toBeGreaterThan(coldPolicyGuard);
     expect(coldBody).toContain('writePersistedAuthSession(refreshData.refreshToken, storedRealm);');
+    expect(coldBody).toContain("epochChanged('before-cold-start-vault-write')");
+    expect(coldBody).toContain("'Cold-start Resource session write was superseded'");
 
     const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');
     const refreshEnd = source.indexOf('\n}\n\nexport async function logout()', refreshStart);

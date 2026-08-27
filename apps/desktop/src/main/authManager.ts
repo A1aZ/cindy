@@ -841,6 +841,49 @@ async function rememberResourceSession(
   });
 }
 
+type ResourceSessionReplacementResult = 'stored' | 'stale' | 'missing';
+
+/** Persist a rotated Resource token only while the request still owns its consumed generation. */
+async function replaceResourceSessionIfCurrent(input: {
+  accountKey: string;
+  expectedRefreshToken: string;
+  pair: AuthTokenPair;
+  realm: AuthRegion;
+  passportId: string;
+  validateBeforeWrite?: () => void;
+}): Promise<ResourceSessionReplacementResult> {
+  return mutateAuthAccountVault((vault) => {
+    input.validateBeforeWrite?.();
+    const current = vault.resources[input.accountKey];
+    if (!current) return 'missing';
+    if (current.refreshToken !== input.expectedRefreshToken) return 'stale';
+    writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId, {
+      markActive: false,
+    });
+    return 'stored';
+  });
+}
+
+type RejectedResourceSessionRemovalResult = 'removed' | 'stale' | 'missing';
+
+/** Remove only a Resource generation that this refresh run actually proved unusable. */
+async function removeRejectedResourceSession(input: {
+  accountKey: string;
+  rejectedRefreshTokens: readonly string[];
+  validateBeforeWrite?: () => void;
+}): Promise<RejectedResourceSessionRemovalResult> {
+  const rejectedRefreshTokens = new Set(input.rejectedRefreshTokens);
+  return mutateAuthAccountVault((vault) => {
+    input.validateBeforeWrite?.();
+    const current = vault.resources[input.accountKey];
+    if (!current) return 'missing';
+    if (!rejectedRefreshTokens.has(current.refreshToken)) return 'stale';
+    delete vault.resources[input.accountKey];
+    if (vault.activeAccountKey === input.accountKey) vault.activeAccountKey = null;
+    return 'removed';
+  });
+}
+
 function writeResourceSessionToVault(
   vault: AuthAccountVault,
   pair: AuthTokenPair,
@@ -1128,6 +1171,107 @@ function isDefinitiveRefreshError(error: unknown): boolean {
       'MEMBERSHIP_DISABLED',
     ].includes(error.code)
   );
+}
+
+/**
+ * Refresh a saved Resource session across shared-userData app instances.
+ *
+ * The network request deliberately runs outside the vault lock. A losing
+ * process catches up to a winner's disk generation after INVALID_REFRESH_TOKEN,
+ * while success and cleanup both use compare-and-swap under that lock.
+ */
+async function refreshSavedResourceSession(input: {
+  client: CindyAuthClient;
+  accountKey: string;
+  realm: AuthRegion;
+  metadata: StoredAccountMetadata;
+  initialRefreshToken: string;
+  expectedLoginFlowEpoch: number;
+}): Promise<AuthTokenPair | null> {
+  type RefreshAttemptData = AuthTokenPair | { error: { code: string } };
+  const refreshError: { value: AuthApiError | null } = { value: null };
+  const run = await runRefreshWithReplacementRetry<RefreshAttemptData>(input.initialRefreshToken, {
+    doRefresh: async (refreshToken) => {
+      assertLoginFlowCurrent(input.expectedLoginFlowEpoch);
+      try {
+        const pair = await input.client.refresh(refreshToken);
+        return { ok: true, status: 200, data: pair };
+      } catch (error) {
+        if (!(error instanceof AuthApiError)) throw error;
+        refreshError.value = error;
+        return {
+          ok: false,
+          status: error.statusCode,
+          data: { error: { code: error.code } },
+        };
+      }
+    },
+    readLatestStoredTokens: () => [
+      readAuthAccountVault().resources[input.accountKey]?.refreshToken,
+    ],
+    maxReplacementRetries: REFRESH_TOKEN_REPLACEMENT_RETRY_LIMIT,
+    replacementRecheck: {
+      delaysMs: COLD_START_REFRESH_TOKEN_REPLACEMENT_RECHECK_DELAYS_MS,
+      onBeforeRecheck: ({ delayMs }) =>
+        log.warn(
+          `saved Resource refresh lost a token rotation race — re-reading the vault after ${delayMs}ms`,
+        ),
+    },
+    onReplacementRetry: () =>
+      log.warn(
+        'saved Resource refresh is retrying the replacement written by another app instance',
+      ),
+  });
+  assertLoginFlowCurrent(input.expectedLoginFlowEpoch);
+
+  if (run.result.ok) {
+    const pair = bindResourcePairToSavedAccount(
+      run.result.data as AuthTokenPair,
+      input.realm,
+      input.metadata,
+    );
+    const replacement = await replaceResourceSessionIfCurrent({
+      accountKey: input.accountKey,
+      expectedRefreshToken: run.requestedToken,
+      pair,
+      realm: input.realm,
+      passportId: input.metadata.passportId,
+      validateBeforeWrite: () => assertLoginFlowCurrent(input.expectedLoginFlowEpoch),
+    });
+    if (replacement === 'stored') return pair;
+    throw new AuthApiError(
+      'AUTH_FLOW_SUPERSEDED',
+      409,
+      'Saved Resource session changed while it was being refreshed',
+    );
+  }
+
+  const lastRefreshError = refreshError.value;
+  if (!lastRefreshError) {
+    throw new AuthApiError(
+      'INVALID_RESPONSE',
+      502,
+      'Saved Resource refresh failed without an error',
+    );
+  }
+  if (!isDefinitiveRefreshError(lastRefreshError)) throw lastRefreshError;
+  // A device mismatch says nothing about whether the shared on-disk token is
+  // valid for its owning device, so it must never authorize credential deletion.
+  if (lastRefreshError.code === 'DEVICE_MISMATCH') throw lastRefreshError;
+
+  const removal = await removeRejectedResourceSession({
+    accountKey: input.accountKey,
+    rejectedRefreshTokens: run.rejectedTokens,
+    validateBeforeWrite: () => assertLoginFlowCurrent(input.expectedLoginFlowEpoch),
+  });
+  if (removal === 'stale') {
+    throw new AuthApiError(
+      'AUTH_FLOW_SUPERSEDED',
+      409,
+      'Saved Resource session was replaced by another app instance',
+    );
+  }
+  return null;
 }
 
 function readPersistedAuthSession() {
@@ -2901,18 +3045,15 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
   let pair: AuthTokenPair | null = null;
 
   if (resource) {
-    try {
-      pair = await client.refresh(resource.refreshToken);
-      assertLoginFlowCurrent(switchLoginFlowEpoch);
-      pair = bindResourcePairToSavedAccount(pair, realm, metadata);
-      await rememberResourceSession(pair, realm, {
-        markActive: false,
-        validateBeforeWrite: () => assertLoginFlowCurrent(switchLoginFlowEpoch),
-      });
-    } catch (error) {
-      assertLoginFlowCurrent(switchLoginFlowEpoch);
-      if (!isDefinitiveRefreshError(error)) throw error;
-      await removeVaultAccount(parsedKey);
+    pair = await refreshSavedResourceSession({
+      client,
+      accountKey: parsedKey,
+      realm,
+      metadata,
+      initialRefreshToken: resource.refreshToken,
+      expectedLoginFlowEpoch: switchLoginFlowEpoch,
+    });
+    if (!pair) {
       resource = undefined;
       vault = readAuthAccountVault();
     }
@@ -3634,7 +3775,18 @@ async function runColdStartRefreshFlow(
     // Refresh is token-rotating. Preserve the server-issued replacement before
     // the cross-process projection gate can reject or defer the owner commit.
     writePersistedAuthSession(refreshData.refreshToken, storedRealm);
-    await rememberResourceSession(refreshData, storedRealm, { markActive: true });
+    await rememberResourceSession(refreshData, storedRealm, {
+      markActive: true,
+      validateBeforeWrite: () => {
+        if (epochChanged('before-cold-start-vault-write')) {
+          throw new AuthApiError(
+            'AUTH_FLOW_SUPERSEDED',
+            409,
+            'Cold-start Resource session write was superseded',
+          );
+        }
+      },
+    });
     lastAcceptedRefreshToken = refreshData.refreshToken;
     const previousSession = getActiveAppSession();
     await withCloudOwnerCommit({

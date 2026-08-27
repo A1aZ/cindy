@@ -383,6 +383,88 @@ describe('auth login-flow reset', () => {
     expect(refreshAt).toBeGreaterThan(reconcileAt);
   });
 
+  it('keeps logout-all durable across a crash between vault and session cleanup', () => {
+    expect(source).toContain('signedOutAt?: number;');
+
+    const clearStart = source.indexOf('async function clearAuthAccountVault(');
+    const clearEnd = source.indexOf(
+      '\n}\n\nfunction metadataFromMembership',
+      clearStart,
+    );
+    const clearBody = source.slice(clearStart, clearEnd);
+    expect(clearBody).toContain('withCrossProcessLock(');
+    expect(clearBody).toContain("label: 'auth-account-vault-clear'");
+    expect(clearBody).toContain('const vault = emptyAuthAccountVault();');
+    expect(clearBody).toContain('vault.activeAccountKey = null;');
+    expect(clearBody).toContain('vault.resources = {};');
+    expect(clearBody).toContain('vault.passports = {};');
+    expect(clearBody).toContain('vault.signedOutAt = Date.now();');
+    expect(clearBody.indexOf('writeAuthAccountVaultOrThrow(vault);')).toBeLessThan(
+      clearBody.indexOf('await afterPersist();'),
+    );
+
+    const reconcileStart = source.indexOf(
+      'async function reconcileDesktopActiveAuthSession()',
+    );
+    const reconcileEnd = source.indexOf(
+      '\n}\n\nfunction readPersistedRefreshToken',
+      reconcileStart,
+    );
+    const reconcileBody = source.slice(reconcileStart, reconcileEnd);
+    const tombstoneGuard = reconcileBody.indexOf(
+      "typeof vault.signedOutAt === 'number'",
+    );
+    expect(tombstoneGuard).toBeGreaterThan(-1);
+    expect(reconcileBody.indexOf('removeSafe(AUTH_SESSION_KEY);')).toBeGreaterThan(
+      tombstoneGuard,
+    );
+    expect(reconcileBody.indexOf('return null;')).toBeGreaterThan(tombstoneGuard);
+    expect(reconcileBody.indexOf('writePersistedAuthSessionOrThrow(')).toBeGreaterThan(
+      tombstoneGuard,
+    );
+
+    const refreshCommitStart = source.indexOf(
+      'async function commitDesktopRefreshCredentials(',
+    );
+    const refreshCommitEnd = source.indexOf(
+      '\n}\n\n/**\n * Account refresh tokens',
+      refreshCommitStart,
+    );
+    expect(source.slice(refreshCommitStart, refreshCommitEnd)).toContain(
+      "typeof vault.signedOutAt !== 'number'",
+    );
+
+    const resourceWriteStart = source.indexOf('function writeResourceSessionToVault(');
+    const resourceWriteEnd = source.indexOf(
+      '\n}\n\nasync function rememberPassportSession',
+      resourceWriteStart,
+    );
+    const resourceWriteBody = source.slice(resourceWriteStart, resourceWriteEnd);
+    expect(resourceWriteBody).toContain('if (options.markActive !== false) {');
+    expect(resourceWriteBody).toContain('delete vault.signedOutAt;');
+
+    const loginCommitStart = source.indexOf('async function commitDesktopLoginSessions(');
+    const loginCommitEnd = source.indexOf(
+      '\n}\n\n/** Persist a rotated Passport',
+      loginCommitStart,
+    );
+    const loginCommitBody = source.slice(loginCommitStart, loginCommitEnd);
+    expect(loginCommitBody).toContain('if (!input.passportId) {');
+    expect(loginCommitBody).toContain('delete vault.signedOutAt;');
+
+    const logoutStart = source.indexOf('export async function logout(): Promise<void> {');
+    const logoutEnd = source.indexOf('\n}\n\n/**\n * Called on system resume', logoutStart);
+    const logoutBody = source.slice(logoutStart, logoutEnd);
+    const tombstoneCommit = logoutBody.indexOf('await clearAuthAccountVault(() => {');
+    const ownerTeardown = logoutBody.indexOf('await withAccountFreeOwnerCommit({');
+    expect(tombstoneCommit).toBeGreaterThan(-1);
+    expect(logoutBody.indexOf('removeSafe(AUTH_SESSION_KEY);')).toBeGreaterThan(
+      tombstoneCommit,
+    );
+    expect(ownerTeardown).toBeGreaterThan(tombstoneCommit);
+    expect(logoutBody).toContain('preservePersistedRefreshToken: true');
+  });
+
   it('activates a restored realm only after the refreshed membership passes build policy', () => {
     const initializeStart = source.indexOf('export async function initialize(');
     const initializeEnd = source.indexOf('\n}\n\n/**\n * 冷启动 refresh 流程本体', initializeStart);

@@ -232,6 +232,12 @@ interface AuthAccountVault {
   activeAccountKey: string | null;
   resources: Record<string, StoredResourceSession>;
   passports: Record<string, StoredPassportSession>;
+  /**
+   * Durable logout-all marker. The vault is the crash-consistent owner record,
+   * so this must win over a compatibility session left behind by an interrupted
+   * logout until a new explicit login commits an active Resource.
+   */
+  signedOutAt?: number;
 }
 
 export interface AuthState {
@@ -664,7 +670,8 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
       Array.isArray(parsed.resources) ||
       !parsed.passports ||
       typeof parsed.passports !== 'object' ||
-      Array.isArray(parsed.passports)
+      Array.isArray(parsed.passports) ||
+      (parsed.signedOutAt !== undefined && typeof parsed.signedOutAt !== 'number')
     ) {
       throw new Error('unsupported auth account vault');
     }
@@ -719,6 +726,9 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
         typeof parsed.activeAccountKey === 'string' ? parsed.activeAccountKey : null,
       resources,
       passports,
+      ...(typeof parsed.signedOutAt === 'number'
+        ? { signedOutAt: parsed.signedOutAt }
+        : {}),
     };
   } catch (error) {
     log.warn('encrypted auth account vault is invalid; ignoring it without deleting', error);
@@ -806,13 +816,24 @@ async function mutateAuthAccountVault<T>(
   return transactAuthAccountVault(operation);
 }
 
-async function clearAuthAccountVault(): Promise<void> {
+async function clearAuthAccountVault(
+  afterPersist: () => void | Promise<void> = () => undefined,
+): Promise<void> {
   await withCrossProcessLock(
     authAccountVaultLockPath(),
     { label: 'auth-account-vault-clear', waitMs: 5_000 },
     async (status) => {
       if (!status.held) throw accountVaultLockError(status.reason);
-      removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);
+      // Explicit logout must remain available even if an old vault is
+      // undecryptable. Replace it with a fresh fail-closed owner record rather
+      // than reading or deleting it first.
+      const vault = emptyAuthAccountVault();
+      vault.activeAccountKey = null;
+      vault.resources = {};
+      vault.passports = {};
+      vault.signedOutAt = Date.now();
+      writeAuthAccountVaultOrThrow(vault);
+      await afterPersist();
     },
   );
 }
@@ -912,7 +933,10 @@ function writeResourceSessionToVault(
     metadata: metadataFromMembership(pair.membership, passportId),
     lastUsedAt: options.lastUsedAt ?? Date.now(),
   };
-  if (options.markActive !== false) vault.activeAccountKey = key;
+  if (options.markActive !== false) {
+    delete vault.signedOutAt;
+    vault.activeAccountKey = key;
+  }
 }
 
 async function rememberPassportSession(input: {
@@ -967,7 +991,13 @@ async function commitDesktopLoginSessions(
   commitTransition: () => void | Promise<void>,
 ): Promise<void> {
   await transactAuthAccountVault((vault) => {
-    if (!input.passportId) return;
+    if (!input.passportId) {
+      // Legacy login responses may only be able to persist the compatibility
+      // session. They are still an explicit login and must supersede a prior
+      // logout-all tombstone so cold start can migrate the Resource later.
+      delete vault.signedOutAt;
+      return;
+    }
     writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId);
     if (input.accountRefreshToken) {
       writePassportSessionToVault(vault, {
@@ -1064,6 +1094,7 @@ async function commitDesktopRefreshCredentials(
       const canClaimUninitializedVault =
         options.allowUnclaimedVault === true &&
         vault.activeAccountKey === null &&
+        typeof vault.signedOutAt !== 'number' &&
         Object.keys(vault.resources).length === 0;
       const stillOwnsActiveSession =
         requestedTokenStillStored &&
@@ -1318,6 +1349,16 @@ async function reconcileDesktopActiveAuthSession(): Promise<
       if (!status.held) throw accountVaultLockError(status.reason);
       const vault = readAuthAccountVault();
       const session = readPersistedAuthSession();
+      if (typeof vault.signedOutAt === 'number') {
+        // Logout-all persists this owner tombstone before removing the
+        // compatibility projection. If the process stopped between those
+        // writes, finish the projection cleanup without ever refreshing it.
+        removeSafe(AUTH_SESSION_KEY);
+        removeSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY);
+        removeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY);
+        removeSafe(LEGACY_REFRESH_TOKEN_KEY);
+        return null;
+      }
       const activeResource = vault.activeAccountKey
         ? vault.resources[vault.activeAccountKey]
         : undefined;
@@ -4894,7 +4935,15 @@ export async function logout(): Promise<void> {
   const currentAccountKey = currentUser
     ? accountVaultKey(activeAuthRealm, currentUser.id)
     : savedVault.activeAccountKey;
-  await clearAuthAccountVault();
+  await clearAuthAccountVault(() => {
+    // Publish the durable signed-out owner before clearing compatibility
+    // records. The vault lock remains held across both writes, and startup
+    // reconciliation completes this cleanup if the process dies in between.
+    removeSafe(AUTH_SESSION_KEY);
+    removeSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY);
+    removeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY);
+    removeSafe(LEGACY_REFRESH_TOKEN_KEY);
+  });
   // The shared projection state machine owns the full teardown and only then
   // publishes the signed-out owner. The bootstrap IPC handler must not wrap a
   // second independent boundary around this transition.
@@ -4916,6 +4965,7 @@ export async function logout(): Promise<void> {
       reason: 'logout',
       nextMode: 'signed-out',
       clearOnFailure: true,
+      preservePersistedRefreshToken: true,
     });
   } catch (error) {
     localTransitionError = error;

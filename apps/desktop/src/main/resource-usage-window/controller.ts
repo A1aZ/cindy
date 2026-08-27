@@ -19,6 +19,7 @@ const log = createLogger('resource-usage-window-controller');
 const DEFAULT_OPEN_TIMEOUT_MS = 5000;
 const DEFAULT_PREWARM_TIMEOUT_MS = 10_000;
 const DEFAULT_RECOVERY_STABILITY_MS = 30_000;
+const DEFAULT_LEAVE_TIMEOUT_MS = 2000;
 const MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 1;
 
 export interface ResourceUsageOwnerWindow {
@@ -43,6 +44,8 @@ export interface ResourceUsageWindowControllerDeps {
   openTimeoutMs?: number;
   prewarmTimeoutMs?: number;
   recoveryStabilityMs?: number;
+  /** 测试注入；macOS 退出全屏若没有 leave-full-screen，到期后仍完成隐藏。 */
+  leaveTimeoutMs?: number;
 }
 
 export class ResourceUsageWindowController {
@@ -54,6 +57,7 @@ export class ResourceUsageWindowController {
   private openTimeout: NodeJS.Timeout | null = null;
   private prewarmTimeout: NodeJS.Timeout | null = null;
   private recoveryStabilityTimeout: NodeJS.Timeout | null = null;
+  private leaveTimeout: NodeJS.Timeout | null = null;
   private samplingActive = false;
   private automaticRecoveryAttempts = 0;
   private destroyingWindow = false;
@@ -288,6 +292,7 @@ export class ResourceUsageWindowController {
   private showAndFocus(win: BrowserWindow): void {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
+    this.clearLeaveTimeout();
     this.pendingOpen = false;
     this.visibilityGeneration += 1;
     this.setSamplingActive(win, true);
@@ -302,6 +307,7 @@ export class ResourceUsageWindowController {
   private hideWindow(win: BrowserWindow, options: { restoreOwner?: boolean } = {}): void {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
+    this.clearLeaveTimeout();
     this.pendingOpen = false;
     this.setSamplingActive(win, false);
     if (win.isDestroyed()) return;
@@ -310,6 +316,8 @@ export class ResourceUsageWindowController {
       if (generation !== this.visibilityGeneration || win !== this.winRef || win.isDestroyed()) {
         return;
       }
+      this.visibilityGeneration += 1;
+      this.clearLeaveTimeout();
       if (win.isVisible()) win.hide();
       this.visible = false;
       if (options.restoreOwner !== false) this.focusOwnerWindow();
@@ -317,6 +325,11 @@ export class ResourceUsageWindowController {
     if (this.platform() === 'darwin' && win.isFullScreen()) {
       win.once('leave-full-screen', finishHide);
       win.setFullScreen(false);
+      this.leaveTimeout = setTimeout(
+        finishHide,
+        this.deps.leaveTimeoutMs ?? DEFAULT_LEAVE_TIMEOUT_MS,
+      );
+      this.leaveTimeout.unref?.();
       return;
     }
     finishHide();
@@ -410,6 +423,7 @@ export class ResourceUsageWindowController {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
     this.clearRecoveryStabilityTimeout();
+    this.clearLeaveTimeout();
     this.winRef = null;
     this.rendererReady = false;
     this.presentationReady = false;
@@ -445,6 +459,12 @@ export class ResourceUsageWindowController {
     if (!this.prewarmTimeout) return;
     clearTimeout(this.prewarmTimeout);
     this.prewarmTimeout = null;
+  }
+
+  private clearLeaveTimeout(): void {
+    if (!this.leaveTimeout) return;
+    clearTimeout(this.leaveTimeout);
+    this.leaveTimeout = null;
   }
 
   private scheduleRecoveryStabilityReset(win: BrowserWindow): void {

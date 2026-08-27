@@ -109,6 +109,7 @@ function makeHarness(
   prewarmTimeoutMs = 10_000,
   recoveryStabilityMs = 30_000,
   platform: NodeJS.Platform = 'linux',
+  leaveTimeoutMs = 2000,
 ) {
   const windows: FakeWindow[] = [];
   const mainSender = { id: 100 } as WebContents;
@@ -122,6 +123,7 @@ function makeHarness(
     openTimeoutMs: timeoutMs,
     prewarmTimeoutMs,
     recoveryStabilityMs,
+    leaveTimeoutMs,
     platform,
   });
   return { controller, windows, mainSender };
@@ -804,6 +806,27 @@ describe('ResourceUsageWindowController', () => {
 
     windows[0]?.emitWindow('leave-full-screen');
     expect(windows[0]?.hide).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(2000);
+    expect(windows[0]?.hide).toHaveBeenCalledOnce();
+    expect(controller.isOpen()).toBe(true);
+  });
+
+  it('falls back to hiding when macOS does not emit leave-full-screen', () => {
+    const { controller, windows, mainSender } = makeHarness(5000, 10_000, 30_000, 'darwin');
+    controller.prewarm();
+    markPrewarmed(controller, windows[0]!);
+    controller.open(mainSender);
+    windows[0]!.setFullscreenState(true);
+    vi.clearAllMocks();
+
+    windows[0]!.close();
+    vi.advanceTimersByTime(1999);
+    expect(windows[0]?.hide).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(windows[0]?.hide).toHaveBeenCalledOnce();
+    windows[0]?.emitWindow('leave-full-screen');
+    expect(windows[0]?.hide).toHaveBeenCalledOnce();
     expect(controller.isOpen()).toBe(true);
   });
 
@@ -818,6 +841,7 @@ describe('ResourceUsageWindowController', () => {
 
     controller.open(mainSender);
     windows[0]?.emitWindow('leave-full-screen');
+    vi.advanceTimersByTime(2000);
 
     expect(windows[0]?.hide).not.toHaveBeenCalled();
     expect(windows[0]?.show).toHaveBeenCalledOnce();

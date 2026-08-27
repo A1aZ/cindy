@@ -824,7 +824,11 @@ function metadataFromMembership(
 async function rememberResourceSession(
   pair: AuthTokenPair,
   realm: AuthRegion,
-  options: { markActive?: boolean; lastUsedAt?: number } = {},
+  options: {
+    markActive?: boolean;
+    lastUsedAt?: number;
+    validateBeforeWrite?: () => void;
+  } = {},
 ): Promise<void> {
   const passportId = pair.membership.passportId;
   if (!passportId) {
@@ -832,6 +836,7 @@ async function rememberResourceSession(
     return;
   }
   await mutateAuthAccountVault((vault) => {
+    options.validateBeforeWrite?.();
     writeResourceSessionToVault(vault, pair, realm, passportId, options);
   });
 }
@@ -976,6 +981,42 @@ function assertPassportReplacementStored(result: PassportSessionReplacementResul
     'CREDENTIAL_STORE_UNAVAILABLE',
     503,
     'Could not persist the refreshed Passport session',
+  );
+}
+
+type RuntimeRefreshCredentialCommit = 'active' | 'inactive' | 'discarded';
+
+async function commitDesktopRuntimeRefreshCredentials(
+  pair: AuthTokenPair,
+  realm: AuthRegion,
+  requestedRefreshToken: string,
+): Promise<RuntimeRefreshCredentialCommit> {
+  return transactAuthAccountVault(
+    (vault) => {
+      const key = accountVaultKey(realm, pair.membership.id);
+      const latestSession = readPersistedAuthSession();
+      const requestedTokenStillStored =
+        (latestSession?.realm === realm && latestSession.refreshToken === requestedRefreshToken) ||
+        (realm === AUTH_REGION &&
+          readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) === requestedRefreshToken);
+      const stillOwnsActiveSession = requestedTokenStillStored && vault.activeAccountKey === key;
+      const passportId = pair.membership.passportId;
+      if (passportId && (stillOwnsActiveSession || vault.resources[key])) {
+        // A passive stale refresh may still rotate account A's resource token
+        // after the primary has committed account B. Preserve A for a future
+        // explicit switch, but never let that late result reclaim activeAccountKey.
+        writeResourceSessionToVault(vault, pair, realm, passportId, {
+          markActive: stillOwnsActiveSession,
+        });
+      }
+      if (stillOwnsActiveSession) return 'active';
+      return vault.resources[key] ? 'inactive' : 'discarded';
+    },
+    (commit) => {
+      if (commit === 'active') {
+        writePersistedAuthSessionOrThrow(pair.refreshToken, realm);
+      }
+    },
   );
 }
 
@@ -2818,6 +2859,7 @@ export async function syncSavedAccounts(): Promise<DesktopAccountSwitcherSnapsho
 }
 
 export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> {
+  const switchLoginFlowEpoch = loginFlowEpoch;
   const parsedKey = parseDesktopAccountKey(rawAccountKey);
   if (!parsedKey) throw new AuthApiError('INVALID_AUTH_ACTION', 400, 'Invalid account key');
   if (isPassiveSharedUserDataInstance()) {
@@ -2854,15 +2896,21 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
     )?.realm;
   if (!realm) throw new AuthApiError('ACCOUNT_NOT_FOUND', 404, 'Saved account realm missing');
   await loadClientEndpointsForRealm(realm);
+  assertLoginFlowCurrent(switchLoginFlowEpoch);
   const client = createAuthClient(realm);
   let pair: AuthTokenPair | null = null;
 
   if (resource) {
     try {
       pair = await client.refresh(resource.refreshToken);
+      assertLoginFlowCurrent(switchLoginFlowEpoch);
       pair = bindResourcePairToSavedAccount(pair, realm, metadata);
-      await rememberResourceSession(pair, realm, { markActive: false });
+      await rememberResourceSession(pair, realm, {
+        markActive: false,
+        validateBeforeWrite: () => assertLoginFlowCurrent(switchLoginFlowEpoch),
+      });
     } catch (error) {
+      assertLoginFlowCurrent(switchLoginFlowEpoch);
       if (!isDefinitiveRefreshError(error)) throw error;
       await removeVaultAccount(parsedKey);
       resource = undefined;
@@ -2880,9 +2928,14 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
       realm,
       passport.passportId,
     );
+    assertLoginFlowCurrent(switchLoginFlowEpoch);
     pair = await client.exchangeAccountMembership(accountPair.accountToken, metadata.membershipId);
+    assertLoginFlowCurrent(switchLoginFlowEpoch);
     pair = bindResourcePairToSavedAccount(pair, realm, metadata);
-    await rememberResourceSession(pair, realm, { markActive: false });
+    await rememberResourceSession(pair, realm, {
+      markActive: false,
+      validateBeforeWrite: () => assertLoginFlowCurrent(switchLoginFlowEpoch),
+    });
   }
 
   if (!canRestoreAuthSessionForMembership(AUTH_REGION, realm, pair.membership.kind)) {
@@ -2897,7 +2950,7 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
   pendingAccountRefreshToken = null;
   pendingAccountMemberships = [];
   try {
-    await completeLogin({ status: 'ok', ...pair });
+    await completeLogin({ status: 'ok', ...pair }, switchLoginFlowEpoch);
   } catch (error) {
     pendingAuthRealm = null;
     throw error;
@@ -4350,7 +4403,7 @@ export async function refresh(): Promise<boolean> {
     }
 
     try {
-      const { result, failureAction, replacementRetries } =
+      const { result, failureAction, replacementRetries, requestedToken } =
         await runAuthRefreshWithReplacementRetry(storedToken, {
           phase: 'runtime',
           realm: refreshRealm,
@@ -4358,9 +4411,13 @@ export async function refresh(): Promise<boolean> {
         });
       if (refreshWasSuperseded('after-refresh')) return false;
       const latestSession = readPersistedAuthSession();
-      if (latestSession && latestSession.realm !== refreshRealm) {
-        // 另一实例在请求期间完成了跨区域登录；旧区域结果不得覆盖或删除新记录。
-        log.warn('runtime auth realm changed on disk; discarding stale refresh result');
+      const stillOwnsRequestedSession =
+        latestSession?.realm === refreshRealm && latestSession.refreshToken === requestedToken;
+      if (!result.ok && !stillOwnsRequestedSession) {
+        // Another shared-userData instance advanced the active session while
+        // this request was in flight. Its failure cannot expire or delete the
+        // newer owner, even when both accounts live in the same realm.
+        log.warn('runtime auth session changed on disk; discarding stale refresh failure');
         scheduleRefreshRetryAfterTransientFailure();
         return false;
       }
@@ -4400,10 +4457,23 @@ export async function refresh(): Promise<boolean> {
 
       const authRealmChanged = refreshRealm !== activeAuthRealm;
       const data = result.data as RefreshResponse;
+      const credentialCommit = await commitDesktopRuntimeRefreshCredentials(
+        data,
+        refreshRealm,
+        requestedToken,
+      );
+      if (credentialCommit !== 'active') {
+        log.warn(
+          `runtime refresh lost active credential ownership (${credentialCommit}); preserved only the still-saved account token and will reconcile from disk`,
+        );
+        scheduleRefreshRetryAfterTransientFailure();
+        return false;
+      }
+      lastAcceptedRefreshToken = data.refreshToken;
       if (!canRestoreAuthSessionForMembership(AUTH_REGION, refreshRealm, data.membership.kind)) {
-        // Preserve a rotated token in the realm that issued it, but never publish
-        // the incompatible personal identity or activate that realm's business endpoints.
-        writePersistedAuthSession(data.refreshToken, refreshRealm);
+        // The credential transaction above preserves the rotated token in its
+        // issuing realm, but this process never publishes the incompatible
+        // personal identity or activates that realm's business endpoints.
         log.warn(
           `runtime refresh rejected cross-realm personal session realm=${refreshRealm} buildRegion=${AUTH_REGION}`,
         );
@@ -4417,11 +4487,6 @@ export async function refresh(): Promise<boolean> {
         }
         return false;
       }
-      // Refresh is token-rotating. Preserve the replacement before any owner
-      // projection transition can defer this process.
-      writePersistedAuthSession(data.refreshToken, refreshRealm);
-      await rememberResourceSession(data, refreshRealm, { markActive: true });
-      lastAcceptedRefreshToken = data.refreshToken;
       const needsIdentityCheck =
         replacementRetries > 0 ||
         persistedRefreshTokenNeedsIdentityCheck ||

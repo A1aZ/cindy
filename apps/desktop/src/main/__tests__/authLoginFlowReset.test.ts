@@ -239,12 +239,11 @@ describe('auth login-flow reset', () => {
     const completeBody = source.slice(completeStart, completeEnd);
     expect(completeBody).toContain('expectedLoginFlowEpoch = loginFlowEpoch');
     expect(completeBody).toContain('loginFlowEpoch !== expectedLoginFlowEpoch');
-    const resourceStored = completeBody.indexOf('await rememberResourceSession(');
-    const resourceRecheck = completeBody.indexOf('assertTransitionCurrent();', resourceStored);
+    const vaultTransaction = completeBody.indexOf('await commitDesktopLoginSessions(');
     const durableSession = completeBody.indexOf('writePersistedAuthSessionOrThrow(');
     const teardown = completeBody.indexOf('await accountSwitchTeardown(');
-    expect(resourceRecheck).toBeGreaterThan(resourceStored);
-    expect(durableSession).toBeGreaterThan(resourceRecheck);
+    expect(vaultTransaction).toBeGreaterThan(-1);
+    expect(durableSession).toBeGreaterThan(vaultTransaction);
     expect(completeBody.lastIndexOf('assertTransitionCurrent();', teardown)).toBeLessThan(teardown);
     expect(completeBody).toContain('restorePersistedAuthSessionIfCurrent(');
 
@@ -286,6 +285,13 @@ describe('auth login-flow reset', () => {
     expect(commitRealm).toBeGreaterThan(policyGuard);
     expect(switchBody).toContain('refreshPassportSessionSingleFlight(');
     expect(switchBody).toContain("'REGION_MISMATCH'");
+    expect(switchBody).toContain('const switchLoginFlowEpoch = loginFlowEpoch;');
+    expect(switchBody).toContain(
+      'validateBeforeWrite: () => assertLoginFlowCurrent(switchLoginFlowEpoch)',
+    );
+    expect(switchBody).toContain(
+      "await completeLogin({ status: 'ok', ...pair }, switchLoginFlowEpoch);",
+    );
   });
 
   it('keeps account refresh out of resource-token cold-start initialization', () => {
@@ -339,7 +345,7 @@ describe('auth login-flow reset', () => {
     );
     expect(runtimePolicyGuard).toBeGreaterThan(-1);
     expect(runtimeRealmActivation).toBeGreaterThan(runtimePolicyGuard);
-    expect(refreshBody).toContain('writePersistedAuthSession(data.refreshToken, refreshRealm);');
+    expect(refreshBody).toContain('await commitDesktopRuntimeRefreshCredentials(');
     expect(refreshBody).toContain(
       "await expireRuntimeAuth(currentUser.id, 'replaced-elsewhere', {",
     );
@@ -394,6 +400,17 @@ describe('auth login-flow reset', () => {
     expect(refreshBody).toContain("refreshWasSuperseded('after-account-switch-teardown')");
     expect(refreshBody).toContain("refreshWasSuperseded('after-integration-reload')");
     expect(refreshBody).toContain("refreshWasSuperseded('catch')");
+    expect(refreshBody).toContain('latestSession.refreshToken === requestedToken');
+    expect(refreshBody).toContain("credentialCommit !== 'active'");
+
+    const helperStart = source.indexOf('async function commitDesktopRuntimeRefreshCredentials(');
+    const helperEnd = source.indexOf('\n}\n\n/** Persist a rotated Passport', helperStart);
+    const helperBody = source.slice(helperStart, helperEnd);
+    expect(helperBody).toContain('vault.activeAccountKey === key');
+    expect(helperBody).toContain('readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY)');
+    expect(helperBody).toContain('markActive: stillOwnsActiveSession');
+    expect(helperBody).toContain("if (commit === 'active') {");
+    expect(helperBody).toContain('writePersistedAuthSessionOrThrow(pair.refreshToken, realm);');
   });
 
   it('reconnects realm-bound main clients after a runtime realm change commits its new token', () => {
@@ -402,7 +419,7 @@ describe('auth login-flow reset', () => {
     const refreshBody = source.slice(refreshStart, refreshEnd);
 
     expect(refreshBody).toContain('const authRealmChanged = refreshRealm !== activeAuthRealm;');
-    expect(refreshBody).toContain('writePersistedAuthSession(data.refreshToken, refreshRealm);');
+    expect(refreshBody).toContain('await commitDesktopRuntimeRefreshCredentials(');
     expect(refreshBody).toContain('activeAuthRealm = refreshRealm;');
     expect(refreshBody).toContain(
       'const membershipKindChanged = previousMembershipKind !== nextUser.membershipKind;',

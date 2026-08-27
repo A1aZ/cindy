@@ -440,6 +440,58 @@ describe('mobile auth-server login', () => {
     expect(switchBody).not.toContain('const oldSession = initialVault');
   });
 
+  it('clears the previous identity deletion receipt inside saved-account activation', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const switchStart = authSource.indexOf('const switchAccount = useCallback');
+    const switchBody = authSource.slice(
+      switchStart,
+      authSource.indexOf('\n\n  const beginAddAccount', switchStart),
+    );
+    const runtimeClear = switchBody.indexOf(
+      'await clearAccountScopedRuntimeForSwitch();',
+    );
+    const receiptClear = switchBody.indexOf(
+      'await persistAccountDeletionReceipt(null);',
+      runtimeClear,
+    );
+    const ownerCommit = switchBody.indexOf(
+      'activateMobileSessionRealm(realm!);',
+      receiptClear,
+    );
+
+    expect(runtimeClear).toBeGreaterThan(-1);
+    expect(receiptClear).toBeGreaterThan(runtimeClear);
+    expect(ownerCommit).toBeGreaterThan(receiptClear);
+    expect(switchBody.slice(receiptClear, ownerCommit)).toContain(
+      'pendingAccountDeletionRestoredRef.current = false;',
+    );
+    expect(switchBody.slice(receiptClear, ownerCommit)).toContain(
+      'setAccountDeletionRestored(false);',
+    );
+  });
+
+  it('normalizes outer saved-account sync failures into sheet state', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const syncStart = authSource.indexOf('const syncSavedAccounts = useCallback');
+    const syncBody = authSource.slice(
+      syncStart,
+      authSource.indexOf('\n\n  const switchAccount = useCallback', syncStart),
+    );
+
+    expect(syncBody).toContain('const generation = authGenerationRef.current;');
+    expect(syncBody).toContain('} catch (error) {');
+    expect(syncBody).toContain('setAccountsError(authErrorCode(error));');
+    expect(syncBody).toContain(
+      'if (authGenerationRef.current === generation) setAccountsLoading(false);',
+    );
+  });
+
   it('keeps the added-account vault transaction through runtime cleanup and owner commit', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),

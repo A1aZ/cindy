@@ -1987,6 +1987,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const syncSavedAccounts = useCallback(async (): Promise<void> => {
+    const generation = authGenerationRef.current;
     setAccountsLoading(true);
     setAccountsError(null);
     try {
@@ -1997,7 +1998,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         // Keep the cached list on transient refresh failures.
       }
-      const generation = authGenerationRef.current;
       const vault = await readMobileAccountVault();
       let firstTransientError: string | null = null;
       for (const passport of Object.values(vault.passports)) {
@@ -2030,8 +2030,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       await refreshSavedAccountsSnapshot();
       setAccountsError(firstTransientError);
+    } catch (error) {
+      // SecureStore/device-id/vault failures happen outside the per-Passport loop too.
+      // Normalize them into the sheet's existing error projection so a fire-and-forget
+      // refresh never reaches React Native's global unhandled-rejection handler.
+      if (authGenerationRef.current === generation) {
+        setAccountsError(authErrorCode(error));
+      }
     } finally {
-      setAccountsLoading(false);
+      if (authGenerationRef.current === generation) setAccountsLoading(false);
     }
   }, [refresh, refreshSavedAccountsSnapshot]);
 
@@ -2165,6 +2172,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     throw authCodeError('AUTH_FLOW_SUPERSEDED');
                   }
 
+                  // The deletion receipt belongs to the previous login identity, not the
+                  // physical device. Clear its durable token, realm and restored banner at the
+                  // same account boundary as the other runtime projections. This is deliberately
+                  // the final awaited mutation before the synchronous owner commit below.
+                  await persistAccountDeletionReceipt(null);
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+                  pendingAccountDeletionRestoredRef.current = false;
+                  setAccountDeletionRestored(false);
+
                   // Publish the new owner synchronously while the vault
                   // transaction still owns activeAccountKey and AUTH_SESSION_KEY.
                   activateMobileSessionRealm(realm!);
@@ -2218,6 +2236,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       applyUser,
       clearAccountScopedRuntimeForSwitch,
       loadMe,
+      persistAccountDeletionReceipt,
       refreshSavedAccountsSnapshot,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,

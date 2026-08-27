@@ -357,6 +357,8 @@ interface MessageStreamProps {
   workingDir: string;
   messages: ChatMessage[];
   historyLoaded: boolean;
+  /** The task shell remains, but all prior message content was intentionally cleared. */
+  historyCleared?: boolean;
   taskUpdates?: ReadonlyMap<string, AgentTaskUpdate>;
   /** Kept for API compatibility. v2 — no longer threaded into render items
    *  (AgentActionsBlock + ThinkingCard manage their own per-block expand
@@ -728,6 +730,19 @@ function ForkOriginMarker({ onClick }: { onClick?: () => void }) {
         <GitFork size={15} strokeWidth={2} className="shrink-0" aria-hidden="true" />
         <span>{t('chat.forkOrigin.label')}</span>
       </button>
+      <div className="h-px flex-1 bg-[var(--border-default)]" />
+    </div>
+  );
+}
+
+function HistoryClearedMarker() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-4 py-3" role="status">
+      <div className="h-px flex-1 bg-[var(--border-default)]" />
+      <span className="shrink-0 text-12 text-[var(--text-tertiary)]">
+        {t('settings.about.storage.dbSlimmingHistoryCleared')}
+      </span>
       <div className="h-px flex-1 bg-[var(--border-default)]" />
     </div>
   );
@@ -3019,6 +3034,7 @@ export function MessageStream({
   workingDir,
   messages,
   historyLoaded,
+  historyCleared = false,
   taskUpdates,
   isSessionStreaming = false,
   continuationTurnClientId = null,
@@ -5878,6 +5894,9 @@ export function MessageStream({
                   maxWidth: contentWidth ?? 880,
                 }}
               >
+                {historyLoaded && historyCleared && (
+                  <HistoryClearedMarker />
+                )}
                 {/* F-SYNC-2: Loading spinner at top */}
                 {isLoadingMore && (
                   <div className="flex items-center justify-center pb-4">

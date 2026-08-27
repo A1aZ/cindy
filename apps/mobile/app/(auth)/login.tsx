@@ -76,6 +76,7 @@ import {
   LoginSocialGlyph,
   LoginSocialRow,
   LoginSsoOrgHistoryList,
+  LoginTextAction,
   LoginTextLinkSlot,
   LoginTitleBlock,
   AppleLogoGlyph,
@@ -86,6 +87,11 @@ import {
 } from '@/components/MobileLoginHandoffStage';
 import { AUTH_REGION, BUILD_AUTH_REGION, getMobileConfigIssues } from '@/config/env';
 import { resolveIdentifierMethod } from '@/auth/loginIdentifierMethod';
+import { AccountSwitcherSheet } from '@/session/AccountSwitcherSheet';
+import {
+  remoteSessionStore,
+  useRemoteSessionStoreVersion,
+} from '@/session/remoteSessionStore';
 import { fontWeight, iconSize, iconStroke, lineHeight, loginPalettes, loginSizes, radius, spacing, typeScale } from '@/theme/tokens';
 
 /**
@@ -108,6 +114,14 @@ export function LoginScreen({
   // 手动语言 override 恢复/切换时本屏跟着重渲(P2-a:不依赖 auth 重渲兜底)。
   const { t } = useTranslation();
   const auth = useAuth();
+  const remoteSessionStoreVersion = useRemoteSessionStoreVersion();
+  const hasRunningTasks = useMemo(
+    () =>
+      remoteSessionStore
+        .getSessions()
+        .some((session) => remoteSessionStore.isSessionRunning(session.id)),
+    [remoteSessionStoreVersion],
+  );
   const stage = useLoginSurface();
   const insets = useSafeAreaInsets();
   // 舞台有效主题(首启亮色门可强制 light,与系统主题可能不一致):状态栏样式
@@ -263,6 +277,7 @@ export function LoginScreen({
   const [resendDeadline, setResendDeadline] = useState<number | null>(null);
   const [accountDeletionStatus, setAccountDeletionStatus] =
     useState<AccountDeletionStatus | null>(null);
+  const [accountSwitcherVisible, setAccountSwitcherVisible] = useState(false);
   const styles = useThemedStyles(makeStyles);
   const configIssues = getMobileConfigIssues();
   const disabled = auth.isBusy || !auth.initialized || configIssues.length > 0;
@@ -302,6 +317,11 @@ export function LoginScreen({
     initializedLoginRef.current = true;
     void auth.dispatchLoginAction({ type: 'reset' });
   }, [additionalAccount, auth]);
+
+  useEffect(() => {
+    if (additionalAccount || !auth.initialized || auth.isAuthenticated) return;
+    void auth.syncSavedAccounts().catch(() => undefined);
+  }, [additionalAccount, auth.initialized, auth.isAuthenticated, auth.syncSavedAccounts]);
 
   useEffect(() => {
     if (auth.loginState?.step !== 'identifier') return;
@@ -417,6 +437,15 @@ export function LoginScreen({
   const errorNode = error ? (
     <LoginErrorText testID="login.error">{error}</LoginErrorText>
   ) : null;
+  const accountRecoveryNode =
+    !additionalAccount && auth.savedAccounts.length > 0 ? (
+      <LoginTextAction
+        disabled={auth.isBusy}
+        label={t('devices.list.accounts.title')}
+        onPress={() => setAccountSwitcherVisible(true)}
+        testID="login.accountSwitcher"
+      />
+    ) : null;
   const backNode = backAction ? (
     <LoginBackButton
       disabled={auth.isBusy}
@@ -649,6 +678,7 @@ export function LoginScreen({
             onPress={submit}
             testID="login.continueButton"
           />
+          {accountRecoveryNode}
           {identifierErrorNode}
         </LoginPanel>
         {/* Apple 入口为圆钮行第一颗:iOS 走原生 Sign in with Apple,
@@ -1129,6 +1159,7 @@ export function LoginScreen({
           onPress={reset}
           testID="login.errorRetryButton"
         />
+        {accountRecoveryNode}
         <LoginErrorText testID="login.error">
           {authErrorText(state.code) ?? loginText('errorFallback')}
         </LoginErrorText>
@@ -1182,6 +1213,7 @@ export function LoginScreen({
           onPress={reset}
           testID="login.retryButton"
         />
+        {accountRecoveryNode}
         {errorNode}
       </LoginPanel>
     );
@@ -1408,6 +1440,15 @@ export function LoginScreen({
           </Animated.View>
         </View>
       </View>
+      <AccountSwitcherSheet
+        hasRunningTasks={hasRunningTasks}
+        onAddAccount={() => {
+          setAccountSwitcherVisible(false);
+          reset();
+        }}
+        onClose={() => setAccountSwitcherVisible(false)}
+        visible={accountSwitcherVisible}
+      />
       {accountDeletionStatus && deletionBubbleFrame ? (
         // 入场门(PR #464 review,与桌面同口径):opacity 结构性跟随面板入场的
         // Animated 值(splash=0 → handoff 渐显 → done=1,同一 usePanelEntrance 输出,

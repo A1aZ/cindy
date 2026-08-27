@@ -183,6 +183,12 @@ async function refreshMobilePassportSingleFlight(
       if (!replacementStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
       return pair;
     } catch (error) {
+      // A migrated vault or reset deviceId can make this process foreign to a
+      // Passport that remains valid on its original device. Preserve it just
+      // like the Resource refresh path does.
+      if (error instanceof AuthApiError && error.code === 'DEVICE_MISMATCH') {
+        throw error;
+      }
       if (isDefinitivePassportSessionError(error)) {
         await removeMobilePassportSessionIfCurrent(
           realm,

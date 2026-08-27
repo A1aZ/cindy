@@ -343,6 +343,9 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('passportAccountRefreshFlights.get(key)');
     expect(helperBody).toContain('replacePassportSessionIfCurrent({');
     expect(helperBody).toContain('removePassportSessionIfCurrent(');
+    expect(helperBody.indexOf("error.code === 'DEVICE_MISMATCH'")).toBeLessThan(
+      helperBody.indexOf('removePassportSessionIfCurrent('),
+    );
     expect(source).toContain("'write-failed'");
     expect(source).toContain("'CREDENTIAL_STORE_UNAVAILABLE'");
     expect(source).toContain('isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)');

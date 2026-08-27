@@ -1287,6 +1287,12 @@ async function refreshPassportSessionSingleFlight(
       );
       return pair;
     } catch (error) {
+      // A device mismatch only proves that this process is using a different
+      // device identity. The encrypted Passport can still be valid for the
+      // device that owns the shared vault, so it cannot authorize deletion.
+      if (error instanceof AuthApiError && error.code === 'DEVICE_MISMATCH') {
+        throw error;
+      }
       if (isDefinitiveRefreshError(error)) {
         try {
           await removePassportSessionIfCurrent(realm, passportId, current.accountRefreshToken);

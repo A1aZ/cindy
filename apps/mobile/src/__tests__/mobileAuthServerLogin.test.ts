@@ -378,6 +378,9 @@ describe('mobile auth-server login', () => {
     expect(helperBody).toContain('mobilePassportRefreshFlights.get(key)');
     expect(helperBody).toContain('replaceMobilePassportSessionIfCurrent({');
     expect(helperBody).toContain('removeMobilePassportSessionIfCurrent(');
+    expect(helperBody.indexOf("error.code === 'DEVICE_MISMATCH'")).toBeLessThan(
+      helperBody.indexOf('removeMobilePassportSessionIfCurrent('),
+    );
 
     const syncStart = authSource.indexOf(
       'const syncSavedAccounts = useCallback',

@@ -236,6 +236,15 @@ describe('auth login-flow reset', () => {
     );
     const loginBody = source.slice(loginStart, loginEnd);
     expect(loginBody).toContain('{ recoverInvalidForExplicitLogin: true }');
+    const transitionCommit = loginBody.indexOf('await transition.commit();');
+    const transitionRollback = loginBody.indexOf('await transition.rollback();');
+    expect(transitionCommit).toBeGreaterThan(
+      loginBody.indexOf('await transactAuthAccountVault('),
+    );
+    expect(transitionRollback).toBeGreaterThan(transitionCommit);
+    expect(transitionRollback).toBeLessThan(
+      loginBody.indexOf('{ recoverInvalidForExplicitLogin: true }'),
+    );
   });
 
   it('atomically replaces the aggregate saved-account vault', () => {
@@ -255,7 +264,7 @@ describe('auth login-flow reset', () => {
     expect(clearBody.indexOf('`${filepath}.bak`')).toBeLessThan(clearBody.indexOf('filepath])'));
   });
 
-  it('fails a Desktop account switch before owner teardown when session persistence fails', () => {
+  it('fails a Desktop account switch before owner teardown and rolls back under the vault lock', () => {
     const completeStart = source.indexOf('async function completeLogin(');
     const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
     const completeBody = source.slice(completeStart, completeEnd);
@@ -269,6 +278,7 @@ describe('auth login-flow reset', () => {
     expect(completeBody.indexOf('restorePersistedAuthSessionIfCurrent(')).toBeGreaterThan(
       ownerCommit,
     );
+    expect(completeBody.indexOf('rollback: () => {')).toBeGreaterThan(ownerCommit);
     expect(completeBody.slice(ownerCommit)).not.toContain(
       'writePersistedAuthSession(outcome.refreshToken',
     );

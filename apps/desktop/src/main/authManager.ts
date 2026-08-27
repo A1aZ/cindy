@@ -1069,7 +1069,10 @@ async function commitDesktopLoginSessions(
     accountRefreshToken?: string | null;
     memberships: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
   },
-  commitTransition: () => void | Promise<void>,
+  transition: {
+    commit: () => void | Promise<void>;
+    rollback: () => void | Promise<void>;
+  },
 ): Promise<void> {
   await transactAuthAccountVault(
     (vault) => {
@@ -1090,7 +1093,18 @@ async function commitDesktopLoginSessions(
         });
       }
     },
-    commitTransition,
+    async () => {
+      try {
+        await transition.commit();
+      } catch (error) {
+        // `transactAuthAccountVault` still owns the cross-process lock here.
+        // Restore the compatibility session before the vault rollback can
+        // finish and release that lock, so a passive peer cannot consume the
+        // failed target account's token in the gap between the two restores.
+        await transition.rollback();
+        throw error;
+      }
+    },
     { recoverInvalidForExplicitLogin: true },
   );
 }
@@ -4197,17 +4211,17 @@ async function completeLogin(
   const accountRefreshToken = outcome.accountRefreshToken ?? pendingAccountRefreshToken;
   let previousPersistedSession: ReturnType<typeof readPersistedAuthSession> = null;
   let activeSessionWritten = false;
-  try {
-    await commitDesktopLoginSessions(
-      {
-        pair: outcome,
-        realm: committedRealm,
-        passportId: nextUser.passportId || undefined,
-        accountRefreshToken,
-        memberships:
-          pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
-      },
-      async () => {
+  await commitDesktopLoginSessions(
+    {
+      pair: outcome,
+      realm: committedRealm,
+      passportId: nextUser.passportId || undefined,
+      accountRefreshToken,
+      memberships:
+        pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
+    },
+    {
+      commit: async () => {
         // The aggregate account vault, compatibility active session, old-owner
         // teardown and final owner publication are one epoch-owned transaction.
         // Any cancellation before commit restores both durable records while
@@ -4272,17 +4286,16 @@ async function completeLogin(
             }),
         });
       },
-    );
-  } catch (error) {
-    if (activeSessionWritten) {
-      restorePersistedAuthSessionIfCurrent(
-        outcome.refreshToken,
-        committedRealm,
-        previousPersistedSession,
-      );
-    }
-    throw error;
-  }
+      rollback: () => {
+        if (!activeSessionWritten) return;
+        restorePersistedAuthSessionIfCurrent(
+          outcome.refreshToken,
+          committedRealm,
+          previousPersistedSession,
+        );
+      },
+    },
+  );
   scheduleCanaryFlagSync({
     token: outcome.accessToken,
     expectedAuthEpoch: loginEpoch,

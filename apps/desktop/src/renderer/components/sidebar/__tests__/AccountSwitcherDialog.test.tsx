@@ -125,7 +125,7 @@ describe('AccountSwitcherDialog', () => {
 
     await waitFor(() => expect(syncAccounts).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('button', { name: 'sidebar.accountSwitcher.addAccount' }));
-    expect(onAddAccount).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onAddAccount).toHaveBeenCalledOnce());
   });
 
   it('keeps switching and add-account actions available during background sync', async () => {
@@ -150,7 +150,52 @@ describe('AccountSwitcherDialog', () => {
     expect((addButton as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(addButton);
-    expect(onAddAccount).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onAddAccount).toHaveBeenCalledOnce());
+  });
+
+  it('asks before adding an account when a task is running and stays put on cancel', async () => {
+    const onAddAccount = vi.fn();
+    runningSnapshot.set('running-session', { isRunning: true });
+    confirm.mockResolvedValue(false);
+    render(
+      <AccountSwitcherDialog
+        open
+        onOpenChange={vi.fn()}
+        onAddAccount={onAddAccount}
+        triggerRef={createRef<HTMLButtonElement>()}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'sidebar.accountSwitcher.addAccount',
+      }),
+    );
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    expect(onAddAccount).not.toHaveBeenCalled();
+  });
+
+  it('starts adding an account only after confirming interruption of running tasks', async () => {
+    const onAddAccount = vi.fn();
+    runningSnapshot.set('running-session', { isRunning: true });
+    render(
+      <AccountSwitcherDialog
+        open
+        onOpenChange={vi.fn()}
+        onAddAccount={onAddAccount}
+        triggerRef={createRef<HTMLButtonElement>()}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'sidebar.accountSwitcher.addAccount',
+      }),
+    );
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onAddAccount).toHaveBeenCalledOnce());
   });
 
   it('asks before switching when a task is running and keeps the account dialog open on cancel', async () => {

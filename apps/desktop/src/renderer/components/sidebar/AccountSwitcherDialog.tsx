@@ -59,6 +59,7 @@ export function AccountSwitcherDialog({
   const [mutationAllowed, setMutationAllowed] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [switchingKey, setSwitchingKey] = useState<string | null>(null);
+  const [addingAccount, setAddingAccount] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -90,30 +91,32 @@ export function AccountSwitcherDialog({
     };
   }, [listAccounts, open, syncAccounts, t]);
 
+  const confirmRunningTaskInterruption = async (): Promise<boolean> => {
+    // Lazy-load the task store only when the user requests an account boundary
+    // change. The dialog is mounted with the sidebar shell, while chat runtime is not.
+    const { makerChatStore } = await import('@/lib/makerChatStore');
+    const hasRunningTask = [...makerChatStore.getRunningSnapshot().values()].some(
+      (status) => status.isRunning,
+    );
+    if (!hasRunningTask) return true;
+    // Full app windows always provide the shared confirmation host. Standalone
+    // story/test mounts fail closed instead of changing accounts without consent.
+    if (!confirmDialog) return false;
+    return confirmDialog.confirm({
+      title: t('sidebar.accountSwitcher.runningTaskTitle'),
+      description: t('sidebar.accountSwitcher.runningTaskDescription'),
+      confirmText: t('sidebar.accountSwitcher.runningTaskConfirm'),
+      cancelText: t('logic.confirm.cancel'),
+      confirmVariant: 'destructive',
+    });
+  };
+
   const handleSwitch = async (account: DesktopSavedAccount) => {
-    if (account.isCurrent || switchingKey || !mutationAllowed) return;
+    if (account.isCurrent || switchingKey || addingAccount || !mutationAllowed) return;
     setSwitchingKey(account.accountKey);
 
     try {
-      // Lazy-load the task store only when the user requests a switch. The account
-      // dialog is mounted with the sidebar shell, while the chat runtime is not.
-      const { makerChatStore } = await import('@/lib/makerChatStore');
-      const hasRunningTask = [...makerChatStore.getRunningSnapshot().values()].some(
-        (status) => status.isRunning,
-      );
-      if (hasRunningTask) {
-        // Full app windows always provide the shared confirmation host. Standalone
-        // story/test mounts fail closed instead of switching without consent.
-        if (!confirmDialog) return;
-        const confirmed = await confirmDialog.confirm({
-          title: t('sidebar.accountSwitcher.runningTaskTitle'),
-          description: t('sidebar.accountSwitcher.runningTaskDescription'),
-          confirmText: t('sidebar.accountSwitcher.runningTaskConfirm'),
-          cancelText: t('logic.confirm.cancel'),
-          confirmVariant: 'destructive',
-        });
-        if (!confirmed) return;
-      }
+      if (!(await confirmRunningTaskInterruption())) return;
 
       // Main owns the account boundary: it stops and drains the outgoing runtime
       // before committing the selected account, so this await is also the stop barrier.
@@ -123,6 +126,19 @@ export function AccountSwitcherDialog({
       toast.error(t('sidebar.accountSwitcher.switchFailed'));
     } finally {
       setSwitchingKey(null);
+    }
+  };
+
+  const handleAddAccount = async () => {
+    if (switchingKey || addingAccount || !mutationAllowed) return;
+    setAddingAccount(true);
+    try {
+      if (!(await confirmRunningTaskInterruption())) return;
+      onAddAccount();
+    } catch {
+      toast.error(t('sidebar.accountSwitcher.switchFailed'));
+    } finally {
+      setAddingAccount(false);
     }
   };
 
@@ -187,7 +203,12 @@ export function AccountSwitcherDialog({
                 <button
                   key={account.accountKey}
                   type="button"
-                  disabled={account.isCurrent || switchingKey !== null || !mutationAllowed}
+                  disabled={
+                    account.isCurrent ||
+                    switchingKey !== null ||
+                    addingAccount ||
+                    !mutationAllowed
+                  }
                   onClick={() => void handleSwitch(account)}
                   className={cn(
                     'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
@@ -228,8 +249,8 @@ export function AccountSwitcherDialog({
           <div className="mt-4 border-t border-[var(--border-default)] pt-4">
             <button
               type="button"
-              disabled={!mutationAllowed || switchingKey !== null}
-              onClick={onAddAccount}
+              disabled={!mutationAllowed || switchingKey !== null || addingAccount}
+              onClick={() => void handleAddAccount()}
               className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2.5 text-14 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />

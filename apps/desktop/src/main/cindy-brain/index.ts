@@ -225,6 +225,7 @@ import { submitAndAwaitVideo } from '../cindy-proxy-media/video/run.js';
 
 import {
   deriveCindyMediaConfig,
+  filterLegacyCindyMediaConfig,
   selectExecutableCoreMediaModels,
   type CindyCapabilityKind,
   type CindyMediaCatalogConfig,
@@ -4282,10 +4283,20 @@ export function getGhostCindySlot(): GhostCindySlot {
         const value = readGhostCindyOverrides(ghostId)[capability as CindyCapabilityKey] ?? null;
         if (!value) return null;
         const mediaCapability = capability as GhostMediaCapability;
+        const config = getGhostMediaPreferenceConfig(ghostId, mediaCapability);
+        const videoRegistry = capability.startsWith('video.') ? getVideoProviderRegistry() : null;
+        // Core 专用选型不能交给旧执行器。复用存量配置迁移，确保回退后
+        // 用户保存的 provider + modelId 与实际执行一致，不影响 Core 清单。
+        const executableConfig = capability.startsWith('video.')
+          ? filterLegacyCindyMediaConfig(
+              config,
+              (model) => videoRegistry?.hasAlias(model.modelId, model.providerId) ?? false,
+            )
+          : config;
         const selected = resolveAndMigrateGhostMediaPreference(
           ghostId,
           mediaCapability,
-          getGhostMediaPreferenceConfig(ghostId, mediaCapability),
+          executableConfig,
           value,
         );
         return selected

@@ -314,6 +314,67 @@ describe('mobile auth-server login', () => {
     );
   });
 
+  it('persists Passport rotations before membership reads and CAS-guards invalidation', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const syncStart = authSource.indexOf(
+      'const syncSavedAccounts = useCallback',
+    );
+    const syncEnd = authSource.indexOf(
+      '\n\n  const switchAccount = useCallback',
+      syncStart,
+    );
+    const syncBody = authSource.slice(syncStart, syncEnd);
+    const refreshAccount = syncBody.indexOf('client.refreshAccount(');
+    const persistReplacement = syncBody.indexOf(
+      'replaceMobilePassportSessionIfCurrent',
+      refreshAccount,
+    );
+    const readMemberships = syncBody.indexOf(
+      'client.getAccountMemberships(',
+      persistReplacement,
+    );
+    expect(refreshAccount).toBeGreaterThan(-1);
+    expect(persistReplacement).toBeGreaterThan(refreshAccount);
+    expect(readMemberships).toBeGreaterThan(persistReplacement);
+    expect(syncBody).toContain('removeMobilePassportSessionIfCurrent(');
+
+    const switchStart = syncEnd;
+    const switchEnd = authSource.indexOf(
+      '\n\n  const beginAddAccount',
+      switchStart,
+    );
+    const switchBody = authSource.slice(switchStart, switchEnd);
+    const switchRefreshAccount = switchBody.indexOf('client.refreshAccount(');
+    const switchPersistReplacement = switchBody.indexOf(
+      'replaceMobilePassportSessionIfCurrent',
+      switchRefreshAccount,
+    );
+    const switchReadMemberships = switchBody.indexOf(
+      'client.getAccountMemberships(',
+      switchPersistReplacement,
+    );
+    expect(switchBody).toContain(
+      'expectedAccountRefreshToken: passport.accountRefreshToken',
+    );
+    expect(switchRefreshAccount).toBeGreaterThan(-1);
+    expect(switchPersistReplacement).toBeGreaterThan(switchRefreshAccount);
+    expect(switchReadMemberships).toBeGreaterThan(switchPersistReplacement);
+    expect(switchBody).toContain('removeMobilePassportSessionIfCurrent(');
+    const resourceStored = switchBody.indexOf(
+      'await rememberMobileResourceSession(',
+    );
+    const regionGuard = switchBody.indexOf(
+      'realm !== BUILD_AUTH_REGION',
+      resourceStored,
+    );
+    expect(resourceStored).toBeGreaterThan(-1);
+    expect(regionGuard).toBeGreaterThan(resourceStored);
+    expect(switchBody).toContain("throw authCodeError('REGION_MISMATCH')");
+  });
+
   it('accepts enterprise ID, organization slug, and verified domains up to the API limit', () => {
     const loginSource = readFileSync(
       resolve(process.cwd(), 'app/(auth)/login.tsx'),

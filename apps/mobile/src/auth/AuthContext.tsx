@@ -93,8 +93,9 @@ import {
   readMobileAccountVault,
   rememberMobilePassportSession,
   rememberMobileResourceSession,
+  removeMobilePassportSessionIfCurrent,
+  replaceMobilePassportSessionIfCurrent,
   removeMobilePassport,
-  removeMobilePassportSession,
   removeMobileSavedAccount,
   type MobileSavedAccount,
 } from '@/auth/mobileAccountVault';
@@ -1794,23 +1795,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         // Keep the cached list on transient refresh failures.
       }
+      const generation = authGenerationRef.current;
       const vault = await readMobileAccountVault();
       let firstTransientError: string | null = null;
       for (const passport of Object.values(vault.passports)) {
+        let accountRefreshSucceeded = false;
         try {
           await loadMobileEndpointsForRealm(passport.realm);
           const client = authClientFor(did, passport.realm);
-          const pair = await client.refreshAccount(passport.accountRefreshToken);
-          const memberships = await client.getAccountMemberships(pair.accountToken);
-          await rememberMobilePassportSession({
+          const pair = await client.refreshAccount(
+            passport.accountRefreshToken,
+          );
+          accountRefreshSucceeded = true;
+          if (authGenerationRef.current !== generation) return;
+          const replacementStored = await replaceMobilePassportSessionIfCurrent(
+            {
+              realm: passport.realm,
+              passportId: passport.passportId,
+              expectedAccountRefreshToken: passport.accountRefreshToken,
+              accountRefreshToken: pair.accountRefreshToken,
+              memberships: passport.memberships,
+            },
+          );
+          if (!replacementStored) continue;
+          const memberships = await client.getAccountMemberships(
+            pair.accountToken,
+          );
+          if (authGenerationRef.current !== generation) return;
+          await replaceMobilePassportSessionIfCurrent({
             realm: passport.realm,
             passportId: passport.passportId,
+            expectedAccountRefreshToken: pair.accountRefreshToken,
             accountRefreshToken: pair.accountRefreshToken,
             memberships,
           });
         } catch (error) {
-          if (isDefinitivePassportSessionError(error)) {
-            await removeMobilePassportSession(passport.realm, passport.passportId);
+          if (authGenerationRef.current !== generation) return;
+          if (
+            !accountRefreshSucceeded &&
+            isDefinitivePassportSessionError(error)
+          ) {
+            await removeMobilePassportSessionIfCurrent(
+              passport.realm,
+              passport.passportId,
+              passport.accountRefreshToken,
+            );
           } else {
             firstTransientError ??= authErrorCode(error);
           }
@@ -1825,6 +1854,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const switchAccount = useCallback(
     async (accountKey: string): Promise<void> => {
+      const generationAtStart = authGenerationRef.current;
       const initialVault = await readMobileAccountVault();
       if (initialVault.activeAccountKey === accountKey) return;
       const resource = initialVault.resources[accountKey];
@@ -1870,13 +1900,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             passportVaultKey(realm, metadata.passportId)
           ];
           if (!passport) throw authCodeError('SAVED_ACCOUNT_REAUTH_REQUIRED');
+          let accountRefreshSucceeded = false;
           try {
             const accountPair = await client.refreshAccount(
               passport.accountRefreshToken,
             );
+            accountRefreshSucceeded = true;
+            if (authGenerationRef.current !== generationAtStart) {
+              throw authCodeError('AUTH_FLOW_SUPERSEDED');
+            }
+            const replacementStored =
+              await replaceMobilePassportSessionIfCurrent({
+                realm,
+                passportId: metadata.passportId,
+                expectedAccountRefreshToken: passport.accountRefreshToken,
+                accountRefreshToken: accountPair.accountRefreshToken,
+                memberships: passport.memberships,
+              });
+            if (!replacementStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
             const memberships = await client.getAccountMemberships(
               accountPair.accountToken,
             );
+            if (authGenerationRef.current !== generationAtStart) {
+              throw authCodeError('AUTH_FLOW_SUPERSEDED');
+            }
             const selected = memberships.find(
               (membership) => membership.id === metadata.membershipId,
             );
@@ -1884,19 +1931,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               await removeMobileSavedAccount(accountKey);
               throw authCodeError('MEMBERSHIP_DISABLED');
             }
-            await rememberMobilePassportSession({
+            const metadataStored = await replaceMobilePassportSessionIfCurrent({
               realm,
               passportId: metadata.passportId,
+              expectedAccountRefreshToken: accountPair.accountRefreshToken,
               accountRefreshToken: accountPair.accountRefreshToken,
               memberships,
             });
+            if (!metadataStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
             pair = await client.exchangeAccountMembership(
               accountPair.accountToken,
               selected.id,
             );
           } catch (error) {
-            if (isDefinitivePassportSessionError(error)) {
-              await removeMobilePassportSession(realm, metadata.passportId);
+            if (
+              !accountRefreshSucceeded &&
+              isDefinitivePassportSessionError(error)
+            ) {
+              await removeMobilePassportSessionIfCurrent(
+                realm,
+                metadata.passportId,
+                passport.accountRefreshToken,
+              );
             }
             throw error;
           }
@@ -1905,12 +1961,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (pair.membership.id !== metadata.membershipId) {
           throw authCodeError('SAVED_ACCOUNT_MISMATCH');
         }
+        if (authGenerationRef.current !== generationAtStart) {
+          throw authCodeError('AUTH_FLOW_SUPERSEDED');
+        }
         await rememberMobileResourceSession(
           pair,
           realm,
           metadata.passportId,
           false,
         );
+        if (
+          pair.membership.kind === 'personal' &&
+          realm !== BUILD_AUTH_REGION
+        ) {
+          throw authCodeError('REGION_MISMATCH');
+        }
 
         const oldSession = initialVault.activeAccountKey
           ? initialVault.resources[initialVault.activeAccountKey]

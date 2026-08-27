@@ -361,6 +361,10 @@ let pendingLoginTicket: string | null = null;
 let pendingBindTicket: string | null = null;
 let pendingSsoVerificationTicket: string | null = null;
 let loginActionPromise: Promise<DesktopLoginActionResult> | null = null;
+let loginActionPromiseEpoch: number | null = null;
+// Separate from authStateEpoch: closing an add-account surface must invalidate
+// its requests without expiring the still-active account's runtime refresh.
+let loginFlowEpoch = 0;
 // `accountDeletionRestored` may arrive before membership selection. Keep it
 // main-only until the final resource-token login commits.
 let pendingAccountDeletionRestored = false;
@@ -665,8 +669,21 @@ function rememberPassportSession(input: {
   accountRefreshToken: string;
   memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
 }): void {
-  const key = passportVaultKey(input.realm, input.passportId);
   const vault = readAuthAccountVault();
+  writePassportSessionToVault(vault, input);
+  writeAuthAccountVault(vault);
+}
+
+function writePassportSessionToVault(
+  vault: AuthAccountVault,
+  input: {
+    realm: AuthRegion;
+    passportId: string;
+    accountRefreshToken: string;
+    memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
+  },
+): void {
+  const key = passportVaultKey(input.realm, input.passportId);
   const previous = vault.passports[key];
   const memberships = (input.memberships ?? previous?.memberships ?? []).map((membership) =>
     isStoredAccountMetadata(membership)
@@ -685,7 +702,38 @@ function rememberPassportSession(input: {
     memberships,
     passportMode: 'replace-passport',
   });
+}
+
+/** Persist a rotated Passport only while the request still owns the token it consumed. */
+function replacePassportSessionIfCurrent(input: {
+  realm: AuthRegion;
+  passportId: string;
+  expectedAccountRefreshToken: string;
+  accountRefreshToken: string;
+  memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
+}): boolean {
+  const vault = readAuthAccountVault();
+  const key = passportVaultKey(input.realm, input.passportId);
+  if (vault.passports[key]?.accountRefreshToken !== input.expectedAccountRefreshToken) {
+    return false;
+  }
+  writePassportSessionToVault(vault, input);
   writeAuthAccountVault(vault);
+  return true;
+}
+
+/** Delete a rejected Passport only if no concurrent refresh has replaced it. */
+function removePassportSessionIfCurrent(
+  realm: AuthRegion,
+  passportId: string,
+  expectedAccountRefreshToken: string,
+): boolean {
+  const vault = readAuthAccountVault();
+  const key = passportVaultKey(realm, passportId);
+  if (vault.passports[key]?.accountRefreshToken !== expectedAccountRefreshToken) return false;
+  delete vault.passports[key];
+  writeAuthAccountVault(vault);
+  return true;
 }
 
 function rememberUpdatedMembershipMetadata(
@@ -2084,6 +2132,15 @@ function resetLoginFlowState(): void {
   pendingAccountDeletionRestored = false;
 }
 
+function assertLoginFlowCurrent(expectedEpoch: number): void {
+  if (loginFlowEpoch === expectedEpoch) return;
+  throw new AuthApiError(
+    'AUTH_FLOW_SUPERSEDED',
+    409,
+    'Login was cancelled or superseded by a newer flow',
+  );
+}
+
 function resetActiveAuthRealmToBuild(): void {
   activeAuthRealm = AUTH_REGION;
   resetClientEndpointRealm();
@@ -2141,6 +2198,7 @@ function clearAuth(
 ): void {
   const notify = opts.notify ?? true;
   authStateEpoch += 1; // 迟到的冷启动流程从此作废(见 authStateEpoch 注释)
+  loginFlowEpoch += 1;
   // #1687:登出 / 会话过期整体清态时复位凭证库升级态——升级提示只对「仍以为
   // 自己登录着」的会话有意义,登录页自身就是恢复入口。
   credentialStoreHealth.reset();
@@ -2397,36 +2455,41 @@ export function listSavedAccounts(): DesktopAccountSwitcherSnapshot {
 export async function syncSavedAccounts(): Promise<DesktopAccountSwitcherSnapshot> {
   if (isPassiveSharedUserDataInstance()) return listSavedAccounts();
   const initial = readAuthAccountVault();
-  for (const [key, passport] of Object.entries(initial.passports)) {
+  for (const passport of Object.values(initial.passports)) {
+    let accountRefreshSucceeded = false;
     try {
       await loadClientEndpointsForRealm(passport.realm);
       const client = createAuthClient(passport.realm);
       const pair = await client.refreshAccount(passport.accountRefreshToken);
+      accountRefreshSucceeded = true;
       // Account refresh has no replay grace. Persist the replacement before
       // making the membership request that consumes its access token.
-      rememberPassportSession({
+      const replacementStored = replacePassportSessionIfCurrent({
         realm: passport.realm,
         passportId: passport.passportId,
+        expectedAccountRefreshToken: passport.accountRefreshToken,
         accountRefreshToken: pair.accountRefreshToken,
         memberships: passport.memberships,
       });
+      if (!replacementStored) continue;
       const memberships = await client.getAccountMemberships(pair.accountToken);
-      rememberPassportSession({
+      replacePassportSessionIfCurrent({
         realm: passport.realm,
         passportId: passport.passportId,
+        expectedAccountRefreshToken: pair.accountRefreshToken,
         accountRefreshToken: pair.accountRefreshToken,
         memberships,
       });
     } catch (error) {
-      if (!isDefinitiveRefreshError(error)) {
+      if (accountRefreshSucceeded || !isDefinitiveRefreshError(error)) {
         log.warn('saved account membership sync failed transiently', error);
         continue;
       }
-      const latest = readAuthAccountVault();
-      if (latest.passports[key]?.accountRefreshToken === passport.accountRefreshToken) {
-        delete latest.passports[key];
-        writeAuthAccountVault(latest);
-      }
+      removePassportSessionIfCurrent(
+        passport.realm,
+        passport.passportId,
+        passport.accountRefreshToken,
+      );
     }
   }
   return listSavedAccounts();
@@ -2494,12 +2557,20 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
     try {
       const accountPair = await client.refreshAccount(passport.accountRefreshToken);
       accountRefreshSucceeded = true;
-      rememberPassportSession({
+      const replacementStored = replacePassportSessionIfCurrent({
         realm,
         passportId: passport.passportId,
+        expectedAccountRefreshToken: passport.accountRefreshToken,
         accountRefreshToken: accountPair.accountRefreshToken,
         memberships: passport.memberships,
       });
+      if (!replacementStored) {
+        throw new AuthApiError(
+          'AUTH_FLOW_SUPERSEDED',
+          409,
+          'Saved Passport session changed during account switch',
+        );
+      }
       pair = await client.exchangeAccountMembership(
         accountPair.accountToken,
         metadata.membershipId,
@@ -2511,12 +2582,18 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
       // Passport session remains healthy. Only an Account-refresh failure
       // invalidates every membership owned by this Passport.
       if (!accountRefreshSucceeded && isDefinitiveRefreshError(error)) {
-        const latest = readAuthAccountVault();
-        delete latest.passports[passportVaultKey(realm, metadata.passportId)];
-        writeAuthAccountVault(latest);
+        removePassportSessionIfCurrent(realm, metadata.passportId, passport.accountRefreshToken);
       }
       throw error;
     }
+  }
+
+  if (!canRestoreAuthSessionForMembership(AUTH_REGION, realm, pair.membership.kind)) {
+    throw new AuthApiError(
+      'REGION_MISMATCH',
+      409,
+      'Personal accounts must match the installed build region',
+    );
   }
 
   pendingAuthRealm = realm;
@@ -2538,12 +2615,14 @@ export async function beginAddAccountLogin(): Promise<DesktopLoginActionResult> 
       'This shared-data instance cannot add accounts',
     );
   }
+  loginFlowEpoch += 1;
   browserAuthorizationSlot.cancelActive();
   resetLoginFlowState();
   return getLoginState();
 }
 
 export function cancelAddAccountLogin(): void {
+  loginFlowEpoch += 1;
   browserAuthorizationSlot.cancelActive();
   resetLoginFlowState();
 }
@@ -3277,7 +3356,7 @@ async function runColdStartRefreshFlow(
   }
 }
 
-async function loadLoginProviders(): Promise<AuthFlowState> {
+async function loadLoginProviders(expectedLoginFlowEpoch = loginFlowEpoch): Promise<AuthFlowState> {
   discoveredMethods = [];
   pendingAccountToken = null;
   pendingAccountRefreshToken = null;
@@ -3287,7 +3366,9 @@ async function loadLoginProviders(): Promise<AuthFlowState> {
   pendingSsoVerificationTicket = null;
   pendingAccountDeletionRestored = false;
   pendingAuthRealm = null;
-  providerConfig = await createAuthClient(AUTH_REGION).getProviders();
+  const providers = await createAuthClient(AUTH_REGION).getProviders();
+  assertLoginFlowCurrent(expectedLoginFlowEpoch);
+  providerConfig = providers;
   loginFlowState = reduceAuthFlow(loginFlowState, {
     type: 'providers-loaded',
     providers: providerConfig,
@@ -3295,13 +3376,15 @@ async function loadLoginProviders(): Promise<AuthFlowState> {
   return loginFlowState;
 }
 
-async function discoverOrganizationRealm(org: string) {
+async function discoverOrganizationRealm(org: string, expectedLoginFlowEpoch = loginFlowEpoch) {
   // 新的一次组织发现不得复用上一轮成功结果；只有本轮双区判定成功后才重新冻结。
   pendingAuthRealm = null;
   const realmConfig = getClientEndpointRealmConfig();
   if (!realmConfig.crossRealmOrgLoginEnabled || !realmConfig.realmManifestBaseUrls) {
+    const discovery = await createAuthClient(AUTH_REGION).discoverSsoOrg(org);
+    assertLoginFlowCurrent(expectedLoginFlowEpoch);
     pendingAuthRealm = AUTH_REGION;
-    return createAuthClient(AUTH_REGION).discoverSsoOrg(org);
+    return discovery;
   }
 
   // 先并行加载/校验两区清单，再并行做 home-realm discovery。任一清单或请求
@@ -3309,6 +3392,7 @@ async function discoverOrganizationRealm(org: string) {
   // 区域时，后续状态机才要求用户确认。
   try {
     await Promise.all([loadClientEndpointsForRealm('cn'), loadClientEndpointsForRealm('global')]);
+    assertLoginFlowCurrent(expectedLoginFlowEpoch);
   } catch {
     throw new AuthApiError(
       'ORG_REALM_UNAVAILABLE',
@@ -3320,16 +3404,21 @@ async function discoverOrganizationRealm(org: string) {
     cn: createAuthClient('cn'),
     global: createAuthClient('global'),
   });
+  assertLoginFlowCurrent(expectedLoginFlowEpoch);
   pendingAuthRealm = selected.region;
   return selected.discovery;
 }
 
 export async function getLoginState(): Promise<DesktopLoginActionResult> {
+  const expectedLoginFlowEpoch = loginFlowEpoch;
   try {
     if (loginFlowState) return { success: true, state: loginFlowState };
-    return { success: true, state: await loadLoginProviders() };
+    return { success: true, state: await loadLoginProviders(expectedLoginFlowEpoch) };
   } catch (error) {
     const code = error instanceof AuthApiError ? error.code : 'AUTH_SERVICE_UNAVAILABLE';
+    if (loginFlowEpoch !== expectedLoginFlowEpoch) {
+      return { success: false, code: 'AUTH_FLOW_SUPERSEDED', state: loginFlowState };
+    }
     log.warn(`load login providers failed code=${code}`);
     loginFlowState = { step: 'error', code, recoverTo: 'identifier' };
     return { success: false, code, state: loginFlowState };
@@ -3338,7 +3427,9 @@ export async function getLoginState(): Promise<DesktopLoginActionResult> {
 
 async function completeLogin(
   outcome: Extract<LoginOutcome, { status: 'ok' }>,
+  expectedLoginFlowEpoch = loginFlowEpoch,
 ): Promise<AuthFlowState> {
+  assertLoginFlowCurrent(expectedLoginFlowEpoch);
   const loginEpoch = ++authStateEpoch;
   const deletionWasRestored =
     outcome.accountDeletionRestored === true || pendingAccountDeletionRestored;
@@ -3380,7 +3471,7 @@ async function completeLogin(
       });
     },
     prepareCommit: async () => {
-      if (authStateEpoch !== loginEpoch) {
+      if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch) {
         throw new AuthApiError(
           'AUTH_FLOW_SUPERSEDED',
           409,
@@ -3388,7 +3479,7 @@ async function completeLogin(
         );
       }
       await claimLegacyNamespaceForVerifiedUser(nextUser.id);
-      if (authStateEpoch !== loginEpoch) {
+      if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch) {
         throw new AuthApiError(
           'AUTH_FLOW_SUPERSEDED',
           409,
@@ -3444,7 +3535,11 @@ async function completeLogin(
   return loginFlowState;
 }
 
-async function acceptLoginOutcome(outcome: LoginOutcome): Promise<AuthFlowState> {
+async function acceptLoginOutcome(
+  outcome: LoginOutcome,
+  expectedLoginFlowEpoch = loginFlowEpoch,
+): Promise<AuthFlowState> {
+  assertLoginFlowCurrent(expectedLoginFlowEpoch);
   if (outcome.status === 'ok' || outcome.status === 'select_account') {
     // Membership selection already establishes which passport owns the new
     // login. A receipt from the previous login must not survive this boundary.
@@ -3470,7 +3565,7 @@ async function acceptLoginOutcome(outcome: LoginOutcome): Promise<AuthFlowState>
         ? [outcome.membership]
         : [];
 
-  if (outcome.status === 'ok') return completeLogin(outcome);
+  if (outcome.status === 'ok') return completeLogin(outcome, expectedLoginFlowEpoch);
   if (outcome.status === 'select_account') {
     pendingLoginTicket = outcome.loginTicket;
     pendingBindTicket = null;
@@ -3489,6 +3584,7 @@ async function acceptLoginOutcome(outcome: LoginOutcome): Promise<AuthFlowState>
 }
 
 async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginActionResult> {
+  const actionLoginFlowEpoch = loginFlowEpoch;
   const startsBuildRealmFlow =
     action.type === 'discover' ||
     action.type === 'request-code' ||
@@ -3506,7 +3602,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
       throw new AuthApiError('INVALID_AUTH_ACTION', 400, 'Unexpected browser cancellation');
     }
     if (action.type === 'reset') {
-      return { success: true, state: await loadLoginProviders() };
+      return { success: true, state: await loadLoginProviders(actionLoginFlowEpoch) };
     }
     if (action.type === 'confirm-sso-realm') {
       const confirmation = loginFlowState;
@@ -3545,11 +3641,13 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
       });
       return { success: true, state: loginFlowState };
     }
-    if (!providerConfig) await loadLoginProviders();
+    if (!providerConfig) await loadLoginProviders(actionLoginFlowEpoch);
 
     if (action.type === 'discover') {
       const email = action.email.trim().toLowerCase();
-      discoveredMethods = await client.discover(email);
+      const methods = await client.discover(email);
+      assertLoginFlowCurrent(actionLoginFlowEpoch);
+      discoveredMethods = methods;
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'discovery-loaded',
         email,
@@ -3563,7 +3661,10 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
     // 唯一 SSO 由 renderer 接到 method-choice 后直接派发 start-browser，
     // 以便立刻投影 browser-redirect（确认框消失、露出取消）。
     if (action.type === 'discover-sso-org') {
-      const discovery = await discoverOrganizationRealm(action.org.trim().toLowerCase());
+      const discovery = await discoverOrganizationRealm(
+        action.org.trim().toLowerCase(),
+        actionLoginFlowEpoch,
+      );
       const methods = ssoOrgDiscoveryToMethods(discovery);
       if (discovery.region !== AUTH_REGION) {
         if (!providerConfig) {
@@ -3598,6 +3699,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
       await client.requestCode(action.kind, action.identifier, {
         captchaToken: action.captchaToken,
       });
+      assertLoginFlowCurrent(actionLoginFlowEpoch);
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'code-requested',
         kind: action.kind,
@@ -3611,6 +3713,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         success: true,
         state: await acceptLoginOutcome(
           await client.verifyCode(action.kind, action.identifier, action.code),
+          actionLoginFlowEpoch,
         ),
       };
     }
@@ -3655,6 +3758,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
           },
           cancellation.signal,
         );
+        assertLoginFlowCurrent(actionLoginFlowEpoch);
         if ('error' in callback) {
           throw new AuthApiError(callback.error, 0, 'Browser authorization did not complete');
         }
@@ -3667,7 +3771,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         }
         return {
           success: true,
-          state: await acceptLoginOutcome(exchange.value),
+          state: await acceptLoginOutcome(exchange.value, actionLoginFlowEpoch),
         };
       } finally {
         deactivateCancellation();
@@ -3678,10 +3782,11 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
       const accountToken = pendingAccountToken;
       if (accountToken) {
         const pair = await client.exchangeAccountMembership(accountToken, action.accountId);
+        assertLoginFlowCurrent(actionLoginFlowEpoch);
         pendingAccountToken = null;
         return {
           success: true,
-          state: await completeLogin({ status: 'ok', ...pair }),
+          state: await completeLogin({ status: 'ok', ...pair }, actionLoginFlowEpoch),
         };
       }
       // 纯社交/SSO 等没有 account 会话的历史路径仍用一次性 loginTicket。
@@ -3692,6 +3797,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         success: true,
         state: await acceptLoginOutcome(
           await client.selectAccount(pendingLoginTicket, action.accountId),
+          actionLoginFlowEpoch,
         ),
       };
     }
@@ -3705,6 +3811,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         );
       }
       await client.requestSsoVerificationCode(pendingSsoVerificationTicket);
+      assertLoginFlowCurrent(actionLoginFlowEpoch);
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'sso-verification-code-requested',
         channel: loginFlowState.channel,
@@ -3725,6 +3832,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         success: true,
         state: await acceptLoginOutcome(
           await client.verifySsoVerification(pendingSsoVerificationTicket, action.code),
+          actionLoginFlowEpoch,
         ),
       };
     }
@@ -3734,6 +3842,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         throw new AuthApiError('INVALID_BIND_TICKET', 401, 'Missing binding ticket');
       }
       await client.requestBindingCode(pendingBindTicket, loginFlowState.bindType, action.contact);
+      assertLoginFlowCurrent(actionLoginFlowEpoch);
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'binding-code-requested',
         bindType: loginFlowState.bindType,
@@ -3754,9 +3863,13 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
           action.contact,
           action.code,
         ),
+        actionLoginFlowEpoch,
       ),
     };
   } catch (error) {
+    if (loginFlowEpoch !== actionLoginFlowEpoch) {
+      return { success: false, code: 'AUTH_FLOW_SUPERSEDED', state: loginFlowState };
+    }
     const code = error instanceof AuthApiError ? error.code : 'AUTH_REQUEST_FAILED';
     const status = error instanceof AuthApiError ? error.statusCode : 0;
     log.warn(`login action failed action=${action.type} status=${status} code=${code}`);
@@ -3786,17 +3899,21 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
 }
 
 export async function dispatchLoginAction(action: unknown): Promise<DesktopLoginActionResult> {
+  const dispatchLoginFlowEpoch = loginFlowEpoch;
   // Terminal logout clears credentials synchronously, then tears down the old
   // account boundary in the background so the rejecting request can unwind.
   // Do not let a fast re-login open a new account DB that the old teardown
   // would subsequently close.
   if (sessionInvalidationPromise) await sessionInvalidationPromise;
+  if (loginFlowEpoch !== dispatchLoginFlowEpoch) {
+    return { success: false, code: 'AUTH_FLOW_SUPERSEDED', state: loginFlowState };
+  }
   const parsedAction = parseDesktopLoginAction(action);
   if (!parsedAction) {
     return { success: false, code: 'INVALID_AUTH_ACTION', state: loginFlowState };
   }
   if (parsedAction.type === 'cancel-browser') {
-    const pendingAction = loginActionPromise;
+    const pendingAction = loginActionPromiseEpoch === loginFlowEpoch ? loginActionPromise : null;
     const cancelled = browserAuthorizationSlot.cancelActive();
     if (!cancelled && !pendingAction) {
       return { success: false, code: 'NO_BROWSER_AUTH_IN_PROGRESS', state: loginFlowState };
@@ -3805,14 +3922,19 @@ export async function dispatchLoginAction(action: unknown): Promise<DesktopLogin
     const state = settled?.state ?? loginFlowState ?? (await loadLoginProviders());
     return { success: true, state };
   }
-  if (loginActionPromise) {
+  if (loginActionPromise && loginActionPromiseEpoch === loginFlowEpoch) {
     return { success: false, code: 'LOGIN_BUSY', state: loginFlowState };
   }
-  loginActionPromise = runLoginAction(parsedAction);
+  const run = runLoginAction(parsedAction);
+  loginActionPromise = run;
+  loginActionPromiseEpoch = loginFlowEpoch;
   try {
-    return await loginActionPromise;
+    return await run;
   } finally {
-    loginActionPromise = null;
+    if (loginActionPromise === run) {
+      loginActionPromise = null;
+      loginActionPromiseEpoch = null;
+    }
   }
 }
 

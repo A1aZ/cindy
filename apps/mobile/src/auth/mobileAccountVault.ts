@@ -215,6 +215,49 @@ export async function rememberMobilePassportSession(input: {
   });
 }
 
+/**
+ * Store a rotated Passport only while the vault still contains the token that
+ * started the request. Logout and concurrent refreshes therefore win over a
+ * late response instead of having their newer state overwritten.
+ */
+export async function replaceMobilePassportSessionIfCurrent(input: {
+  realm: AuthRegion;
+  passportId: string;
+  expectedAccountRefreshToken: string;
+  accountRefreshToken: string;
+  memberships: readonly (
+    AuthMembership | AccountMembership | StoredAccountMetadata
+  )[];
+}): Promise<boolean> {
+  const memberships = input.memberships.map((membership) =>
+    isStoredAccountMetadata(membership)
+      ? membership
+      : storedAccountMetadataFromMembership(membership, input.passportId),
+  );
+  return mutateMobileAccountVault((vault) => {
+    const key = passportVaultKey(input.realm, input.passportId);
+    if (
+      vault.passports[key]?.accountRefreshToken !==
+      input.expectedAccountRefreshToken
+    ) {
+      return false;
+    }
+    vault.passports[key] = {
+      realm: input.realm,
+      passportId: input.passportId,
+      accountRefreshToken: input.accountRefreshToken,
+      memberships,
+    };
+    reconcileSavedAccountMetadata(vault, {
+      realm: input.realm,
+      passportId: input.passportId,
+      memberships,
+      passportMode: 'replace-passport',
+    });
+    return true;
+  });
+}
+
 export async function patchMobileAccountMetadata(input: {
   realm: AuthRegion;
   passportId: string;
@@ -259,5 +302,23 @@ export async function removeMobilePassportSession(
 ): Promise<void> {
   await mutateMobileAccountVault((vault) => {
     delete vault.passports[passportVaultKey(realm, passportId)];
+  });
+}
+
+/** Delete only the rejected Passport generation, never a concurrent replacement. */
+export async function removeMobilePassportSessionIfCurrent(
+  realm: AuthRegion,
+  passportId: string,
+  expectedAccountRefreshToken: string,
+): Promise<boolean> {
+  return mutateMobileAccountVault((vault) => {
+    const key = passportVaultKey(realm, passportId);
+    if (
+      vault.passports[key]?.accountRefreshToken !== expectedAccountRefreshToken
+    ) {
+      return false;
+    }
+    delete vault.passports[key];
+    return true;
   });
 }

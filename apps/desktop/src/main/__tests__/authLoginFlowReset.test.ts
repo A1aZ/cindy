@@ -82,7 +82,7 @@ describe('auth login-flow reset', () => {
   });
 
   it('clears stale organization realm state before personal login and a new discovery', () => {
-    const discoveryStart = source.indexOf('async function discoverOrganizationRealm(org: string)');
+    const discoveryStart = source.indexOf('async function discoverOrganizationRealm(');
     const discoveryBody = source.slice(discoveryStart, source.indexOf('\n}', discoveryStart));
     expect(discoveryBody).toContain('pendingAuthRealm = null;');
 
@@ -136,20 +136,60 @@ describe('auth login-flow reset', () => {
   });
 
   it('keeps saved account metadata fresh after profile edits and Passport sync', () => {
-    const rememberPassportStart = source.indexOf('function rememberPassportSession(');
-    const rememberPassportEnd = source.indexOf(
-      '\n}\n\nfunction rememberUpdatedMembershipMetadata',
-      rememberPassportStart,
+    const writePassportStart = source.indexOf('function writePassportSessionToVault(');
+    const writePassportEnd = source.indexOf(
+      '\n}\n\n/** Persist a rotated Passport',
+      writePassportStart,
     );
-    const rememberPassportBody = source.slice(rememberPassportStart, rememberPassportEnd);
-    expect(rememberPassportBody).toContain('reconcileSavedAccountMetadata(vault');
-    expect(rememberPassportBody).toContain("passportMode: 'replace-passport'");
+    const writePassportBody = source.slice(writePassportStart, writePassportEnd);
+    expect(writePassportBody).toContain('reconcileSavedAccountMetadata(vault');
+    expect(writePassportBody).toContain("passportMode: 'replace-passport'");
 
     const profileStart = source.indexOf('export async function updateServerProfile(');
     const profileEnd = source.indexOf('\n}\n\nexport async function initialize(', profileStart);
     const profileBody = source.slice(profileStart, profileEnd);
     expect(profileBody).toContain('rememberUpdatedMembershipMetadata(');
     expect(profileBody).toContain('membership.passportId ?? currentUser.passportId');
+  });
+
+  it('invalidates every pending add-account action when its surface closes', () => {
+    const runStart = source.indexOf('async function runLoginAction(action: DesktopLoginAction)');
+    const runEnd = source.indexOf('\n}\n\nexport async function dispatchLoginAction', runStart);
+    const runBody = source.slice(runStart, runEnd);
+    expect(runBody).toContain('const actionLoginFlowEpoch = loginFlowEpoch;');
+    expect(runBody).toContain('assertLoginFlowCurrent(actionLoginFlowEpoch);');
+    expect(runBody).toContain("code: 'AUTH_FLOW_SUPERSEDED'");
+
+    const completeStart = source.indexOf('async function completeLogin(');
+    const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
+    const completeBody = source.slice(completeStart, completeEnd);
+    expect(completeBody).toContain('expectedLoginFlowEpoch = loginFlowEpoch');
+    expect(completeBody).toContain('loginFlowEpoch !== expectedLoginFlowEpoch');
+
+    const cancelStart = source.indexOf('export function cancelAddAccountLogin(): void {');
+    const cancelEnd = source.indexOf('\n}', cancelStart);
+    expect(source.slice(cancelStart, cancelEnd)).toContain('loginFlowEpoch += 1;');
+  });
+
+  it('CAS-guards Passport sync and rejects cross-realm personal account switching', () => {
+    const syncStart = source.indexOf('export async function syncSavedAccounts()');
+    const syncEnd = source.indexOf('\n}\n\nexport async function switchSavedAccount', syncStart);
+    const syncBody = source.slice(syncStart, syncEnd);
+    expect(syncBody).toContain('replacePassportSessionIfCurrent({');
+    expect(syncBody).toContain('expectedAccountRefreshToken: passport.accountRefreshToken');
+    expect(syncBody).toContain('removePassportSessionIfCurrent(');
+
+    const switchStart = syncEnd;
+    const switchEnd = source.indexOf(
+      '\n}\n\nexport async function beginAddAccountLogin',
+      switchStart,
+    );
+    const switchBody = source.slice(switchStart, switchEnd);
+    const policyGuard = switchBody.indexOf('!canRestoreAuthSessionForMembership(');
+    const commitRealm = switchBody.indexOf('pendingAuthRealm = realm;');
+    expect(policyGuard).toBeGreaterThan(-1);
+    expect(commitRealm).toBeGreaterThan(policyGuard);
+    expect(switchBody).toContain("'REGION_MISMATCH'");
   });
 
   it('keeps account refresh out of resource-token cold-start initialization', () => {

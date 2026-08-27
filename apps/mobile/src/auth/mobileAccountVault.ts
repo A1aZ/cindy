@@ -243,15 +243,22 @@ export function mutateMobileAccountVault<T>(
 export async function clearMobileAccountVault(
   afterPersist: () => void | Promise<void> = () => undefined,
 ): Promise<void> {
-  await transactMobileAccountVault(
-    (vault) => {
-      vault.activeAccountKey = null;
-      vault.resources = {};
-      vault.passports = {};
-      vault.signedOutAt = Date.now();
-    },
-    afterPersist,
-  );
+  await enqueueMobileVaultOperation(async () => {
+    // Explicit logout is the one mutation allowed to replace malformed vault
+    // contents. Preserve the opaque record for rollback, but do not require it
+    // to parse before publishing the fail-closed signed-out owner.
+    const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
+    const vault = emptyMobileAccountVault();
+    vault.signedOutAt = Date.now();
+    await writeMobileAccountVault(vault);
+    try {
+      await afterPersist();
+    } catch (error) {
+      if (raw === null) await deleteSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
+      else await setSecureItem(MOBILE_ACCOUNT_VAULT_KEY, raw);
+      throw error;
+    }
+  });
 }
 
 export function listMobileSavedAccounts(vault: MobileAccountVault): MobileSavedAccount[] {

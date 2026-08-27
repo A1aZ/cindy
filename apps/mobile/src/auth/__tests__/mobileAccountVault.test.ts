@@ -725,4 +725,25 @@ describe('mobile account vault', () => {
       expect.any(Number),
     );
   });
+
+  it('lets explicit logout replace a malformed vault without parsing it', async () => {
+    const malformed = '{bad-json';
+    secureStorage.value = malformed;
+
+    await expect(clearMobileAccountVault()).resolves.toBeUndefined();
+    expect(parseMobileAccountVault(secureStorage.value)).toMatchObject({
+      activeAccountKey: null,
+      passports: {},
+      resources: {},
+      signedOutAt: expect.any(Number),
+    });
+
+    secureStorage.value = malformed;
+    await expect(
+      clearMobileAccountVault(async () => {
+        throw new Error('session delete failed');
+      }),
+    ).rejects.toThrow('session delete failed');
+    expect(secureStorage.value).toBe(malformed);
+  });
 });

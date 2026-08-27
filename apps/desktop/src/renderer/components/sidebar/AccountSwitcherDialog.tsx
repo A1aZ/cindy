@@ -104,10 +104,7 @@ export function AccountSwitcherDialog({
       if (hasRunningTask) {
         // Full app windows always provide the shared confirmation host. Standalone
         // story/test mounts fail closed instead of switching without consent.
-        if (!confirmDialog) {
-          setSwitchingKey(null);
-          return;
-        }
+        if (!confirmDialog) return;
         const confirmed = await confirmDialog.confirm({
           title: t('sidebar.accountSwitcher.runningTaskTitle'),
           description: t('sidebar.accountSwitcher.runningTaskDescription'),
@@ -115,10 +112,7 @@ export function AccountSwitcherDialog({
           cancelText: t('logic.confirm.cancel'),
           confirmVariant: 'destructive',
         });
-        if (!confirmed) {
-          setSwitchingKey(null);
-          return;
-        }
+        if (!confirmed) return;
       }
 
       // Main owns the account boundary: it stops and drains the outgoing runtime
@@ -127,6 +121,7 @@ export function AccountSwitcherDialog({
       onOpenChange(false);
     } catch {
       toast.error(t('sidebar.accountSwitcher.switchFailed'));
+    } finally {
       setSwitchingKey(null);
     }
   };

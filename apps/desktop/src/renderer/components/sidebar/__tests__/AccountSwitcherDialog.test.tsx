@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { createRef } from 'react';
+import { createRef, useState } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -198,5 +198,41 @@ describe('AccountSwitcherDialog', () => {
     await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
     await waitFor(() => expect(switchAccount).toHaveBeenCalledWith('org-key'));
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('releases the switching state after success so the dialog can be used again', async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            reopen
+          </button>
+          <AccountSwitcherDialog
+            open={open}
+            onOpenChange={setOpen}
+            onAddAccount={vi.fn()}
+            triggerRef={createRef<HTMLButtonElement>()}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Example CorpOrganization Cindy/ }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'reopen' }));
+
+    const switchButton = await screen.findByRole('button', {
+      name: /Example CorpOrganization Cindy/,
+    });
+    expect((switchButton as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByRole('button', {
+        name: 'sidebar.accountSwitcher.addAccount',
+      }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });

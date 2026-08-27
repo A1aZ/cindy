@@ -237,7 +237,14 @@ export function rollbackPiHostTurnStart(
   ctx: PiTranslateContext,
   token: PiHostTurnStartToken,
 ): void {
-  if (ctx.pendingHostTurnStartToken === token) ctx.pendingHostTurnStartToken = null;
+  if (ctx.pendingHostTurnStartToken !== token) return;
+  ctx.pendingHostTurnStartToken = null;
+  // A stop requested before agent_start targets the pending generation. If the
+  // matching prompt is later rejected, that generation never exists, so its
+  // accepted stop must not be inherited by the next real turn.
+  if (ctx.hostAbortRequestGeneration === ctx.turnGeneration + 1) {
+    clearPiHostAbortRequests(ctx);
+  }
 }
 
 /**

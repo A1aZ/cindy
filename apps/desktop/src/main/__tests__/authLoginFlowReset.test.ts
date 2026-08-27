@@ -82,18 +82,11 @@ describe('auth login-flow reset', () => {
   });
 
   it('clears stale organization realm state before personal login and a new discovery', () => {
-    const discoveryStart = source.indexOf(
-      'async function discoverOrganizationRealm(org: string)',
-    );
-    const discoveryBody = source.slice(
-      discoveryStart,
-      source.indexOf('\n}', discoveryStart),
-    );
+    const discoveryStart = source.indexOf('async function discoverOrganizationRealm(org: string)');
+    const discoveryBody = source.slice(discoveryStart, source.indexOf('\n}', discoveryStart));
     expect(discoveryBody).toContain('pendingAuthRealm = null;');
 
-    const actionStart = source.indexOf(
-      'async function runLoginAction(action: DesktopLoginAction)',
-    );
+    const actionStart = source.indexOf('async function runLoginAction(action: DesktopLoginAction)');
     const actionPreamble = source.slice(
       actionStart,
       source.indexOf('const stateBeforeAction', actionStart),
@@ -101,12 +94,8 @@ describe('auth login-flow reset', () => {
     expect(actionPreamble).toContain("action.type === 'discover'");
     expect(actionPreamble).toContain("action.type === 'request-code'");
     expect(actionPreamble).toContain("action.type === 'verify-code'");
-    expect(actionPreamble).toContain(
-      "action.type === 'start-browser' && action.kind === 'social'",
-    );
-    expect(actionPreamble).toContain(
-      'if (startsBuildRealmFlow) pendingAuthRealm = null;',
-    );
+    expect(actionPreamble).toContain("action.type === 'start-browser' && action.kind === 'social'");
+    expect(actionPreamble).toContain('if (startsBuildRealmFlow) pendingAuthRealm = null;');
   });
 
   it('does not leave expired private tickets on a screen that can only reuse them', () => {
@@ -116,14 +105,16 @@ describe('auth login-flow reset', () => {
     expect(source).toContain("? { step: 'error', code, recoverTo: 'identifier' }");
   });
 
-  it('keeps the account token in the login flow only and exchanges a resource token', () => {
+  it('keeps account access tokens in memory while persisting only encrypted refresh sessions', () => {
     expect(source).toContain(
       "const LEGACY_ACCOUNT_REFRESH_TOKEN_KEY = 'cindy_auth_account_refresh_token';",
     );
     expect(source).toContain('let pendingAccountToken: string | null = null;');
     expect(source).toContain('client.exchangeAccountMembership(accountToken, action.accountId)');
-    expect(source).not.toContain('.logoutAccount(');
-    expect(source).not.toContain('accountSession');
+    expect(source).toContain("const AUTH_ACCOUNT_VAULT_KEY = 'cindy_auth_accounts_v1';");
+    expect(source).toContain('client.refreshAccount(passport.accountRefreshToken)');
+    expect(source).toContain('client.logoutAccount(pair.accountToken)');
+    expect(source).toContain('writeSafe(AUTH_ACCOUNT_VAULT_KEY');
     expect(source).not.toContain('writeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY');
     expect(source).not.toContain('accountToken: accountAccessToken');
 
@@ -144,7 +135,24 @@ describe('auth login-flow reset', () => {
     expect(getterBody).not.toContain('accountAccessToken');
   });
 
-  it('never restores an account session during resource-token initialization', () => {
+  it('keeps saved account metadata fresh after profile edits and Passport sync', () => {
+    const rememberPassportStart = source.indexOf('function rememberPassportSession(');
+    const rememberPassportEnd = source.indexOf(
+      '\n}\n\nfunction rememberUpdatedMembershipMetadata',
+      rememberPassportStart,
+    );
+    const rememberPassportBody = source.slice(rememberPassportStart, rememberPassportEnd);
+    expect(rememberPassportBody).toContain('reconcileSavedAccountMetadata(vault');
+    expect(rememberPassportBody).toContain("passportMode: 'replace-passport'");
+
+    const profileStart = source.indexOf('export async function updateServerProfile(');
+    const profileEnd = source.indexOf('\n}\n\nexport async function initialize(', profileStart);
+    const profileBody = source.slice(profileStart, profileEnd);
+    expect(profileBody).toContain('rememberUpdatedMembershipMetadata(');
+    expect(profileBody).toContain('membership.passportId ?? currentUser.passportId');
+  });
+
+  it('keeps account refresh out of resource-token cold-start initialization', () => {
     const initializeStart = source.indexOf('export async function initialize(');
     const initializeEnd = source.indexOf('\n}\n\n/**\n * 冷启动 refresh 流程本体', initializeStart);
     const initializeBody = source.slice(initializeStart, initializeEnd);
@@ -165,7 +173,9 @@ describe('auth login-flow reset', () => {
 
     expect(localGuard).toBeGreaterThan(-1);
     expect(refreshTokenRead).toBeGreaterThan(localGuard);
-    expect(initializeBody.slice(localGuard, refreshTokenRead)).toContain('return snapshotAuthState();');
+    expect(initializeBody.slice(localGuard, refreshTokenRead)).toContain(
+      'return snapshotAuthState();',
+    );
   });
 
   it('activates a restored realm only after the refreshed membership passes build policy', () => {
@@ -285,7 +295,10 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('notifySessionExpired(reason);');
 
     const ownerCommitStart = source.indexOf('async function withAccountFreeOwnerCommit(');
-    const ownerCommitEnd = source.indexOf('\n}\n\nasync function withCloudOwnerCommit(', ownerCommitStart);
+    const ownerCommitEnd = source.indexOf(
+      '\n}\n\nasync function withCloudOwnerCommit(',
+      ownerCommitStart,
+    );
     const ownerCommitBody = source.slice(ownerCommitStart, ownerCommitEnd);
     expect(ownerCommitBody).toContain('beginAppSessionBoundary()');
     expect(ownerCommitBody).toContain('notifyRendererAuthBoundaryPending();');

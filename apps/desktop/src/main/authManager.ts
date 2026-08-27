@@ -34,6 +34,7 @@ import {
   type AuthMembership,
   type AuthRegion,
   type AuthTokenPair,
+  type AccountMembership,
   type AccountDeletionAvailability,
   type AccountDeletionStatus,
   type LoginMethod,
@@ -72,6 +73,7 @@ import {
   type AuthLoopbackDevBridge,
 } from './authLoopbackCallback';
 import { createDesktopPollCredentials, runHostedCallbackPolling } from './authHostedCallback';
+import { reconcileSavedAccountMetadata, type StoredAccountMetadata } from './authAccountMetadata';
 // dev-only 登录 scenario harness(implementation-plan Step 0 WHAT4):静态 import
 // (main 禁运行时动态 import),生产构建由 vite alias 把整模块替换为空 stub
 // (vite.main.config.ts),运行时另有 app.isPackaged guard 双保险。
@@ -95,7 +97,10 @@ import {
 } from './clientEndpointsService.js';
 import {
   parseDesktopLoginAction,
+  parseDesktopAccountKey,
   type DesktopAccountDeletionChallenge,
+  type DesktopAccountSwitcherSnapshot,
+  type DesktopSavedAccount,
   type DesktopLoginAction,
   type DesktopLoginActionResult,
 } from '../shared/authIpc';
@@ -157,6 +162,7 @@ function authServerUrl(realm: AuthRegion = activeAuthRealm): string {
   return getClientEndpointForRealm(realm, 'authApiBaseUrl');
 }
 const AUTH_SESSION_KEY = 'cindy_auth_session_v1';
+const AUTH_ACCOUNT_VAULT_KEY = 'cindy_auth_accounts_v1';
 const LEGACY_RESOURCE_REFRESH_TOKEN_KEY = 'cindy_auth_refresh_token';
 const ACCOUNT_DELETION_RECEIPT_KEY = 'cindy_auth_account_deletion_receipt';
 const LEGACY_ACCOUNT_REFRESH_TOKEN_KEY = 'cindy_auth_account_refresh_token';
@@ -202,6 +208,27 @@ export interface User {
  */
 interface CurrentUser extends User {
   membershipDisplayName: string;
+}
+
+interface StoredResourceSession {
+  realm: AuthRegion;
+  refreshToken: string;
+  metadata: StoredAccountMetadata;
+  lastUsedAt: number;
+}
+
+interface StoredPassportSession {
+  realm: AuthRegion;
+  passportId: string;
+  accountRefreshToken: string;
+  memberships: StoredAccountMetadata[];
+}
+
+interface AuthAccountVault {
+  version: 1;
+  activeAccountKey: string | null;
+  resources: Record<string, StoredResourceSession>;
+  passports: Record<string, StoredPassportSession>;
 }
 
 export interface AuthState {
@@ -269,8 +296,8 @@ const stableOwnerPostCommitCoordinator = new StableOwnerPostCommitCoordinator({
       scopeKey: activeOwnerScopeKey(),
       dataOwnerId: session.dataOwnerId,
       stable:
-        !isAppSessionBoundaryPending()
-        && isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId),
+        !isAppSessionBoundaryPending() &&
+        isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId),
     };
   },
   warn: (message, meta) => log.warn(message, meta),
@@ -328,6 +355,8 @@ let discoveredMethods: LoginMethod[] = [];
 // Account token 仅在一次登录的 Membership 选择阶段存活；兑换 resource token
 // 后立即清空，不持久化、不续期，也不参与业务请求或正常登出。
 let pendingAccountToken: string | null = null;
+let pendingAccountRefreshToken: string | null = null;
+let pendingAccountMemberships: AuthMembership[] = [];
 let pendingLoginTicket: string | null = null;
 let pendingBindTicket: string | null = null;
 let pendingSsoVerificationTicket: string | null = null;
@@ -495,6 +524,227 @@ function removeSafe(key: string): void {
   } catch {
     // ENOENT is fine
   }
+}
+
+function emptyAuthAccountVault(): AuthAccountVault {
+  return { version: 1, activeAccountKey: null, resources: {}, passports: {} };
+}
+
+function accountVaultKey(realm: AuthRegion, membershipId: string): string {
+  return JSON.stringify([realm, membershipId]);
+}
+
+function passportVaultKey(realm: AuthRegion, passportId: string): string {
+  return JSON.stringify([realm, passportId]);
+}
+
+function isStoredAccountMetadata(value: unknown): value is StoredAccountMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<StoredAccountMetadata>;
+  return (
+    typeof item.membershipId === 'string' &&
+    typeof item.passportId === 'string' &&
+    typeof item.displayName === 'string' &&
+    (item.email === null || typeof item.email === 'string') &&
+    (item.avatarUrl === null || typeof item.avatarUrl === 'string') &&
+    (item.kind === 'personal' || item.kind === 'org') &&
+    (item.role === 'owner' || item.role === 'admin' || item.role === 'member') &&
+    (item.orgId === null || typeof item.orgId === 'string') &&
+    (item.orgName === null || typeof item.orgName === 'string') &&
+    (item.orgLogoUrl === null || typeof item.orgLogoUrl === 'string')
+  );
+}
+
+function readAuthAccountVault(): AuthAccountVault {
+  const raw = readSafe(AUTH_ACCOUNT_VAULT_KEY);
+  if (!raw) return emptyAuthAccountVault();
+  try {
+    const parsed = JSON.parse(raw) as Partial<AuthAccountVault>;
+    if (
+      parsed.version !== 1 ||
+      !parsed.resources ||
+      typeof parsed.resources !== 'object' ||
+      Array.isArray(parsed.resources) ||
+      !parsed.passports ||
+      typeof parsed.passports !== 'object' ||
+      Array.isArray(parsed.passports)
+    ) {
+      throw new Error('unsupported auth account vault');
+    }
+    const resources: Record<string, StoredResourceSession> = {};
+    for (const [key, candidate] of Object.entries(parsed.resources)) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      const item = candidate as Partial<StoredResourceSession>;
+      if (
+        (item.realm !== 'cn' && item.realm !== 'global') ||
+        typeof item.refreshToken !== 'string' ||
+        !isStoredAccountMetadata(item.metadata) ||
+        typeof item.lastUsedAt !== 'number'
+      )
+        continue;
+      resources[key] = item as StoredResourceSession;
+    }
+    const passports: Record<string, StoredPassportSession> = {};
+    for (const [key, candidate] of Object.entries(parsed.passports)) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      const item = candidate as Partial<StoredPassportSession>;
+      if (
+        (item.realm !== 'cn' && item.realm !== 'global') ||
+        typeof item.passportId !== 'string' ||
+        typeof item.accountRefreshToken !== 'string' ||
+        !Array.isArray(item.memberships)
+      )
+        continue;
+      passports[key] = {
+        realm: item.realm,
+        passportId: item.passportId,
+        accountRefreshToken: item.accountRefreshToken,
+        memberships: item.memberships.filter(isStoredAccountMetadata),
+      };
+    }
+    return {
+      version: 1,
+      activeAccountKey:
+        typeof parsed.activeAccountKey === 'string' ? parsed.activeAccountKey : null,
+      resources,
+      passports,
+    };
+  } catch (error) {
+    log.warn('encrypted auth account vault is invalid; ignoring it without deleting', error);
+    return emptyAuthAccountVault();
+  }
+}
+
+function writeAuthAccountVault(vault: AuthAccountVault): boolean {
+  return writeSafe(AUTH_ACCOUNT_VAULT_KEY, JSON.stringify(vault));
+}
+
+function metadataFromMembership(
+  membership: AuthMembership | AccountMembership,
+  passportId: string,
+): StoredAccountMetadata {
+  return {
+    membershipId: membership.id,
+    passportId,
+    displayName: membership.displayName,
+    email: membership.email,
+    avatarUrl: membership.avatarUrl ?? null,
+    kind: membership.kind,
+    role: membership.role,
+    orgId: membership.orgId,
+    orgName: membership.orgName,
+    orgLogoUrl: membership.orgLogoUrl ?? null,
+  };
+}
+
+function rememberResourceSession(
+  pair: AuthTokenPair,
+  realm: AuthRegion,
+  options: { markActive?: boolean; lastUsedAt?: number } = {},
+): void {
+  const passportId = pair.membership.passportId;
+  if (!passportId) {
+    log.warn('resource session omitted passportId; keeping only the active compatibility record');
+    return;
+  }
+  const key = accountVaultKey(realm, pair.membership.id);
+  const vault = readAuthAccountVault();
+  vault.resources[key] = {
+    realm,
+    refreshToken: pair.refreshToken,
+    metadata: metadataFromMembership(pair.membership, passportId),
+    lastUsedAt: options.lastUsedAt ?? Date.now(),
+  };
+  if (options.markActive !== false) vault.activeAccountKey = key;
+  writeAuthAccountVault(vault);
+}
+
+function rememberPassportSession(input: {
+  realm: AuthRegion;
+  passportId: string;
+  accountRefreshToken: string;
+  memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
+}): void {
+  const key = passportVaultKey(input.realm, input.passportId);
+  const vault = readAuthAccountVault();
+  const previous = vault.passports[key];
+  const memberships = (input.memberships ?? previous?.memberships ?? []).map((membership) =>
+    isStoredAccountMetadata(membership)
+      ? membership
+      : metadataFromMembership(membership, input.passportId),
+  );
+  vault.passports[key] = {
+    realm: input.realm,
+    passportId: input.passportId,
+    accountRefreshToken: input.accountRefreshToken,
+    memberships,
+  };
+  reconcileSavedAccountMetadata(vault, {
+    realm: input.realm,
+    passportId: input.passportId,
+    memberships,
+    passportMode: 'replace-passport',
+  });
+  writeAuthAccountVault(vault);
+}
+
+function rememberUpdatedMembershipMetadata(
+  membership: AuthMembership,
+  realm: AuthRegion,
+  passportId: string,
+): void {
+  if (isPassiveSharedUserDataInstance()) return;
+  const vault = readAuthAccountVault();
+  const changed = reconcileSavedAccountMetadata(vault, {
+    realm,
+    passportId,
+    memberships: [metadataFromMembership(membership, passportId)],
+    passportMode: 'patch-known',
+  });
+  if (changed) writeAuthAccountVault(vault);
+}
+
+function removeVaultAccount(accountKey: string): void {
+  const vault = readAuthAccountVault();
+  delete vault.resources[accountKey];
+  if (vault.activeAccountKey === accountKey) vault.activeAccountKey = null;
+  writeAuthAccountVault(vault);
+}
+
+function bindResourcePairToSavedAccount(
+  pair: AuthTokenPair,
+  realm: AuthRegion,
+  metadata: StoredAccountMetadata,
+): AuthTokenPair {
+  if (
+    accountVaultKey(realm, pair.membership.id) !== accountVaultKey(realm, metadata.membershipId) ||
+    (pair.membership.passportId !== undefined && pair.membership.passportId !== metadata.passportId)
+  ) {
+    throw new AuthApiError(
+      'INVALID_RESPONSE',
+      502,
+      'Refreshed resource session does not match the selected saved account',
+    );
+  }
+  return pair.membership.passportId
+    ? pair
+    : {
+        ...pair,
+        membership: { ...pair.membership, passportId: metadata.passportId },
+      };
+}
+
+function isDefinitiveRefreshError(error: unknown): boolean {
+  return (
+    error instanceof AuthApiError &&
+    [
+      'INVALID_REFRESH_TOKEN',
+      'REFRESH_TOKEN_EXPIRED',
+      'DEVICE_MISMATCH',
+      'ACCOUNT_UNAVAILABLE',
+      'MEMBERSHIP_DISABLED',
+    ].includes(error.code)
+  );
 }
 
 function readPersistedAuthSession() {
@@ -1825,6 +2075,8 @@ function resetLoginFlowState(): void {
   providerConfig = null;
   discoveredMethods = [];
   pendingAccountToken = null;
+  pendingAccountRefreshToken = null;
+  pendingAccountMemberships = [];
   pendingLoginTicket = null;
   pendingBindTicket = null;
   pendingSsoVerificationTicket = null;
@@ -1894,6 +2146,8 @@ function clearAuth(
   credentialStoreHealth.reset();
   accessToken = null;
   pendingAccountToken = null;
+  pendingAccountRefreshToken = null;
+  pendingAccountMemberships = [];
   currentUser = null;
   accountDeletionRestoredNoticePending = false;
   confirmedAccountDeletionCredential = null;
@@ -1955,6 +2209,14 @@ async function expireRuntimeAuth(
   reason: SessionExpiredReason = 'unknown',
   opts: { preservePersistedRefreshToken?: boolean } = {},
 ): Promise<void> {
+  const expiredAccountKey = currentUser ? accountVaultKey(activeAuthRealm, currentUser.id) : null;
+  if (
+    expiredAccountKey &&
+    !opts.preservePersistedRefreshToken &&
+    !isPassiveSharedUserDataInstance()
+  ) {
+    removeVaultAccount(expiredAccountKey);
+  }
   // Raise the owner boundary before clearing auth so queued owner-scoped
   // continuations see the pending boundary and fail closed, rather than
   // executing between token clearance and the async teardown (P1,
@@ -1998,6 +2260,10 @@ async function expireRuntimeAuth(
  */
 export function invalidateSession(reason: string): Promise<void> {
   if (sessionInvalidationPromise) return sessionInvalidationPromise;
+
+  if (currentUser && !isPassiveSharedUserDataInstance()) {
+    removeVaultAccount(accountVaultKey(activeAuthRealm, currentUser.id));
+  }
 
   // Raise the owner boundary before clearing auth (same P1 fix as
   // expireRuntimeAuth — see PRRT_kwDOTgdRUs6YaakC).
@@ -2085,6 +2351,203 @@ export function getAuthState(): AuthState {
   return snapshotAuthState();
 }
 
+function accountSummaryFromMetadata(
+  accountKey: string,
+  metadata: StoredAccountMetadata,
+  activeAccountKey: string | null,
+): DesktopSavedAccount {
+  return {
+    accountKey,
+    displayName: metadata.displayName || metadata.email || 'Cindy',
+    email: metadata.email,
+    avatarUrl: metadata.avatarUrl,
+    kind: metadata.kind,
+    orgName: metadata.orgName,
+    orgLogoUrl: metadata.orgLogoUrl,
+    isCurrent: accountKey === activeAccountKey,
+  };
+}
+
+export function listSavedAccounts(): DesktopAccountSwitcherSnapshot {
+  const vault = readAuthAccountVault();
+  const byKey = new Map<string, StoredAccountMetadata>();
+  for (const [key, resource] of Object.entries(vault.resources)) {
+    byKey.set(key, resource.metadata);
+  }
+  for (const passport of Object.values(vault.passports)) {
+    for (const membership of passport.memberships) {
+      const key = accountVaultKey(passport.realm, membership.membershipId);
+      if (!byKey.has(key)) byKey.set(key, membership);
+    }
+  }
+  const activeKey = currentUser
+    ? accountVaultKey(activeAuthRealm, currentUser.id)
+    : vault.activeAccountKey;
+  const accounts = [...byKey.entries()]
+    .map(([key, metadata]) => accountSummaryFromMetadata(key, metadata, activeKey))
+    .sort((left, right) => {
+      if (left.isCurrent !== right.isCurrent) return left.isCurrent ? -1 : 1;
+      const leftUsed = vault.resources[left.accountKey]?.lastUsedAt ?? 0;
+      const rightUsed = vault.resources[right.accountKey]?.lastUsedAt ?? 0;
+      return rightUsed - leftUsed || left.displayName.localeCompare(right.displayName);
+    });
+  return { accounts, mutationAllowed: !isPassiveSharedUserDataInstance() };
+}
+
+export async function syncSavedAccounts(): Promise<DesktopAccountSwitcherSnapshot> {
+  if (isPassiveSharedUserDataInstance()) return listSavedAccounts();
+  const initial = readAuthAccountVault();
+  for (const [key, passport] of Object.entries(initial.passports)) {
+    try {
+      await loadClientEndpointsForRealm(passport.realm);
+      const client = createAuthClient(passport.realm);
+      const pair = await client.refreshAccount(passport.accountRefreshToken);
+      // Account refresh has no replay grace. Persist the replacement before
+      // making the membership request that consumes its access token.
+      rememberPassportSession({
+        realm: passport.realm,
+        passportId: passport.passportId,
+        accountRefreshToken: pair.accountRefreshToken,
+        memberships: passport.memberships,
+      });
+      const memberships = await client.getAccountMemberships(pair.accountToken);
+      rememberPassportSession({
+        realm: passport.realm,
+        passportId: passport.passportId,
+        accountRefreshToken: pair.accountRefreshToken,
+        memberships,
+      });
+    } catch (error) {
+      if (!isDefinitiveRefreshError(error)) {
+        log.warn('saved account membership sync failed transiently', error);
+        continue;
+      }
+      const latest = readAuthAccountVault();
+      if (latest.passports[key]?.accountRefreshToken === passport.accountRefreshToken) {
+        delete latest.passports[key];
+        writeAuthAccountVault(latest);
+      }
+    }
+  }
+  return listSavedAccounts();
+}
+
+export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> {
+  const parsedKey = parseDesktopAccountKey(rawAccountKey);
+  if (!parsedKey) throw new AuthApiError('INVALID_AUTH_ACTION', 400, 'Invalid account key');
+  if (isPassiveSharedUserDataInstance()) {
+    throw new AuthApiError(
+      'PASSIVE_AUTH_MUTATION_BLOCKED',
+      409,
+      'This shared-data instance cannot switch accounts',
+    );
+  }
+  if (currentUser && parsedKey === accountVaultKey(activeAuthRealm, currentUser.id)) return;
+
+  let vault = readAuthAccountVault();
+  let resource: StoredResourceSession | undefined = vault.resources[parsedKey];
+  let metadata = resource?.metadata;
+  if (!metadata) {
+    for (const passport of Object.values(vault.passports)) {
+      const candidate = passport.memberships.find(
+        (membership) => accountVaultKey(passport.realm, membership.membershipId) === parsedKey,
+      );
+      if (candidate) {
+        metadata = candidate;
+        break;
+      }
+    }
+  }
+  if (!metadata) throw new AuthApiError('ACCOUNT_NOT_FOUND', 404, 'Saved account not found');
+
+  const realm =
+    resource?.realm ??
+    Object.values(vault.passports).find((passport) =>
+      passport.memberships.some(
+        (membership) => accountVaultKey(passport.realm, membership.membershipId) === parsedKey,
+      ),
+    )?.realm;
+  if (!realm) throw new AuthApiError('ACCOUNT_NOT_FOUND', 404, 'Saved account realm missing');
+  await loadClientEndpointsForRealm(realm);
+  const client = createAuthClient(realm);
+  let pair: AuthTokenPair | null = null;
+
+  if (resource) {
+    try {
+      pair = await client.refresh(resource.refreshToken);
+      pair = bindResourcePairToSavedAccount(pair, realm, metadata);
+      rememberResourceSession(pair, realm, { markActive: false });
+    } catch (error) {
+      if (!isDefinitiveRefreshError(error)) throw error;
+      removeVaultAccount(parsedKey);
+      resource = undefined;
+      vault = readAuthAccountVault();
+    }
+  }
+
+  if (!pair) {
+    const passport = vault.passports[passportVaultKey(realm, metadata.passportId)];
+    if (!passport) {
+      throw new AuthApiError('ACCOUNT_REAUTH_REQUIRED', 401, 'Saved account requires login');
+    }
+    let accountRefreshSucceeded = false;
+    try {
+      const accountPair = await client.refreshAccount(passport.accountRefreshToken);
+      accountRefreshSucceeded = true;
+      rememberPassportSession({
+        realm,
+        passportId: passport.passportId,
+        accountRefreshToken: accountPair.accountRefreshToken,
+        memberships: passport.memberships,
+      });
+      pair = await client.exchangeAccountMembership(
+        accountPair.accountToken,
+        metadata.membershipId,
+      );
+      pair = bindResourcePairToSavedAccount(pair, realm, metadata);
+      rememberResourceSession(pair, realm, { markActive: false });
+    } catch (error) {
+      // An exchange can fail because one membership was disabled while the
+      // Passport session remains healthy. Only an Account-refresh failure
+      // invalidates every membership owned by this Passport.
+      if (!accountRefreshSucceeded && isDefinitiveRefreshError(error)) {
+        const latest = readAuthAccountVault();
+        delete latest.passports[passportVaultKey(realm, metadata.passportId)];
+        writeAuthAccountVault(latest);
+      }
+      throw error;
+    }
+  }
+
+  pendingAuthRealm = realm;
+  pendingAccountRefreshToken = null;
+  pendingAccountMemberships = [];
+  try {
+    await completeLogin({ status: 'ok', ...pair });
+  } catch (error) {
+    pendingAuthRealm = null;
+    throw error;
+  }
+}
+
+export async function beginAddAccountLogin(): Promise<DesktopLoginActionResult> {
+  if (isPassiveSharedUserDataInstance()) {
+    throw new AuthApiError(
+      'PASSIVE_AUTH_MUTATION_BLOCKED',
+      409,
+      'This shared-data instance cannot add accounts',
+    );
+  }
+  browserAuthorizationSlot.cancelActive();
+  resetLoginFlowState();
+  return getLoginState();
+}
+
+export function cancelAddAccountLogin(): void {
+  browserAuthorizationSlot.cancelActive();
+  resetLoginFlowState();
+}
+
 export function getCurrentDataOwnerId(): string | null {
   return getActiveAppSession().dataOwnerId;
 }
@@ -2112,7 +2575,8 @@ export function isLocalMode(): boolean {
 export function hasNoPersistedAuthCredentials(): boolean {
   return (
     isPersistedSecretAbsent(AUTH_SESSION_KEY) &&
-    isPersistedSecretAbsent(LEGACY_RESOURCE_REFRESH_TOKEN_KEY)
+    isPersistedSecretAbsent(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) &&
+    isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)
   );
 }
 
@@ -2344,6 +2808,19 @@ export function isConfirmedAccountDeletionSessionCurrent(): boolean {
 export async function clearLocalSessionAfterAccountDeletion(): Promise<boolean> {
   if (!isConfirmedAccountDeletionSessionCurrent()) return false;
   const expectedCredential = confirmedAccountDeletionCredential;
+  const deletedPassportId = currentUser?.passportId ?? null;
+  const deletedRealm = activeAuthRealm;
+  if (deletedPassportId && !isPassiveSharedUserDataInstance()) {
+    const vault = readAuthAccountVault();
+    for (const [key, resource] of Object.entries(vault.resources)) {
+      if (resource.realm === deletedRealm && resource.metadata.passportId === deletedPassportId) {
+        delete vault.resources[key];
+        if (vault.activeAccountKey === key) vault.activeAccountKey = null;
+      }
+    }
+    delete vault.passports[passportVaultKey(deletedRealm, deletedPassportId)];
+    writeAuthAccountVault(vault);
+  }
   await withAccountFreeOwnerCommit({
     reason: 'account-deletion',
     nextMode: 'signed-out',
@@ -2424,6 +2901,11 @@ export async function updateServerProfile(
       membershipDisplayName: membership.displayName,
       avatar: membership.avatarUrl ?? null,
     };
+    rememberUpdatedMembershipMetadata(
+      membership,
+      activeAuthRealm,
+      membership.passportId ?? currentUser.passportId,
+    );
     notifyRenderer();
     notifyAuthListeners();
     return { ok: true, profile: { name: currentUser.name, avatar: currentUser.avatar } };
@@ -2513,12 +2995,10 @@ export async function initialize(options: AuthInitializeOptions = {}): Promise<A
       commitVolatileAppSession('signed-out');
       return snapshotLoggedOutAuthState();
     }
-    log.info(
-      'relogin marker hit for v%s — clearing persisted auth',
-      reloginFlag.version,
-    );
+    log.info('relogin marker hit for v%s — clearing persisted auth', reloginFlag.version);
     lastAcceptedRefreshToken = null;
     removeSafe(AUTH_SESSION_KEY);
+    removeSafe(AUTH_ACCOUNT_VAULT_KEY);
     removeSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY);
     pendingAccountToken = null;
     removeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY);
@@ -2594,10 +3074,7 @@ export async function initialize(options: AuthInitializeOptions = {}): Promise<A
       // A signed-out fallback is not safe until the shared Ghost projection
       // has been swept. Otherwise the previous cloud owner's links remain
       // available to local/anonymous Agent processes during a slow refresh.
-      await recoverAccountFreeOwnerAtStartup(
-        'signed-out',
-        'cold-start-timeout-recovery',
-      );
+      await recoverAccountFreeOwnerAtStartup('signed-out', 'cold-start-timeout-recovery');
       return snapshotLoggedOutAuthState();
     },
     onLateResult: (state) =>
@@ -2719,6 +3196,7 @@ async function runColdStartRefreshFlow(
     // Refresh is token-rotating. Preserve the server-issued replacement before
     // the cross-process projection gate can reject or defer the owner commit.
     writePersistedAuthSession(refreshData.refreshToken, storedRealm);
+    rememberResourceSession(refreshData, storedRealm, { markActive: true });
     lastAcceptedRefreshToken = refreshData.refreshToken;
     const previousSession = getActiveAppSession();
     await withCloudOwnerCommit({
@@ -2802,6 +3280,8 @@ async function runColdStartRefreshFlow(
 async function loadLoginProviders(): Promise<AuthFlowState> {
   discoveredMethods = [];
   pendingAccountToken = null;
+  pendingAccountRefreshToken = null;
+  pendingAccountMemberships = [];
   pendingLoginTicket = null;
   pendingBindTicket = null;
   pendingSsoVerificationTicket = null;
@@ -2873,6 +3353,20 @@ async function completeLogin(
   }
 
   const committedRealm = pendingAuthRealm ?? AUTH_REGION;
+  const accountRefreshToken = outcome.accountRefreshToken ?? pendingAccountRefreshToken;
+  // Resource and Account refresh endpoints rotate credentials. Persist the new
+  // target session before tearing down the current owner so a later local
+  // boundary failure cannot strand the newly authenticated account.
+  rememberResourceSession(outcome, committedRealm, { markActive: true });
+  if (accountRefreshToken && nextUser.passportId) {
+    rememberPassportSession({
+      realm: committedRealm,
+      passportId: nextUser.passportId,
+      accountRefreshToken,
+      memberships:
+        pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
+    });
+  }
   await withCloudOwnerCommit({
     previousOwnerId: previousSession.dataOwnerId,
     nextOwnerId: nextUser.id,
@@ -2904,6 +3398,8 @@ async function completeLogin(
     },
     commit: () => {
       pendingAccountToken = null;
+      pendingAccountRefreshToken = null;
+      pendingAccountMemberships = [];
       pendingAccountDeletionRestored = false;
       accessToken = outcome.accessToken;
       persistedRefreshTokenNeedsIdentityCheck = false;
@@ -2963,6 +3459,16 @@ async function acceptLoginOutcome(outcome: LoginOutcome): Promise<AuthFlowState>
     pendingAccountDeletionRestored = true;
   }
   pendingAccountToken = outcome.status === 'select_account' ? (outcome.accountToken ?? null) : null;
+  pendingAccountRefreshToken =
+    outcome.status === 'ok' || outcome.status === 'select_account'
+      ? (outcome.accountRefreshToken ?? null)
+      : null;
+  pendingAccountMemberships =
+    outcome.status === 'select_account'
+      ? outcome.accounts
+      : outcome.status === 'ok'
+        ? [outcome.membership]
+        : [];
 
   if (outcome.status === 'ok') return completeLogin(outcome);
   if (outcome.status === 'select_account') {
@@ -2990,7 +3496,7 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
     (action.type === 'start-browser' && action.kind === 'social');
   if (startsBuildRealmFlow) pendingAuthRealm = null;
   const client = createAuthClient(
-    startsBuildRealmFlow ? AUTH_REGION : pendingAuthRealm ?? activeAuthRealm,
+    startsBuildRealmFlow ? AUTH_REGION : (pendingAuthRealm ?? activeAuthRealm),
   );
   const stateBeforeAction = loginFlowState?.step === 'error' ? null : loginFlowState;
   try {
@@ -3459,16 +3965,14 @@ export async function refresh(): Promise<boolean> {
           });
         } else {
           resetActiveAuthRealmToBuild();
-          await recoverAccountFreeOwnerAtStartup(
-            'signed-out',
-            'runtime-incompatible-membership',
-          );
+          await recoverAccountFreeOwnerAtStartup('signed-out', 'runtime-incompatible-membership');
         }
         return false;
       }
       // Refresh is token-rotating. Preserve the replacement before any owner
       // projection transition can defer this process.
       writePersistedAuthSession(data.refreshToken, refreshRealm);
+      rememberResourceSession(data, refreshRealm, { markActive: true });
       lastAcceptedRefreshToken = data.refreshToken;
       const needsIdentityCheck =
         replacementRetries > 0 ||
@@ -3601,9 +4105,50 @@ export async function refresh(): Promise<boolean> {
   }
 }
 
+function revokeSavedSessionsBestEffort(
+  vault: AuthAccountVault,
+  currentAccountKey: string | null,
+): void {
+  void (async () => {
+    for (const [key, session] of Object.entries(vault.resources)) {
+      if (key === currentAccountKey) continue;
+      try {
+        await loadClientEndpointsForRealm(session.realm);
+        const client = createAuthClient(session.realm);
+        const pair = await client.refresh(session.refreshToken);
+        await client.logout(pair.accessToken);
+      } catch {
+        // Logout is local-first. Offline/expired remote sessions age out normally.
+      }
+    }
+    for (const session of Object.values(vault.passports)) {
+      try {
+        await loadClientEndpointsForRealm(session.realm);
+        const client = createAuthClient(session.realm);
+        const pair = await client.refreshAccount(session.accountRefreshToken);
+        await client.logoutAccount(pair.accountToken);
+      } catch {
+        // Best effort for the same reason as resource logout above.
+      }
+    }
+  })();
+}
+
 export async function logout(): Promise<void> {
+  if (isPassiveSharedUserDataInstance()) {
+    throw new AuthApiError(
+      'PASSIVE_AUTH_MUTATION_BLOCKED',
+      409,
+      'This shared-data instance cannot log out all accounts',
+    );
+  }
   const currentAccessToken = accessToken;
   const currentAuthBaseUrl = authServerUrl(activeAuthRealm);
+  const savedVault = readAuthAccountVault();
+  const currentAccountKey = currentUser
+    ? accountVaultKey(activeAuthRealm, currentUser.id)
+    : savedVault.activeAccountKey;
+  removeSafe(AUTH_ACCOUNT_VAULT_KEY);
   // The shared projection state machine owns the full teardown and only then
   // publishes the signed-out owner. The bootstrap IPC handler must not wrap a
   // second independent boundary around this transition.
@@ -3641,6 +4186,7 @@ export async function logout(): Promise<void> {
       baseUrl: currentAuthBaseUrl,
     }).catch(() => {});
   }
+  revokeSavedSessionsBestEffort(savedVault, currentAccountKey);
   if (localTransitionError) throw localTransitionError;
 }
 

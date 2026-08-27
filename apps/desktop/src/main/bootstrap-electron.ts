@@ -5280,6 +5280,31 @@ const registerIpcHandlers = () => {
     await authManager.logout();
   });
 
+  ipcMain.handle('auth:accounts:list', (event) => {
+    assertTrustedAppRendererEvent(event);
+    return authManager.listSavedAccounts();
+  });
+
+  ipcMain.handle('auth:accounts:sync', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    return authManager.syncSavedAccounts();
+  });
+
+  ipcMain.handle('auth:accounts:switch', async (event, accountKey: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    await authManager.switchSavedAccount(accountKey);
+  });
+
+  ipcMain.handle('auth:accounts:begin-add', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    return authManager.beginAddAccountLogin();
+  });
+
+  ipcMain.handle('auth:accounts:cancel-add', (event) => {
+    assertTrustedAppRendererEvent(event);
+    authManager.cancelAddAccountLogin();
+  });
+
   ipcMain.handle('auth:enter-local', async () => {
     if (getActiveAppSession().mode === 'local') {
       return authManager.getAuthState();

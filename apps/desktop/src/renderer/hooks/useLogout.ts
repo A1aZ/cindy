@@ -15,6 +15,7 @@ export function useLogout(): { handleLogout: () => Promise<void> } {
       description: t('logic.confirm.logoutDescription'),
       confirmText: t('logic.confirm.logoutConfirm'),
       cancelText: t('logic.confirm.cancel'),
+      confirmVariant: 'destructive',
     });
     if (confirmed) {
       await logout();

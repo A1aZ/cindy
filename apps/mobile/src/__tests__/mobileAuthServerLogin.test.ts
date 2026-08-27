@@ -1,6 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync as readFileSyncRaw } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+const readFileSync = (
+  path: Parameters<typeof readFileSyncRaw>[0],
+  encoding: BufferEncoding,
+): string => readFileSyncRaw(path, encoding).toString().replace(/\r\n/g, '\n');
 
 describe('mobile auth-server login', () => {
   it('uses native social credentials where available and browser PKCE for Global Android Apple', () => {
@@ -298,7 +303,7 @@ describe('mobile auth-server login', () => {
     expect(authSource).not.toContain('serializeAccountTokenMutation');
     expect(authSource).not.toContain('accountRefreshInFlightRef');
     expect(authSource).toMatch(
-      /if \(authGenerationRef\.current !== generation\)\s+throw authCodeError\('AUTH_FLOW_SUPERSEDED'\)/,
+      /authGenerationRef\.current !== generation \|\|\s+loginFlowEpochRef\.current !== expectedLoginFlowEpoch/,
     );
     const refreshStart = authSource.indexOf('const refresh = useCallback');
     const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
@@ -373,6 +378,75 @@ describe('mobile auth-server login', () => {
     expect(resourceStored).toBeGreaterThan(-1);
     expect(regionGuard).toBeGreaterThan(resourceStored);
     expect(switchBody).toContain("throw authCodeError('REGION_MISMATCH')");
+  });
+
+  it('invalidates an add-account login when Android removes the route', () => {
+    const screenSource = readFileSync(
+      resolve(process.cwd(), 'app/add-account.tsx'),
+      'utf8',
+    );
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    expect(screenSource).toContain('() => () => {');
+    expect(screenSource).toContain('void auth.cancelAddAccount();');
+    expect(screenSource).toContain('flowFinishedRef.current');
+
+    const beginStart = authSource.indexOf('const beginAddAccount = useCallback');
+    const cancelStart = authSource.indexOf(
+      'const cancelAddAccount = useCallback',
+      beginStart,
+    );
+    const cancelEnd = authSource.indexOf(
+      '\n\n  const clearLocalSession',
+      cancelStart,
+    );
+    expect(authSource.slice(beginStart, cancelStart)).toContain(
+      'loginFlowEpochRef.current += 1;',
+    );
+    expect(authSource.slice(cancelStart, cancelEnd)).toContain(
+      'loginFlowEpochRef.current += 1;',
+    );
+    expect(authSource).toContain(
+      'assertLoginFlowCurrent(expectedLoginFlowEpoch);',
+    );
+    expect(authSource).toContain(
+      'loginFlowEpochRef.current !== expectedLoginFlowEpoch',
+    );
+  });
+
+  it('clears every Device Link account projection when accountGeneration changes', () => {
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/device-link/DeviceLinkContext.tsx'),
+      'utf8',
+    );
+    const clearStart = source.indexOf(
+      'const clearPerAccountDeviceLinkState = useCallback',
+    );
+    const clearEnd = source.indexOf('\n  }, []);', clearStart);
+    const clearBody = source.slice(clearStart, clearEnd);
+    expect(clearBody).toContain('remoteSessionStore.clear();');
+    expect(clearBody).toContain('remoteScheduleEventStore.clearAll();');
+    expect(clearBody).toContain('revokedDevicesStore.clearAll();');
+    expect(clearBody).toContain('clearAllDeviceProviders();');
+    expect(clearBody).toContain('setLastPresenceSnapshot(null);');
+
+    const effectStart = source.indexOf(
+      'const accountGenerationChanged =',
+      clearEnd,
+    );
+    const authenticatedStart = source.indexOf(
+      'const client = new DeviceLinkClient',
+      effectStart,
+    );
+    const boundaryBody = source.slice(effectStart, authenticatedStart);
+    expect(boundaryBody).toContain(
+      'accountGenerationRef.current !== auth.accountGeneration',
+    );
+    expect(boundaryBody).toContain(
+      'if (accountGenerationChanged) clearPerAccountDeviceLinkState();',
+    );
   });
 
   it('accepts enterprise ID, organization slug, and verified domains up to the API limit', () => {

@@ -342,7 +342,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const accountDeletionReceiptRealmRef = useRef<AuthRegion | null>(null);
   const pendingAccountDeletionRestoredRef = useRef(false);
   const loginActionInFlightRef = useRef<Promise<boolean> | null>(null);
+  const loginActionInFlightEpochRef = useRef<number | null>(null);
   const browserCompletionRef = useRef<Promise<void> | null>(null);
+  const browserCompletionEpochRef = useRef<number | null>(null);
+  // 独立于 authGeneration：关闭“添加账号”只应让该登录流失效，不能让当前
+  // 已登录账号的 refresh/runtime 一并过期。
+  const loginFlowEpochRef = useRef(0);
   // auth-server rotates refresh tokens, so every caller must share one request.
   const refreshInFlightRef = useRef<Promise<string | null> | null>(null);
   const terminalLogoutInFlightRef = useRef<Promise<void> | null>(null);
@@ -377,6 +382,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     authGenerationRef.current += 1;
     refreshInFlightRef.current = null;
     setDeferredSessionRecovery(false);
+  }, []);
+
+  const assertLoginFlowCurrent = useCallback((expectedEpoch: number) => {
+    if (loginFlowEpochRef.current === expectedEpoch) return;
+    throw authCodeError('AUTH_FLOW_SUPERSEDED');
   }, []);
 
   const prepareBetaChannelForCurrentDevice = useCallback((): Promise<string> => {
@@ -757,12 +767,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const acceptOutcome = useCallback(
-    async (outcome: LoginOutcome, did: string): Promise<void> => {
+    async (
+      outcome: LoginOutcome,
+      did: string,
+      expectedLoginFlowEpoch = loginFlowEpochRef.current,
+    ): Promise<void> => {
       await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
+      assertLoginFlowCurrent(expectedLoginFlowEpoch);
       if (outcome.status === 'ok' || outcome.status === 'select_account') {
         // 成功登录后，当前会话已明确属于本次登录的 passport。无论是否恢复了
         // 注销中的账号，都不能继续保留此前其他账号留下的查询 receipt。
         await persistAccountDeletionReceipt(null);
+        assertLoginFlowCurrent(expectedLoginFlowEpoch);
       }
 
       pendingAccountTokenRef.current =
@@ -836,6 +852,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               ? pendingAccountMembershipsRef.current
               : [outcome.membership],
         });
+        assertLoginFlowCurrent(expectedLoginFlowEpoch);
       }
       await rememberMobileResourceSession(
         outcome,
@@ -843,23 +860,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         passportId || undefined,
         false,
       );
+      assertLoginFlowCurrent(expectedLoginFlowEpoch);
       const previousRealm = activeAuthRealmRef.current;
       const replacesActiveSession =
         userRef.current !== null &&
         (previousRealm !== committedRealm ||
           userRef.current?.id !== outcome.membership.id);
-      const generation = ++authGenerationRef.current;
-      refreshInFlightRef.current = null;
       if (replacesActiveSession) {
         await clearAccountScopedRuntimeForSwitch();
+        assertLoginFlowCurrent(expectedLoginFlowEpoch);
       }
+      const generation = ++authGenerationRef.current;
+      refreshInFlightRef.current = null;
       const persisted = await serializeRefreshTokenMutation(async () => {
-        if (authGenerationRef.current !== generation) return false;
+        if (
+          authGenerationRef.current !== generation ||
+          loginFlowEpochRef.current !== expectedLoginFlowEpoch
+        ) {
+          return false;
+        }
         await writePersistedAuthSession(outcome.refreshToken, committedRealm);
-        return authGenerationRef.current === generation;
+        return (
+          authGenerationRef.current === generation &&
+          loginFlowEpochRef.current === expectedLoginFlowEpoch
+        );
       });
       if (!persisted) throw authCodeError('AUTH_FLOW_SUPERSEDED');
-      if (authGenerationRef.current !== generation)
+      if (
+        authGenerationRef.current !== generation ||
+        loginFlowEpochRef.current !== expectedLoginFlowEpoch
+      )
         throw authCodeError('AUTH_FLOW_SUPERSEDED');
       if (passportId) {
         const nextAccountKey = accountVaultKey(
@@ -867,10 +897,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           outcome.membership.id,
         );
         await mutateMobileAccountVault((vault) => {
+          assertLoginFlowCurrent(expectedLoginFlowEpoch);
           if (vault.resources[nextAccountKey]) {
             vault.activeAccountKey = nextAccountKey;
           }
         });
+        assertLoginFlowCurrent(expectedLoginFlowEpoch);
       }
       activateMobileSessionRealm(committedRealm);
       activeAuthRealmRef.current = committedRealm;
@@ -907,6 +939,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     [
       applyUser,
+      assertLoginFlowCurrent,
       clearAccountScopedRuntimeForSwitch,
       loadMe,
       persistAccountDeletionReceipt,
@@ -1237,8 +1270,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user?.id]);
 
   const completeOAuthCallback = useCallback(
-    (callbackUrl: string): Promise<void> => {
-      if (browserCompletionRef.current) return browserCompletionRef.current;
+    (
+      callbackUrl: string,
+      expectedLoginFlowEpoch = loginFlowEpochRef.current,
+    ): Promise<void> => {
+      if (
+        browserCompletionRef.current &&
+        browserCompletionEpochRef.current === expectedLoginFlowEpoch
+      ) {
+        return browserCompletionRef.current;
+      }
       suspendSessionRecoveryForLogin();
       const run = (async () => {
         setIsBusy(true);
@@ -1247,6 +1288,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             throw authCodeError('INVALID_AUTH_CODE');
           }
           const pending = await readPendingOAuth();
+          assertLoginFlowCurrent(expectedLoginFlowEpoch);
           const callback = parseOAuthCallbackUrl(callbackUrl);
           if (callback.state !== pending.state)
             throw authCodeError('STATE_MISMATCH');
@@ -1259,16 +1301,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               'Unable to load the enterprise auth region manifest',
             );
           }
+          assertLoginFlowCurrent(expectedLoginFlowEpoch);
           pendingAuthRealmRef.current = pending.realm;
           const outcome = await authClientFor(
             pending.deviceId,
             pending.realm,
           ).exchangeAuthorizationCode(callback.code, pending.codeVerifier);
+          assertLoginFlowCurrent(expectedLoginFlowEpoch);
           deviceIdRef.current = pending.deviceId;
           setDeviceId(pending.deviceId);
-          await acceptOutcome(outcome, pending.deviceId);
+          await acceptOutcome(
+            outcome,
+            pending.deviceId,
+            expectedLoginFlowEpoch,
+          );
           setAuthError(null);
         } catch (error) {
+          if (loginFlowEpochRef.current !== expectedLoginFlowEpoch) throw error;
           const code = authErrorCode(error);
           if (code === 'INVALID_AUTH_CODE') {
             await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
@@ -1279,23 +1328,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAuthError(code);
           throw error;
         } finally {
-          setIsBusy(false);
+          if (loginFlowEpochRef.current === expectedLoginFlowEpoch) {
+            setIsBusy(false);
+          }
         }
       })();
       browserCompletionRef.current = run;
+      browserCompletionEpochRef.current = expectedLoginFlowEpoch;
       run.then(
         () => {
-          if (browserCompletionRef.current === run)
+          if (browserCompletionRef.current === run) {
             browserCompletionRef.current = null;
+            browserCompletionEpochRef.current = null;
+          }
         },
         () => {
-          if (browserCompletionRef.current === run)
+          if (browserCompletionRef.current === run) {
             browserCompletionRef.current = null;
+            browserCompletionEpochRef.current = null;
+          }
         },
       );
       return run;
     },
-    [acceptOutcome, suspendSessionRecoveryForLogin, updateLoginState],
+    [
+      acceptOutcome,
+      assertLoginFlowCurrent,
+      suspendSessionRecoveryForLogin,
+      updateLoginState,
+    ],
   );
 
   // SSO returns through cindycn://auth or cindy://auth. The pending PKCE verifier
@@ -1316,12 +1377,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const dispatchLoginAction = useCallback(
     (action: MobileLoginAction): Promise<boolean> => {
+      const expectedLoginFlowEpoch = loginFlowEpochRef.current;
       suspendSessionRecoveryForLogin();
-      if (loginActionInFlightRef.current) return loginActionInFlightRef.current;
+      if (
+        loginActionInFlightRef.current &&
+        loginActionInFlightEpochRef.current === expectedLoginFlowEpoch
+      ) {
+        return loginActionInFlightRef.current;
+      }
       let run: Promise<boolean>;
       const clearIfCurrent = () => {
-        if (loginActionInFlightRef.current === run)
+        if (loginActionInFlightRef.current === run) {
           loginActionInFlightRef.current = null;
+          loginActionInFlightEpochRef.current = null;
+        }
       };
       run = (async () => {
         setIsBusy(true);
@@ -1329,6 +1398,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const did =
             deviceIdRef.current ?? (await prepareBetaChannelForCurrentDevice());
+          assertLoginFlowCurrent(expectedLoginFlowEpoch);
           deviceIdRef.current = did;
           setDeviceId(did);
           const startsBuildRealmFlow =
@@ -1350,6 +1420,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             label: string;
           }): Promise<boolean> => {
             const { codeVerifier, codeChallenge } = await createPkcePair();
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             const state = createState();
             await setSecureItem(
               PENDING_OAUTH_KEY,
@@ -1362,6 +1433,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 realm: loginRealm,
               } satisfies PendingOAuth),
             );
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             updateLoginState(
               reduceAuthFlow(input.previousState, {
                 type: 'browser-started',
@@ -1379,11 +1451,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               authUrl,
               MOBILE_REDIRECT_URL,
             );
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             if (result.type === 'success') {
-              await completeOAuthCallback(result.url);
+              await completeOAuthCallback(result.url, expectedLoginFlowEpoch);
               return true;
             }
             await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             pendingAuthRealmRef.current = null;
             updateLoginState(null);
             throw authCodeError('USER_CANCELLED');
@@ -1401,10 +1475,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             pendingAccountDeletionRestoredRef.current = false;
             setAccountDeletionRestored(false);
             await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             const providers = await authClientFor(
               did,
               BUILD_AUTH_REGION,
             ).getProviders();
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             updateLoginState(
               reduceAuthFlow(loginStateRef.current, {
                 type: 'providers-loaded',
@@ -1460,6 +1536,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               did,
               BUILD_AUTH_REGION,
             ).discover(email);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             const currentState = loginStateRef.current;
             const sole = soleLoginMethod(methods);
             if (sole?.type === 'sso' && currentState) {
@@ -1474,6 +1551,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               // 人机验证前置闸(覆盖 discovery→发码的自动串发路径):取消则不
               // 串发,落 method-choice,用户可从个人行再次发起(会重新过闸)。
               const gate = await ensureCaptchaGate('email');
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
               if (!gate.proceed) {
                 updateLoginState(
                   reduceAuthFlow(currentState, {
@@ -1490,6 +1568,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 email,
                 gate.captchaToken,
               );
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
               updateLoginState(
                 reduceAuthFlow(currentState, {
                   type: 'code-requested',
@@ -1526,6 +1605,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                   loadMobileEndpointsForRealm('cn'),
                   loadMobileEndpointsForRealm('global'),
                 ]);
+                assertLoginFlowCurrent(expectedLoginFlowEpoch);
               } catch {
                 throw new AuthApiError(
                   'ORG_REALM_UNAVAILABLE',
@@ -1537,6 +1617,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 cn: authClientFor(did, 'cn'),
                 global: authClientFor(did, 'global'),
               });
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
               pendingAuthRealmRef.current = selected.region;
               discovery = selected.discovery;
             } else {
@@ -1545,12 +1626,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 did,
                 BUILD_AUTH_REGION,
               ).discoverSsoOrg(org);
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
             }
             const methods = ssoOrgDiscoveryToMethods(discovery);
             // A sole same-region connection auto-starts browser authorization
             // below. Persist the successful discovery first so cancel/timeout
             // does not lose a valid organization identifier.
             await rememberSsoOrgIdentifier(action.org);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             const currentState = loginStateRef.current;
             if (discovery.region !== BUILD_AUTH_REGION) {
               if (currentState?.step !== 'identifier') {
@@ -1587,6 +1670,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (action.type === 'request-code') {
             const identifier = action.identifier.trim();
             const gate = await ensureCaptchaGate(action.kind);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             // 取消:不发码、不改状态、不报错(用户可再点发送/重发)。
             if (!gate.proceed) return false;
             await requestCodeWithCaptchaFallback(
@@ -1595,6 +1679,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               identifier,
               gate.captchaToken,
             );
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             updateLoginState(
               reduceAuthFlow(loginStateRef.current, {
                 type: 'code-requested',
@@ -1612,6 +1697,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 action.code,
               ),
               did,
+              expectedLoginFlowEpoch,
             );
             return true;
           }
@@ -1619,12 +1705,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const credential = await acquireNativeSocialCredential(
               action.provider,
             );
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             await acceptOutcome(
               await authClientFor(did, BUILD_AUTH_REGION).exchangeNativeSocial(
                 action.provider,
                 credential,
               ),
               did,
+              expectedLoginFlowEpoch,
             );
             return true;
           }
@@ -1669,8 +1757,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 accountToken,
                 action.accountId,
               );
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
               pendingAccountTokenRef.current = null;
-              await acceptOutcome({ status: 'ok', ...pair }, did);
+              await acceptOutcome(
+                { status: 'ok', ...pair },
+                did,
+                expectedLoginFlowEpoch,
+              );
               return true;
             }
             const ticket = pendingLoginTicketRef.current;
@@ -1678,6 +1771,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await acceptOutcome(
               await client.selectAccount(ticket, action.accountId),
               did,
+              expectedLoginFlowEpoch,
             );
             return true;
           }
@@ -1689,6 +1783,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               throw authCodeError('INVALID_SSO_VERIFICATION_TICKET');
             }
             await client.requestSsoVerificationCode(ticket);
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             updateLoginState(
               reduceAuthFlow(state, {
                 type: 'sso-verification-code-requested',
@@ -1707,6 +1802,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await acceptOutcome(
               await client.verifySsoVerification(ticket, action.code),
               did,
+              expectedLoginFlowEpoch,
             );
             return true;
           }
@@ -1722,6 +1818,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               state.bindType,
               contact,
             );
+            assertLoginFlowCurrent(expectedLoginFlowEpoch);
             updateLoginState(
               reduceAuthFlow(state, {
                 type: 'binding-code-requested',
@@ -1739,9 +1836,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               action.code,
             ),
             did,
+            expectedLoginFlowEpoch,
           );
           return true;
         } catch (error) {
+          if (loginFlowEpochRef.current !== expectedLoginFlowEpoch) return false;
           const code = authErrorCode(error);
           if (
             code === 'INVALID_LOGIN_TICKET' ||
@@ -1766,15 +1865,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAuthError(code);
           return false;
         } finally {
-          setIsBusy(false);
+          if (loginFlowEpochRef.current === expectedLoginFlowEpoch) {
+            setIsBusy(false);
+          }
         }
       })();
       loginActionInFlightRef.current = run;
+      loginActionInFlightEpochRef.current = expectedLoginFlowEpoch;
       run.then(clearIfCurrent, clearIfCurrent);
       return run;
     },
     [
       acceptOutcome,
+      assertLoginFlowCurrent,
       completeOAuthCallback,
       ensureCaptchaGate,
       requestCodeWithCaptchaFallback,
@@ -2046,6 +2149,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const beginAddAccount = useCallback(async (): Promise<void> => {
+    loginFlowEpochRef.current += 1;
     additionalLoginRef.current = true;
     sessionRecoverySuspendedRef.current = false;
     updateLoginState(null);
@@ -2054,6 +2158,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [dispatchLoginAction, updateLoginState]);
 
   const cancelAddAccount = useCallback(async (): Promise<void> => {
+    loginFlowEpochRef.current += 1;
+    setIsBusy(false);
     pendingAccountTokenRef.current = null;
     pendingAccountRefreshTokenRef.current = null;
     pendingAccountMembershipsRef.current = [];

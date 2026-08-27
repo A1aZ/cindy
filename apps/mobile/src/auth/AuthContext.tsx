@@ -401,6 +401,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [accountDeletionReceipt, setAccountDeletionReceipt] = useState<
     string | null
   >(null);
+  const accountDeletionReceiptRef = useRef<string | null>(null);
   const [accountDeletionRestored, setAccountDeletionRestored] = useState(false);
   const pendingLoginTicketRef = useRef<string | null>(null);
   const pendingBindTicketRef = useRef<string | null>(null);
@@ -627,13 +628,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             ACCOUNT_DELETION_RECEIPT_KEY,
             serializeAccountDeletionReceiptRecord(realm, receiptToken),
           );
+          accountDeletionReceiptRef.current = receiptToken;
           accountDeletionReceiptRealmRef.current = realm;
         } else {
-          // Account-bound transitions await this helper before publishing the
-          // new owner. A failed durable delete must reject so their vault and
-          // active-session transactions roll back instead of reviving the
-          // previous identity's receipt after restart.
+          // Explicit receipt clearing must reject on storage failure instead
+          // of updating only the in-memory projection.
           await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY);
+          accountDeletionReceiptRef.current = null;
           accountDeletionReceiptRealmRef.current = null;
         }
         setAccountDeletionReceipt(receiptToken);
@@ -647,6 +648,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         () => undefined,
       );
       await run;
+    },
+    [],
+  );
+
+  const commitWithClearedAccountDeletionReceipt = useCallback(
+    (commit: () => void): Promise<void> => {
+      const operation = async (): Promise<void> => {
+        const previousRaw = await getSecureItem(
+          ACCOUNT_DELETION_RECEIPT_KEY,
+        );
+        const previousToken = accountDeletionReceiptRef.current;
+        const previousRealm = accountDeletionReceiptRealmRef.current;
+        await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY);
+        try {
+          // Deliberately synchronous: after the post-delete cancellation
+          // checks pass, no event-loop turn may reopen the cancellation window
+          // before the new owner is published.
+          commit();
+          accountDeletionReceiptRef.current = null;
+          accountDeletionReceiptRealmRef.current = null;
+          setAccountDeletionReceipt(null);
+        } catch (error) {
+          // Add Account can be cancelled while SecureStore is deleting the
+          // previous owner's receipt. Restore the exact opaque record before
+          // releasing the receipt queue so cancellation cannot consume it.
+          if (previousRaw === null) {
+            await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY);
+          } else {
+            await setSecureItem(ACCOUNT_DELETION_RECEIPT_KEY, previousRaw);
+          }
+          accountDeletionReceiptRef.current = previousToken;
+          accountDeletionReceiptRealmRef.current = previousRealm;
+          setAccountDeletionReceipt(previousToken);
+          throw error;
+        }
+      };
+      const run = accountDeletionReceiptMutationRef.current.then(
+        operation,
+        operation,
+      );
+      accountDeletionReceiptMutationRef.current = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
     },
     [],
   );
@@ -849,12 +895,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ): Promise<void> => {
       await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
       assertLoginFlowCurrent(expectedLoginFlowEpoch);
-      if (outcome.status === 'ok' || outcome.status === 'select_account') {
-        // 成功登录后，当前会话已明确属于本次登录的 passport。无论是否恢复了
-        // 注销中的账号，都不能继续保留此前其他账号留下的查询 receipt。
-        await persistAccountDeletionReceipt(null);
-        assertLoginFlowCurrent(expectedLoginFlowEpoch);
-      }
 
       pendingAccountTokenRef.current =
         outcome.status === 'select_account'
@@ -905,7 +945,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const deletionWasRestored =
         outcome.accountDeletionRestored === true ||
         pendingAccountDeletionRestoredRef.current;
-      pendingAccountDeletionRestoredRef.current = false;
       const committedRealm = pendingAuthRealmRef.current ?? BUILD_AUTH_REGION;
       const pendingMembership = pendingAccountMembershipsRef.current.find(
         (membership) => membership.id === outcome.membership.id,
@@ -965,38 +1004,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 assertLoginFlowCurrent(expectedLoginFlowEpoch);
               }
 
-              // No await is allowed between the final cancellation check and
-              // publishing the new in-memory owner. The vault transaction stays
-              // owned through runtime cleanup and this synchronous commit, so a
-              // cancelled Add Account flow restores both durable records.
-              activateMobileSessionRealm(committedRealm);
-              activeAuthRealmRef.current = committedRealm;
-              pendingLoginTicketRef.current = null;
-              pendingAccountTokenRef.current = null;
-              pendingAccountRefreshTokenRef.current = null;
-              pendingAccountMembershipsRef.current = [];
-              pendingBindTicketRef.current = null;
-              pendingSsoVerificationTicketRef.current = null;
-              pendingAuthRealmRef.current = null;
-              setToken(outcome.accessToken);
-              applyUser(
-                mergeMembershipWithExisting(
-                  outcome.membership,
-                  userRef.current,
-                  passportId || undefined,
-                ),
-              );
-              additionalLoginRef.current = false;
-              sessionRecoverySuspendedRef.current = false;
-              setAccountGeneration((value) => value + 1);
-              updateLoginState(
-                reduceAuthFlow(loginStateRef.current, {
-                  type: 'outcome',
-                  outcome,
-                }),
-              );
-              // 只有 resource token、用户资料与 refresh token 全部落地后才发布恢复提示。
-              setAccountDeletionRestored(deletionWasRestored);
+              await commitWithClearedAccountDeletionReceipt(() => {
+                if (authGenerationRef.current !== generation) {
+                  throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                }
+                assertLoginFlowCurrent(expectedLoginFlowEpoch);
+
+                // Receipt deletion and owner publication are one transaction.
+                // The receipt helper restores the opaque record if Add Account
+                // was cancelled while SecureStore was deleting it.
+                pendingAccountDeletionRestoredRef.current = false;
+                activateMobileSessionRealm(committedRealm);
+                activeAuthRealmRef.current = committedRealm;
+                pendingLoginTicketRef.current = null;
+                pendingAccountTokenRef.current = null;
+                pendingAccountRefreshTokenRef.current = null;
+                pendingAccountMembershipsRef.current = [];
+                pendingBindTicketRef.current = null;
+                pendingSsoVerificationTicketRef.current = null;
+                pendingAuthRealmRef.current = null;
+                setToken(outcome.accessToken);
+                applyUser(
+                  mergeMembershipWithExisting(
+                    outcome.membership,
+                    userRef.current,
+                    passportId || undefined,
+                  ),
+                );
+                additionalLoginRef.current = false;
+                sessionRecoverySuspendedRef.current = false;
+                setAccountGeneration((value) => value + 1);
+                updateLoginState(
+                  reduceAuthFlow(loginStateRef.current, {
+                    type: 'outcome',
+                    outcome,
+                  }),
+                );
+                // 只有 resource token、用户资料与 refresh token 全部落地后才发布恢复提示。
+                setAccountDeletionRestored(deletionWasRestored);
+              });
             },
           );
           return true;
@@ -1030,8 +1076,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       applyUser,
       assertLoginFlowCurrent,
       clearAccountScopedRuntimeForSwitch,
+      commitWithClearedAccountDeletionReceipt,
       loadMe,
-      persistAccountDeletionReceipt,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,
       refreshSavedAccountsSnapshot,
@@ -1273,6 +1319,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               }
             : null);
         if (storedDeletionReceipt) {
+          accountDeletionReceiptRef.current =
+            storedDeletionReceipt.receiptToken;
           accountDeletionReceiptRealmRef.current = storedDeletionReceipt.realm;
           setAccountDeletionReceipt(storedDeletionReceipt.receiptToken);
           // Older builds stored only the opaque receipt; migrate it atomically
@@ -2306,33 +2354,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     throw authCodeError('AUTH_FLOW_SUPERSEDED');
                   }
 
-                  // The deletion receipt belongs to the previous login identity, not the
-                  // physical device. Clear its durable token, realm and restored banner at the
-                  // same account boundary as the other runtime projections. This is deliberately
-                  // the final awaited mutation before the synchronous owner commit below.
-                  await persistAccountDeletionReceipt(null);
-                  if (authGenerationRef.current !== generation) {
-                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
-                  }
-                  pendingAccountDeletionRestoredRef.current = false;
-                  setAccountDeletionRestored(false);
+                  await commitWithClearedAccountDeletionReceipt(() => {
+                    if (authGenerationRef.current !== generation) {
+                      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                    }
+                    pendingAccountDeletionRestoredRef.current = false;
+                    setAccountDeletionRestored(false);
 
-                  // Publish the new owner synchronously while the vault
-                  // transaction still owns activeAccountKey and AUTH_SESSION_KEY.
-                  activateMobileSessionRealm(realm!);
-                  activeAuthRealmRef.current = realm!;
-                  pendingAuthRealmRef.current = null;
-                  setToken(pair!.accessToken);
-                  applyUser(
-                    mergeMembershipWithExisting(
-                      pair!.membership,
-                      null,
-                      metadata.passportId,
-                    ),
-                  );
-                  sessionRecoverySuspendedRef.current = false;
-                  updateLoginState(null);
-                  setAccountGeneration((value) => value + 1);
+                    // Publish the new owner synchronously while the vault and
+                    // receipt transactions are both still owned.
+                    activateMobileSessionRealm(realm!);
+                    activeAuthRealmRef.current = realm!;
+                    pendingAuthRealmRef.current = null;
+                    setToken(pair!.accessToken);
+                    applyUser(
+                      mergeMembershipWithExisting(
+                        pair!.membership,
+                        null,
+                        metadata.passportId,
+                      ),
+                    );
+                    sessionRecoverySuspendedRef.current = false;
+                    updateLoginState(null);
+                    setAccountGeneration((value) => value + 1);
+                  });
                 },
               );
             } catch (error) {
@@ -2369,8 +2414,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       applyUser,
       clearAccountScopedRuntimeForSwitch,
+      commitWithClearedAccountDeletionReceipt,
       loadMe,
-      persistAccountDeletionReceipt,
       refreshSavedAccountsSnapshot,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,

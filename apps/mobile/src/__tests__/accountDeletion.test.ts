@@ -47,13 +47,16 @@ describe("mobile account deletion", () => {
     );
 
     expect(context).toContain("'cindy.mobile.auth.accountDeletionReceipt'");
-    expect(acceptBody).toContain(
-      "if (outcome.status === 'ok' || outcome.status === 'select_account')",
+    const selectionPending = acceptBody.indexOf(
+      "if (outcome.status === 'select_account')",
     );
-    expect(
-      acceptBody.indexOf("await persistAccountDeletionReceipt(null);"),
-    ).toBeLessThan(
-      acceptBody.indexOf("if (outcome.status === 'select_account')"),
+    const receiptCommit = acceptBody.indexOf(
+      "await commitWithClearedAccountDeletionReceipt(() => {",
+    );
+    expect(selectionPending).toBeGreaterThan(-1);
+    expect(receiptCommit).toBeGreaterThan(selectionPending);
+    expect(acceptBody.slice(0, selectionPending)).not.toContain(
+      "persistAccountDeletionReceipt(null)",
     );
     expect(acceptBody).toContain("pendingAccountDeletionRestoredRef.current =");
     expect(acceptBody).toContain(
@@ -81,6 +84,25 @@ describe("mobile account deletion", () => {
     expect(persistBody).not.toContain(
       "deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY).catch",
     );
+    const transactionalClearStart = context.indexOf(
+      "const commitWithClearedAccountDeletionReceipt = useCallback",
+    );
+    const transactionalClearBody = context.slice(
+      transactionalClearStart,
+      context.indexOf("/* ── 登录人机验证", transactionalClearStart),
+    );
+    expect(transactionalClearBody).toContain(
+      "const previousRaw = await getSecureItem(",
+    );
+    expect(transactionalClearBody).toContain(
+      "await setSecureItem(ACCOUNT_DELETION_RECEIPT_KEY, previousRaw);",
+    );
+    expect(
+      transactionalClearBody.indexOf("await deleteSecureItem("),
+    ).toBeLessThan(
+      transactionalClearBody.indexOf("commit();"),
+    );
+    expect(transactionalClearBody).not.toContain("await commit()");
     expect(requestBody).toContain("activeAuthRealmRef.current,\n    );");
     expect(confirmBody).toContain("await clearLocalSession();");
     expect(confirmBody).not.toContain(

@@ -620,6 +620,73 @@ function removeSafe(key: string): void {
   }
 }
 
+/**
+ * Delete the previous owner's account-deletion receipt as the final fallible
+ * step of an account transition. The encrypted bytes are restored if the
+ * synchronous owner publication throws, while an unlink failure prevents the
+ * new owner from being published at all.
+ */
+function commitWithClearedAccountDeletionReceipt(commit: () => void): void {
+  if (isPassiveSharedUserDataInstance()) return commit();
+  const filepath = path.join(SAFE_STORAGE_DIR(), `${ACCOUNT_DELETION_RECEIPT_KEY}.enc`);
+  let previousEncrypted: string | null;
+  try {
+    previousEncrypted = fs.readFileSync(filepath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      previousEncrypted = null;
+    } else {
+      logSafeStorageIssueOnce(
+        'account transition receipt snapshot failed',
+        ACCOUNT_DELETION_RECEIPT_KEY,
+        error,
+      );
+      throw new AuthApiError(
+        'CREDENTIAL_STORE_UNAVAILABLE',
+        503,
+        'Could not read the previous account deletion receipt',
+      );
+    }
+  }
+  try {
+    fs.unlinkSync(filepath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      logSafeStorageIssueOnce(
+        'account transition receipt delete failed',
+        ACCOUNT_DELETION_RECEIPT_KEY,
+        error,
+      );
+      throw new AuthApiError(
+        'CREDENTIAL_STORE_UNAVAILABLE',
+        503,
+        'Could not clear the previous account deletion receipt',
+      );
+    }
+  }
+  try {
+    return commit();
+  } catch (error) {
+    if (previousEncrypted !== null) {
+      try {
+        atomicWriteFileSync(filepath, previousEncrypted);
+      } catch (restoreError) {
+        logSafeStorageIssueOnce(
+          'account transition receipt restore failed',
+          ACCOUNT_DELETION_RECEIPT_KEY,
+          restoreError,
+        );
+        throw new AuthApiError(
+          'CREDENTIAL_STORE_UNAVAILABLE',
+          503,
+          'Could not restore the previous account deletion receipt',
+        );
+      }
+    }
+    throw error;
+  }
+}
+
 function emptyAuthAccountVault(): AuthAccountVault {
   return { version: 1, activeAccountKey: null, resources: {}, passports: {} };
 }
@@ -4124,35 +4191,36 @@ async function completeLogin(
             await claimLegacyNamespaceForVerifiedUser(nextUser.id);
             assertTransitionCurrent();
           },
-          commit: () => {
-            pendingAccountToken = null;
-            pendingAccountRefreshToken = null;
-            pendingAccountMemberships = [];
-            pendingAccountDeletionRestored = false;
-            accessToken = outcome.accessToken;
-            persistedRefreshTokenNeedsIdentityCheck = false;
-            clearReplacementIntegrationReloadTimers();
-            activateClientEndpointRealm(committedRealm);
-            activeAuthRealm = committedRealm;
-            if (!isPassiveSharedUserDataInstance()) {
-              removeSafe(LEGACY_REFRESH_TOKEN_KEY);
-            }
-            lastAcceptedRefreshToken = outcome.refreshToken;
-            if (!isPassiveSharedUserDataInstance()) {
-              removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
-              clearReloginFlag();
-            }
-            accountDeletionRestoredNoticePending = deletionWasRestored;
-            // 显式登录解除本进程登出墓碑(passive / foreign-device)。
-            passiveLocalSignOut = false;
-            foreignDeviceLocalSignOut = false;
-            currentUser = nextUser;
-            commitCloudAppSession(currentUser.id);
-            if (!isPassiveSharedUserDataInstance()) {
-              canaryFlagStore.clear();
-            }
-            pendingAuthRealm = null;
-          },
+          commit: () =>
+            commitWithClearedAccountDeletionReceipt(() => {
+              assertTransitionCurrent();
+              pendingAccountToken = null;
+              pendingAccountRefreshToken = null;
+              pendingAccountMemberships = [];
+              pendingAccountDeletionRestored = false;
+              accessToken = outcome.accessToken;
+              persistedRefreshTokenNeedsIdentityCheck = false;
+              clearReplacementIntegrationReloadTimers();
+              activateClientEndpointRealm(committedRealm);
+              activeAuthRealm = committedRealm;
+              if (!isPassiveSharedUserDataInstance()) {
+                removeSafe(LEGACY_REFRESH_TOKEN_KEY);
+              }
+              lastAcceptedRefreshToken = outcome.refreshToken;
+              if (!isPassiveSharedUserDataInstance()) {
+                clearReloginFlag();
+              }
+              accountDeletionRestoredNoticePending = deletionWasRestored;
+              // 显式登录解除本进程登出墓碑(passive / foreign-device)。
+              passiveLocalSignOut = false;
+              foreignDeviceLocalSignOut = false;
+              currentUser = nextUser;
+              commitCloudAppSession(currentUser.id);
+              if (!isPassiveSharedUserDataInstance()) {
+                canaryFlagStore.clear();
+              }
+              pendingAuthRealm = null;
+            }),
         });
       },
     );
@@ -4191,13 +4259,6 @@ async function acceptLoginOutcome(
   expectedLoginFlowEpoch = loginFlowEpoch,
 ): Promise<AuthFlowState> {
   assertLoginFlowCurrent(expectedLoginFlowEpoch);
-  if (outcome.status === 'ok' || outcome.status === 'select_account') {
-    // Membership selection already establishes which passport owns the new
-    // login. A receipt from the previous login must not survive this boundary.
-    if (!isPassiveSharedUserDataInstance()) {
-      removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
-    }
-  }
   if (
     (outcome.status === 'ok' || outcome.status === 'select_account') &&
     outcome.accountDeletionRestored === true

@@ -480,7 +480,7 @@ describe('mobile auth-server login', () => {
       'await clearAccountScopedRuntimeForSwitch();',
     );
     const receiptClear = switchBody.indexOf(
-      'await persistAccountDeletionReceipt(null);',
+      'await commitWithClearedAccountDeletionReceipt(() => {',
       runtimeClear,
     );
     const ownerCommit = switchBody.indexOf(

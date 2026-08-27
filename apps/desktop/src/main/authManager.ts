@@ -1174,6 +1174,9 @@ async function commitDesktopRefreshCredentials(
       const latestSession = readPersistedAuthSession();
       const requestedTokenStillStored =
         (latestSession?.realm === realm && latestSession.refreshToken === requestedRefreshToken) ||
+        (vault.activeAccountKey === key &&
+          vault.resources[key]?.realm === realm &&
+          vault.resources[key]?.refreshToken === requestedRefreshToken) ||
         (realm === AUTH_REGION &&
           readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) === requestedRefreshToken);
       const canClaimUninitializedVault =
@@ -1420,9 +1423,10 @@ function readPersistedAuthSession() {
 }
 
 /**
- * The aggregate vault is the crash-consistent owner record. Repair its
- * compatibility session projection under the same cross-process lock before
- * cold start can send a refresh request with a consumed token generation.
+ * Repair a missing compatibility projection from the aggregate vault. When
+ * both exist but diverge, preserve both: a rollback build can rotate only the
+ * compatibility session, while an interrupted new-build commit can leave the
+ * vault newer. The refresh retry path asks the server which one is stale.
  */
 async function reconcileDesktopActiveAuthSession(): Promise<
   ReturnType<typeof readPersistedAuthSession>
@@ -1448,20 +1452,21 @@ async function reconcileDesktopActiveAuthSession(): Promise<
         ? vault.resources[vault.activeAccountKey]
         : undefined;
       if (!activeResource) return session;
-      if (
-        session?.realm !== activeResource.realm ||
-        session.refreshToken !== activeResource.refreshToken
-      ) {
+      if (!session) {
         writePersistedAuthSessionOrThrow(
           activeResource.refreshToken,
           activeResource.realm,
         );
+        return {
+          version: 1,
+          realm: activeResource.realm,
+          refreshToken: activeResource.refreshToken,
+        };
       }
-      return {
-        version: 1,
-        realm: activeResource.realm,
-        refreshToken: activeResource.refreshToken,
-      };
+      // A rollback build can rotate only the compatibility session. When the
+      // two durable projections disagree, preserve both as refresh candidates;
+      // the server's definitive response decides which generation is stale.
+      return session;
     },
   );
 }
@@ -1569,8 +1574,8 @@ function mirrorLegacyResourceRefreshToken(refreshToken: string, realm: AuthRegio
 }
 
 /**
- * 确定性失效后清掉磁盘上所有「已确认死掉」的 refresh token —— v1 权威记录与 legacy
- * 从属副本各清一次。
+ * 确定性失效后清掉磁盘上所有「已确认死掉」的 refresh token —— account vault、
+ * v1 兼容记录与 legacy 从属副本各清一次。
  *
  * `deadTokens` 是本轮被服务端拒过的全部 token(按首次尝试顺序)。必须逐一比对而不是只
  * 认最初那一枚:本轮一旦从另一个来源追赶过,磁盘上现存的就是清单里较晚的那一枚,只拿
@@ -1584,7 +1589,30 @@ function mirrorLegacyResourceRefreshToken(refreshToken: string, realm: AuthRegio
  * 运行期 `clearAuth` 已经会删这两个文件(那是显式登出 / 会话过期的整体清理),所以这里
  * 只补冷启动确定性失效这一条路径;passive 实例的守卫在调用点。
  */
-function clearConfirmedDeadRefreshTokens(realm: AuthRegion, deadTokens: readonly string[]): void {
+async function clearConfirmedDeadRefreshTokens(
+  realm: AuthRegion,
+  deadTokens: readonly string[],
+): Promise<void> {
+  try {
+    await mutateAuthAccountVault((vault) => {
+      const activeKey = vault.activeAccountKey;
+      const activeResource = activeKey ? vault.resources[activeKey] : undefined;
+      if (
+        !activeKey ||
+        activeResource?.realm !== realm ||
+        !deadTokens.includes(activeResource.refreshToken)
+      ) {
+        return;
+      }
+      delete vault.resources[activeKey];
+      vault.activeAccountKey = null;
+    });
+  } catch (error) {
+    log.error(
+      'cold-start refresh: failed to remove the confirmed-dead active Resource from the account vault',
+      error,
+    );
+  }
   let sessionOutcome: RemoveIfUnchangedResult = 'changed';
   for (const token of deadTokens) {
     sessionOutcome = removeSafeIfUnchanged(
@@ -1645,8 +1673,13 @@ function clearConfirmedDeadRefreshTokens(realm: AuthRegion, deadTokens: readonly
  * 的 token 挤掉 legacy 里真正有效的那枚,最终以确定性失效收场并连带删掉有效凭证。
  */
 function readStoredRefreshTokenCandidates(realm: AuthRegion): readonly (string | null)[] {
+  const vault = readAuthAccountVault();
+  const activeResource = vault.activeAccountKey
+    ? vault.resources[vault.activeAccountKey]
+    : undefined;
   return [
     readPersistedRefreshToken(realm),
+    activeResource?.realm === realm ? activeResource.refreshToken : null,
     realm === AUTH_REGION ? readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) : null,
   ];
 }
@@ -3145,9 +3178,7 @@ export function listSavedAccounts(): DesktopAccountSwitcherSnapshot {
       if (!byKey.has(key)) byKey.set(key, membership);
     }
   }
-  const activeKey = currentUser
-    ? accountVaultKey(activeAuthRealm, currentUser.id)
-    : vault.activeAccountKey;
+  const activeKey = currentUser ? accountVaultKey(activeAuthRealm, currentUser.id) : null;
   const accounts = [...byKey.entries()]
     .map(([key, metadata]) => accountSummaryFromMetadata(key, metadata, activeKey))
     .sort((left, right) => {
@@ -3937,7 +3968,7 @@ async function runColdStartRefreshFlow(
           // 的 token 做 compare-and-delete 会一律 changed,把已确认失效的凭证留在盘上,
           // 只读 legacy 的旧版实例继续拿它撞 INVALID_REFRESH_TOKEN 被强制重登。
           const confirmedDeadTokens = rejectedTokens.length > 0 ? rejectedTokens : [storedToken];
-          clearConfirmedDeadRefreshTokens(storedRealm, confirmedDeadTokens);
+          await clearConfirmedDeadRefreshTokens(storedRealm, confirmedDeadTokens);
         }
         resetActiveAuthRealmToBuild();
       } else if (action.kind === 'foreign-device') {

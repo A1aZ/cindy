@@ -195,13 +195,15 @@ export function transactMobileAccountVault<T>(
 export interface ReconciledMobileAuthState {
   vault: MobileAccountVault;
   session: AuthSessionRecord | null;
+  refreshCandidates: AuthSessionRecord[];
 }
 
 /**
- * Repair the compatibility auth session from the crash-consistent active
- * Resource record before any refresh request can consume a stale generation.
- * The vault queue remains owned through the repair so an account transition
- * cannot interleave between the snapshot and the projection write.
+ * Reconcile the compatibility session with the active Resource record before
+ * refresh. A missing projection is repaired from the vault, but divergent
+ * generations are both returned: rollback builds can rotate only the legacy
+ * projection, while an interrupted new-build commit can leave the vault newer.
+ * Only a definitive server response can identify the stale generation.
  */
 export function reconcileMobileActiveAuthSession(input: {
   readPersistedSession: () => Promise<AuthSessionRecord | null>;
@@ -218,29 +220,38 @@ export function reconcileMobileActiveAuthSession(input: {
 
     if (typeof vault.signedOutAt === 'number') {
       if (session) await input.clearPersistedSession();
-      return { vault, session: null };
+      return { vault, session: null, refreshCandidates: [] };
     }
 
     const activeResource = vault.activeAccountKey
       ? vault.resources[vault.activeAccountKey]
       : undefined;
-    if (!activeResource) return { vault, session };
-
-    if (
-      session?.realm !== activeResource.realm ||
-      session.refreshToken !== activeResource.refreshToken
-    ) {
+    const activeSession: AuthSessionRecord | null = activeResource
+      ? {
+          version: 1,
+          realm: activeResource.realm,
+          refreshToken: activeResource.refreshToken,
+        }
+      : null;
+    if (!session && activeSession) {
       await input.writePersistedSession(
-        activeResource.refreshToken,
-        activeResource.realm,
+        activeSession.refreshToken,
+        activeSession.realm,
       );
-      session = {
-        version: 1,
-        realm: activeResource.realm,
-        refreshToken: activeResource.refreshToken,
-      };
+      session = activeSession;
     }
-    return { vault, session };
+    const refreshCandidates = session ? [session] : [];
+    if (
+      activeSession &&
+      !refreshCandidates.some(
+        (candidate) =>
+          candidate.realm === activeSession.realm &&
+          candidate.refreshToken === activeSession.refreshToken,
+      )
+    ) {
+      refreshCandidates.push(activeSession);
+    }
+    return { vault, session, refreshCandidates };
   });
 }
 
@@ -289,14 +300,17 @@ export async function clearMobileLoginCredentialsForLogout(input: {
   });
 }
 
-export function listMobileSavedAccounts(vault: MobileAccountVault): MobileSavedAccount[] {
+export function listMobileSavedAccounts(
+  vault: MobileAccountVault,
+  activeAccountKey = vault.activeAccountKey,
+): MobileSavedAccount[] {
   const byKey = new Map<string, MobileSavedAccount>();
   for (const [key, resource] of Object.entries(vault.resources)) {
     byKey.set(key, {
       ...resource.metadata,
       accountKey: key,
       realm: resource.realm,
-      isCurrent: key === vault.activeAccountKey,
+      isCurrent: key === activeAccountKey,
       lastUsedAt: resource.lastUsedAt,
     });
   }
@@ -308,7 +322,7 @@ export function listMobileSavedAccounts(vault: MobileAccountVault): MobileSavedA
         ...metadata,
         accountKey: key,
         realm: passport.realm,
-        isCurrent: key === vault.activeAccountKey,
+        isCurrent: key === activeAccountKey,
         lastUsedAt: 0,
       });
     }
@@ -354,6 +368,7 @@ export type MobileResourceSessionReplacementResult =
  */
 export async function commitMobileRuntimeResourceSession(input: {
   expectedRefreshToken: string;
+  compatibilityRefreshTokens?: readonly string[];
   pair: AuthTokenPair;
   realm: AuthRegion;
   passportId: string;
@@ -366,10 +381,14 @@ export async function commitMobileRuntimeResourceSession(input: {
       input.validateBeforeWrite?.();
       const current = vault.resources[key];
       if (current) {
+        const acceptedPreviousTokens = new Set([
+          input.expectedRefreshToken,
+          ...(input.compatibilityRefreshTokens ?? []),
+        ]);
         if (
           vault.activeAccountKey !== key ||
           current.realm !== input.realm ||
-          current.refreshToken !== input.expectedRefreshToken
+          !acceptedPreviousTokens.has(current.refreshToken)
         ) {
           return 'stale';
         }

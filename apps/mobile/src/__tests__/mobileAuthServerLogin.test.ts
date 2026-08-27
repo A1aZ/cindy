@@ -415,6 +415,39 @@ describe('mobile auth-server login', () => {
     expect(resourceStored).toBeGreaterThan(-1);
     expect(regionGuard).toBeGreaterThan(resourceStored);
     expect(switchBody).toContain("throw authCodeError('REGION_MISMATCH')");
+    expect(switchBody).toContain('const runtimeActiveAccountKey = userRef.current');
+    expect(switchBody).toContain('if (runtimeActiveAccountKey === accountKey) return;');
+  });
+
+  it('tries both compatibility and vault Resource generations before expiring auth', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const refreshStart = authSource.indexOf('const refresh = useCallback');
+    const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
+    const refreshBody = authSource.slice(refreshStart, refreshEnd);
+
+    expect(refreshBody).toContain('const refreshCandidates = reconciledAuth.refreshCandidates;');
+    expect(refreshBody).toContain('for (const [index, candidate] of refreshCandidates.entries())');
+    expect(refreshBody).toContain('rejectedRefreshTokens.push(candidate.refreshToken);');
+    expect(refreshBody).toContain('compatibilityRefreshTokens: refreshCandidates');
+    expect(refreshBody).toContain(
+      'rejectedRefreshTokens.includes(\n                activeResourceAtStart.resource.refreshToken,',
+    );
+
+    const snapshotStart = authSource.indexOf(
+      'const refreshSavedAccountsSnapshot = useCallback',
+    );
+    const snapshotEnd = authSource.indexOf(
+      '\n\n  const refreshSavedAccountsSnapshotBestEffort',
+      snapshotStart,
+    );
+    const snapshotBody = authSource.slice(snapshotStart, snapshotEnd);
+    expect(snapshotBody).toContain('const runtimeActiveAccountKey = userRef.current');
+    expect(snapshotBody).toContain(
+      'listMobileSavedAccounts(vault, runtimeActiveAccountKey)',
+    );
   });
 
   it('rolls a failed account switch back to the latest serialized session', () => {

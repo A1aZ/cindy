@@ -138,16 +138,25 @@ describe('auth weak-network bootstrap', () => {
     const reconcileAt = refreshBody.indexOf(
       'reconcileMobileActiveAuthSession({',
     );
-    const readSessionAt = refreshBody.indexOf(
-      'const session = reconciledAuth.session;',
+    const readCandidatesAt = refreshBody.indexOf(
+      'const refreshCandidates = reconciledAuth.refreshCandidates;',
       reconcileAt,
     );
-    const emptySessionAt = refreshBody.indexOf('if (!session) {');
+    const emptyCandidatesAt = refreshBody.indexOf(
+      'if (refreshCandidates.length === 0) {',
+      readCandidatesAt,
+    );
     const loadRealmAt = refreshBody.indexOf(
-      'await loadMobileEndpointsForRealm(session.realm);',
+      'await loadMobileEndpointsForRealm(candidate.realm);',
+      emptyCandidatesAt,
+    );
+    const requestRefreshAt = refreshBody.indexOf(
+      'candidatePair = await authClientFor(did, candidate.realm).refresh(',
+      loadRealmAt,
     );
     const activateRealmAt = refreshBody.indexOf(
       'activateMobileSessionRealm(session.realm);',
+      requestRefreshAt,
     );
     const guards = [
       ...refreshBody.matchAll(
@@ -156,14 +165,17 @@ describe('auth weak-network bootstrap', () => {
     ].map((match) => match.index);
 
     expect(reconcileAt).toBeGreaterThanOrEqual(0);
-    expect(readSessionAt).toBeGreaterThan(reconcileAt);
+    expect(readCandidatesAt).toBeGreaterThan(reconcileAt);
     expect(
-      guards.some((index) => index > readSessionAt && index < emptySessionAt),
+      guards.some(
+        (index) => index > readCandidatesAt && index < emptyCandidatesAt,
+      ),
     ).toBe(true);
-    expect(loadRealmAt).toBeGreaterThan(emptySessionAt);
+    expect(loadRealmAt).toBeGreaterThan(emptyCandidatesAt);
     expect(
-      guards.some((index) => index > loadRealmAt && index < activateRealmAt),
+      guards.some((index) => index > loadRealmAt && index < requestRefreshAt),
     ).toBe(true);
+    expect(activateRealmAt).toBeGreaterThan(requestRefreshAt);
   });
 
   it('换账号或区域时先用旧会话撤销旧区域推送，再激活新区域', () => {

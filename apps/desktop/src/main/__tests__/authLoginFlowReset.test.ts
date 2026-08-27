@@ -386,7 +386,7 @@ describe('auth login-flow reset', () => {
     );
   });
 
-  it('repairs an interrupted active-session projection before cold-start refresh', () => {
+  it('preserves compatibility and vault generations before cold-start refresh', () => {
     const helperStart = source.indexOf(
       'async function reconcileDesktopActiveAuthSession()',
     );
@@ -398,8 +398,54 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('authAccountVaultLockPath()');
     expect(helperBody).toContain("label: 'auth-account-vault-reconcile'");
     expect(helperBody).toContain('vault.resources[vault.activeAccountKey]');
-    expect(helperBody).toContain('session.refreshToken !== activeResource.refreshToken');
+    expect(helperBody).toContain('if (!session)');
     expect(helperBody).toContain('writePersistedAuthSessionOrThrow(');
+    expect(helperBody).toContain('return session;');
+
+    const candidatesStart = source.indexOf(
+      'function readStoredRefreshTokenCandidates',
+    );
+    const candidatesEnd = source.indexOf(
+      '\n}\n\nfunction readPersistedAccountDeletionReceipt',
+      candidatesStart,
+    );
+    const candidatesBody = source.slice(candidatesStart, candidatesEnd);
+    expect(candidatesBody).toContain('readPersistedRefreshToken(realm)');
+    expect(candidatesBody).toContain('vault.resources[vault.activeAccountKey]');
+    expect(candidatesBody).toContain('activeResource.refreshToken');
+
+    const commitStart = source.indexOf(
+      'async function commitDesktopRefreshCredentials',
+    );
+    const commitEnd = source.indexOf(
+      '\n}\n\n/**\n * Account refresh tokens have no replay grace.',
+      commitStart,
+    );
+    const commitBody = source.slice(commitStart, commitEnd);
+    expect(commitBody).toContain('vault.resources[key]?.refreshToken === requestedRefreshToken');
+
+    const deadStart = source.indexOf(
+      'async function clearConfirmedDeadRefreshTokens',
+    );
+    const deadEnd = source.indexOf(
+      '\n}\n\n/**\n * replacement-retry',
+      deadStart,
+    );
+    const deadBody = source.slice(deadStart, deadEnd);
+    expect(deadBody).toContain('await mutateAuthAccountVault((vault) => {');
+    expect(deadBody).toContain('deadTokens.includes(activeResource.refreshToken)');
+    expect(deadBody).toContain('delete vault.resources[activeKey];');
+    expect(deadBody).toContain('vault.activeAccountKey = null;');
+
+    const listStart = source.indexOf('export function listSavedAccounts()');
+    const listEnd = source.indexOf(
+      '\n}\n\nexport async function syncSavedAccounts',
+      listStart,
+    );
+    const listBody = source.slice(listStart, listEnd);
+    expect(listBody).toContain(
+      'const activeKey = currentUser ? accountVaultKey(activeAuthRealm, currentUser.id) : null;',
+    );
 
     const initializeStart = source.indexOf('export async function initialize(');
     const initializeEnd = source.indexOf(

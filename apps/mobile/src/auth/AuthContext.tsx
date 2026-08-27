@@ -822,7 +822,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshSavedAccountsSnapshot = useCallback(async () => {
     const vault = await readMobileAccountVault();
-    setSavedAccounts(listMobileSavedAccounts(vault));
+    const runtimeActiveAccountKey = userRef.current
+      ? accountVaultKey(activeAuthRealmRef.current, userRef.current.id)
+      : null;
+    setSavedAccounts(listMobileSavedAccounts(vault, runtimeActiveAccountKey));
   }, []);
 
   const refreshSavedAccountsSnapshotBestEffort = useCallback((): void => {
@@ -1124,20 +1127,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await clearCanaryChannel().catch(() => undefined);
           return null;
         }
-        const session = reconciledAuth.session;
+        const refreshCandidates = reconciledAuth.refreshCandidates;
         if (authGenerationRef.current !== generation) return null;
-        if (!session) {
+        if (refreshCandidates.length === 0) {
           await clearCanaryChannel().catch(() => undefined);
           return null;
         }
+        let selectedSession: AuthSessionRecord | null = null;
+        let candidatePair: Awaited<ReturnType<CindyAuthClient['refresh']>> | null = null;
+        const rejectedRefreshTokens: string[] = [];
         try {
-          await loadMobileEndpointsForRealm(session.realm);
-          if (authGenerationRef.current !== generation) return null;
+          for (const [index, candidate] of refreshCandidates.entries()) {
+            selectedSession = candidate;
+            try {
+              await loadMobileEndpointsForRealm(candidate.realm);
+              if (authGenerationRef.current !== generation) return null;
+              candidatePair = await authClientFor(did, candidate.realm).refresh(
+                candidate.refreshToken,
+              );
+              break;
+            } catch (candidateError) {
+              const rejected = isRejectedRefresh(candidateError);
+              const deviceMismatch =
+                candidateError instanceof AuthApiError &&
+                candidateError.code === 'DEVICE_MISMATCH';
+              if (rejected && !deviceMismatch) {
+                rejectedRefreshTokens.push(candidate.refreshToken);
+              }
+              if (
+                !rejected ||
+                deviceMismatch ||
+                index === refreshCandidates.length - 1
+              ) {
+                throw candidateError;
+              }
+            }
+          }
+          if (!selectedSession || !candidatePair) return null;
+          const session = selectedSession;
+          const pair = candidatePair;
           activateMobileSessionRealm(session.realm);
           activeAuthRealmRef.current = session.realm;
-          const pair = await authClientFor(did, session.realm).refresh(
-            session.refreshToken,
-          );
           if (authGenerationRef.current !== generation) return null;
           const passportId =
             pair.membership.passportId ??
@@ -1147,12 +1177,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const persisted = await serializeRefreshTokenMutation(async () => {
             if (authGenerationRef.current !== generation) return false;
             if (!passportId) {
-              await writePersistedAuthSession(pair.refreshToken, session.realm);
+              await writePersistedAuthSession(
+                pair.refreshToken,
+                session.realm,
+              );
               return authGenerationRef.current === generation;
             }
             const resourceCommit =
               await commitMobileRuntimeResourceSession({
                 expectedRefreshToken: session.refreshToken,
+                compatibilityRefreshTokens: refreshCandidates
+                  .filter((candidate) => candidate.realm === session.realm)
+                  .map((candidate) => candidate.refreshToken),
                 pair,
                 realm: session.realm,
                 passportId,
@@ -1192,15 +1228,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           refreshSavedAccountsSnapshotBestEffort();
           scheduleCanaryChannelSync(pair.accessToken, generation);
           scheduleXdOrgBetaDefault(pair.accessToken, generation);
-          void loadMe(pair.accessToken, did, generation).catch(() => undefined);
+          void loadMe(pair.accessToken, did, generation).catch(
+            () => undefined,
+          );
           return pair.accessToken;
         } catch (error) {
           if (authGenerationRef.current !== generation) return null;
           if (isRejectedRefresh(error)) {
             const rejectedAccountKey =
-              activeResourceAtStart?.resource?.realm === session.realm &&
-              activeResourceAtStart.resource.refreshToken ===
-                session.refreshToken
+              activeResourceAtStart?.resource &&
+              rejectedRefreshTokens.includes(
+                activeResourceAtStart.resource.refreshToken,
+              )
                 ? activeResourceAtStart.accountKey
                 : null;
             if (
@@ -1213,7 +1252,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               try {
                 const removal = await removeMobileResourceSessionIfCurrent({
                   accountKey: rejectedAccountKey,
-                  expectedRefreshToken: session.refreshToken,
+                  expectedRefreshToken:
+                    activeResourceAtStart!.resource!.refreshToken,
                   validateBeforeWrite: () => {
                     if (authGenerationRef.current !== generation) {
                       throw authCodeError('AUTH_FLOW_SUPERSEDED');
@@ -2192,7 +2232,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (accountKey: string): Promise<void> => {
       const generationAtStart = authGenerationRef.current;
       const initialVault = await readMobileAccountVault();
-      if (initialVault.activeAccountKey === accountKey) return;
+      const runtimeActiveAccountKey = userRef.current
+        ? accountVaultKey(activeAuthRealmRef.current, userRef.current.id)
+        : null;
+      if (runtimeActiveAccountKey === accountKey) return;
       const resource = initialVault.resources[accountKey];
       let metadata = resource?.metadata ?? null;
       let realm = resource?.realm ?? null;

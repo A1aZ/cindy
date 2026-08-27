@@ -119,9 +119,12 @@ describe('mobile account vault', () => {
         orgLogoUrl: 'https://example.com/org.png',
       }),
     ]);
+    expect(listMobileSavedAccounts(parseMobileAccountVault(raw), null)).toEqual([
+      expect.objectContaining({ accountKey, isCurrent: false }),
+    ]);
   });
 
-  it('repairs an interrupted compatibility-session write from the active vault before refresh', async () => {
+  it('preserves divergent compatibility and vault generations as refresh candidates', async () => {
     const accountKey = JSON.stringify(['global', metadata.membershipId]);
     secureStorage.value = JSON.stringify({
       version: 1,
@@ -161,12 +164,13 @@ describe('mobile account vault', () => {
     expect(reconciled.session).toEqual({
       version: 1,
       realm: 'global',
-      refreshToken: 'resource-new',
+      refreshToken: 'resource-old',
     });
-    expect(writePersistedSession).toHaveBeenCalledWith(
-      'resource-new',
-      'global',
-    );
+    expect(reconciled.refreshCandidates).toEqual([
+      { version: 1, realm: 'global', refreshToken: 'resource-old' },
+      { version: 1, realm: 'global', refreshToken: 'resource-new' },
+    ]);
+    expect(writePersistedSession).not.toHaveBeenCalled();
     expect(clearPersistedSession).not.toHaveBeenCalled();
     expect(secureStorage.set).not.toHaveBeenCalled();
 
@@ -185,6 +189,49 @@ describe('mobile account vault', () => {
       }),
     ).resolves.toEqual(expect.objectContaining({ session: null }));
     expect(clearPersistedSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs a missing compatibility projection from the active vault', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-new',
+          metadata,
+          lastUsedAt: 10,
+        },
+      },
+      passports: {},
+    });
+    const writePersistedSession = vi.fn(async () => undefined);
+
+    await expect(
+      reconcileMobileActiveAuthSession({
+        readPersistedSession: async () => null,
+        writePersistedSession,
+        clearPersistedSession: vi.fn(async () => undefined),
+      }),
+    ).resolves.toMatchObject({
+      session: {
+        version: 1,
+        realm: 'global',
+        refreshToken: 'resource-new',
+      },
+      refreshCandidates: [
+        {
+          version: 1,
+          realm: 'global',
+          refreshToken: 'resource-new',
+        },
+      ],
+    });
+    expect(writePersistedSession).toHaveBeenCalledWith(
+      'resource-new',
+      'global',
+    );
   });
 
   it('does not trust an active key whose resource credential is missing', () => {
@@ -442,6 +489,53 @@ describe('mobile account vault', () => {
         ?.refreshToken,
     ).toBe('resource-late');
     expect(afterPersist).toHaveBeenCalledTimes(1);
+  });
+
+  it('commits a refresh that proves a newer compatibility generation', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    const pair = {
+      accessToken: 'access-latest',
+      refreshToken: 'resource-latest',
+      membership: {
+        id: metadata.membershipId,
+        passportId: metadata.passportId,
+        displayName: metadata.displayName,
+        email: metadata.email,
+        avatarUrl: metadata.avatarUrl,
+        kind: metadata.kind,
+        role: metadata.role,
+        orgId: metadata.orgId,
+        orgName: metadata.orgName,
+        orgLogoUrl: metadata.orgLogoUrl,
+      },
+    };
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'vault-older',
+          metadata,
+          lastUsedAt: 10,
+        },
+      },
+      passports: {},
+    });
+
+    await expect(
+      commitMobileRuntimeResourceSession({
+        expectedRefreshToken: 'compatibility-newer',
+        compatibilityRefreshTokens: ['vault-older'],
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+      }),
+    ).resolves.toBe('stored');
+    expect(
+      parseMobileAccountVault(secureStorage.value).resources[accountKey]
+        ?.refreshToken,
+    ).toBe('resource-latest');
   });
 
   it('does not recreate a runtime Resource after a signed-out tombstone', async () => {

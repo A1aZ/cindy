@@ -192,6 +192,18 @@ describe('auth login-flow reset', () => {
     }
   });
 
+  it('filters invalid vault children only for read-only projection', () => {
+    const readStart = source.indexOf('function readAuthAccountVault(');
+    const readEnd = source.indexOf('\n}\n\nfunction writeAuthAccountVault', readStart);
+    const readBody = source.slice(readStart, readEnd);
+
+    expect(readBody).toContain('if (options.allowUnreadable) continue;');
+    expect(readBody).toContain("throw new Error('invalid saved resource credential')");
+    expect(readBody).toContain("throw new Error('invalid saved Passport credential')");
+    expect(readBody).toContain("throw new Error('invalid saved Passport membership')");
+    expect(readBody).toContain('memberships.length !== item.memberships.length');
+  });
+
   it('atomically replaces the aggregate saved-account vault', () => {
     const writeStart = source.indexOf('function writeAtomicSafe(');
     const writeEnd = source.indexOf('\n}\n\nfunction removeAtomicSafeOrThrow', writeStart);

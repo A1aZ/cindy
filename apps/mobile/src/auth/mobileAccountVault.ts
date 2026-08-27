@@ -50,7 +50,10 @@ export function emptyMobileAccountVault(): MobileAccountVault {
   return { version: 1, activeAccountKey: null, resources: {}, passports: {} };
 }
 
-function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
+function parseMobileAccountVaultRecord(
+  raw: string | null,
+  options: { allowInvalidChildren?: boolean } = {},
+): MobileAccountVault {
   if (raw === null) return emptyMobileAccountVault();
   const value = JSON.parse(raw) as Partial<MobileAccountVault>;
   if (
@@ -66,7 +69,10 @@ function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
   }
   const resources: Record<string, MobileStoredResourceSession> = {};
   for (const [key, candidate] of Object.entries(value.resources)) {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      if (options.allowInvalidChildren) continue;
+      throw new Error('Saved resource credential could not be read safely');
+    }
     const item = candidate as Partial<MobileStoredResourceSession>;
     if (
       (item.realm !== 'cn' && item.realm !== 'global') ||
@@ -74,12 +80,18 @@ function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
       !item.refreshToken ||
       !isStoredAccountMetadata(item.metadata) ||
       typeof item.lastUsedAt !== 'number'
-    ) continue;
+    ) {
+      if (options.allowInvalidChildren) continue;
+      throw new Error('Saved resource credential could not be read safely');
+    }
     resources[key] = item as MobileStoredResourceSession;
   }
   const passports: Record<string, MobileStoredPassportSession> = {};
   for (const [key, candidate] of Object.entries(value.passports)) {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      if (options.allowInvalidChildren) continue;
+      throw new Error('Saved Passport credential could not be read safely');
+    }
     const item = candidate as Partial<MobileStoredPassportSession>;
     if (
       (item.realm !== 'cn' && item.realm !== 'global') ||
@@ -87,12 +99,22 @@ function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
       typeof item.accountRefreshToken !== 'string' ||
       !item.accountRefreshToken ||
       !Array.isArray(item.memberships)
-    ) continue;
+    ) {
+      if (options.allowInvalidChildren) continue;
+      throw new Error('Saved Passport credential could not be read safely');
+    }
+    const memberships = item.memberships.filter(isStoredAccountMetadata);
+    if (
+      !options.allowInvalidChildren &&
+      memberships.length !== item.memberships.length
+    ) {
+      throw new Error('Saved Passport membership could not be read safely');
+    }
     passports[key] = {
       realm: item.realm,
       passportId: item.passportId,
       accountRefreshToken: item.accountRefreshToken,
-      memberships: item.memberships.filter(isStoredAccountMetadata),
+      memberships,
     };
   }
   const active = typeof value.activeAccountKey === 'string' ? value.activeAccountKey : null;
@@ -109,7 +131,7 @@ function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
 
 export function parseMobileAccountVault(raw: string | null): MobileAccountVault {
   try {
-    return parseMobileAccountVaultRecord(raw);
+    return parseMobileAccountVaultRecord(raw, { allowInvalidChildren: true });
   } catch {
     // Read-only projections may fall back, but mutations use the strict parser
     // below so malformed encrypted content can never be overwritten.

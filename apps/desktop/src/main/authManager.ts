@@ -670,33 +670,47 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
     }
     const resources: Record<string, StoredResourceSession> = {};
     for (const [key, candidate] of Object.entries(parsed.resources)) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        if (options.allowUnreadable) continue;
+        throw new Error('invalid saved resource credential');
+      }
       const item = candidate as Partial<StoredResourceSession>;
       if (
         (item.realm !== 'cn' && item.realm !== 'global') ||
         typeof item.refreshToken !== 'string' ||
         !isStoredAccountMetadata(item.metadata) ||
         typeof item.lastUsedAt !== 'number'
-      )
-        continue;
+      ) {
+        if (options.allowUnreadable) continue;
+        throw new Error('invalid saved resource credential');
+      }
       resources[key] = item as StoredResourceSession;
     }
     const passports: Record<string, StoredPassportSession> = {};
     for (const [key, candidate] of Object.entries(parsed.passports)) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        if (options.allowUnreadable) continue;
+        throw new Error('invalid saved Passport credential');
+      }
       const item = candidate as Partial<StoredPassportSession>;
       if (
         (item.realm !== 'cn' && item.realm !== 'global') ||
         typeof item.passportId !== 'string' ||
         typeof item.accountRefreshToken !== 'string' ||
         !Array.isArray(item.memberships)
-      )
-        continue;
+      ) {
+        if (options.allowUnreadable) continue;
+        throw new Error('invalid saved Passport credential');
+      }
+      const memberships = item.memberships.filter(isStoredAccountMetadata);
+      if (!options.allowUnreadable && memberships.length !== item.memberships.length) {
+        throw new Error('invalid saved Passport membership');
+      }
       passports[key] = {
         realm: item.realm,
         passportId: item.passportId,
         accountRefreshToken: item.accountRefreshToken,
-        memberships: item.memberships.filter(isStoredAccountMetadata),
+        memberships,
       };
     }
     return {

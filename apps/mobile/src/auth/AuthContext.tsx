@@ -217,6 +217,17 @@ export interface MobileUser {
   passportId: string;
 }
 
+interface CachedUserProfile {
+  accountKey: string | null;
+  user: MobileUser;
+}
+
+interface CachedUserProfileRecord {
+  version: 1;
+  accountKey: string;
+  user: MobileUser;
+}
+
 export type MobileLoginAction =
   | { type: 'reset' }
   | { type: 'discover'; email: string }
@@ -744,11 +755,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 缓存资料恢复“已登录”视图,token 由后台刷新补齐。
   const applyUser = useCallback(
     (next: MobileUser | null) => {
+      const profileAccountKey = next
+        ? accountVaultKey(activeAuthRealmRef.current, next.id)
+        : null;
       setDeferredSessionRecovery(false);
       setMobileAuthOwner(next?.id);
       userRef.current = next;
       setUser(next);
-      void serializeUserProfileMutation(() => writeCachedUserProfile(next));
+      void serializeUserProfileMutation(() =>
+        writeCachedUserProfile(next, profileAccountKey),
+      );
     },
     [serializeUserProfileMutation],
   );
@@ -1178,10 +1194,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             };
           }
         }
-        const [cachedUser, storedDeletionReceiptRaw] = await Promise.all([
+        const [cachedProfile, storedDeletionReceiptRaw] = await Promise.all([
           readCachedUserProfile(),
           getSecureItem(ACCOUNT_DELETION_RECEIPT_KEY).catch(() => null),
         ]);
+        const cachedUser = cachedProfile?.user ?? null;
         const storedDeletionReceipt =
           parseAccountDeletionReceiptRecord(storedDeletionReceiptRaw) ??
           (storedDeletionReceiptRaw &&
@@ -1210,7 +1227,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // 弱网冷启动只有在会话所属 realm 的业务端点已整体激活后，才发布缓存用户。
         // 构建 realm 命中启动缓存，不增加网络依赖；跨区清单不可用时保持未认证，
         // 防止业务调用先捕获构建区 URL、随后 refresh 又把对端 token 发给该 URL。
-        if (storedSession && cachedUser) {
+        const cachedAccountKey =
+          storedSession && cachedUser
+            ? accountVaultKey(storedSession.realm, cachedUser.id)
+            : null;
+        const cachedProfileMatchesActiveAccount =
+          cachedAccountKey !== null &&
+          persistedAccountVault?.activeAccountKey === cachedAccountKey &&
+          (cachedProfile?.accountKey === cachedAccountKey ||
+            cachedProfile?.accountKey === null);
+        if (storedSession && cachedUser && cachedProfileMatchesActiveAccount) {
           try {
             await loadMobileEndpointsForRealm(storedSession.realm);
             if (cancelled) return;
@@ -1219,6 +1245,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             userRef.current = cachedUser;
             setMobileAuthOwner(cachedUser.id);
             setUser(cachedUser);
+            if (cachedProfile.accountKey === null) {
+              void serializeUserProfileMutation(() =>
+                writeCachedUserProfile(cachedUser, cachedAccountKey),
+              );
+            }
           } catch {
             if (!cancelled) setDeferredSessionRecovery(true);
           }
@@ -2854,31 +2885,52 @@ async function restorePersistedAuthSession(
   }
 }
 
-async function readCachedUserProfile(): Promise<MobileUser | null> {
+function parseCachedMobileUser(value: unknown): MobileUser | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const parsed = value as Partial<MobileUser>;
+  if (
+    typeof parsed.id !== 'string' ||
+    typeof parsed.name !== 'string' ||
+    (parsed.membershipKind !== 'personal' && parsed.membershipKind !== 'org')
+  )
+    return null;
+  return {
+    ...(parsed as MobileUser),
+    orgLogoUrl:
+      typeof parsed.orgLogoUrl === 'string' ? parsed.orgLogoUrl : null,
+  };
+}
+
+async function readCachedUserProfile(): Promise<CachedUserProfile | null> {
   try {
     const raw = await getSecureItem(USER_PROFILE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<MobileUser>;
-    if (
-      typeof parsed.id !== 'string' ||
-      typeof parsed.name !== 'string' ||
-      (parsed.membershipKind !== 'personal' && parsed.membershipKind !== 'org')
-    )
-      return null;
-    return {
-      ...(parsed as MobileUser),
-      orgLogoUrl:
-        typeof parsed.orgLogoUrl === 'string' ? parsed.orgLogoUrl : null,
-    };
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Partial<CachedUserProfileRecord>;
+      if (record.version === 1 && typeof record.accountKey === 'string') {
+        const user = parseCachedMobileUser(record.user);
+        return user ? { accountKey: record.accountKey, user } : null;
+      }
+    }
+    const legacyUser = parseCachedMobileUser(parsed);
+    return legacyUser ? { accountKey: null, user: legacyUser } : null;
   } catch {
     return null;
   }
 }
 
-async function writeCachedUserProfile(user: MobileUser | null): Promise<void> {
+async function writeCachedUserProfile(
+  user: MobileUser | null,
+  accountKey: string | null,
+): Promise<void> {
   try {
-    if (user) await setSecureItem(USER_PROFILE_KEY, JSON.stringify(user));
-    else await deleteSecureItem(USER_PROFILE_KEY);
+    if (user && accountKey) {
+      const record: CachedUserProfileRecord = { version: 1, accountKey, user };
+      await setSecureItem(USER_PROFILE_KEY, JSON.stringify(record));
+    } else {
+      await deleteSecureItem(USER_PROFILE_KEY);
+    }
   } catch {
     // Snapshot persistence is best effort and never blocks the auth flow.
   }

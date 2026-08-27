@@ -61,6 +61,28 @@ describe('mobile account vault', () => {
     });
   });
 
+  it('filters damaged children only from the read-only projection', () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    const raw = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-refresh',
+          metadata,
+          lastUsedAt: 10,
+        },
+        damaged: { realm: 'global', refreshToken: 'must-not-be-rewritten' },
+      },
+      passports: {},
+    });
+
+    expect(parseMobileAccountVault(raw).resources).toEqual({
+      [accountKey]: expect.objectContaining({ refreshToken: 'resource-refresh' }),
+    });
+  });
+
   it('deduplicates resource and Passport projections and marks the active account', () => {
     const accountKey = JSON.stringify(['global', 'membership-1']);
     const raw = JSON.stringify({
@@ -211,6 +233,53 @@ describe('mobile account vault', () => {
     ).rejects.toThrow();
 
     expect(secureStorage.value).toBe('{bad-json');
+    expect(secureStorage.set).not.toHaveBeenCalled();
+  });
+
+  it('does not rewrite a vault containing a damaged resource child', async () => {
+    const original = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {
+        damaged: { realm: 'global', refreshToken: 'must-not-be-deleted' },
+      },
+      passports: {},
+    });
+    secureStorage.value = original;
+
+    await expect(
+      mutateMobileAccountVault((vault) => {
+        vault.activeAccountKey = null;
+      }),
+    ).rejects.toThrow('Saved resource credential could not be read safely');
+
+    expect(secureStorage.value).toBe(original);
+    expect(secureStorage.set).not.toHaveBeenCalled();
+  });
+
+  it('does not rewrite a Passport containing damaged membership metadata', async () => {
+    const original = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: {
+        passport: {
+          realm: 'global',
+          passportId: 'passport-1',
+          accountRefreshToken: 'must-not-be-deleted',
+          memberships: [metadata, { membershipId: 'damaged' }],
+        },
+      },
+    });
+    secureStorage.value = original;
+
+    await expect(
+      mutateMobileAccountVault((vault) => {
+        vault.activeAccountKey = null;
+      }),
+    ).rejects.toThrow('Saved Passport membership could not be read safely');
+
+    expect(secureStorage.value).toBe(original);
     expect(secureStorage.set).not.toHaveBeenCalled();
   });
 

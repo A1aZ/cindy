@@ -15,12 +15,14 @@ describe('auth weak-network bootstrap', () => {
   );
 
   it('bootstrap 只在会话 realm 端点激活后用本地痕迹恢复登录视图', () => {
-    // 快照恢复必须双条件:refresh token 还在 + 有缓存资料;二者缺一不得凭空造登录态。
-    expect(authSource).toContain('if (storedSession && cachedUser) {');
+    // 快照恢复必须三条件:refresh token、缓存资料、vault 当前 owner 一致。
+    expect(authSource).toContain(
+      'if (storedSession && cachedUser && cachedProfileMatchesActiveAccount) {',
+    );
     expect(authSource).toContain('userRef.current = cachedUser;');
     expect(authSource).toContain('setUser(cachedUser);');
     const restoreStart = authSource.indexOf(
-      'if (storedSession && cachedUser) {',
+      'if (storedSession && cachedUser && cachedProfileMatchesActiveAccount) {',
     );
     const restoreEnd = authSource.indexOf(
       '\n        if (!storedSession)',
@@ -40,6 +42,13 @@ describe('auth weak-network bootstrap', () => {
     expect(publishOwnerAt).toBeGreaterThan(activateRealmAt);
     expect(publishUserAt).toBeGreaterThan(publishOwnerAt);
     expect(restoreBody).toContain('setDeferredSessionRecovery(true);');
+    expect(authSource).toContain(
+      'persistedAccountVault?.activeAccountKey === cachedAccountKey',
+    );
+    expect(authSource).toContain('cachedProfile?.accountKey === cachedAccountKey');
+    expect(authSource).toContain(
+      'writeCachedUserProfile(cachedUser, cachedAccountKey)',
+    );
     // bootstrap 里的 refresh 失败必须是"保留降级会话",不许再出现坍缩式 .catch(() => null)。
     expect(authSource).not.toContain('await refresh(did).catch(() => null)');
     expect(authSource).toMatch(
@@ -56,6 +65,12 @@ describe('auth weak-network bootstrap', () => {
     const applyUserBody = authSource.slice(applyUserStart, applyUserEnd);
     expect(applyUserBody.indexOf('setMobileAuthOwner(next?.id);'))
       .toBeLessThan(applyUserBody.indexOf('setUser(next);'));
+    expect(applyUserBody).toContain(
+      'accountVaultKey(activeAuthRealmRef.current, next.id)',
+    );
+    expect(applyUserBody).toContain(
+      'writeCachedUserProfile(next, profileAccountKey)',
+    );
 
     const initializeFailure = authSource.indexOf(
       "console.warn('[auth] initialize failed; normalized to signed-out'",

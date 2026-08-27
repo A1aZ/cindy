@@ -10,6 +10,7 @@ import {
   createPiTranslateContext,
   disposePiTranslateContext,
   markPiHostAbortRequested,
+  markPiHostTurnStartPending,
   translatePiEvent,
   usageSnapshotOf,
 } from '../translator.js';
@@ -592,6 +593,33 @@ describe('pi translator', () => {
         attempt: 1,
         maxAttempts: 3,
         errorMessage: rawError,
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
+    expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
+  });
+
+  it('keeps a Host stop when it arrives before the pending turn agent_start', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    const rawError = 'OpenAI Responses stream ended before a terminal response event';
+
+    markPiHostTurnStartPending(ctx);
+    markPiHostAbortRequested(ctx);
+    translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+    translatePiEvent(
+      ev({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          content: [],
+          stopReason: 'aborted',
+          errorMessage: rawError,
+        },
       }),
       queue,
       ctx,

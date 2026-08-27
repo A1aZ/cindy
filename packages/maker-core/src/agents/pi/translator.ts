@@ -116,6 +116,8 @@ export interface PiTranslateContext {
   isStreaming: boolean;
   /** agent_start 代际；主动停止只允许影响登记时所在的这一轮。 */
   turnGeneration: number;
+  /** Host prompt 已发出、但对应 agent_start 尚未到达。 */
+  pendingHostTurnStartToken: symbol | null;
   /** 当前 turn 内尚未被终态消费的 Host 主动停止请求。 */
   hostAbortRequestGeneration: number | null;
   hostAbortRequestTokens: Set<symbol>;
@@ -196,6 +198,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     costUsd: 0,
     isStreaming: false,
     turnGeneration: 0,
+    pendingHostTurnStartToken: null,
     hostAbortRequestGeneration: null,
     hostAbortRequestTokens: new Set(),
     thinkingSeq: 0,
@@ -220,15 +223,34 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
 }
 
 export type PiHostAbortRequestToken = symbol;
+export type PiHostTurnStartToken = symbol;
+
+/** 在 prompt RPC 发出前登记其尚未到达的 agent_start。 */
+export function markPiHostTurnStartPending(ctx: PiTranslateContext): PiHostTurnStartToken {
+  const token = Symbol('pi-host-turn-start');
+  ctx.pendingHostTurnStartToken = token;
+  return token;
+}
+
+/** 明确得知 prompt 未启动时，只撤销对应的待开始标记。 */
+export function rollbackPiHostTurnStart(
+  ctx: PiTranslateContext,
+  token: PiHostTurnStartToken,
+): void {
+  if (ctx.pendingHostTurnStartToken === token) ctx.pendingHostTurnStartToken = null;
+}
 
 /**
  * 在 abort RPC 发出前登记 Host 主动停止，避免 Pi 的 aborted 终态先于 RPC 回执到达。
  * token 让并发或迟到的失败回滚只能撤销自己的请求，不能清掉更新的一次停止。
  */
 export function markPiHostAbortRequested(ctx: PiTranslateContext): PiHostAbortRequestToken {
-  if (ctx.hostAbortRequestGeneration !== ctx.turnGeneration) {
+  const targetGeneration = !ctx.isStreaming && ctx.pendingHostTurnStartToken !== null
+    ? ctx.turnGeneration + 1
+    : ctx.turnGeneration;
+  if (ctx.hostAbortRequestGeneration !== targetGeneration) {
     ctx.hostAbortRequestTokens.clear();
-    ctx.hostAbortRequestGeneration = ctx.turnGeneration;
+    ctx.hostAbortRequestGeneration = targetGeneration;
   }
   const token = Symbol('pi-host-abort-request');
   ctx.hostAbortRequestTokens.add(token);
@@ -240,7 +262,6 @@ export function rollbackPiHostAbortRequest(
   ctx: PiTranslateContext,
   token: PiHostAbortRequestToken,
 ): void {
-  if (ctx.hostAbortRequestGeneration !== ctx.turnGeneration) return;
   ctx.hostAbortRequestTokens.delete(token);
   if (ctx.hostAbortRequestTokens.size === 0) ctx.hostAbortRequestGeneration = null;
 }
@@ -269,6 +290,7 @@ function stopPiGenerationHeartbeat(ctx: PiTranslateContext): void {
 export function disposePiTranslateContext(ctx: PiTranslateContext): void {
   stopPiGenerationHeartbeat(ctx);
   ctx.isStreaming = false;
+  ctx.pendingHostTurnStartToken = null;
   clearPiHostAbortRequests(ctx);
   ctx.pendingAssistantError = null;
   ctx.compactTurnScope = null;
@@ -599,7 +621,10 @@ export function translatePiEvent(
   switch (event.type) {
     case 'agent_start': {
       ctx.turnGeneration += 1;
-      clearPiHostAbortRequests(ctx);
+      ctx.pendingHostTurnStartToken = null;
+      if (ctx.hostAbortRequestGeneration !== ctx.turnGeneration) {
+        clearPiHostAbortRequests(ctx);
+      }
       ctx.isStreaming = true;
       ctx.turnTokens = 0;
       ctx.turnInput = 0;

@@ -1781,7 +1781,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await handle.close();
   });
 
-  it('does not surface an aborted gateway error after the Host stops the Pi turn', async () => {
+  it('does not surface an aborted gateway error when Host stop beats agent_start', async () => {
     const handle = await new PiAgent(buildDeps()).startSession(opts());
     const events: Array<{ type: string; data?: unknown }> = [];
     void (async () => {
@@ -1789,8 +1789,9 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     })();
     const rawError = 'OpenAI Responses stream ended before a terminal response event';
 
-    knobs.onEvent?.({ type: 'agent_start' });
+    await handle.send({ type: 'user', content: 'start a Pi turn' });
     await handle.abort();
+    knobs.onEvent?.({ type: 'agent_start' });
     knobs.onEvent?.({
       type: 'message_end',
       message: {
@@ -1817,8 +1818,9 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     })();
     const rawError = 'OpenAI Responses stream ended before a terminal response event';
 
-    knobs.onEvent?.({ type: 'agent_start' });
+    await handle.send({ type: 'user', content: 'start a Pi turn' });
     await handle.abort();
+    knobs.onEvent?.({ type: 'agent_start' });
     knobs.onEvent?.({
       type: 'message_end',
       message: {

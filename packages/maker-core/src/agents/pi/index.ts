@@ -179,7 +179,9 @@ import {
   disposePiTranslateContext,
   isFailedOrAbortedPiCompaction,
   markPiHostAbortRequested,
+  markPiHostTurnStartPending,
   rollbackPiHostAbortRequest,
+  rollbackPiHostTurnStart,
   translatePiEvent,
   usageSnapshotOf,
   type PiTranslateContext,
@@ -5140,6 +5142,7 @@ export class PiAgent extends BaseAgent {
             ? await readPiUserEntryIds()
             : null;
           if (!managedPackageRoute.accepted) rejectIfCancelled(sendOpts, 'send');
+          const pendingTurnStartToken = markPiHostTurnStartPending(ctx);
           promptRequestStarted = true;
           try {
             doctorCommandActivity.enter(isDoctorCommand);
@@ -5152,6 +5155,7 @@ export class PiAgent extends BaseAgent {
                 PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
             }));
             if (!resp.success) {
+              rollbackPiHostTurnStart(ctx, pendingTurnStartToken);
               if (managedPackageRoute.accepted) {
                 // The host-owned package mutation and its deterministic visible
                 // receipt already crossed the dispatch boundary. The follow-up
@@ -5221,6 +5225,7 @@ export class PiAgent extends BaseAgent {
                   data.isCompacting !== true &&
                   (typeof data.pendingMessageCount !== 'number' || data.pendingMessageCount === 0);
                 if (runtimeIdle && piAgentLifecycleSequence === lifecycleSequenceBeforePrompt) {
+                  rollbackPiHostTurnStart(ctx, pendingTurnStartToken);
                   const result = capturedExtensionNotifications?.join('\n\n') ?? '';
                   // prompt success is only the RPC acceptance boundary. Let
                   // handle.send() resolve before publishing a synthetic terminal;

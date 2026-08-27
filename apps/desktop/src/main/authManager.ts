@@ -637,6 +637,15 @@ function writeAuthAccountVault(vault: AuthAccountVault): boolean {
   return writeSafe(AUTH_ACCOUNT_VAULT_KEY, JSON.stringify(vault));
 }
 
+function writeAuthAccountVaultOrThrow(vault: AuthAccountVault): void {
+  if (writeAuthAccountVault(vault)) return;
+  throw new AuthApiError(
+    'CREDENTIAL_STORE_UNAVAILABLE',
+    503,
+    'Could not persist saved account credentials',
+  );
+}
+
 function metadataFromMembership(
   membership: AuthMembership | AccountMembership,
   passportId: string,
@@ -674,7 +683,7 @@ function rememberResourceSession(
     lastUsedAt: options.lastUsedAt ?? Date.now(),
   };
   if (options.markActive !== false) vault.activeAccountKey = key;
-  writeAuthAccountVault(vault);
+  writeAuthAccountVaultOrThrow(vault);
 }
 
 function rememberPassportSession(input: {
@@ -685,7 +694,7 @@ function rememberPassportSession(input: {
 }): void {
   const vault = readAuthAccountVault();
   writePassportSessionToVault(vault, input);
-  writeAuthAccountVault(vault);
+  writeAuthAccountVaultOrThrow(vault);
 }
 
 function writePassportSessionToVault(
@@ -830,14 +839,14 @@ function rememberUpdatedMembershipMetadata(
     memberships: [metadataFromMembership(membership, passportId)],
     passportMode: 'patch-known',
   });
-  if (changed) writeAuthAccountVault(vault);
+  if (changed) writeAuthAccountVaultOrThrow(vault);
 }
 
 function removeVaultAccount(accountKey: string): void {
   const vault = readAuthAccountVault();
   delete vault.resources[accountKey];
   if (vault.activeAccountKey === accountKey) vault.activeAccountKey = null;
-  writeAuthAccountVault(vault);
+  writeAuthAccountVaultOrThrow(vault);
 }
 
 function bindResourcePairToSavedAccount(
@@ -2945,7 +2954,7 @@ export async function clearLocalSessionAfterAccountDeletion(): Promise<boolean> 
       }
     }
     delete vault.passports[passportVaultKey(deletedRealm, deletedPassportId)];
-    writeAuthAccountVault(vault);
+    writeAuthAccountVaultOrThrow(vault);
   }
   await withAccountFreeOwnerCommit({
     reason: 'account-deletion',

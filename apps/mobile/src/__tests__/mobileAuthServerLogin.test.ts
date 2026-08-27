@@ -415,6 +415,17 @@ describe('mobile auth-server login', () => {
     );
   });
 
+  it('does not block add-account while saved accounts sync in the background', () => {
+    const sheetSource = readFileSync(
+      resolve(process.cwd(), 'src/session/AccountSwitcherSheet.tsx'),
+      'utf8',
+    );
+    expect(sheetSource).toContain('disabled={switchingKey !== null}');
+    expect(sheetSource).not.toContain(
+      'disabled={auth.accountsLoading || switchingKey !== null}',
+    );
+  });
+
   it('clears every Device Link account projection when accountGeneration changes', () => {
     const source = readFileSync(
       resolve(process.cwd(), 'src/device-link/DeviceLinkContext.tsx'),

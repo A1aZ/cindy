@@ -98,7 +98,7 @@ export function AccountSwitcherSheet({
   const footer = (
     <Pressable
       accessibilityRole="button"
-      disabled={auth.accountsLoading || switchingKey !== null}
+      disabled={switchingKey !== null}
       onPress={() => confirmBoundary(onAddAccount)}
       style={({ pressed }) => [
         styles.addButton,

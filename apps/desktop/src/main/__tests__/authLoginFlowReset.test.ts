@@ -185,6 +185,7 @@ describe('auth login-flow reset', () => {
     expect(source).toContain("'CREDENTIAL_STORE_UNAVAILABLE'");
     expect(source).toContain('isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)');
     expect(source).toContain('readAuthAccountVault({ allowUnreadable: true })');
+    expect(source).toContain('writeAuthAccountVaultOrThrow(vault);');
 
     const syncStart = source.indexOf('export async function syncSavedAccounts()');
     const syncEnd = source.indexOf('\n}\n\nexport async function switchSavedAccount', syncStart);

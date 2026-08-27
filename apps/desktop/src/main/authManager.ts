@@ -1698,6 +1698,19 @@ function readStoredRefreshTokenCandidates(realm: AuthRegion): readonly (string |
   ];
 }
 
+function readActiveVaultRefreshCandidate(): {
+  accountKey: string;
+  realm: AuthRegion;
+  refreshToken: string;
+} | null {
+  const vault = readAuthAccountVault();
+  const accountKey = vault.activeAccountKey;
+  const resource = accountKey ? vault.resources[accountKey] : undefined;
+  return accountKey && resource
+    ? { accountKey, realm: resource.realm, refreshToken: resource.refreshToken }
+    : null;
+}
+
 function readPersistedAccountDeletionReceipt() {
   const raw = readSafe(ACCOUNT_DELETION_RECEIPT_KEY);
   const record = parseAccountDeletionReceiptRecord(raw);
@@ -3915,7 +3928,14 @@ export async function initialize(options: AuthInitializeOptions = {}): Promise<A
 async function runColdStartRefreshFlow(
   storedToken: string,
   storedRealm: AuthRegion,
+  ownershipRecovery: {
+    attemptedTokens?: ReadonlySet<string>;
+    expectedActiveVaultAccountKey?: string;
+    hopsRemaining?: number;
+  } = {},
 ): Promise<AuthState> {
+  const attemptedOwnershipTokens = new Set(ownershipRecovery.attemptedTokens);
+  attemptedOwnershipTokens.add(storedToken);
   const epochAtStart = authStateEpoch;
   const epochChanged = (point: string): boolean => {
     if (authStateEpoch === epochAtStart) return false;
@@ -3956,7 +3976,11 @@ async function runColdStartRefreshFlow(
       return snapshotAuthState();
     }
     const latestSession = readPersistedAuthSession();
-    if (latestSession && latestSession.realm !== storedRealm) {
+    if (
+      latestSession &&
+      latestSession.realm !== storedRealm &&
+      !ownershipRecovery.expectedActiveVaultAccountKey
+    ) {
       // 共享 userData 的另一个实例已切到其它区域。旧区域请求无论成功失败都不能
       // 覆盖/删除新原子记录；本实例本次以未登录返回，后续 initialize 可加载新清单。
       log.warn('cold-start auth realm changed on disk; discarding stale refresh result');
@@ -4003,6 +4027,7 @@ async function runColdStartRefreshFlow(
     }
 
     const refreshData = refreshResult.data as RefreshResponse;
+    attemptedOwnershipTokens.add(requestedToken);
     const credentialCommit = await commitDesktopRefreshCredentials(
       refreshData,
       storedRealm,
@@ -4024,6 +4049,26 @@ async function runColdStartRefreshFlow(
       log.warn(
         `cold-start refresh lost active credential ownership (${credentialCommit}); preserved only the still-saved account token`,
       );
+      const nextActiveCandidate = readActiveVaultRefreshCandidate();
+      const hopsRemaining = ownershipRecovery.hopsRemaining ?? 3;
+      if (
+        nextActiveCandidate &&
+        hopsRemaining > 0 &&
+        !attemptedOwnershipTokens.has(nextActiveCandidate.refreshToken)
+      ) {
+        log.info(
+          'cold-start refresh preserved a non-active rotation; continuing with the vault active account',
+        );
+        return runColdStartRefreshFlow(
+          nextActiveCandidate.refreshToken,
+          nextActiveCandidate.realm,
+          {
+            attemptedTokens: attemptedOwnershipTokens,
+            expectedActiveVaultAccountKey: nextActiveCandidate.accountKey,
+            hopsRemaining: hopsRemaining - 1,
+          },
+        );
+      }
       return finishColdStartSignedOut('cold-start-credential-ownership-lost');
     }
     lastAcceptedRefreshToken = refreshData.refreshToken;

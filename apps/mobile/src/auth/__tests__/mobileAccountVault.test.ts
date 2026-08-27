@@ -377,7 +377,7 @@ describe('mobile account vault', () => {
     ).toBe('resource-new');
   });
 
-  it('commits a runtime refresh only for its active Resource owner and token generation', async () => {
+  it('preserves an inactive refresh without letting it reclaim the active account', async () => {
     const accountKey = JSON.stringify(['global', metadata.membershipId]);
     const otherAccountKey = JSON.stringify(['global', 'membership-2']);
     const afterPersist = vi.fn(async () => undefined);
@@ -425,10 +425,10 @@ describe('mobile account vault', () => {
         passportId: metadata.passportId,
         afterPersist,
       }),
-    ).resolves.toBe('stale');
+    ).resolves.toBe('inactive');
     const vault = parseMobileAccountVault(secureStorage.value);
     expect(vault.activeAccountKey).toBe(otherAccountKey);
-    expect(vault.resources[accountKey]?.refreshToken).toBe('resource-old');
+    expect(vault.resources[accountKey]?.refreshToken).toBe('resource-late');
     expect(vault.resources[otherAccountKey]?.refreshToken).toBe(
       'resource-new-login',
     );
@@ -483,7 +483,7 @@ describe('mobile account vault', () => {
         passportId: metadata.passportId,
         afterPersist,
       }),
-    ).resolves.toBe('stored');
+    ).resolves.toBe('active');
     expect(
       parseMobileAccountVault(secureStorage.value).resources[accountKey]
         ?.refreshToken,
@@ -531,7 +531,7 @@ describe('mobile account vault', () => {
         realm: 'global',
         passportId: metadata.passportId,
       }),
-    ).resolves.toBe('stored');
+    ).resolves.toBe('active');
     expect(
       parseMobileAccountVault(secureStorage.value).resources[accountKey]
         ?.refreshToken,

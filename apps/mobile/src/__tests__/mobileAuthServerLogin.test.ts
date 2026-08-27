@@ -321,23 +321,36 @@ describe('mobile auth-server login', () => {
       'clearPersistedSession: () => deleteSecureItem(AUTH_SESSION_KEY)',
     );
     const resourceVaultWrite = refreshBody.indexOf(
-      'await commitMobileRuntimeResourceSession({',
+      'commitMobileRuntimeResourceSession({',
     );
     const publishAccessToken = refreshBody.indexOf(
       'setToken(pair.accessToken);',
       resourceVaultWrite,
     );
+    const inactiveCommit = refreshBody.indexOf(
+      "if (resourceCommit === 'inactive') {",
+      resourceVaultWrite,
+    );
+    const selectActivePair = refreshBody.indexOf(
+      'selectedSession = candidate;',
+      inactiveCommit,
+    );
     expect(resourceVaultWrite).toBeGreaterThan(-1);
+    expect(inactiveCommit).toBeGreaterThan(resourceVaultWrite);
+    expect(selectActivePair).toBeGreaterThan(inactiveCommit);
     expect(publishAccessToken).toBeGreaterThan(resourceVaultWrite);
     expect(refreshBody.slice(resourceVaultWrite, publishAccessToken)).not.toContain(
       '.catch(',
     );
-    expect(refreshBody).toMatch(
-      /if \(authGenerationRef\.current !== generation\) return null;\s+const passportId =[\s\S]*?expectedRefreshToken: session\.refreshToken,[\s\S]*?if \(authGenerationRef\.current !== generation\) return null;\s+setToken\(pair\.accessToken\);/,
+    expect(refreshBody).toContain(
+      'expectedRefreshToken: candidate.refreshToken',
+    );
+    expect(refreshBody.slice(inactiveCommit, selectActivePair)).toContain(
+      'continue;',
     );
     expect(refreshBody).toContain('removeMobileResourceSessionIfCurrent({');
     expect(refreshBody).toContain(
-      'expectedRefreshToken: session.refreshToken',
+      'expectedRefreshToken:\n                    activeResourceAtStart!.resource!.refreshToken',
     );
     expect(refreshBody).toContain("error.code === 'DEVICE_MISMATCH'");
     expect(refreshBody).not.toContain('removeMobileSavedAccount(');
@@ -432,6 +445,8 @@ describe('mobile auth-server login', () => {
     expect(refreshBody).toContain('for (const [index, candidate] of refreshCandidates.entries())');
     expect(refreshBody).toContain('rejectedRefreshTokens.push(candidate.refreshToken);');
     expect(refreshBody).toContain('compatibilityRefreshTokens: refreshCandidates');
+    expect(refreshBody).toContain("if (resourceCommit === 'inactive') {");
+    expect(refreshBody).toContain('selectedSession = candidate;');
     expect(refreshBody).toContain(
       'rejectedRefreshTokens.includes(\n                activeResourceAtStart.resource.refreshToken,',
     );

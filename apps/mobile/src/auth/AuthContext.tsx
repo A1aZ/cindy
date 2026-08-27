@@ -1134,18 +1134,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return null;
         }
         let selectedSession: AuthSessionRecord | null = null;
-        let candidatePair: Awaited<ReturnType<CindyAuthClient['refresh']>> | null = null;
+        let selectedPair: Awaited<ReturnType<CindyAuthClient['refresh']>> | null = null;
+        let selectedPassportId: string | undefined;
         const rejectedRefreshTokens: string[] = [];
         try {
           for (const [index, candidate] of refreshCandidates.entries()) {
-            selectedSession = candidate;
+            let pair: Awaited<ReturnType<CindyAuthClient['refresh']>>;
             try {
               await loadMobileEndpointsForRealm(candidate.realm);
               if (authGenerationRef.current !== generation) return null;
-              candidatePair = await authClientFor(did, candidate.realm).refresh(
+              pair = await authClientFor(did, candidate.realm).refresh(
                 candidate.refreshToken,
               );
-              break;
             } catch (candidateError) {
               const rejected = isRejectedRefresh(candidateError);
               const deviceMismatch =
@@ -1161,61 +1161,91 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               ) {
                 throw candidateError;
               }
+              continue;
             }
-          }
-          if (!selectedSession || !candidatePair) return null;
-          const session = selectedSession;
-          const pair = candidatePair;
-          activateMobileSessionRealm(session.realm);
-          activeAuthRealmRef.current = session.realm;
-          if (authGenerationRef.current !== generation) return null;
-          const passportId =
-            pair.membership.passportId ??
-            (userRef.current?.id === pair.membership.id
-              ? userRef.current.passportId
-              : undefined);
-          const persisted = await serializeRefreshTokenMutation(async () => {
-            if (authGenerationRef.current !== generation) return false;
-            if (!passportId) {
-              await writePersistedAuthSession(
-                pair.refreshToken,
-                session.realm,
-              );
-              return authGenerationRef.current === generation;
-            }
-            const resourceCommit =
-              await commitMobileRuntimeResourceSession({
-                expectedRefreshToken: session.refreshToken,
-                compatibilityRefreshTokens: refreshCandidates
-                  .filter((candidate) => candidate.realm === session.realm)
-                  .map((candidate) => candidate.refreshToken),
-                pair,
-                realm: session.realm,
-                passportId,
-                validateBeforeWrite: () => {
-                  if (authGenerationRef.current !== generation) {
-                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
-                  }
-                },
-                afterPersist: async () => {
-                  if (authGenerationRef.current !== generation) {
-                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+
+            if (authGenerationRef.current !== generation) return null;
+            const candidateAccountKey = accountVaultKey(
+              candidate.realm,
+              pair.membership.id,
+            );
+            const passportId =
+              pair.membership.passportId ??
+              persistedVault.resources[candidateAccountKey]?.metadata
+                .passportId ??
+              (userRef.current?.id === pair.membership.id
+                ? userRef.current.passportId
+                : undefined);
+            const resourceCommit = await serializeRefreshTokenMutation(
+              async () => {
+                if (authGenerationRef.current !== generation) return 'stale';
+                if (!passportId) {
+                  if (
+                    persistedVault.activeAccountKey &&
+                    persistedVault.activeAccountKey !== candidateAccountKey
+                  ) {
+                    return 'inactive';
                   }
                   await writePersistedAuthSession(
                     pair.refreshToken,
-                    session.realm,
+                    candidate.realm,
                   );
-                  if (authGenerationRef.current !== generation) {
-                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
-                  }
-                },
-              });
-            return (
-              resourceCommit === 'stored' &&
-              authGenerationRef.current === generation
+                  return authGenerationRef.current === generation
+                    ? 'active'
+                    : 'stale';
+                }
+                return commitMobileRuntimeResourceSession({
+                  expectedRefreshToken: candidate.refreshToken,
+                  compatibilityRefreshTokens: refreshCandidates
+                    .filter(
+                      (refreshCandidate) =>
+                        refreshCandidate.realm === candidate.realm,
+                    )
+                    .map(
+                      (refreshCandidate) => refreshCandidate.refreshToken,
+                    ),
+                  pair,
+                  realm: candidate.realm,
+                  passportId,
+                  validateBeforeWrite: () => {
+                    if (authGenerationRef.current !== generation) {
+                      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                    }
+                  },
+                  afterPersist: async () => {
+                    if (authGenerationRef.current !== generation) {
+                      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                    }
+                    await writePersistedAuthSession(
+                      pair.refreshToken,
+                      candidate.realm,
+                    );
+                    if (authGenerationRef.current !== generation) {
+                      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                    }
+                  },
+                });
+              },
             );
-          });
-          if (!persisted) return null;
+            if (resourceCommit === 'stale') return null;
+            if (resourceCommit === 'inactive') {
+              // A successful refresh rotates the token even when this is only
+              // the stale compatibility account. Its replacement is durable;
+              // continue until the vault's active account wins the CAS.
+              refreshSavedAccountsSnapshotBestEffort();
+              continue;
+            }
+            selectedSession = candidate;
+            selectedPair = pair;
+            selectedPassportId = passportId;
+            break;
+          }
+          if (!selectedSession || !selectedPair) return null;
+          const session = selectedSession;
+          const pair = selectedPair;
+          const passportId = selectedPassportId;
+          activateMobileSessionRealm(session.realm);
+          activeAuthRealmRef.current = session.realm;
           if (authGenerationRef.current !== generation) return null;
           setToken(pair.accessToken);
           applyUser(

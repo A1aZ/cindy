@@ -362,9 +362,11 @@ export type MobileResourceSessionReplacementResult =
   | 'missing';
 
 /**
- * Commit an active runtime session refresh only while it still owns the active
- * Resource token generation. A missing entry is accepted solely for the
- * one-time legacy migration where no vault account has been activated yet.
+ * Commit a runtime refresh only while it still owns that Resource generation.
+ * A non-active compatibility account keeps its rotated replacement without
+ * reclaiming `activeAccountKey`; only an active result publishes the
+ * compatibility session in `afterPersist`. A missing entry may be recreated
+ * after a proved refresh unless a logout-all tombstone forbids every write.
  */
 export async function commitMobileRuntimeResourceSession(input: {
   expectedRefreshToken: string;
@@ -374,32 +376,30 @@ export async function commitMobileRuntimeResourceSession(input: {
   passportId: string;
   validateBeforeWrite?: () => void;
   afterPersist?: () => void | Promise<void>;
-}): Promise<'stored' | 'stale'> {
+}): Promise<'active' | 'inactive' | 'stale'> {
   const key = accountVaultKey(input.realm, input.pair.membership.id);
   return transactMobileAccountVault(
     (vault) => {
       input.validateBeforeWrite?.();
       const current = vault.resources[key];
+      const acceptedPreviousTokens = new Set([
+        input.expectedRefreshToken,
+        ...(input.compatibilityRefreshTokens ?? []),
+      ]);
       if (current) {
-        const acceptedPreviousTokens = new Set([
-          input.expectedRefreshToken,
-          ...(input.compatibilityRefreshTokens ?? []),
-        ]);
         if (
-          vault.activeAccountKey !== key ||
           current.realm !== input.realm ||
           !acceptedPreviousTokens.has(current.refreshToken)
         ) {
           return 'stale';
         }
-      } else if (
-        vault.activeAccountKey !== null ||
-        typeof vault.signedOutAt === 'number'
-      ) {
+      } else if (typeof vault.signedOutAt === 'number') {
         return 'stale';
       }
 
-      delete vault.signedOutAt;
+      const ownsActiveAccount = vault.activeAccountKey === key;
+      const canClaimUninitializedVault =
+        !current && vault.activeAccountKey === null;
       vault.resources[key] = {
         realm: input.realm,
         refreshToken: input.pair.refreshToken,
@@ -409,11 +409,19 @@ export async function commitMobileRuntimeResourceSession(input: {
         ),
         lastUsedAt: Date.now(),
       };
-      vault.activeAccountKey = key;
-      return 'stored';
+      if (ownsActiveAccount || canClaimUninitializedVault) {
+        delete vault.signedOutAt;
+        vault.activeAccountKey = key;
+        return 'active';
+      }
+      // A compatibility candidate can belong to a saved but non-active
+      // account after an interrupted switch. Preserve its rotated token while
+      // leaving the vault's active owner untouched; the caller must continue
+      // until another candidate commits as active.
+      return 'inactive';
     },
     async (result) => {
-      if (result === 'stored') await input.afterPersist?.();
+      if (result === 'active') await input.afterPersist?.();
     },
   );
 }

@@ -578,6 +578,20 @@ describe('auth login-flow reset', () => {
     expect(coldBody).toContain('allowUnclaimedVault: true');
     expect(coldBody).toContain("epochChanged('before-cold-start-credential-commit')");
     expect(coldBody).toContain("credentialCommit !== 'active'");
+    const inactiveCommit = coldBody.indexOf("credentialCommit !== 'active'");
+    const activeCandidateRead = coldBody.indexOf(
+      'readActiveVaultRefreshCandidate()',
+      inactiveCommit,
+    );
+    const ownershipRetry = coldBody.indexOf(
+      'return runColdStartRefreshFlow(',
+      activeCandidateRead,
+    );
+    expect(activeCandidateRead).toBeGreaterThan(inactiveCommit);
+    expect(ownershipRetry).toBeGreaterThan(activeCandidateRead);
+    expect(coldBody.slice(inactiveCommit, ownershipRetry)).toContain(
+      '!attemptedOwnershipTokens.has(nextActiveCandidate.refreshToken)',
+    );
     expect(coldBody).not.toContain(
       'writePersistedAuthSession(refreshData.refreshToken, storedRealm)',
     );

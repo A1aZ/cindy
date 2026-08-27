@@ -151,7 +151,7 @@ describe('auth weak-network bootstrap', () => {
       emptyCandidatesAt,
     );
     const requestRefreshAt = refreshBody.indexOf(
-      'candidatePair = await authClientFor(did, candidate.realm).refresh(',
+      'pair = await authClientFor(did, candidate.realm).refresh(',
       loadRealmAt,
     );
     const activateRealmAt = refreshBody.indexOf(

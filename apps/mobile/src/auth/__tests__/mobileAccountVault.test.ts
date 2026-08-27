@@ -47,7 +47,7 @@ describe('mobile account vault', () => {
     vi.clearAllMocks();
   });
 
-  it('fails closed for malformed encrypted content without throwing', () => {
+  it('falls back to an empty read-only projection for malformed encrypted content', () => {
     expect(parseMobileAccountVault('{bad-json')).toEqual({
       version: 1,
       activeAccountKey: null,
@@ -193,6 +193,19 @@ describe('mobile account vault', () => {
     ).rejects.toThrow('keychain temporarily unavailable');
 
     expect(secureStorage.value).toBe(original);
+    expect(secureStorage.set).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite saved credentials when encrypted content is malformed', async () => {
+    secureStorage.value = '{bad-json';
+
+    await expect(
+      mutateMobileAccountVault((vault) => {
+        vault.passports = {};
+      }),
+    ).rejects.toThrow();
+
+    expect(secureStorage.value).toBe('{bad-json');
     expect(secureStorage.set).not.toHaveBeenCalled();
   });
 });

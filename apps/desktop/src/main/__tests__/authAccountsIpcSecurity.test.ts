@@ -24,4 +24,16 @@ describe('desktop saved-account IPC boundary', () => {
       handler.indexOf('authManager.'),
     );
   });
+
+  it.each([
+    'auth:accounts:sync',
+    'auth:accounts:switch',
+    'auth:accounts:begin-add',
+  ])('%s converts auth failures to the shared IPC error protocol', (channel) => {
+    const start = source.indexOf(`ipcMain.handle('${channel}'`);
+    const end = source.indexOf('\n  });', start);
+    const handler = source.slice(start, end);
+    expect(handler).toContain('catch (error)');
+    expect(handler).toContain('throwAuthAccountIpcError(error);');
+  });
 });

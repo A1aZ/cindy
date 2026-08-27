@@ -2946,15 +2946,21 @@ export async function clearLocalSessionAfterAccountDeletion(): Promise<boolean> 
   const deletedPassportId = currentUser?.passportId ?? null;
   const deletedRealm = activeAuthRealm;
   if (deletedPassportId && !isPassiveSharedUserDataInstance()) {
-    const vault = readAuthAccountVault();
-    for (const [key, resource] of Object.entries(vault.resources)) {
-      if (resource.realm === deletedRealm && resource.metadata.passportId === deletedPassportId) {
-        delete vault.resources[key];
-        if (vault.activeAccountKey === key) vault.activeAccountKey = null;
+    try {
+      const vault = readAuthAccountVault();
+      for (const [key, resource] of Object.entries(vault.resources)) {
+        if (resource.realm === deletedRealm && resource.metadata.passportId === deletedPassportId) {
+          delete vault.resources[key];
+          if (vault.activeAccountKey === key) vault.activeAccountKey = null;
+        }
       }
+      delete vault.passports[passportVaultKey(deletedRealm, deletedPassportId)];
+      writeAuthAccountVaultOrThrow(vault);
+    } catch (error) {
+      // The server has already accepted deletion and revoked this credential
+      // family. Vault cleanup is best-effort; runtime teardown must still run.
+      log.warn('failed to remove deleted account from saved-account vault', error);
     }
-    delete vault.passports[passportVaultKey(deletedRealm, deletedPassportId)];
-    writeAuthAccountVaultOrThrow(vault);
   }
   await withAccountFreeOwnerCommit({
     reason: 'account-deletion',

@@ -87,6 +87,10 @@ describe('desktop auth account-deletion lifecycle', () => {
     expect(localClearBody).toContain("reason: 'account-deletion'");
     expect(localClearBody).toContain('validateBeforeCommit: () =>');
     expect(localClearBody).toContain('isConfirmedAccountDeletionSessionCurrent()');
+    expect(localClearBody).toContain("log.warn('failed to remove deleted account");
+    expect(localClearBody.indexOf('await withAccountFreeOwnerCommit({')).toBeGreaterThan(
+      localClearBody.indexOf("log.warn('failed to remove deleted account"),
+    );
     expect(localClearBody).not.toContain('clearAccountDeletionReceipt');
 
     const logoutStart = source.indexOf('export async function logout(): Promise<void> {');

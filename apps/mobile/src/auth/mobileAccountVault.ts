@@ -49,61 +49,66 @@ export function emptyMobileAccountVault(): MobileAccountVault {
   return { version: 1, activeAccountKey: null, resources: {}, passports: {} };
 }
 
-export function parseMobileAccountVault(raw: string | null): MobileAccountVault {
-  if (!raw) return emptyMobileAccountVault();
-  try {
-    const value = JSON.parse(raw) as Partial<MobileAccountVault>;
+function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
+  if (raw === null) return emptyMobileAccountVault();
+  const value = JSON.parse(raw) as Partial<MobileAccountVault>;
+  if (
+    value.version !== 1 ||
+    !value.resources ||
+    typeof value.resources !== 'object' ||
+    Array.isArray(value.resources) ||
+    !value.passports ||
+    typeof value.passports !== 'object' ||
+    Array.isArray(value.passports)
+  ) {
+    throw new Error('Saved account credentials could not be read safely');
+  }
+  const resources: Record<string, MobileStoredResourceSession> = {};
+  for (const [key, candidate] of Object.entries(value.resources)) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const item = candidate as Partial<MobileStoredResourceSession>;
     if (
-      value.version !== 1 ||
-      !value.resources ||
-      typeof value.resources !== 'object' ||
-      Array.isArray(value.resources) ||
-      !value.passports ||
-      typeof value.passports !== 'object' ||
-      Array.isArray(value.passports)
-    ) {
-      return emptyMobileAccountVault();
-    }
-    const resources: Record<string, MobileStoredResourceSession> = {};
-    for (const [key, candidate] of Object.entries(value.resources)) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-      const item = candidate as Partial<MobileStoredResourceSession>;
-      if (
-        (item.realm !== 'cn' && item.realm !== 'global') ||
-        typeof item.refreshToken !== 'string' ||
-        !item.refreshToken ||
-        !isStoredAccountMetadata(item.metadata) ||
-        typeof item.lastUsedAt !== 'number'
-      ) continue;
-      resources[key] = item as MobileStoredResourceSession;
-    }
-    const passports: Record<string, MobileStoredPassportSession> = {};
-    for (const [key, candidate] of Object.entries(value.passports)) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-      const item = candidate as Partial<MobileStoredPassportSession>;
-      if (
-        (item.realm !== 'cn' && item.realm !== 'global') ||
-        typeof item.passportId !== 'string' ||
-        typeof item.accountRefreshToken !== 'string' ||
-        !item.accountRefreshToken ||
-        !Array.isArray(item.memberships)
-      ) continue;
-      passports[key] = {
-        realm: item.realm,
-        passportId: item.passportId,
-        accountRefreshToken: item.accountRefreshToken,
-        memberships: item.memberships.filter(isStoredAccountMetadata),
-      };
-    }
-    const active = typeof value.activeAccountKey === 'string' ? value.activeAccountKey : null;
-    return {
-      version: 1,
-      activeAccountKey: active && resources[active] ? active : null,
-      resources,
-      passports,
+      (item.realm !== 'cn' && item.realm !== 'global') ||
+      typeof item.refreshToken !== 'string' ||
+      !item.refreshToken ||
+      !isStoredAccountMetadata(item.metadata) ||
+      typeof item.lastUsedAt !== 'number'
+    ) continue;
+    resources[key] = item as MobileStoredResourceSession;
+  }
+  const passports: Record<string, MobileStoredPassportSession> = {};
+  for (const [key, candidate] of Object.entries(value.passports)) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const item = candidate as Partial<MobileStoredPassportSession>;
+    if (
+      (item.realm !== 'cn' && item.realm !== 'global') ||
+      typeof item.passportId !== 'string' ||
+      typeof item.accountRefreshToken !== 'string' ||
+      !item.accountRefreshToken ||
+      !Array.isArray(item.memberships)
+    ) continue;
+    passports[key] = {
+      realm: item.realm,
+      passportId: item.passportId,
+      accountRefreshToken: item.accountRefreshToken,
+      memberships: item.memberships.filter(isStoredAccountMetadata),
     };
+  }
+  const active = typeof value.activeAccountKey === 'string' ? value.activeAccountKey : null;
+  return {
+    version: 1,
+    activeAccountKey: active && resources[active] ? active : null,
+    resources,
+    passports,
+  };
+}
+
+export function parseMobileAccountVault(raw: string | null): MobileAccountVault {
+  try {
+    return parseMobileAccountVaultRecord(raw);
   } catch {
-    // A malformed encrypted record is ignored, never deleted automatically.
+    // Read-only projections may fall back, but mutations use the strict parser
+    // below so malformed encrypted content can never be overwritten.
     return emptyMobileAccountVault();
   }
 }
@@ -127,7 +132,7 @@ export function mutateMobileAccountVault<T>(
     // transient keychain error can never turn the next mutation into a write
     // that erases every saved credential.
     const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
-    const vault = parseMobileAccountVault(raw);
+    const vault = parseMobileAccountVaultRecord(raw);
     result = await operation(vault);
     await writeMobileAccountVault(vault);
   });

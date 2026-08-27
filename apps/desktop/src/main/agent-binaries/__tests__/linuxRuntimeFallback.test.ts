@@ -4,6 +4,9 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import claudeLatest from '../../../../../../tools/claude/latest.json';
+import codexLatest from '../../../../../../tools/codex/latest.json';
+
 import {
   claudeLauncherScript,
   extractCodexBinaryFromTarGz,
@@ -39,9 +42,11 @@ function singleFileTar(name: string, content: Buffer): Buffer {
 
 describe('runtimeVersionMatchesPin', () => {
   it('requires Cindy-managed Claude and Codex binaries to match their pins exactly', () => {
-    expect(runtimeVersionMatchesPin('claude-code', '2.1.219 (Claude Code)')).toBe(true);
+    expect(runtimeVersionMatchesPin('claude-code', `${claudeLatest.version} (Claude Code)`)).toBe(
+      true,
+    );
     expect(runtimeVersionMatchesPin('claude-code', '2.1.218 (Claude Code)')).toBe(false);
-    expect(runtimeVersionMatchesPin('codex', 'codex-cli 0.145.0')).toBe(true);
+    expect(runtimeVersionMatchesPin('codex', `codex-cli ${codexLatest.version}`)).toBe(true);
     expect(runtimeVersionMatchesPin('codex', 'codex-cli 0.144.6')).toBe(false);
   });
 
@@ -53,10 +58,14 @@ describe('runtimeVersionMatchesPin', () => {
 
 describe('systemRuntimeVersionSupportsPin', () => {
   it('accepts the pinned or newer Claude runtime and rejects older or prerelease-equivalent builds', () => {
-    expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.219 (Claude Code)')).toBe(true);
+    expect(
+      systemRuntimeVersionSupportsPin('claude-code', `${claudeLatest.version} (Claude Code)`),
+    ).toBe(true);
     expect(systemRuntimeVersionSupportsPin('claude-code', '2.2.0 (Claude Code)')).toBe(true);
     expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.218 (Claude Code)')).toBe(false);
-    expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.219-beta.1')).toBe(false);
+    expect(
+      systemRuntimeVersionSupportsPin('claude-code', `${claudeLatest.version}-beta.1`),
+    ).toBe(false);
     expect(systemRuntimeVersionSupportsPin('claude-code', '2.2.0-beta.1')).toBe(false);
   });
 });
@@ -77,10 +86,10 @@ describeOnLinuxFileSystem('install path helpers', () => {
 
   it('resolves the exact legacy CDN cache path for migration', () => {
     expect(legacyManagedBinaryPath('/userdata', 'claude-code')).toBe(
-      path.join('/userdata', 'claude-code', '2.1.219', 'claude'),
+      path.join('/userdata', 'claude-code', claudeLatest.version, 'claude'),
     );
     expect(legacyManagedBinaryPath('/userdata', 'codex')).toBe(
-      path.join('/userdata', 'codex', '0.145.0', 'codex'),
+      path.join('/userdata', 'codex', codexLatest.version, 'codex'),
     );
   });
 

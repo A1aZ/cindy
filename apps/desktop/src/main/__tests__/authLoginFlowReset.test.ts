@@ -387,6 +387,17 @@ describe('auth login-flow reset', () => {
     expect(syncBody).toContain("if (outcome.kind === 'synced')");
     expect(syncBody).toContain('notifyRenderer();');
 
+    const completeStart = source.indexOf('async function completeLogin(');
+    const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
+    const completeBody = source.slice(completeStart, completeEnd);
+    const ownerCommit = completeBody.indexOf('commitCloudAppSession(currentUser.id);');
+    const clearPreviousFlag = completeBody.indexOf('canaryFlagStore.clear();', ownerCommit);
+    expect(ownerCommit).toBeGreaterThan(-1);
+    expect(clearPreviousFlag).toBeGreaterThan(ownerCommit);
+    expect(completeBody.slice(ownerCommit, clearPreviousFlag)).toContain(
+      'if (!isPassiveSharedUserDataInstance()) {',
+    );
+
     const betaStart = source.indexOf('function scheduleXdOrgBetaDefault(');
     const betaEnd = source.indexOf('function scheduleNonXdOrgBetaDefault(', betaStart);
     expect(betaEnd).toBeGreaterThan(betaStart);

@@ -391,6 +391,30 @@ describe('mobile auth-server login', () => {
     expect(switchBody).toContain("throw authCodeError('REGION_MISMATCH')");
   });
 
+  it('clears the previous owner canary flag before best-effort sync', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const acceptStart = authSource.indexOf('const acceptOutcome = useCallback');
+    const acceptBody = authSource.slice(
+      acceptStart,
+      authSource.indexOf('const refresh = useCallback', acceptStart),
+    );
+    const switchStart = authSource.indexOf('const switchAccount = useCallback');
+    const switchBody = authSource.slice(
+      switchStart,
+      authSource.indexOf('\n\n  const beginAddAccount', switchStart),
+    );
+
+    for (const body of [acceptBody, switchBody]) {
+      const clearAt = body.indexOf('void clearCanaryChannel()');
+      const syncAt = body.indexOf('scheduleCanaryChannelSync(', clearAt);
+      expect(clearAt).toBeGreaterThan(-1);
+      expect(syncAt).toBeGreaterThan(clearAt);
+    }
+  });
+
   it('invalidates an add-account login when Android removes the route', () => {
     const screenSource = readFileSync(
       resolve(process.cwd(), 'app/add-account.tsx'),

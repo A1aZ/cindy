@@ -79,7 +79,7 @@ export function reconcileSavedAccountMetadata(
       .filter((metadata) => metadata.passportId === input.passportId)
       .map((metadata) => [metadata.membershipId, metadata] as const),
   );
-  if (latestById.size === 0) return false;
+  if (latestById.size === 0 && input.passportMode === "patch-known") return false;
 
   let changed = false;
   for (const resource of Object.values(vault.resources)) {

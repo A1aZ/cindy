@@ -3574,6 +3574,9 @@ async function completeLogin(
       foreignDeviceLocalSignOut = false;
       currentUser = nextUser;
       commitCloudAppSession(currentUser.id);
+      if (!isPassiveSharedUserDataInstance()) {
+        canaryFlagStore.clear();
+      }
       pendingAuthRealm = null;
     },
   });

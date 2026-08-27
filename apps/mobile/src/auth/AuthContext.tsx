@@ -978,6 +978,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       sessionRecoverySuspendedRef.current = false;
       setAccountGeneration((value) => value + 1);
       void refreshSavedAccountsSnapshot();
+      void clearCanaryChannel().catch(() => undefined);
       scheduleCanaryChannelSync(outcome.accessToken, generation);
       scheduleXdOrgBetaDefault(outcome.accessToken, generation);
       updateLoginState(
@@ -2134,6 +2135,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         updateLoginState(null);
         setAccountGeneration((value) => value + 1);
         await refreshSavedAccountsSnapshot();
+        void clearCanaryChannel().catch(() => undefined);
         scheduleCanaryChannelSync(pair.accessToken, generation);
         scheduleXdOrgBetaDefault(pair.accessToken, generation);
         void loadMe(pair.accessToken, did, generation).catch(() => undefined);

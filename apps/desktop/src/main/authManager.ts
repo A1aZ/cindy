@@ -748,20 +748,48 @@ function accountVaultLockError(reason: 'busy' | 'unavailable'): AuthApiError {
  * in-process queue alone cannot prevent it from overwriting a primary
  * instance's concurrently added account or rotated Passport.
  */
-async function mutateAuthAccountVault<T>(
+async function transactAuthAccountVault<T>(
   operation: (vault: AuthAccountVault) => T | Promise<T>,
+  afterPersist: (result: T) => void | Promise<void> = () => undefined,
 ): Promise<T> {
   return withCrossProcessLock(
     authAccountVaultLockPath(),
     { label: 'auth-account-vault', waitMs: 5_000 },
     async (status) => {
       if (!status.held) throw accountVaultLockError(status.reason);
+      const previousRaw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
+      const previousWasAbsent =
+        previousRaw === null && isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY);
       const vault = readAuthAccountVault();
       const result = await operation(vault);
       writeAuthAccountVaultOrThrow(vault);
-      return result;
+      try {
+        // Keep the shared-userData lock through the active-session write,
+        // runtime teardown and final owner commit. Cancellation or any local
+        // boundary failure restores the complete pre-transition vault before
+        // another process can observe or extend the partial account switch.
+        await afterPersist(result);
+        return result;
+      } catch (error) {
+        if (previousWasAbsent) {
+          removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);
+        } else if (previousRaw !== null && !writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY, previousRaw)) {
+          throw new AuthApiError(
+            'CREDENTIAL_STORE_UNAVAILABLE',
+            503,
+            'Could not restore saved account credentials after a failed account switch',
+          );
+        }
+        throw error;
+      }
     },
   );
+}
+
+async function mutateAuthAccountVault<T>(
+  operation: (vault: AuthAccountVault) => T | Promise<T>,
+): Promise<T> {
+  return transactAuthAccountVault(operation);
 }
 
 async function clearAuthAccountVault(): Promise<void> {
@@ -803,16 +831,26 @@ async function rememberResourceSession(
     log.warn('resource session omitted passportId; keeping only the active compatibility record');
     return;
   }
-  const key = accountVaultKey(realm, pair.membership.id);
   await mutateAuthAccountVault((vault) => {
-    vault.resources[key] = {
-      realm,
-      refreshToken: pair.refreshToken,
-      metadata: metadataFromMembership(pair.membership, passportId),
-      lastUsedAt: options.lastUsedAt ?? Date.now(),
-    };
-    if (options.markActive !== false) vault.activeAccountKey = key;
+    writeResourceSessionToVault(vault, pair, realm, passportId, options);
   });
+}
+
+function writeResourceSessionToVault(
+  vault: AuthAccountVault,
+  pair: AuthTokenPair,
+  realm: AuthRegion,
+  passportId: string,
+  options: { markActive?: boolean; lastUsedAt?: number } = {},
+): void {
+  const key = accountVaultKey(realm, pair.membership.id);
+  vault.resources[key] = {
+    realm,
+    refreshToken: pair.refreshToken,
+    metadata: metadataFromMembership(pair.membership, passportId),
+    lastUsedAt: options.lastUsedAt ?? Date.now(),
+  };
+  if (options.markActive !== false) vault.activeAccountKey = key;
 }
 
 async function rememberPassportSession(input: {
@@ -854,6 +892,30 @@ function writePassportSessionToVault(
     memberships,
     passportMode: 'replace-passport',
   });
+}
+
+async function commitDesktopLoginSessions(
+  input: {
+    pair: AuthTokenPair;
+    realm: AuthRegion;
+    passportId?: string;
+    accountRefreshToken?: string | null;
+    memberships: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
+  },
+  commitTransition: () => void | Promise<void>,
+): Promise<void> {
+  await transactAuthAccountVault((vault) => {
+    if (!input.passportId) return;
+    writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId);
+    if (input.accountRefreshToken) {
+      writePassportSessionToVault(vault, {
+        realm: input.realm,
+        passportId: input.passportId,
+        accountRefreshToken: input.accountRefreshToken,
+        memberships: input.memberships,
+      });
+    }
+  }, commitTransition);
 }
 
 /** Persist a rotated Passport only while the request still owns the token it consumed. */
@@ -3692,84 +3754,91 @@ async function completeLogin(
 
   const committedRealm = pendingAuthRealm ?? AUTH_REGION;
   const accountRefreshToken = outcome.accountRefreshToken ?? pendingAccountRefreshToken;
-  // Resource and Account refresh endpoints rotate credentials. Persist the new
-  // target session before tearing down the current owner so a later local
-  // boundary failure cannot strand the newly authenticated account.
-  await rememberResourceSession(outcome, committedRealm, { markActive: true });
-  assertTransitionCurrent();
-  if (accountRefreshToken && nextUser.passportId) {
-    await rememberPassportSession({
-      realm: committedRealm,
-      passportId: nextUser.passportId,
-      accountRefreshToken,
-      memberships:
-        pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
-    });
-    assertTransitionCurrent();
-  }
-  // Switching is not committed until the compatibility active-session record
-  // is durable. Failing here keeps the old owner and its runtimes intact;
-  // ignoring this write would report success only in memory and lose the
-  // selected account on restart.
-  assertTransitionCurrent();
-  const previousPersistedSession = readPersistedAuthSession();
-  writePersistedAuthSessionOrThrow(outcome.refreshToken, committedRealm);
+  let previousPersistedSession: ReturnType<typeof readPersistedAuthSession> = null;
+  let activeSessionWritten = false;
   try {
-    await withCloudOwnerCommit({
-      previousOwnerId: previousSession.dataOwnerId,
-      nextOwnerId: nextUser.id,
-      prepareTransition: async () => {
+    await commitDesktopLoginSessions(
+      {
+        pair: outcome,
+        realm: committedRealm,
+        passportId: nextUser.passportId || undefined,
+        accountRefreshToken,
+        memberships:
+          pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
+      },
+      async () => {
+        // The aggregate account vault, compatibility active session, old-owner
+        // teardown and final owner publication are one epoch-owned transaction.
+        // Any cancellation before commit restores both durable records while
+        // the cross-process vault lock is still held.
         assertTransitionCurrent();
-        if (!accountSwitchTeardown) {
-          throw new Error('login cloud owner transition requires a teardown hook');
-        }
-        await accountSwitchTeardown({
-          previousUserId: previousSession.dataOwnerId ?? previousSession.mode,
-          nextUserId: nextUser.id,
+        // Capture the compatibility session only after entering the same
+        // cross-process ownership window as the vault write. A concurrent
+        // passive refresh may have rotated it while this login waited on the
+        // lock; rollback must restore that latest generation, not a stale one.
+        previousPersistedSession = readPersistedAuthSession();
+        writePersistedAuthSessionOrThrow(outcome.refreshToken, committedRealm);
+        activeSessionWritten = true;
+        assertTransitionCurrent();
+        await withCloudOwnerCommit({
+          previousOwnerId: previousSession.dataOwnerId,
+          nextOwnerId: nextUser.id,
+          prepareTransition: async () => {
+            assertTransitionCurrent();
+            if (!accountSwitchTeardown) {
+              throw new Error('login cloud owner transition requires a teardown hook');
+            }
+            await accountSwitchTeardown({
+              previousUserId: previousSession.dataOwnerId ?? previousSession.mode,
+              nextUserId: nextUser.id,
+            });
+            assertTransitionCurrent();
+          },
+          prepareCommit: async () => {
+            assertTransitionCurrent();
+            await claimLegacyNamespaceForVerifiedUser(nextUser.id);
+            assertTransitionCurrent();
+          },
+          commit: () => {
+            pendingAccountToken = null;
+            pendingAccountRefreshToken = null;
+            pendingAccountMemberships = [];
+            pendingAccountDeletionRestored = false;
+            accessToken = outcome.accessToken;
+            persistedRefreshTokenNeedsIdentityCheck = false;
+            clearReplacementIntegrationReloadTimers();
+            activateClientEndpointRealm(committedRealm);
+            activeAuthRealm = committedRealm;
+            if (!isPassiveSharedUserDataInstance()) {
+              removeSafe(LEGACY_REFRESH_TOKEN_KEY);
+            }
+            lastAcceptedRefreshToken = outcome.refreshToken;
+            if (!isPassiveSharedUserDataInstance()) {
+              removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
+              clearReloginFlag();
+            }
+            accountDeletionRestoredNoticePending = deletionWasRestored;
+            // 显式登录解除本进程登出墓碑(passive / foreign-device)。
+            passiveLocalSignOut = false;
+            foreignDeviceLocalSignOut = false;
+            currentUser = nextUser;
+            commitCloudAppSession(currentUser.id);
+            if (!isPassiveSharedUserDataInstance()) {
+              canaryFlagStore.clear();
+            }
+            pendingAuthRealm = null;
+          },
         });
-        assertTransitionCurrent();
       },
-      prepareCommit: async () => {
-        assertTransitionCurrent();
-        await claimLegacyNamespaceForVerifiedUser(nextUser.id);
-        assertTransitionCurrent();
-      },
-      commit: () => {
-        pendingAccountToken = null;
-        pendingAccountRefreshToken = null;
-        pendingAccountMemberships = [];
-        pendingAccountDeletionRestored = false;
-        accessToken = outcome.accessToken;
-        persistedRefreshTokenNeedsIdentityCheck = false;
-        clearReplacementIntegrationReloadTimers();
-        activateClientEndpointRealm(committedRealm);
-        activeAuthRealm = committedRealm;
-        if (!isPassiveSharedUserDataInstance()) {
-          removeSafe(LEGACY_REFRESH_TOKEN_KEY);
-        }
-        lastAcceptedRefreshToken = outcome.refreshToken;
-        if (!isPassiveSharedUserDataInstance()) {
-          removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
-          clearReloginFlag();
-        }
-        accountDeletionRestoredNoticePending = deletionWasRestored;
-        // 显式登录解除本进程登出墓碑(passive / foreign-device)。
-        passiveLocalSignOut = false;
-        foreignDeviceLocalSignOut = false;
-        currentUser = nextUser;
-        commitCloudAppSession(currentUser.id);
-        if (!isPassiveSharedUserDataInstance()) {
-          canaryFlagStore.clear();
-        }
-        pendingAuthRealm = null;
-      },
-    });
-  } catch (error) {
-    restorePersistedAuthSessionIfCurrent(
-      outcome.refreshToken,
-      committedRealm,
-      previousPersistedSession,
     );
+  } catch (error) {
+    if (activeSessionWritten) {
+      restorePersistedAuthSessionIfCurrent(
+        outcome.refreshToken,
+        committedRealm,
+        previousPersistedSession,
+      );
+    }
     throw error;
   }
   scheduleCanaryFlagSync({

@@ -88,6 +88,7 @@ import {
 import {
   clearMobileAccountVault,
   commitMobileLoginSessions,
+  commitMobileSavedAccountActivation,
   listMobileSavedAccounts,
   mutateMobileAccountVault,
   patchMobileAccountMetadata,
@@ -906,6 +907,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           userRef.current?.id !== outcome.membership.id);
       const generation = ++authGenerationRef.current;
       refreshInFlightRef.current = null;
+      let runtimeCleanupStarted = false;
       const persisted = await serializeRefreshTokenMutation(async () => {
         if (
           authGenerationRef.current !== generation ||
@@ -933,54 +935,72 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 throw authCodeError('AUTH_FLOW_SUPERSEDED');
               }
               assertLoginFlowCurrent(expectedLoginFlowEpoch);
+              if (replacesActiveSession) {
+                runtimeCleanupStarted = true;
+                await clearAccountScopedRuntimeForSwitch();
+                if (authGenerationRef.current !== generation) {
+                  throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                }
+                assertLoginFlowCurrent(expectedLoginFlowEpoch);
+              }
+
+              // No await is allowed between the final cancellation check and
+              // publishing the new in-memory owner. The vault transaction stays
+              // owned through runtime cleanup and this synchronous commit, so a
+              // cancelled Add Account flow restores both durable records.
+              activateMobileSessionRealm(committedRealm);
+              activeAuthRealmRef.current = committedRealm;
+              pendingLoginTicketRef.current = null;
+              pendingAccountTokenRef.current = null;
+              pendingAccountRefreshTokenRef.current = null;
+              pendingAccountMembershipsRef.current = [];
+              pendingBindTicketRef.current = null;
+              pendingSsoVerificationTicketRef.current = null;
+              pendingAuthRealmRef.current = null;
+              setToken(outcome.accessToken);
+              applyUser(
+                mergeMembershipWithExisting(
+                  outcome.membership,
+                  userRef.current,
+                  passportId || undefined,
+                ),
+              );
+              additionalLoginRef.current = false;
+              sessionRecoverySuspendedRef.current = false;
+              setAccountGeneration((value) => value + 1);
+              updateLoginState(
+                reduceAuthFlow(loginStateRef.current, {
+                  type: 'outcome',
+                  outcome,
+                }),
+              );
+              // 只有 resource token、用户资料与 refresh token 全部落地后才发布恢复提示。
+              setAccountDeletionRestored(deletionWasRestored);
             },
           );
           return true;
         } catch (error) {
           await restorePersistedAuthSession(previousPersistedSession);
+          if (
+            runtimeCleanupStarted &&
+            authGenerationRef.current === generation
+          ) {
+            // Runtime cleanup is rebuildable rather than durable. If the login
+            // is cancelled while push/cache cleanup is in flight, republish the
+            // old owner and advance its generation after cleanup settles so
+            // account-scoped effects reconnect from the restored session.
+            activateMobileSessionRealm(previousRealm);
+            setMobileAuthOwner(userRef.current?.id ?? null);
+            setAccountGeneration((value) => value + 1);
+          }
           throw error;
         }
       });
       if (!persisted) throw authCodeError('AUTH_FLOW_SUPERSEDED');
-      if (
-        authGenerationRef.current !== generation ||
-        loginFlowEpochRef.current !== expectedLoginFlowEpoch
-      )
-        throw authCodeError('AUTH_FLOW_SUPERSEDED');
-      if (replacesActiveSession) {
-        await clearAccountScopedRuntimeForSwitch();
-        assertLoginFlowCurrent(expectedLoginFlowEpoch);
-      }
-      activateMobileSessionRealm(committedRealm);
-      activeAuthRealmRef.current = committedRealm;
-
-      pendingLoginTicketRef.current = null;
-      pendingAccountTokenRef.current = null;
-      pendingAccountRefreshTokenRef.current = null;
-      pendingAccountMembershipsRef.current = [];
-      pendingBindTicketRef.current = null;
-      pendingSsoVerificationTicketRef.current = null;
-      pendingAuthRealmRef.current = null;
-      setToken(outcome.accessToken);
-      applyUser(
-        mergeMembershipWithExisting(
-          outcome.membership,
-          userRef.current,
-          passportId || undefined,
-        ),
-      );
-      additionalLoginRef.current = false;
-      sessionRecoverySuspendedRef.current = false;
-      setAccountGeneration((value) => value + 1);
       void refreshSavedAccountsSnapshot();
       void clearCanaryChannel().catch(() => undefined);
       scheduleCanaryChannelSync(outcome.accessToken, generation);
       scheduleXdOrgBetaDefault(outcome.accessToken, generation);
-      updateLoginState(
-        reduceAuthFlow(loginStateRef.current, { type: 'outcome', outcome }),
-      );
-      // 只有 resource token、用户资料与 refresh token 全部落地后才发布恢复提示。
-      setAccountDeletionRestored(deletionWasRestored);
       // Identity is already durable. Product preferences/profile hydration is best effort
       // and must not turn a successful login into an error on a transient downstream outage.
       void loadMe(outcome.accessToken, did, generation).catch(() => undefined);
@@ -2119,6 +2139,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const generation = ++authGenerationRef.current;
         refreshInFlightRef.current = null;
+        const previousRealm = activeAuthRealmRef.current;
+        let runtimeCleanupStarted = false;
         try {
           await serializeRefreshTokenMutation(async () => {
             if (authGenerationRef.current !== generation) {
@@ -2129,16 +2151,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // must roll back to a concurrently persisted T1, never its stale
             // initial vault snapshot.
             const previousSession = await readPersistedAuthSessionStrict();
-            await writePersistedAuthSession(pair!.refreshToken, realm!);
             try {
-              await mutateMobileAccountVault((vault) => {
-                if (!vault.resources[accountKey]) {
-                  throw authCodeError('SAVED_ACCOUNT_NOT_FOUND');
-                }
-                vault.activeAccountKey = accountKey;
-              });
+              await commitMobileSavedAccountActivation(
+                accountKey,
+                async () => {
+                  await writePersistedAuthSession(pair!.refreshToken, realm!);
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+                  runtimeCleanupStarted = true;
+                  await clearAccountScopedRuntimeForSwitch();
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+
+                  // Publish the new owner synchronously while the vault
+                  // transaction still owns activeAccountKey and AUTH_SESSION_KEY.
+                  activateMobileSessionRealm(realm!);
+                  activeAuthRealmRef.current = realm!;
+                  pendingAuthRealmRef.current = null;
+                  setToken(pair!.accessToken);
+                  applyUser(
+                    mergeMembershipWithExisting(
+                      pair!.membership,
+                      null,
+                      metadata.passportId,
+                    ),
+                  );
+                  sessionRecoverySuspendedRef.current = false;
+                  updateLoginState(null);
+                  setAccountGeneration((value) => value + 1);
+                },
+              );
             } catch (error) {
               await restorePersistedAuthSession(previousSession);
+              if (
+                runtimeCleanupStarted &&
+                authGenerationRef.current === generation
+              ) {
+                activateMobileSessionRealm(previousRealm);
+                setMobileAuthOwner(userRef.current?.id ?? null);
+                setAccountGeneration((value) => value + 1);
+              }
               throw error;
             }
           });
@@ -2147,25 +2201,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw error;
         }
 
-        await clearAccountScopedRuntimeForSwitch();
-        if (authGenerationRef.current !== generation) {
-          throw authCodeError('AUTH_FLOW_SUPERSEDED');
-        }
-        activateMobileSessionRealm(realm);
-        activeAuthRealmRef.current = realm;
-        pendingAuthRealmRef.current = null;
-        setToken(pair.accessToken);
-        applyUser(
-          mergeMembershipWithExisting(
-            pair.membership,
-            null,
-            metadata.passportId,
-          ),
-        );
-        sessionRecoverySuspendedRef.current = false;
-        updateLoginState(null);
-        setAccountGeneration((value) => value + 1);
-        await refreshSavedAccountsSnapshot();
+        void refreshSavedAccountsSnapshot().catch(() => undefined);
         void clearCanaryChannel().catch(() => undefined);
         scheduleCanaryChannelSync(pair.accessToken, generation);
         scheduleXdOrgBetaDefault(pair.accessToken, generation);

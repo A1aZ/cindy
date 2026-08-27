@@ -155,9 +155,9 @@ describe('auth login-flow reset', () => {
   });
 
   it('serializes saved-account vault mutations across shared-userData processes', () => {
-    const mutationStart = source.indexOf('async function mutateAuthAccountVault');
+    const mutationStart = source.indexOf('async function transactAuthAccountVault');
     const mutationEnd = source.indexOf(
-      '\n}\n\nasync function clearAuthAccountVault',
+      '\n}\n\nasync function mutateAuthAccountVault',
       mutationStart,
     );
     const mutationBody = source.slice(mutationStart, mutationEnd);
@@ -169,6 +169,11 @@ describe('auth login-flow reset', () => {
     expect(mutationBody.indexOf('writeAuthAccountVaultOrThrow(vault);')).toBeGreaterThan(
       mutationBody.indexOf('await operation(vault);'),
     );
+    expect(mutationBody.indexOf('await afterPersist(result);')).toBeGreaterThan(
+      mutationBody.indexOf('writeAuthAccountVaultOrThrow(vault);'),
+    );
+    expect(mutationBody).toContain('removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);');
+    expect(mutationBody).toContain('writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY, previousRaw)');
 
     for (const helper of [
       'async function rememberResourceSession(',
@@ -206,10 +211,16 @@ describe('auth login-flow reset', () => {
     const completeStart = source.indexOf('async function completeLogin(');
     const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
     const completeBody = source.slice(completeStart, completeEnd);
+    const vaultTransaction = completeBody.indexOf('await commitDesktopLoginSessions(');
     const durableSession = completeBody.indexOf('writePersistedAuthSessionOrThrow(');
     const ownerCommit = completeBody.indexOf('await withCloudOwnerCommit({');
+    expect(vaultTransaction).toBeGreaterThan(-1);
+    expect(durableSession).toBeGreaterThan(vaultTransaction);
     expect(durableSession).toBeGreaterThan(-1);
     expect(ownerCommit).toBeGreaterThan(durableSession);
+    expect(completeBody.indexOf('restorePersistedAuthSessionIfCurrent(')).toBeGreaterThan(
+      ownerCommit,
+    );
     expect(completeBody.slice(ownerCommit)).not.toContain(
       'writePersistedAuthSession(outcome.refreshToken',
     );

@@ -413,23 +413,34 @@ describe('mobile auth-server login', () => {
       latestRead,
     );
     const activeVaultCommit = switchBody.indexOf(
-      'await mutateMobileAccountVault((vault) => {',
+      'await commitMobileSavedAccountActivation(',
+      latestRead,
+    );
+    const runtimeClear = switchBody.indexOf(
+      'await clearAccountScopedRuntimeForSwitch();',
       targetWrite,
     );
     const rollbackWrite = switchBody.indexOf(
       'await restorePersistedAuthSession(previousSession);',
-      activeVaultCommit,
+      runtimeClear,
     );
 
     expect(serialized).toBeGreaterThan(-1);
     expect(latestRead).toBeGreaterThan(serialized);
-    expect(targetWrite).toBeGreaterThan(latestRead);
-    expect(activeVaultCommit).toBeGreaterThan(targetWrite);
-    expect(rollbackWrite).toBeGreaterThan(activeVaultCommit);
+    expect(activeVaultCommit).toBeGreaterThan(latestRead);
+    expect(targetWrite).toBeGreaterThan(activeVaultCommit);
+    expect(runtimeClear).toBeGreaterThan(targetWrite);
+    expect(rollbackWrite).toBeGreaterThan(runtimeClear);
+    expect(switchBody.slice(runtimeClear, rollbackWrite)).toContain(
+      'activateMobileSessionRealm(realm!);',
+    );
+    expect(switchBody.slice(rollbackWrite)).toContain(
+      'activateMobileSessionRealm(previousRealm);',
+    );
     expect(switchBody).not.toContain('const oldSession = initialVault');
   });
 
-  it('durably commits an added account before clearing the previous runtime', () => {
+  it('keeps the added-account vault transaction through runtime cleanup and owner commit', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
       'utf8',
@@ -450,20 +461,28 @@ describe('mobile auth-server login', () => {
       'await writePersistedAuthSession(',
       vaultTransaction,
     );
-    const rollback = acceptBody.indexOf(
-      'await restorePersistedAuthSession(previousPersistedSession);',
-      targetWrite,
-    );
     const runtimeClear = acceptBody.indexOf(
       'await clearAccountScopedRuntimeForSwitch();',
-      rollback,
+      targetWrite,
+    );
+    const ownerCommit = acceptBody.indexOf(
+      'activateMobileSessionRealm(committedRealm);',
+      runtimeClear,
+    );
+    const rollback = acceptBody.indexOf(
+      'await restorePersistedAuthSession(previousPersistedSession);',
+      ownerCommit,
     );
 
     expect(serialized).toBeGreaterThan(-1);
     expect(vaultTransaction).toBeGreaterThan(serialized);
     expect(targetWrite).toBeGreaterThan(vaultTransaction);
-    expect(rollback).toBeGreaterThan(targetWrite);
-    expect(runtimeClear).toBeGreaterThan(rollback);
+    expect(runtimeClear).toBeGreaterThan(targetWrite);
+    expect(ownerCommit).toBeGreaterThan(runtimeClear);
+    expect(rollback).toBeGreaterThan(ownerCommit);
+    expect(acceptBody.slice(rollback)).toContain(
+      'activateMobileSessionRealm(previousRealm);',
+    );
   });
 
   it('durably clears saved credentials before publishing mobile logout', () => {

@@ -311,6 +311,23 @@ export async function commitMobileLoginSessions(
   );
 }
 
+export async function commitMobileSavedAccountActivation(
+  accountKey: string,
+  commitTransition: () => void | Promise<void>,
+): Promise<void> {
+  await transactMobileAccountVault(
+    (vault) => {
+      if (!vault.resources[accountKey]) {
+        throw Object.assign(new Error('SAVED_ACCOUNT_NOT_FOUND'), {
+          code: 'SAVED_ACCOUNT_NOT_FOUND',
+        });
+      }
+      vault.activeAccountKey = accountKey;
+    },
+    commitTransition,
+  );
+}
+
 /**
  * Store a rotated Passport only while the vault still contains the token that
  * started the request. Logout and concurrent refreshes therefore win over a

@@ -23,6 +23,7 @@ vi.mock('../secureStorage', () => ({
 import {
   clearMobileAccountVault,
   commitMobileLoginSessions,
+  commitMobileSavedAccountActivation,
   listMobileSavedAccounts,
   mutateMobileAccountVault,
   parseMobileAccountVault,
@@ -280,6 +281,40 @@ describe('mobile account vault', () => {
     ).toBe('account-refresh');
     expect(afterPersist).toHaveBeenCalledTimes(1);
     expect(secureStorage.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the previous active account when runtime commit is superseded', async () => {
+    const oldKey = JSON.stringify(['global', metadata.membershipId]);
+    const targetKey = JSON.stringify(['global', 'membership-2']);
+    const original = JSON.stringify({
+      version: 1,
+      activeAccountKey: oldKey,
+      resources: {
+        [oldKey]: {
+          realm: 'global',
+          refreshToken: 'old-refresh',
+          metadata,
+          lastUsedAt: 10,
+        },
+        [targetKey]: {
+          realm: 'global',
+          refreshToken: 'target-refresh',
+          metadata: { ...metadata, membershipId: 'membership-2' },
+          lastUsedAt: 20,
+        },
+      },
+      passports: {},
+    });
+    secureStorage.value = original;
+
+    await expect(
+      commitMobileSavedAccountActivation(targetKey, async () => {
+        throw new Error('AUTH_FLOW_SUPERSEDED');
+      }),
+    ).rejects.toThrow('AUTH_FLOW_SUPERSEDED');
+
+    expect(secureStorage.value).toBe(original);
+    expect(secureStorage.set).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a signed-out tombstone and restores the vault if session deletion fails', async () => {

@@ -86,7 +86,11 @@ describe("mobile account deletion", () => {
     );
     expect(
       logoutBody.indexOf("persistAccountDeletionReceipt(null)"),
-    ).toBeLessThan(logoutBody.indexOf("clearLocalSession()"));
+    ).toBeLessThan(
+      logoutBody.indexOf(
+        "clearLocalSession({ persistedAuthAlreadyCleared: true })",
+      ),
+    );
 
     const statusStart = context.indexOf("const getAccountDeletionStatus");
     const statusBody = context.slice(

@@ -271,7 +271,7 @@ describe('mobile auth-server login', () => {
       'client.verifySsoVerification(ticket, action.code)',
     );
     expect(authSource).toContain('pendingAccountRefreshTokenRef');
-    expect(authSource).toContain('rememberMobilePassportSession({');
+    expect(authSource).toContain('commitMobileLoginSessions(');
     expect(authSource).toContain('.refreshAccount(');
     expect(authSource).toContain('.logoutAccount(');
     expect(authSource).not.toContain(
@@ -442,17 +442,17 @@ describe('mobile auth-server login', () => {
     const serialized = acceptBody.indexOf(
       'const persisted = await serializeRefreshTokenMutation(async () => {',
     );
-    const targetWrite = acceptBody.indexOf(
-      'await writePersistedAuthSession(outcome.refreshToken, committedRealm);',
+    const vaultTransaction = acceptBody.indexOf(
+      'await commitMobileLoginSessions(',
       serialized,
     );
-    const activeVaultCommit = acceptBody.indexOf(
-      'await mutateMobileAccountVault((vault) => {',
-      targetWrite,
+    const targetWrite = acceptBody.indexOf(
+      'await writePersistedAuthSession(',
+      vaultTransaction,
     );
     const rollback = acceptBody.indexOf(
       'await restorePersistedAuthSession(previousPersistedSession);',
-      activeVaultCommit,
+      targetWrite,
     );
     const runtimeClear = acceptBody.indexOf(
       'await clearAccountScopedRuntimeForSwitch();',
@@ -460,10 +460,34 @@ describe('mobile auth-server login', () => {
     );
 
     expect(serialized).toBeGreaterThan(-1);
-    expect(targetWrite).toBeGreaterThan(serialized);
-    expect(activeVaultCommit).toBeGreaterThan(targetWrite);
-    expect(rollback).toBeGreaterThan(activeVaultCommit);
+    expect(vaultTransaction).toBeGreaterThan(serialized);
+    expect(targetWrite).toBeGreaterThan(vaultTransaction);
+    expect(rollback).toBeGreaterThan(targetWrite);
     expect(runtimeClear).toBeGreaterThan(rollback);
+  });
+
+  it('durably clears saved credentials before publishing mobile logout', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const logoutStart = authSource.indexOf('const logout = useCallback');
+    const logoutBody = authSource.slice(
+      logoutStart,
+      authSource.indexOf('const getAccessToken = useCallback', logoutStart),
+    );
+    const durableClear = logoutBody.indexOf(
+      'clearMobileAccountVault(() => deleteSecureItem(AUTH_SESSION_KEY))',
+    );
+    const runtimeClear = logoutBody.indexOf(
+      'await clearLocalSession({ persistedAuthAlreadyCleared: true });',
+    );
+    expect(durableClear).toBeGreaterThan(-1);
+    expect(runtimeClear).toBeGreaterThan(durableClear);
+    expect(logoutBody).not.toContain('clearMobileAccountVault().catch');
+    expect(authSource).toContain(
+      "typeof persistedAccountVault?.signedOutAt === 'number'",
+    );
   });
 
   it('clears the previous owner canary flag before best-effort sync', () => {

@@ -87,6 +87,7 @@ import {
 } from '@/auth/secureStorage';
 import {
   clearMobileAccountVault,
+  commitMobileLoginSessions,
   listMobileSavedAccounts,
   mutateMobileAccountVault,
   patchMobileAccountMetadata,
@@ -894,25 +895,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           ? userRef.current.passportId
           : '');
       const accountRefreshToken = pendingAccountRefreshTokenRef.current;
-      if (accountRefreshToken && passportId) {
-        await rememberMobilePassportSession({
-          realm: committedRealm,
-          passportId,
-          accountRefreshToken,
-          memberships:
-            pendingAccountMembershipsRef.current.length > 0
-              ? pendingAccountMembershipsRef.current
-              : [outcome.membership],
-        });
-        assertLoginFlowCurrent(expectedLoginFlowEpoch);
-      }
-      await rememberMobileResourceSession(
-        outcome,
-        committedRealm,
-        passportId || undefined,
-        false,
-      );
-      assertLoginFlowCurrent(expectedLoginFlowEpoch);
+      const loginMemberships =
+        pendingAccountMembershipsRef.current.length > 0
+          ? pendingAccountMembershipsRef.current
+          : [outcome.membership];
       const previousRealm = activeAuthRealmRef.current;
       const replacesActiveSession =
         userRef.current !== null &&
@@ -920,9 +906,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           userRef.current?.id !== outcome.membership.id);
       const generation = ++authGenerationRef.current;
       refreshInFlightRef.current = null;
-      const nextAccountKey = passportId
-        ? accountVaultKey(committedRealm, outcome.membership.id)
-        : null;
       const persisted = await serializeRefreshTokenMutation(async () => {
         if (
           authGenerationRef.current !== generation ||
@@ -931,22 +914,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return false;
         }
         const previousPersistedSession = await readPersistedAuthSessionStrict();
-        await writePersistedAuthSession(outcome.refreshToken, committedRealm);
         try {
-          if (nextAccountKey) {
-            await mutateMobileAccountVault((vault) => {
+          await commitMobileLoginSessions(
+            {
+              pair: outcome,
+              realm: committedRealm,
+              passportId: passportId || undefined,
+              accountRefreshToken,
+              memberships: loginMemberships,
+            },
+            async () => {
               assertLoginFlowCurrent(expectedLoginFlowEpoch);
-              if (vault.resources[nextAccountKey]) {
-                vault.activeAccountKey = nextAccountKey;
+              await writePersistedAuthSession(
+                outcome.refreshToken,
+                committedRealm,
+              );
+              if (authGenerationRef.current !== generation) {
+                throw authCodeError('AUTH_FLOW_SUPERSEDED');
               }
-            });
-          }
-          if (
-            authGenerationRef.current !== generation ||
-            loginFlowEpochRef.current !== expectedLoginFlowEpoch
-          ) {
-            throw authCodeError('AUTH_FLOW_SUPERSEDED');
-          }
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
+            },
+          );
           return true;
         } catch (error) {
           await restorePersistedAuthSession(previousPersistedSession);
@@ -1025,6 +1013,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const did =
           knownDeviceId ?? deviceIdRef.current ?? (await ensureDeviceId());
         deviceIdRef.current = did;
+        const persistedVault = await readMobileAccountVault().catch(
+          () => null,
+        );
+        if (typeof persistedVault?.signedOutAt === 'number') {
+          await serializeRefreshTokenMutation(() =>
+            deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
+          );
+          return null;
+        }
         const session = await serializeRefreshTokenMutation(
           readPersistedAuthSession,
         );
@@ -1113,6 +1110,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         deviceIdRef.current = did;
         setDeviceId(did);
         await refreshSavedAccountsSnapshot().catch(() => undefined);
+        const persistedAccountVault = await readMobileAccountVault().catch(
+          () => null,
+        );
+        const signedOutTombstone =
+          typeof persistedAccountVault?.signedOutAt === 'number';
         // Old Feishu refresh tokens are not valid in auth-server. Purge them explicitly
         // instead of sending them to the new endpoint or restoring an unrelated profile.
         await Promise.all([
@@ -1127,8 +1129,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // 服务模式开关与 BYOK LiteLLM key,防止桌面 key 继续躺在 secure storage。
           clearAllMobileVoiceCredentials().catch(() => undefined),
         ]);
-        let storedSession = await readPersistedAuthSession();
-        if (!storedSession) {
+        let storedSession = signedOutTombstone
+          ? null
+          : await readPersistedAuthSession();
+        if (signedOutTombstone) {
+          // Logout writes the empty-vault tombstone before deleting the
+          // compatibility session key. If the process stopped between those
+          // writes, the tombstone remains authoritative on the next launch.
+          await serializeRefreshTokenMutation(() =>
+            deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
+          );
+          await deleteSecureItem(LEGACY_RESOURCE_REFRESH_TOKEN_KEY).catch(
+            () => undefined,
+          );
+        } else if (!storedSession) {
           const legacyToken = await getSecureItem(
             LEGACY_RESOURCE_REFRESH_TOKEN_KEY,
           ).catch(() => null);
@@ -1231,7 +1245,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [prepareBetaChannelForCurrentDevice, refresh, refreshSavedAccountsSnapshot]);
+  }, [
+    prepareBetaChannelForCurrentDevice,
+    refresh,
+    refreshSavedAccountsSnapshot,
+    serializeRefreshTokenMutation,
+  ]);
 
   // 降级会话自愈:已安全发布的缓存用户，或因跨区清单失败而延迟发布的会话，
   // 都以退避节奏和回前台时机重试。
@@ -2201,7 +2220,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAuthError(null);
   }, [updateLoginState]);
 
-  const clearLocalSession = useCallback(async () => {
+  const clearLocalSession = useCallback(async (
+    options: { persistedAuthAlreadyCleared?: boolean } = {},
+  ) => {
     // 任何登录态清除路径(logout / terminateSession / 账号注销 / ACCOUNT_UNAVAILABLE)
     // 都先 best-effort 注销移动推送 token —— 只挂在 logout 会漏掉终止路径,设备会
     // 继续收到旧账号的任务通知。token 此刻可能已失效(账号不可用),失败静默,
@@ -2249,9 +2270,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 「还在被统计、却再也关不掉」的状态;清掉之后,下次登录会重新过登录页的协议门。
     await stopMobileTapdbReporting().catch(() => undefined);
     await clearAnalyticsConsent().catch(() => undefined);
-    await serializeRefreshTokenMutation(() =>
-      deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
-    );
+    if (!options.persistedAuthAlreadyCleared) {
+      await serializeRefreshTokenMutation(() =>
+        deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
+      );
+    }
     await Promise.all([
       serializeUserProfileMutation(() =>
         deleteSecureItem(USER_PROFILE_KEY).catch(() => undefined),
@@ -2303,6 +2326,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
+    // Invalidate refresh/login continuations before the first storage await;
+    // the UI remains signed in until the durable credential transaction wins.
+    authGenerationRef.current += 1;
+    refreshInFlightRef.current = null;
     const token = accessTokenRef.current;
     const did = deviceIdRef.current;
     const realm = activeAuthRealmRef.current;
@@ -2311,8 +2338,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 普通登出代表放弃尚未确认的 challenge；确认注销走 clearLocalSession 直达，
     // 不调用本函数，因此已确认请求的 receipt 仍会保留供登录页查询。
     await persistAccountDeletionReceipt(null);
-    await clearLocalSession();
-    await clearMobileAccountVault().catch(() => undefined);
+    await serializeRefreshTokenMutation(() =>
+      clearMobileAccountVault(() => deleteSecureItem(AUTH_SESSION_KEY)),
+    );
+    await clearLocalSession({ persistedAuthAlreadyCleared: true });
     setSavedAccounts([]);
     if (!did) return;
     const revocations: Promise<unknown>[] = [];
@@ -2346,7 +2375,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
     await Promise.allSettled(revocations);
-  }, [clearLocalSession, persistAccountDeletionReceipt]);
+  }, [
+    clearLocalSession,
+    persistAccountDeletionReceipt,
+    serializeRefreshTokenMutation,
+  ]);
 
   const getAccessToken = useCallback(async () => {
     const cached = accessTokenRef.current;

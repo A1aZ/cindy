@@ -34,6 +34,7 @@ export interface MobileAccountVault {
   activeAccountKey: string | null;
   resources: Record<string, MobileStoredResourceSession>;
   passports: Record<string, MobileStoredPassportSession>;
+  signedOutAt?: number;
 }
 
 export interface MobileSavedAccount extends StoredAccountMetadata {
@@ -100,6 +101,9 @@ function parseMobileAccountVaultRecord(raw: string | null): MobileAccountVault {
     activeAccountKey: active && resources[active] ? active : null,
     resources,
     passports,
+    ...(typeof value.signedOutAt === 'number'
+      ? { signedOutAt: value.signedOutAt }
+      : {}),
   };
 }
 
@@ -123,8 +127,9 @@ async function writeMobileAccountVault(vault: MobileAccountVault): Promise<void>
   await setSecureItem(MOBILE_ACCOUNT_VAULT_KEY, JSON.stringify(vault));
 }
 
-export function mutateMobileAccountVault<T>(
+export function transactMobileAccountVault<T>(
   operation: (vault: MobileAccountVault) => T | Promise<T>,
+  afterPersist: (result: T) => void | Promise<void> = () => undefined,
 ): Promise<T> {
   let result!: T;
   const run = mutation.then(async () => {
@@ -135,15 +140,39 @@ export function mutateMobileAccountVault<T>(
     const vault = parseMobileAccountVaultRecord(raw);
     result = await operation(vault);
     await writeMobileAccountVault(vault);
+    try {
+      // Keep the vault queue owned until every related durable write and
+      // cancellation check has committed. A failure restores the exact prior
+      // encrypted record before another mutation can observe partial state.
+      await afterPersist(result);
+    } catch (error) {
+      if (raw === null) await deleteSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
+      else await setSecureItem(MOBILE_ACCOUNT_VAULT_KEY, raw);
+      throw error;
+    }
   });
   mutation = run.then(() => undefined, () => undefined);
   return run.then(() => result);
 }
 
-export async function clearMobileAccountVault(): Promise<void> {
-  const run = mutation.then(() => deleteSecureItem(MOBILE_ACCOUNT_VAULT_KEY));
-  mutation = run.then(() => undefined, () => undefined);
-  await run;
+export function mutateMobileAccountVault<T>(
+  operation: (vault: MobileAccountVault) => T | Promise<T>,
+): Promise<T> {
+  return transactMobileAccountVault(operation);
+}
+
+export async function clearMobileAccountVault(
+  afterPersist: () => void | Promise<void> = () => undefined,
+): Promise<void> {
+  await transactMobileAccountVault(
+    (vault) => {
+      vault.activeAccountKey = null;
+      vault.resources = {};
+      vault.passports = {};
+      vault.signedOutAt = Date.now();
+    },
+    afterPersist,
+  );
 }
 
 export function listMobileSavedAccounts(vault: MobileAccountVault): MobileSavedAccount[] {
@@ -185,6 +214,7 @@ export async function rememberMobileResourceSession(
   if (!passportId) return null;
   const key = accountVaultKey(realm, pair.membership.id);
   await mutateMobileAccountVault((vault) => {
+    delete vault.signedOutAt;
     vault.resources[key] = {
       realm,
       refreshToken: pair.refreshToken,
@@ -208,6 +238,7 @@ export async function rememberMobilePassportSession(input: {
       : storedAccountMetadataFromMembership(membership, input.passportId),
   );
   await mutateMobileAccountVault((vault) => {
+    delete vault.signedOutAt;
     vault.passports[passportVaultKey(input.realm, input.passportId)] = {
       realm: input.realm,
       passportId: input.passportId,
@@ -221,6 +252,63 @@ export async function rememberMobilePassportSession(input: {
       passportMode: 'replace-passport',
     });
   });
+}
+
+export async function commitMobileLoginSessions(
+  input: {
+    pair: AuthTokenPair;
+    realm: AuthRegion;
+    passportId?: string;
+    accountRefreshToken?: string | null;
+    memberships: readonly (
+      | AuthMembership
+      | AccountMembership
+      | StoredAccountMetadata
+    )[];
+  },
+  afterPersist: () => void | Promise<void>,
+): Promise<string | null> {
+  const passportId = input.passportId;
+  const key = passportId
+    ? accountVaultKey(input.realm, input.pair.membership.id)
+    : null;
+  return transactMobileAccountVault(
+    (vault) => {
+      delete vault.signedOutAt;
+      if (!passportId || !key) return null;
+      const memberships = input.memberships.map((membership) =>
+        isStoredAccountMetadata(membership)
+          ? membership
+          : storedAccountMetadataFromMembership(membership, passportId),
+      );
+      if (input.accountRefreshToken) {
+        vault.passports[passportVaultKey(input.realm, passportId)] = {
+          realm: input.realm,
+          passportId,
+          accountRefreshToken: input.accountRefreshToken,
+          memberships,
+        };
+        reconcileSavedAccountMetadata(vault, {
+          realm: input.realm,
+          passportId,
+          memberships,
+          passportMode: 'replace-passport',
+        });
+      }
+      vault.resources[key] = {
+        realm: input.realm,
+        refreshToken: input.pair.refreshToken,
+        metadata: storedAccountMetadataFromMembership(
+          input.pair.membership,
+          passportId,
+        ),
+        lastUsedAt: Date.now(),
+      };
+      vault.activeAccountKey = key;
+      return key;
+    },
+    afterPersist,
+  );
 }
 
 /**

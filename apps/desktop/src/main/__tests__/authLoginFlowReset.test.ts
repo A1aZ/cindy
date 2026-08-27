@@ -112,7 +112,7 @@ describe('auth login-flow reset', () => {
     expect(source).toContain('let pendingAccountToken: string | null = null;');
     expect(source).toContain('client.exchangeAccountMembership(accountToken, action.accountId)');
     expect(source).toContain("const AUTH_ACCOUNT_VAULT_KEY = 'cindy_auth_accounts_v1';");
-    expect(source).toContain('client.refreshAccount(passport.accountRefreshToken)');
+    expect(source).toContain('client.refreshAccount(current.accountRefreshToken)');
     expect(source).toContain('client.logoutAccount(pair.accountToken)');
     expect(source).toContain('writeSafe(AUTH_ACCOUNT_VAULT_KEY');
     expect(source).not.toContain('writeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY');
@@ -171,13 +171,23 @@ describe('auth login-flow reset', () => {
     expect(source.slice(cancelStart, cancelEnd)).toContain('loginFlowEpoch += 1;');
   });
 
-  it('CAS-guards Passport sync and rejects cross-realm personal account switching', () => {
+  it('single-flights Passport refresh and rejects cross-realm personal account switching', () => {
+    const helperStart = source.indexOf('async function refreshPassportSessionSingleFlight(');
+    const helperEnd = source.indexOf(
+      '\n}\n\nfunction rememberUpdatedMembershipMetadata',
+      helperStart,
+    );
+    const helperBody = source.slice(helperStart, helperEnd);
+    expect(helperBody).toContain('passportAccountRefreshFlights.get(key)');
+    expect(helperBody).toContain('replacePassportSessionIfCurrent({');
+    expect(helperBody).toContain('removePassportSessionIfCurrent(');
+    expect(source).toContain("'write-failed'");
+    expect(source).toContain("'CREDENTIAL_STORE_UNAVAILABLE'");
+
     const syncStart = source.indexOf('export async function syncSavedAccounts()');
     const syncEnd = source.indexOf('\n}\n\nexport async function switchSavedAccount', syncStart);
     const syncBody = source.slice(syncStart, syncEnd);
-    expect(syncBody).toContain('replacePassportSessionIfCurrent({');
-    expect(syncBody).toContain('expectedAccountRefreshToken: passport.accountRefreshToken');
-    expect(syncBody).toContain('removePassportSessionIfCurrent(');
+    expect(syncBody).toContain('refreshPassportSessionSingleFlight(');
 
     const switchStart = syncEnd;
     const switchEnd = source.indexOf(
@@ -189,6 +199,7 @@ describe('auth login-flow reset', () => {
     const commitRealm = switchBody.indexOf('pendingAuthRealm = realm;');
     expect(policyGuard).toBeGreaterThan(-1);
     expect(commitRealm).toBeGreaterThan(policyGuard);
+    expect(switchBody).toContain('refreshPassportSessionSingleFlight(');
     expect(switchBody).toContain("'REGION_MISMATCH'");
   });
 

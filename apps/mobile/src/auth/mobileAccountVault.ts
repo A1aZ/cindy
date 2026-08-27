@@ -110,7 +110,7 @@ export function parseMobileAccountVault(raw: string | null): MobileAccountVault 
 
 export async function readMobileAccountVault(): Promise<MobileAccountVault> {
   await mutation;
-  const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY).catch(() => null);
+  const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
   return parseMobileAccountVault(raw);
 }
 
@@ -123,7 +123,10 @@ export function mutateMobileAccountVault<T>(
 ): Promise<T> {
   let result!: T;
   const run = mutation.then(async () => {
-    const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY).catch(() => null);
+    // A SecureStore read failure is not an empty vault. Propagate it so a
+    // transient keychain error can never turn the next mutation into a write
+    // that erases every saved credential.
+    const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
     const vault = parseMobileAccountVault(raw);
     result = await operation(vault);
     await writeMobileAccountVault(vault);

@@ -146,6 +146,58 @@ const ACCOUNT_DELETION_RECEIPT_KEY = 'cindy.mobile.auth.accountDeletionReceipt';
 const LEGACY_PENDING_OAUTH_KEY = 'xdt.mobile.pendingOAuth';
 const PENDING_OAUTH_MAX_AGE_MS = 10 * 60 * 1000;
 const AUTH_STARTUP_GATE_TIMEOUT_MS = 20 * 1000;
+type MobilePassportRefreshPair = Awaited<ReturnType<CindyAuthClient['refreshAccount']>>;
+const mobilePassportRefreshFlights = new Map<string, Promise<MobilePassportRefreshPair>>();
+
+/**
+ * Passport refresh tokens are rotating, non-replayable credentials. Keep the
+ * network request and replacement write single-flight per Passport so sync and
+ * an explicit account switch can never consume the same generation twice.
+ */
+async function refreshMobilePassportSingleFlight(
+  client: CindyAuthClient,
+  realm: AuthRegion,
+  passportId: string,
+): Promise<MobilePassportRefreshPair> {
+  const key = passportVaultKey(realm, passportId);
+  const existing = mobilePassportRefreshFlights.get(key);
+  if (existing) return existing;
+
+  const flight = (async () => {
+    const current = (await readMobileAccountVault()).passports[key];
+    if (!current) throw authCodeError('SAVED_ACCOUNT_REAUTH_REQUIRED');
+    try {
+      const pair = await client.refreshAccount(current.accountRefreshToken);
+      const replacementStored = await replaceMobilePassportSessionIfCurrent({
+        realm,
+        passportId,
+        expectedAccountRefreshToken: current.accountRefreshToken,
+        accountRefreshToken: pair.accountRefreshToken,
+        memberships: current.memberships,
+      });
+      if (!replacementStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
+      return pair;
+    } catch (error) {
+      if (isDefinitivePassportSessionError(error)) {
+        await removeMobilePassportSessionIfCurrent(
+          realm,
+          passportId,
+          current.accountRefreshToken,
+        );
+      }
+      throw error;
+    }
+  })();
+  mobilePassportRefreshFlights.set(key, flight);
+  try {
+    return await flight;
+  } finally {
+    if (mobilePassportRefreshFlights.get(key) === flight) {
+      mobilePassportRefreshFlights.delete(key);
+    }
+  }
+}
+
 // 2026-07 产品 /api/user/me 退役:身份完全以 auth-server membership 为准,
 // 原产品增强字段(role/isCanary/feishuId)一并下线(与 desktop 同步)。
 export interface MobileUser {
@@ -1902,25 +1954,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const vault = await readMobileAccountVault();
       let firstTransientError: string | null = null;
       for (const passport of Object.values(vault.passports)) {
-        let accountRefreshSucceeded = false;
         try {
           await loadMobileEndpointsForRealm(passport.realm);
           const client = authClientFor(did, passport.realm);
-          const pair = await client.refreshAccount(
-            passport.accountRefreshToken,
+          const pair = await refreshMobilePassportSingleFlight(
+            client,
+            passport.realm,
+            passport.passportId,
           );
-          accountRefreshSucceeded = true;
           if (authGenerationRef.current !== generation) return;
-          const replacementStored = await replaceMobilePassportSessionIfCurrent(
-            {
-              realm: passport.realm,
-              passportId: passport.passportId,
-              expectedAccountRefreshToken: passport.accountRefreshToken,
-              accountRefreshToken: pair.accountRefreshToken,
-              memberships: passport.memberships,
-            },
-          );
-          if (!replacementStored) continue;
           const memberships = await client.getAccountMemberships(
             pair.accountToken,
           );
@@ -1934,16 +1976,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           });
         } catch (error) {
           if (authGenerationRef.current !== generation) return;
-          if (
-            !accountRefreshSucceeded &&
-            isDefinitivePassportSessionError(error)
-          ) {
-            await removeMobilePassportSessionIfCurrent(
-              passport.realm,
-              passport.passportId,
-              passport.accountRefreshToken,
-            );
-          } else {
+          if (!isDefinitivePassportSessionError(error)) {
             firstTransientError ??= authErrorCode(error);
           }
         }
@@ -2003,62 +2036,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             passportVaultKey(realm, metadata.passportId)
           ];
           if (!passport) throw authCodeError('SAVED_ACCOUNT_REAUTH_REQUIRED');
-          let accountRefreshSucceeded = false;
-          try {
-            const accountPair = await client.refreshAccount(
-              passport.accountRefreshToken,
-            );
-            accountRefreshSucceeded = true;
-            if (authGenerationRef.current !== generationAtStart) {
-              throw authCodeError('AUTH_FLOW_SUPERSEDED');
-            }
-            const replacementStored =
-              await replaceMobilePassportSessionIfCurrent({
-                realm,
-                passportId: metadata.passportId,
-                expectedAccountRefreshToken: passport.accountRefreshToken,
-                accountRefreshToken: accountPair.accountRefreshToken,
-                memberships: passport.memberships,
-              });
-            if (!replacementStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
-            const memberships = await client.getAccountMemberships(
-              accountPair.accountToken,
-            );
-            if (authGenerationRef.current !== generationAtStart) {
-              throw authCodeError('AUTH_FLOW_SUPERSEDED');
-            }
-            const selected = memberships.find(
-              (membership) => membership.id === metadata.membershipId,
-            );
-            if (!selected) {
-              await removeMobileSavedAccount(accountKey);
-              throw authCodeError('MEMBERSHIP_DISABLED');
-            }
-            const metadataStored = await replaceMobilePassportSessionIfCurrent({
-              realm,
-              passportId: metadata.passportId,
-              expectedAccountRefreshToken: accountPair.accountRefreshToken,
-              accountRefreshToken: accountPair.accountRefreshToken,
-              memberships,
-            });
-            if (!metadataStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
-            pair = await client.exchangeAccountMembership(
-              accountPair.accountToken,
-              selected.id,
-            );
-          } catch (error) {
-            if (
-              !accountRefreshSucceeded &&
-              isDefinitivePassportSessionError(error)
-            ) {
-              await removeMobilePassportSessionIfCurrent(
-                realm,
-                metadata.passportId,
-                passport.accountRefreshToken,
-              );
-            }
-            throw error;
+          const accountPair = await refreshMobilePassportSingleFlight(
+            client,
+            realm,
+            metadata.passportId,
+          );
+          if (authGenerationRef.current !== generationAtStart) {
+            throw authCodeError('AUTH_FLOW_SUPERSEDED');
           }
+          const memberships = await client.getAccountMemberships(
+            accountPair.accountToken,
+          );
+          if (authGenerationRef.current !== generationAtStart) {
+            throw authCodeError('AUTH_FLOW_SUPERSEDED');
+          }
+          const selected = memberships.find(
+            (membership) => membership.id === metadata.membershipId,
+          );
+          if (!selected) {
+            await removeMobileSavedAccount(accountKey);
+            throw authCodeError('MEMBERSHIP_DISABLED');
+          }
+          const metadataStored = await replaceMobilePassportSessionIfCurrent({
+            realm,
+            passportId: metadata.passportId,
+            expectedAccountRefreshToken: accountPair.accountRefreshToken,
+            accountRefreshToken: accountPair.accountRefreshToken,
+            memberships,
+          });
+          if (!metadataStored) throw authCodeError('AUTH_FLOW_SUPERSEDED');
+          pair = await client.exchangeAccountMembership(
+            accountPair.accountToken,
+            selected.id,
+          );
         }
 
         if (pair.membership.id !== metadata.membershipId) {

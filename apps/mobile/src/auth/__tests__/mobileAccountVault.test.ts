@@ -1,19 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const secureStorage = vi.hoisted(() => ({ value: null as string | null }));
+const secureStorage = vi.hoisted(() => ({
+  value: null as string | null,
+  readError: null as Error | null,
+  set: vi.fn(async (_key: string, value: string) => {
+    secureStorage.value = value;
+  }),
+}));
 
 vi.mock('../secureStorage', () => ({
   deleteSecureItem: vi.fn(async () => {
     secureStorage.value = null;
   }),
-  getSecureItem: vi.fn(async () => secureStorage.value),
-  setSecureItem: vi.fn(async (_key: string, value: string) => {
-    secureStorage.value = value;
+  getSecureItem: vi.fn(async () => {
+    if (secureStorage.readError) throw secureStorage.readError;
+    return secureStorage.value;
   }),
+  setSecureItem: secureStorage.set,
 }));
 
 import {
   listMobileSavedAccounts,
+  mutateMobileAccountVault,
   parseMobileAccountVault,
   removeMobilePassportSessionIfCurrent,
   replaceMobilePassportSessionIfCurrent,
@@ -35,6 +43,8 @@ const metadata = {
 describe('mobile account vault', () => {
   beforeEach(() => {
     secureStorage.value = null;
+    secureStorage.readError = null;
+    vi.clearAllMocks();
   });
 
   it('fails closed for malformed encrypted content without throwing', () => {
@@ -164,5 +174,25 @@ describe('mobile account vault', () => {
       ),
     ).resolves.toBe(true);
     expect(parseMobileAccountVault(secureStorage.value).passports).toEqual({});
+  });
+
+  it('does not overwrite saved credentials when SecureStore cannot be read', async () => {
+    const original = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: { passport: { accountRefreshToken: 'keep-me' } },
+    });
+    secureStorage.value = original;
+    secureStorage.readError = new Error('keychain temporarily unavailable');
+
+    await expect(
+      mutateMobileAccountVault((vault) => {
+        vault.passports = {};
+      }),
+    ).rejects.toThrow('keychain temporarily unavailable');
+
+    expect(secureStorage.value).toBe(original);
+    expect(secureStorage.set).not.toHaveBeenCalled();
   });
 });

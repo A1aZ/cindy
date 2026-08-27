@@ -319,11 +319,23 @@ describe('mobile auth-server login', () => {
     );
   });
 
-  it('persists Passport rotations before membership reads and CAS-guards invalidation', () => {
+  it('single-flights Passport rotations before membership reads', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
       'utf8',
     );
+    const helperStart = authSource.indexOf(
+      'async function refreshMobilePassportSingleFlight(',
+    );
+    const helperEnd = authSource.indexOf(
+      '\n}\n\n// 2026-07 产品',
+      helperStart,
+    );
+    const helperBody = authSource.slice(helperStart, helperEnd);
+    expect(helperBody).toContain('mobilePassportRefreshFlights.get(key)');
+    expect(helperBody).toContain('replaceMobilePassportSessionIfCurrent({');
+    expect(helperBody).toContain('removeMobilePassportSessionIfCurrent(');
+
     const syncStart = authSource.indexOf(
       'const syncSavedAccounts = useCallback',
     );
@@ -332,19 +344,13 @@ describe('mobile auth-server login', () => {
       syncStart,
     );
     const syncBody = authSource.slice(syncStart, syncEnd);
-    const refreshAccount = syncBody.indexOf('client.refreshAccount(');
-    const persistReplacement = syncBody.indexOf(
-      'replaceMobilePassportSessionIfCurrent',
-      refreshAccount,
-    );
+    const refreshAccount = syncBody.indexOf('refreshMobilePassportSingleFlight(');
     const readMemberships = syncBody.indexOf(
       'client.getAccountMemberships(',
-      persistReplacement,
+      refreshAccount,
     );
     expect(refreshAccount).toBeGreaterThan(-1);
-    expect(persistReplacement).toBeGreaterThan(refreshAccount);
-    expect(readMemberships).toBeGreaterThan(persistReplacement);
-    expect(syncBody).toContain('removeMobilePassportSessionIfCurrent(');
+    expect(readMemberships).toBeGreaterThan(refreshAccount);
 
     const switchStart = syncEnd;
     const switchEnd = authSource.indexOf(
@@ -352,22 +358,15 @@ describe('mobile auth-server login', () => {
       switchStart,
     );
     const switchBody = authSource.slice(switchStart, switchEnd);
-    const switchRefreshAccount = switchBody.indexOf('client.refreshAccount(');
-    const switchPersistReplacement = switchBody.indexOf(
-      'replaceMobilePassportSessionIfCurrent',
-      switchRefreshAccount,
+    const switchRefreshAccount = switchBody.indexOf(
+      'refreshMobilePassportSingleFlight(',
     );
     const switchReadMemberships = switchBody.indexOf(
       'client.getAccountMemberships(',
-      switchPersistReplacement,
-    );
-    expect(switchBody).toContain(
-      'expectedAccountRefreshToken: passport.accountRefreshToken',
+      switchRefreshAccount,
     );
     expect(switchRefreshAccount).toBeGreaterThan(-1);
-    expect(switchPersistReplacement).toBeGreaterThan(switchRefreshAccount);
-    expect(switchReadMemberships).toBeGreaterThan(switchPersistReplacement);
-    expect(switchBody).toContain('removeMobilePassportSessionIfCurrent(');
+    expect(switchReadMemberships).toBeGreaterThan(switchRefreshAccount);
     const resourceStored = switchBody.indexOf(
       'await rememberMobileResourceSession(',
     );

@@ -73,13 +73,14 @@ afterEach(() => {
 });
 
 describe('AddAccountLoginPage app-shell cover', () => {
-  it('releases a freshly reset cover and restores pending status when leaving', () => {
+  it('releases a freshly reset cover and cancels the flow when leaving', async () => {
     render(<Harness />);
 
     expect(screen.getByTestId('cover-state').textContent).toBe('open:ready');
 
     fireEvent.click(screen.getByRole('button', { name: 'leave route' }));
     expect(screen.getByTestId('cover-state').textContent).toBe('held:pending');
+    await waitFor(() => expect(auth.cancelAddAccount).toHaveBeenCalledOnce());
   });
 
   it('cancels the add-account flow from the close action', async () => {

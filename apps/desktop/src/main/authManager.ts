@@ -705,21 +705,22 @@ function writePassportSessionToVault(
 }
 
 /** Persist a rotated Passport only while the request still owns the token it consumed. */
+type PassportSessionReplacementResult = 'stored' | 'stale' | 'write-failed';
+
 function replacePassportSessionIfCurrent(input: {
   realm: AuthRegion;
   passportId: string;
   expectedAccountRefreshToken: string;
   accountRefreshToken: string;
   memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
-}): boolean {
+}): PassportSessionReplacementResult {
   const vault = readAuthAccountVault();
   const key = passportVaultKey(input.realm, input.passportId);
   if (vault.passports[key]?.accountRefreshToken !== input.expectedAccountRefreshToken) {
-    return false;
+    return 'stale';
   }
   writePassportSessionToVault(vault, input);
-  writeAuthAccountVault(vault);
-  return true;
+  return writeAuthAccountVault(vault) ? 'stored' : 'write-failed';
 }
 
 /** Delete a rejected Passport only if no concurrent refresh has replaced it. */
@@ -732,8 +733,74 @@ function removePassportSessionIfCurrent(
   const key = passportVaultKey(realm, passportId);
   if (vault.passports[key]?.accountRefreshToken !== expectedAccountRefreshToken) return false;
   delete vault.passports[key];
-  writeAuthAccountVault(vault);
-  return true;
+  return writeAuthAccountVault(vault);
+}
+
+type PassportAccountRefreshPair = Awaited<ReturnType<CindyAuthClient['refreshAccount']>>;
+
+const passportAccountRefreshFlights = new Map<string, Promise<PassportAccountRefreshPair>>();
+
+function assertPassportReplacementStored(result: PassportSessionReplacementResult): void {
+  if (result === 'stored') return;
+  if (result === 'stale') {
+    throw new AuthApiError(
+      'AUTH_FLOW_SUPERSEDED',
+      409,
+      'Saved Passport session changed while it was being refreshed',
+    );
+  }
+  throw new AuthApiError(
+    'CREDENTIAL_STORE_UNAVAILABLE',
+    503,
+    'Could not persist the refreshed Passport session',
+  );
+}
+
+/**
+ * Account refresh tokens have no replay grace. Every consumer of one Passport
+ * must share the same request until its rotated replacement is durable.
+ */
+async function refreshPassportSessionSingleFlight(
+  client: CindyAuthClient,
+  realm: AuthRegion,
+  passportId: string,
+): Promise<PassportAccountRefreshPair> {
+  const key = passportVaultKey(realm, passportId);
+  const existing = passportAccountRefreshFlights.get(key);
+  if (existing) return existing;
+
+  const flight = (async () => {
+    const current = readAuthAccountVault().passports[key];
+    if (!current) {
+      throw new AuthApiError('ACCOUNT_REAUTH_REQUIRED', 401, 'Saved account requires login');
+    }
+    try {
+      const pair = await client.refreshAccount(current.accountRefreshToken);
+      assertPassportReplacementStored(
+        replacePassportSessionIfCurrent({
+          realm,
+          passportId,
+          expectedAccountRefreshToken: current.accountRefreshToken,
+          accountRefreshToken: pair.accountRefreshToken,
+          memberships: current.memberships,
+        }),
+      );
+      return pair;
+    } catch (error) {
+      if (isDefinitiveRefreshError(error)) {
+        removePassportSessionIfCurrent(realm, passportId, current.accountRefreshToken);
+      }
+      throw error;
+    }
+  })();
+  passportAccountRefreshFlights.set(key, flight);
+  try {
+    return await flight;
+  } finally {
+    if (passportAccountRefreshFlights.get(key) === flight) {
+      passportAccountRefreshFlights.delete(key);
+    }
+  }
 }
 
 function rememberUpdatedMembershipMetadata(
@@ -2456,40 +2523,28 @@ export async function syncSavedAccounts(): Promise<DesktopAccountSwitcherSnapsho
   if (isPassiveSharedUserDataInstance()) return listSavedAccounts();
   const initial = readAuthAccountVault();
   for (const passport of Object.values(initial.passports)) {
-    let accountRefreshSucceeded = false;
     try {
       await loadClientEndpointsForRealm(passport.realm);
       const client = createAuthClient(passport.realm);
-      const pair = await client.refreshAccount(passport.accountRefreshToken);
-      accountRefreshSucceeded = true;
-      // Account refresh has no replay grace. Persist the replacement before
-      // making the membership request that consumes its access token.
-      const replacementStored = replacePassportSessionIfCurrent({
-        realm: passport.realm,
-        passportId: passport.passportId,
-        expectedAccountRefreshToken: passport.accountRefreshToken,
-        accountRefreshToken: pair.accountRefreshToken,
-        memberships: passport.memberships,
-      });
-      if (!replacementStored) continue;
-      const memberships = await client.getAccountMemberships(pair.accountToken);
-      replacePassportSessionIfCurrent({
-        realm: passport.realm,
-        passportId: passport.passportId,
-        expectedAccountRefreshToken: pair.accountRefreshToken,
-        accountRefreshToken: pair.accountRefreshToken,
-        memberships,
-      });
-    } catch (error) {
-      if (accountRefreshSucceeded || !isDefinitiveRefreshError(error)) {
-        log.warn('saved account membership sync failed transiently', error);
-        continue;
-      }
-      removePassportSessionIfCurrent(
+      const pair = await refreshPassportSessionSingleFlight(
+        client,
         passport.realm,
         passport.passportId,
-        passport.accountRefreshToken,
       );
+      const memberships = await client.getAccountMemberships(pair.accountToken);
+      assertPassportReplacementStored(
+        replacePassportSessionIfCurrent({
+          realm: passport.realm,
+          passportId: passport.passportId,
+          expectedAccountRefreshToken: pair.accountRefreshToken,
+          accountRefreshToken: pair.accountRefreshToken,
+          memberships,
+        }),
+      );
+    } catch (error) {
+      if (!isDefinitiveRefreshError(error)) {
+        log.warn('saved account membership sync failed transiently', error);
+      }
     }
   }
   return listSavedAccounts();
@@ -2553,39 +2608,17 @@ export async function switchSavedAccount(rawAccountKey: unknown): Promise<void> 
     if (!passport) {
       throw new AuthApiError('ACCOUNT_REAUTH_REQUIRED', 401, 'Saved account requires login');
     }
-    let accountRefreshSucceeded = false;
-    try {
-      const accountPair = await client.refreshAccount(passport.accountRefreshToken);
-      accountRefreshSucceeded = true;
-      const replacementStored = replacePassportSessionIfCurrent({
-        realm,
-        passportId: passport.passportId,
-        expectedAccountRefreshToken: passport.accountRefreshToken,
-        accountRefreshToken: accountPair.accountRefreshToken,
-        memberships: passport.memberships,
-      });
-      if (!replacementStored) {
-        throw new AuthApiError(
-          'AUTH_FLOW_SUPERSEDED',
-          409,
-          'Saved Passport session changed during account switch',
-        );
-      }
-      pair = await client.exchangeAccountMembership(
-        accountPair.accountToken,
-        metadata.membershipId,
-      );
-      pair = bindResourcePairToSavedAccount(pair, realm, metadata);
-      rememberResourceSession(pair, realm, { markActive: false });
-    } catch (error) {
-      // An exchange can fail because one membership was disabled while the
-      // Passport session remains healthy. Only an Account-refresh failure
-      // invalidates every membership owned by this Passport.
-      if (!accountRefreshSucceeded && isDefinitiveRefreshError(error)) {
-        removePassportSessionIfCurrent(realm, metadata.passportId, passport.accountRefreshToken);
-      }
-      throw error;
-    }
+    const accountPair = await refreshPassportSessionSingleFlight(
+      client,
+      realm,
+      passport.passportId,
+    );
+    pair = await client.exchangeAccountMembership(
+      accountPair.accountToken,
+      metadata.membershipId,
+    );
+    pair = bindResourcePairToSavedAccount(pair, realm, metadata);
+    rememberResourceSession(pair, realm, { markActive: false });
   }
 
   if (!canRestoreAuthSessionForMembership(AUTH_REGION, realm, pair.membership.kind)) {

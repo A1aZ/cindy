@@ -18,6 +18,8 @@ export function AddAccountLoginPage() {
   const location = useLocation();
   const { t } = useTranslation();
   const initializedRef = useRef(false);
+  const flowFinishedRef = useRef(false);
+  const closeStartedRef = useRef(false);
   const returnTo = (location.state as AddAccountLocationState | null)?.returnTo ?? '/cc-agent';
 
   useEffect(() => {
@@ -41,10 +43,24 @@ export function AddAccountLoginPage() {
   }, [beginAddAccount, loginState, navigate, returnTo, t]);
 
   useEffect(() => {
-    if (loginState?.step === 'completed') navigate(returnTo, { replace: true });
+    if (loginState?.step !== 'completed') return;
+    flowFinishedRef.current = true;
+    navigate(returnTo, { replace: true });
   }, [loginState?.step, navigate, returnTo]);
 
+  useEffect(
+    () => () => {
+      // Browser history and parent navigation can remove this route without
+      // invoking LoginPage's close action. Invalidate the add-account epoch so
+      // a late verification or account-selection response cannot switch users.
+      if (flowFinishedRef.current || closeStartedRef.current) return;
+      void cancelAddAccount();
+    },
+    [cancelAddAccount],
+  );
+
   const cancel = async () => {
+    closeStartedRef.current = true;
     try {
       await cancelAddAccount();
     } finally {

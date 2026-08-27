@@ -183,6 +183,8 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('removePassportSessionIfCurrent(');
     expect(source).toContain("'write-failed'");
     expect(source).toContain("'CREDENTIAL_STORE_UNAVAILABLE'");
+    expect(source).toContain('isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)');
+    expect(source).toContain('readAuthAccountVault({ allowUnreadable: true })');
 
     const syncStart = source.indexOf('export async function syncSavedAccounts()');
     const syncEnd = source.indexOf('\n}\n\nexport async function switchSavedAccount', syncStart);

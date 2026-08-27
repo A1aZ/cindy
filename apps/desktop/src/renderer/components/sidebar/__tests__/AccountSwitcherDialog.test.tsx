@@ -128,6 +128,31 @@ describe('AccountSwitcherDialog', () => {
     expect(onAddAccount).toHaveBeenCalledOnce();
   });
 
+  it('keeps switching and add-account actions available during background sync', async () => {
+    syncAccounts.mockReturnValueOnce(new Promise(() => {}));
+    const onAddAccount = vi.fn();
+    render(
+      <AccountSwitcherDialog
+        open
+        onOpenChange={vi.fn()}
+        onAddAccount={onAddAccount}
+        triggerRef={createRef<HTMLButtonElement>()}
+      />,
+    );
+
+    const switchButton = await screen.findByRole('button', {
+      name: /Example CorpOrganization Cindy/,
+    });
+    const addButton = screen.getByRole('button', {
+      name: 'sidebar.accountSwitcher.addAccount',
+    });
+    expect((switchButton as HTMLButtonElement).disabled).toBe(false);
+    expect((addButton as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(addButton);
+    expect(onAddAccount).toHaveBeenCalledOnce();
+  });
+
   it('asks before switching when a task is running and keeps the account dialog open on cancel', async () => {
     const onOpenChange = vi.fn();
     runningSnapshot.set('running-session', { isRunning: true });

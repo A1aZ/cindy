@@ -192,9 +192,7 @@ export function AccountSwitcherDialog({
                 <button
                   key={account.accountKey}
                   type="button"
-                  disabled={
-                    account.isCurrent || syncing || switchingKey !== null || !mutationAllowed
-                  }
+                  disabled={account.isCurrent || switchingKey !== null || !mutationAllowed}
                   onClick={() => void handleSwitch(account)}
                   className={cn(
                     'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
@@ -235,7 +233,7 @@ export function AccountSwitcherDialog({
           <div className="mt-4 border-t border-[var(--border-default)] pt-4">
             <button
               type="button"
-              disabled={!mutationAllowed || syncing || switchingKey !== null}
+              disabled={!mutationAllowed || switchingKey !== null}
               onClick={onAddAccount}
               className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2.5 text-14 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
             >

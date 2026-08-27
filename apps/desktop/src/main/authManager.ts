@@ -559,9 +559,18 @@ function isStoredAccountMetadata(value: unknown): value is StoredAccountMetadata
   );
 }
 
-function readAuthAccountVault(): AuthAccountVault {
+function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): AuthAccountVault {
   const raw = readSafe(AUTH_ACCOUNT_VAULT_KEY);
-  if (!raw) return emptyAuthAccountVault();
+  if (raw === null) {
+    if (isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)) return emptyAuthAccountVault();
+    log.warn('encrypted auth account vault exists but is temporarily unreadable');
+    if (options.allowUnreadable) return emptyAuthAccountVault();
+    throw new AuthApiError(
+      'CREDENTIAL_STORE_UNAVAILABLE',
+      503,
+      'Saved account credentials are temporarily unavailable',
+    );
+  }
   try {
     const parsed = JSON.parse(raw) as Partial<AuthAccountVault>;
     if (
@@ -615,7 +624,12 @@ function readAuthAccountVault(): AuthAccountVault {
     };
   } catch (error) {
     log.warn('encrypted auth account vault is invalid; ignoring it without deleting', error);
-    return emptyAuthAccountVault();
+    if (options.allowUnreadable) return emptyAuthAccountVault();
+    throw new AuthApiError(
+      'CREDENTIAL_STORE_UNAVAILABLE',
+      503,
+      'Saved account credentials could not be read safely',
+    );
   }
 }
 
@@ -2494,7 +2508,7 @@ function accountSummaryFromMetadata(
 }
 
 export function listSavedAccounts(): DesktopAccountSwitcherSnapshot {
-  const vault = readAuthAccountVault();
+  const vault = readAuthAccountVault({ allowUnreadable: true });
   const byKey = new Map<string, StoredAccountMetadata>();
   for (const [key, resource] of Object.entries(vault.resources)) {
     byKey.set(key, resource.metadata);
@@ -4299,7 +4313,9 @@ export async function logout(): Promise<void> {
   }
   const currentAccessToken = accessToken;
   const currentAuthBaseUrl = authServerUrl(activeAuthRealm);
-  const savedVault = readAuthAccountVault();
+  // Logout remains available even if the vault cannot be decrypted: local
+  // credential files are removed directly and remote revocation is best effort.
+  const savedVault = readAuthAccountVault({ allowUnreadable: true });
   const currentAccountKey = currentUser
     ? accountVaultKey(activeAuthRealm, currentUser.id)
     : savedVault.activeAccountKey;

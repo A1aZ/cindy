@@ -61,6 +61,8 @@ export class ResourceUsageWindowController {
   private locale: SupportedLocale | null = null;
   private lastOwner: ResourceUsageOwnerWindow | null = null;
   private ownerHideUnsubscribers: Array<() => void> = [];
+  /** 关闭全屏与重新打开可能交错；迟到的 leave-full-screen 只能完成原来的隐藏请求。 */
+  private visibilityGeneration = 0;
 
   constructor(private readonly deps: ResourceUsageWindowControllerDeps) {}
 
@@ -287,10 +289,11 @@ export class ResourceUsageWindowController {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
     this.pendingOpen = false;
+    this.visibilityGeneration += 1;
     this.setSamplingActive(win, true);
     if (win.isMinimized()) win.restore();
-    // 只负责显示和聚焦，不再由 controller 读取 owner 或调用 setFullScreen。
-    // macOS 打开时沿用系统原生 Space / 全屏呈现，后续切换也走本窗口的原生生命周期。
+    // 打开时只负责显示和聚焦，不再按 owner 状态驱动 setFullScreen。
+    // macOS 沿用本窗口的原生 Space / 全屏呈现；仅关闭时显式退出全屏再隐藏。
     win.show();
     win.focus();
     this.visible = true;
@@ -302,9 +305,21 @@ export class ResourceUsageWindowController {
     this.pendingOpen = false;
     this.setSamplingActive(win, false);
     if (win.isDestroyed()) return;
-    if (win.isVisible()) win.hide();
-    this.visible = false;
-    if (options.restoreOwner !== false) this.focusOwnerWindow();
+    const generation = ++this.visibilityGeneration;
+    const finishHide = (): void => {
+      if (generation !== this.visibilityGeneration || win !== this.winRef || win.isDestroyed()) {
+        return;
+      }
+      if (win.isVisible()) win.hide();
+      this.visible = false;
+      if (options.restoreOwner !== false) this.focusOwnerWindow();
+    };
+    if (this.platform() === 'darwin' && win.isFullScreen()) {
+      win.once('leave-full-screen', finishHide);
+      win.setFullScreen(false);
+      return;
+    }
+    finishHide();
   }
 
   private rememberOwner(sender: WebContents): void {

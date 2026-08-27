@@ -9,6 +9,7 @@ import { ResourceUsageWindowController } from '../controller.js';
 
 interface FakeWindow {
   on: ReturnType<typeof vi.fn>;
+  once: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
   hide: ReturnType<typeof vi.fn>;
@@ -18,6 +19,7 @@ interface FakeWindow {
   setFullScreen: ReturnType<typeof vi.fn>;
   setTitle: ReturnType<typeof vi.fn>;
   isMinimized: () => boolean;
+  isFullScreen: () => boolean;
   isVisible: () => boolean;
   isDestroyed: () => boolean;
   webContents: WebContents;
@@ -25,6 +27,7 @@ interface FakeWindow {
   emitClosed: () => void;
   emitWebContents: (event: string, ...args: unknown[]) => void;
   emitWindow: (event: string) => void;
+  setFullscreenState: (fullscreen: boolean) => void;
 }
 
 function fakeWindow(id: number, minimized = false): FakeWindow {
@@ -32,6 +35,7 @@ function fakeWindow(id: number, minimized = false): FakeWindow {
   const webContentsListeners = new Map<string, (...args: unknown[]) => void>();
   let destroyed = false;
   let visible = false;
+  let fullscreen = false;
   const send = vi.fn();
   const webContents = {
     id,
@@ -44,6 +48,12 @@ function fakeWindow(id: number, minimized = false): FakeWindow {
   const win: FakeWindow = {
     on: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
       listeners.set(event, callback);
+    }),
+    once: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
+      listeners.set(event, (...args: unknown[]) => {
+        listeners.delete(event);
+        callback(...args);
+      });
     }),
     close: vi.fn(() => {
       let prevented = false;
@@ -70,9 +80,12 @@ function fakeWindow(id: number, minimized = false): FakeWindow {
     }),
     focus: vi.fn(),
     restore: vi.fn(),
-    setFullScreen: vi.fn(),
+    setFullScreen: vi.fn((nextFullscreen: boolean) => {
+      fullscreen = nextFullscreen;
+    }),
     setTitle: vi.fn(),
     isMinimized: () => minimized,
+    isFullScreen: () => fullscreen,
     isVisible: () => visible,
     isDestroyed: () => destroyed,
     webContents,
@@ -84,6 +97,9 @@ function fakeWindow(id: number, minimized = false): FakeWindow {
     },
     emitWebContents: (event, ...args) => webContentsListeners.get(event)?.(...args),
     emitWindow: (event) => listeners.get(event)?.(),
+    setFullscreenState: (nextFullscreen) => {
+      fullscreen = nextFullscreen;
+    },
   };
   return win;
 }
@@ -771,6 +787,40 @@ describe('ResourceUsageWindowController', () => {
 
     expect(windows[0]?.hide).toHaveBeenCalledOnce();
     expect(controller.isOpen()).toBe(true);
+  });
+
+  it('exits macOS native fullscreen before a native close hides the cached window', () => {
+    const { controller, windows, mainSender } = makeHarness(5000, 10_000, 30_000, 'darwin');
+    controller.prewarm();
+    markPrewarmed(controller, windows[0]!);
+    controller.open(mainSender);
+    windows[0]!.setFullscreenState(true);
+    vi.clearAllMocks();
+
+    windows[0]!.close();
+
+    expect(windows[0]?.setFullScreen).toHaveBeenCalledWith(false);
+    expect(windows[0]?.hide).not.toHaveBeenCalled();
+
+    windows[0]?.emitWindow('leave-full-screen');
+    expect(windows[0]?.hide).toHaveBeenCalledOnce();
+    expect(controller.isOpen()).toBe(true);
+  });
+
+  it('does not hide a reopened macOS window when leave-full-screen arrives late', () => {
+    const { controller, windows, mainSender } = makeHarness(5000, 10_000, 30_000, 'darwin');
+    controller.prewarm();
+    markPrewarmed(controller, windows[0]!);
+    controller.open(mainSender);
+    windows[0]!.setFullscreenState(true);
+    controller.close(windows[0]!.webContents);
+    vi.clearAllMocks();
+
+    controller.open(mainSender);
+    windows[0]?.emitWindow('leave-full-screen');
+
+    expect(windows[0]?.hide).not.toHaveBeenCalled();
+    expect(windows[0]?.show).toHaveBeenCalledOnce();
   });
 
   it('destroys the cached child with its main window and may prewarm a replacement', () => {

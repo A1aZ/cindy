@@ -28,10 +28,11 @@ describe('resource usage BrowserWindow security contract', () => {
     expect(source).not.toContain("once('ready-to-show'");
   });
 
-  it('does not explicitly drive fullscreen and follows its own native fullscreen events', () => {
-    expect(controllerSource).not.toContain('.setFullScreen(');
+  it('only drives fullscreen to exit before hiding and follows its own native fullscreen events', () => {
+    expect(controllerSource).toContain("win.once('leave-full-screen'");
+    expect(controllerSource).toContain('win.setFullScreen(false)');
+    expect(controllerSource).not.toContain('win.setFullScreen(true)');
     expect(controllerSource).not.toContain("'enter-full-screen'");
-    expect(controllerSource).not.toContain("'leave-full-screen'");
     expect(source).toContain("win.on('enter-full-screen'");
     expect(source).toContain("win.on('leave-full-screen'");
     expect(preloadSource).toContain('onFullscreenChange: fanOutFullscreenChange');

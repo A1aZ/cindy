@@ -3,7 +3,8 @@
  *
  * 窗口规格：
  * - macOS 使用与分离右侧栏相同的独立顶层窗口，避免 parent 子窗进入原生全屏时异常
- * - controller 不主动 setFullScreen；macOS 打开时沿用系统原生 Space / 全屏呈现
+ * - controller 不按 owner 驱动全屏；macOS 打开时沿用系统原生 Space / 全屏呈现
+ * - 关闭全屏窗口时先退出原生全屏，等待 leave-full-screen 后再隐藏复用
  * - 用户可通过原生绿灯正常进入或退出全屏
  * - Windows / Linux 继续挂在 owner 窗口下面
  * - owner 最小化或关到托盘时，监视器一起消失
@@ -90,10 +91,13 @@ export function createResourceUsageWindow(parent?: BrowserWindow): BrowserWindow
     url.hash = hash;
     loadPromise = win.loadURL(url.toString());
   } else {
-    loadPromise = win.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`), {
-      query: { resourceUsageWindow: '1' },
-      hash,
-    });
+    loadPromise = win.loadFile(
+      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
+      {
+        query: { resourceUsageWindow: '1' },
+        hash,
+      },
+    );
   }
   void loadPromise.catch((error: unknown) => {
     log.warn('resource-usage window load rejected', {

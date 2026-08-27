@@ -13,10 +13,11 @@
  * - 通过 `resourceUsageWindow=1` 进入独立轻量 renderer 模块图
  */
 
-import { BrowserWindow, app, nativeTheme } from 'electron';
+import { BrowserWindow, app, nativeTheme, screen } from 'electron';
 import path from 'node:path';
 
 import { createLogger } from '../logger.js';
+import { installWindowFullscreenStateBroadcast } from '../mainWindowFullscreenStartup.js';
 import { markAppContentWindow } from '../windowFocusClassifier.js';
 import { installExternalLinkGuards } from '../secondary-windows.js';
 import { installSelectionContextMenu } from '../selection-context-menu.js';
@@ -65,13 +66,10 @@ export function createResourceUsageWindow(parent?: BrowserWindow): BrowserWindow
       webviewTag: false,
     },
   });
-  // 与分离右侧栏一致：辅助窗口拥有自己的原生全屏生命周期，状态必须由本窗口
-  // 推给 renderer，不能依赖主窗口的 fullscreen-change。
-  win.on('enter-full-screen', () => {
-    if (!win.isDestroyed()) win.webContents.send('fullscreen-change', true);
-  });
-  win.on('leave-full-screen', () => {
-    if (!win.isDestroyed()) win.webContents.send('fullscreen-change', false);
+  // 辅助窗口拥有自己的原生全屏生命周期；退出动画开始时交通灯已经恢复，需通过
+  // resize 边界兜底提前撤掉 renderer 的全屏标题留白，不能只等待 leave-full-screen。
+  installWindowFullscreenStateBroadcast(win, {
+    getDisplayBounds: (bounds) => screen.getDisplayMatching(bounds).bounds,
   });
   markResourceUsageWebContentsId(win.webContents.id);
   markAppContentWindow(win);

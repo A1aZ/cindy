@@ -28,13 +28,15 @@ describe('resource usage BrowserWindow security contract', () => {
     expect(source).not.toContain("once('ready-to-show'");
   });
 
-  it('only drives fullscreen to exit before hiding and follows its own native fullscreen events', () => {
+  it('only drives fullscreen to exit and uses the shared native-state broadcaster', () => {
     expect(controllerSource).toContain("win.once('leave-full-screen'");
     expect(controllerSource).toContain('win.setFullScreen(false)');
     expect(controllerSource).not.toContain('win.setFullScreen(true)');
-    expect(controllerSource).not.toContain("'enter-full-screen'");
-    expect(source).toContain("win.on('enter-full-screen'");
-    expect(source).toContain("win.on('leave-full-screen'");
+    expect(controllerSource).toContain("win.on('enter-full-screen'");
+    expect(source).toContain('installWindowFullscreenStateBroadcast(win');
+    expect(source).toContain('screen.getDisplayMatching(bounds).bounds');
+    expect(source).not.toContain("win.on('enter-full-screen'");
+    expect(source).not.toContain("win.on('leave-full-screen'");
     expect(preloadSource).toContain('onFullscreenChange: fanOutFullscreenChange');
     expect(preloadSource).toContain(
       "getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state')",

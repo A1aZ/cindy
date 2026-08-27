@@ -396,7 +396,7 @@ describe('ResourceUsageWindowController', () => {
     expect(owner.focus).not.toHaveBeenCalled();
   });
 
-  it('ignores owner hide during a macOS native fullscreen Space transition', () => {
+  it('tracks a pending macOS fullscreen entry without hiding the resource window', () => {
     const windows: FakeWindow[] = [];
     const mainSender = { id: 100 } as WebContents;
     const ownerListeners = new Map<string, () => void>();
@@ -426,11 +426,15 @@ describe('ResourceUsageWindowController', () => {
     expect(controller.open(mainSender)).toBe(true);
     windows[0]?.hide.mockClear();
 
-    expect(ownerListeners.has('hide')).toBe(false);
+    expect(ownerListeners.has('hide')).toBe(true);
     ownerListeners.get('hide')?.();
     expect(windows[0]?.hide).not.toHaveBeenCalled();
 
-    ownerListeners.get('minimize')?.();
+    windows[0]?.close();
+    expect(windows[0]?.setFullScreen).toHaveBeenCalledWith(false);
+    expect(windows[0]?.hide).not.toHaveBeenCalled();
+
+    windows[0]?.emitWindow('leave-full-screen');
     expect(windows[0]?.hide).toHaveBeenCalledOnce();
   });
 

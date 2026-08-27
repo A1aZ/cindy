@@ -65,6 +65,8 @@ export class ResourceUsageWindowController {
   private locale: SupportedLocale | null = null;
   private lastOwner: ResourceUsageOwnerWindow | null = null;
   private ownerHideUnsubscribers: Array<() => void> = [];
+  /** macOS 原生全屏动画开始后，isFullScreen() 在 enter-full-screen 前仍可能返回 false。 */
+  private enteringNativeFullscreen = false;
   /** 关闭全屏与重新打开可能交错；迟到的 leave-full-screen 只能完成原来的隐藏请求。 */
   private visibilityGeneration = 0;
 
@@ -241,6 +243,12 @@ export class ResourceUsageWindowController {
     win.on('restore', () => this.onNativeVisibilityChanged(win, true));
     win.on('hide', () => this.onNativeVisibilityChanged(win, false));
     win.on('minimize', () => this.onNativeVisibilityChanged(win, false));
+    win.on('enter-full-screen', () => {
+      if (win === this.winRef && !win.isDestroyed()) this.enteringNativeFullscreen = false;
+    });
+    win.on('leave-full-screen', () => {
+      if (win === this.winRef && !win.isDestroyed()) this.enteringNativeFullscreen = false;
+    });
     // index.html 的 <title>Cindy</title> 会在每次导航发出 page-title-updated，
     // 不拦截的话 Mission Control / 任务栏会把本地化标题盖回 Cindy。
     win.webContents.on('page-title-updated', (event) => {
@@ -294,6 +302,7 @@ export class ResourceUsageWindowController {
     this.clearPrewarmTimeout();
     this.clearLeaveTimeout();
     this.pendingOpen = false;
+    if (!win.isVisible()) this.enteringNativeFullscreen = false;
     this.visibilityGeneration += 1;
     this.setSamplingActive(win, true);
     if (win.isMinimized()) win.restore();
@@ -322,7 +331,7 @@ export class ResourceUsageWindowController {
       this.visible = false;
       if (options.restoreOwner !== false) this.focusOwnerWindow();
     };
-    if (this.platform() === 'darwin' && win.isFullScreen()) {
+    if (this.platform() === 'darwin' && (this.enteringNativeFullscreen || win.isFullScreen())) {
       win.once('leave-full-screen', finishHide);
       win.setFullScreen(false);
       this.leaveTimeout = setTimeout(
@@ -346,12 +355,29 @@ export class ResourceUsageWindowController {
     if (!owner?.on) return;
     const hide = () => this.hideWithOwner();
     // macOS 切换独立窗口的原生全屏 Space 时，owner 可能短暂发出 hide；把它
-    // 当成“主窗口主动隐藏”会立刻 hide 正在进入全屏的资源窗口。主窗口红灯关闭
-    // 已在 bootstrap 中显式调用 hideWithOwner，因此 macOS 这里只跟随 minimize / closed。
-    const events: Array<'hide' | 'minimize' | 'closed'> =
-      this.platform() === 'darwin' ? ['minimize', 'closed'] : ['hide', 'minimize', 'closed'];
+    // 当成“主窗口主动隐藏”会立刻 hide 正在进入全屏的资源窗口。这里把它作为进入动画
+    // 已开始的早期信号，确保 enter-full-screen 尚未到达时关闭也会先取消原生转换。
+    if (this.platform() === 'darwin') {
+      const trackFullscreenEntry = () => this.trackFullscreenEntryFromOwnerHide();
+      owner.on('hide', trackFullscreenEntry);
+      owner.on('minimize', hide);
+      owner.on('closed', hide);
+      this.ownerHideUnsubscribers = [
+        () => this.safeOff(owner, 'hide', trackFullscreenEntry),
+        () => this.safeOff(owner, 'minimize', hide),
+        () => this.safeOff(owner, 'closed', hide),
+      ];
+      return;
+    }
+    const events: Array<'hide' | 'minimize' | 'closed'> = ['hide', 'minimize', 'closed'];
     for (const event of events) owner.on(event, hide);
     this.ownerHideUnsubscribers = events.map((event) => () => this.safeOff(owner, event, hide));
+  }
+
+  private trackFullscreenEntryFromOwnerHide(): void {
+    const win = this.winRef;
+    if (!win || win.isDestroyed() || !win.isVisible() || win.isFullScreen()) return;
+    this.enteringNativeFullscreen = true;
   }
 
   private unbindOwnerVisibility(): void {
@@ -431,6 +457,7 @@ export class ResourceUsageWindowController {
     this.pendingOpen = false;
     this.samplingActive = false;
     this.destroyingWindow = false;
+    this.enteringNativeFullscreen = false;
     if (!options.preserveOwner) {
       this.unbindOwnerVisibility();
       this.lastOwner = null;

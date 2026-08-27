@@ -162,7 +162,11 @@ describe('auth login-flow reset', () => {
     );
     const mutationBody = source.slice(mutationStart, mutationEnd);
     expect(mutationBody).toContain('withCrossProcessLock(');
-    expect(mutationBody).toContain('if (!status.held) throw accountVaultLockError(status.reason);');
+    expect(mutationBody).toContain(
+      "status.reason === 'busy' && options.waitWhileBusyAfterRotation",
+    );
+    expect(mutationBody).toContain('throw accountVaultLockError(status.reason);');
+    expect(mutationBody).toContain("if (attempt.kind === 'committed') return attempt.result;");
     expect(mutationBody.indexOf('const vault = readAuthAccountVault({')).toBeGreaterThan(
       mutationBody.indexOf('if (!status.held)'),
     );
@@ -235,7 +239,8 @@ describe('auth login-flow reset', () => {
       loginStart,
     );
     const loginBody = source.slice(loginStart, loginEnd);
-    expect(loginBody).toContain('{ recoverInvalidForExplicitLogin: true }');
+    expect(loginBody).toContain('recoverInvalidForExplicitLogin: true');
+    expect(loginBody).toContain('waitWhileBusyAfterRotation: true');
     const transitionCommit = loginBody.indexOf('await transition.commit();');
     const transitionRollback = loginBody.indexOf('await transition.rollback();');
     expect(transitionCommit).toBeGreaterThan(
@@ -243,7 +248,7 @@ describe('auth login-flow reset', () => {
     );
     expect(transitionRollback).toBeGreaterThan(transitionCommit);
     expect(transitionRollback).toBeLessThan(
-      loginBody.indexOf('{ recoverInvalidForExplicitLogin: true }'),
+      loginBody.indexOf('recoverInvalidForExplicitLogin: true'),
     );
   });
 
@@ -262,6 +267,24 @@ describe('auth login-flow reset', () => {
     const clearEnd = source.indexOf('\n}\n\nfunction removeSafe(', clearStart);
     const clearBody = source.slice(clearStart, clearEnd);
     expect(clearBody.indexOf('`${filepath}.bak`')).toBeLessThan(clearBody.indexOf('filepath])'));
+  });
+
+  it('waits through a busy vault lock after the server has rotated a credential', () => {
+    const rotatedCredentialHelpers = [
+      ['async function rememberResourceSession(', '\n}\n\ntype ResourceSessionReplacementResult'],
+      ['async function replaceResourceSessionIfCurrent(', '\n}\n\ntype RejectedResourceSessionRemovalResult'],
+      ['async function replacePassportSessionIfCurrent(', '\n}\n\n/** Delete a rejected Passport'],
+      ['async function commitDesktopRefreshCredentials(', '\n}\n\n/**\n * Account refresh tokens'],
+    ] as const;
+
+    for (const [startMarker, endMarker] of rotatedCredentialHelpers) {
+      const start = source.indexOf(startMarker);
+      const end = source.indexOf(endMarker, start);
+      expect(start).toBeGreaterThan(-1);
+      expect(source.slice(start, end)).toContain(
+        'waitWhileBusyAfterRotation: true',
+      );
+    }
   });
 
   it('fails a Desktop account switch before owner teardown and rolls back under the vault lock', () => {

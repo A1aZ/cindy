@@ -853,48 +853,70 @@ function accountVaultLockError(reason: 'busy' | 'unavailable'): AuthApiError {
 async function transactAuthAccountVault<T>(
   operation: (vault: AuthAccountVault) => T | Promise<T>,
   afterPersist: (result: T) => void | Promise<void> = () => undefined,
-  options: { recoverInvalidForExplicitLogin?: boolean } = {},
+  options: {
+    recoverInvalidForExplicitLogin?: boolean;
+    waitWhileBusyAfterRotation?: boolean;
+  } = {},
 ): Promise<T> {
-  return withCrossProcessLock(
-    authAccountVaultLockPath(),
-    { label: 'auth-account-vault', waitMs: 5_000 },
-    async (status) => {
-      if (!status.held) throw accountVaultLockError(status.reason);
-      const previousRaw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
-      const previousWasAbsent =
-        previousRaw === null && isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY);
-      const vault = readAuthAccountVault({
-        recoverInvalid: options.recoverInvalidForExplicitLogin,
-      });
-      const result = await operation(vault);
-      writeAuthAccountVaultOrThrow(vault);
-      try {
-        // Keep the shared-userData lock through the active-session write,
-        // runtime teardown and final owner commit. Cancellation or any local
-        // boundary failure restores the complete pre-transition vault before
-        // another process can observe or extend the partial account switch.
-        await afterPersist(result);
-        return result;
-      } catch (error) {
-        if (previousWasAbsent) {
-          removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);
-        } else if (previousRaw !== null && !writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY, previousRaw)) {
-          throw new AuthApiError(
-            'CREDENTIAL_STORE_UNAVAILABLE',
-            503,
-            'Could not restore saved account credentials after a failed account switch',
-          );
+  type Attempt = { kind: 'busy' } | { kind: 'committed'; result: T };
+  let reportedBusyWait = false;
+  for (;;) {
+    const attempt: Attempt = await withCrossProcessLock(
+      authAccountVaultLockPath(),
+      { label: 'auth-account-vault', waitMs: 5_000 },
+      async (status) => {
+        if (!status.held) {
+          if (status.reason === 'busy' && options.waitWhileBusyAfterRotation) {
+            return { kind: 'busy' };
+          }
+          throw accountVaultLockError(status.reason);
         }
-        throw error;
-      }
-    },
-  );
+        const previousRaw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
+        const previousWasAbsent =
+          previousRaw === null && isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY);
+        const vault = readAuthAccountVault({
+          recoverInvalid: options.recoverInvalidForExplicitLogin,
+        });
+        const result = await operation(vault);
+        writeAuthAccountVaultOrThrow(vault);
+        try {
+          // Keep the shared-userData lock through the active-session write,
+          // runtime teardown and final owner commit. Cancellation or any local
+          // boundary failure restores the complete pre-transition vault before
+          // another process can observe or extend the partial account switch.
+          await afterPersist(result);
+          return { kind: 'committed', result };
+        } catch (error) {
+          if (previousWasAbsent) {
+            removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);
+          } else if (previousRaw !== null && !writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY, previousRaw)) {
+            throw new AuthApiError(
+              'CREDENTIAL_STORE_UNAVAILABLE',
+              503,
+              'Could not restore saved account credentials after a failed account switch',
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    if (attempt.kind === 'committed') return attempt.result;
+    // A refresh token has already rotated on the server, so a busy lock is not
+    // a retryable failure: abandoning the replacement would strand that saved
+    // account on the consumed generation. Keep yielding until the current
+    // owner releases the lock; unavailable storage still fails immediately.
+    if (!reportedBusyWait) {
+      reportedBusyWait = true;
+      log.warn('waiting for the account vault lock to persist a rotated credential');
+    }
+  }
 }
 
 async function mutateAuthAccountVault<T>(
   operation: (vault: AuthAccountVault) => T | Promise<T>,
+  options: { waitWhileBusyAfterRotation?: boolean } = {},
 ): Promise<T> {
-  return transactAuthAccountVault(operation);
+  return transactAuthAccountVault(operation, () => undefined, options);
 }
 
 async function clearAuthAccountVault(
@@ -951,10 +973,13 @@ async function rememberResourceSession(
     log.warn('resource session omitted passportId; keeping only the active compatibility record');
     return;
   }
-  await mutateAuthAccountVault((vault) => {
-    options.validateBeforeWrite?.();
-    writeResourceSessionToVault(vault, pair, realm, passportId, options);
-  });
+  await mutateAuthAccountVault(
+    (vault) => {
+      options.validateBeforeWrite?.();
+      writeResourceSessionToVault(vault, pair, realm, passportId, options);
+    },
+    { waitWhileBusyAfterRotation: true },
+  );
 }
 
 type ResourceSessionReplacementResult = 'stored' | 'stale' | 'missing';
@@ -968,16 +993,19 @@ async function replaceResourceSessionIfCurrent(input: {
   passportId: string;
   validateBeforeWrite?: () => void;
 }): Promise<ResourceSessionReplacementResult> {
-  return mutateAuthAccountVault((vault) => {
-    input.validateBeforeWrite?.();
-    const current = vault.resources[input.accountKey];
-    if (!current) return 'missing';
-    if (current.refreshToken !== input.expectedRefreshToken) return 'stale';
-    writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId, {
-      markActive: false,
-    });
-    return 'stored';
-  });
+  return mutateAuthAccountVault(
+    (vault) => {
+      input.validateBeforeWrite?.();
+      const current = vault.resources[input.accountKey];
+      if (!current) return 'missing';
+      if (current.refreshToken !== input.expectedRefreshToken) return 'stale';
+      writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId, {
+        markActive: false,
+      });
+      return 'stored';
+    },
+    { waitWhileBusyAfterRotation: true },
+  );
 }
 
 type RejectedResourceSessionRemovalResult = 'removed' | 'stale' | 'missing';
@@ -1105,7 +1133,10 @@ async function commitDesktopLoginSessions(
         throw error;
       }
     },
-    { recoverInvalidForExplicitLogin: true },
+    {
+      recoverInvalidForExplicitLogin: true,
+      waitWhileBusyAfterRotation: true,
+    },
   );
 }
 
@@ -1120,14 +1151,17 @@ async function replacePassportSessionIfCurrent(input: {
   memberships?: readonly (AuthMembership | AccountMembership | StoredAccountMetadata)[];
 }): Promise<PassportSessionReplacementResult> {
   try {
-    return await mutateAuthAccountVault((vault) => {
-      const key = passportVaultKey(input.realm, input.passportId);
-      if (vault.passports[key]?.accountRefreshToken !== input.expectedAccountRefreshToken) {
-        return 'stale';
-      }
-      writePassportSessionToVault(vault, input);
-      return 'stored';
-    });
+    return await mutateAuthAccountVault(
+      (vault) => {
+        const key = passportVaultKey(input.realm, input.passportId);
+        if (vault.passports[key]?.accountRefreshToken !== input.expectedAccountRefreshToken) {
+          return 'stale';
+        }
+        writePassportSessionToVault(vault, input);
+        return 'stored';
+      },
+      { waitWhileBusyAfterRotation: true },
+    );
   } catch (error) {
     if (error instanceof AuthApiError && error.code === 'CREDENTIAL_STORE_UNAVAILABLE') {
       return 'write-failed';
@@ -1218,6 +1252,7 @@ async function commitDesktopRefreshCredentials(
         writePersistedAuthSessionOrThrow(pair.refreshToken, realm);
       }
     },
+    { waitWhileBusyAfterRotation: true },
   );
 }
 

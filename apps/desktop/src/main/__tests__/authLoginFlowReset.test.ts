@@ -152,6 +152,50 @@ describe('auth login-flow reset', () => {
     expect(profileBody).toContain('membership.passportId ?? currentUser.passportId');
   });
 
+  it('serializes saved-account vault mutations across shared-userData processes', () => {
+    const mutationStart = source.indexOf('async function mutateAuthAccountVault');
+    const mutationEnd = source.indexOf(
+      '\n}\n\nasync function clearAuthAccountVault',
+      mutationStart,
+    );
+    const mutationBody = source.slice(mutationStart, mutationEnd);
+    expect(mutationBody).toContain('withCrossProcessLock(');
+    expect(mutationBody).toContain('if (!status.held) throw accountVaultLockError(status.reason);');
+    expect(mutationBody.indexOf('const vault = readAuthAccountVault();')).toBeGreaterThan(
+      mutationBody.indexOf('if (!status.held)'),
+    );
+    expect(mutationBody.indexOf('writeAuthAccountVaultOrThrow(vault);')).toBeGreaterThan(
+      mutationBody.indexOf('await operation(vault);'),
+    );
+
+    for (const helper of [
+      'async function rememberResourceSession(',
+      'async function rememberPassportSession(',
+      'async function replacePassportSessionIfCurrent(',
+      'async function removePassportSessionIfCurrent(',
+      'async function rememberUpdatedMembershipMetadata(',
+      'async function removeVaultAccount(',
+    ]) {
+      const start = source.indexOf(helper);
+      const end = source.indexOf('\n}\n', start);
+      expect(start).toBeGreaterThan(-1);
+      expect(source.slice(start, end)).toContain('mutateAuthAccountVault(');
+    }
+  });
+
+  it('fails a Desktop account switch before owner teardown when session persistence fails', () => {
+    const completeStart = source.indexOf('async function completeLogin(');
+    const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
+    const completeBody = source.slice(completeStart, completeEnd);
+    const durableSession = completeBody.indexOf('writePersistedAuthSessionOrThrow(');
+    const ownerCommit = completeBody.indexOf('await withCloudOwnerCommit({');
+    expect(durableSession).toBeGreaterThan(-1);
+    expect(ownerCommit).toBeGreaterThan(durableSession);
+    expect(completeBody.slice(ownerCommit)).not.toContain(
+      'writePersistedAuthSession(outcome.refreshToken',
+    );
+  });
+
   it('invalidates every pending add-account action when its surface closes', () => {
     const runStart = source.indexOf('async function runLoginAction(action: DesktopLoginAction)');
     const runEnd = source.indexOf('\n}\n\nexport async function dispatchLoginAction', runStart);
@@ -174,7 +218,7 @@ describe('auth login-flow reset', () => {
   it('single-flights Passport refresh and rejects cross-realm personal account switching', () => {
     const helperStart = source.indexOf('async function refreshPassportSessionSingleFlight(');
     const helperEnd = source.indexOf(
-      '\n}\n\nfunction rememberUpdatedMembershipMetadata',
+      '\n}\n\nasync function rememberUpdatedMembershipMetadata',
       helperStart,
     );
     const helperBody = source.slice(helperStart, helperEnd);

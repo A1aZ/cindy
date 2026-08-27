@@ -391,6 +391,44 @@ describe('mobile auth-server login', () => {
     expect(switchBody).toContain("throw authCodeError('REGION_MISMATCH')");
   });
 
+  it('rolls a failed account switch back to the latest serialized session', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const switchStart = authSource.indexOf('const switchAccount = useCallback');
+    const switchBody = authSource.slice(
+      switchStart,
+      authSource.indexOf('\n\n  const beginAddAccount', switchStart),
+    );
+    const serialized = switchBody.indexOf(
+      'await serializeRefreshTokenMutation(async () => {',
+    );
+    const latestRead = switchBody.indexOf(
+      'const previousSession = await readPersistedAuthSessionStrict();',
+      serialized,
+    );
+    const targetWrite = switchBody.indexOf(
+      'await writePersistedAuthSession(pair!.refreshToken, realm!);',
+      latestRead,
+    );
+    const activeVaultCommit = switchBody.indexOf(
+      'await mutateMobileAccountVault((vault) => {',
+      targetWrite,
+    );
+    const rollbackWrite = switchBody.indexOf(
+      'previousSession.refreshToken,',
+      activeVaultCommit,
+    );
+
+    expect(serialized).toBeGreaterThan(-1);
+    expect(latestRead).toBeGreaterThan(serialized);
+    expect(targetWrite).toBeGreaterThan(latestRead);
+    expect(activeVaultCommit).toBeGreaterThan(targetWrite);
+    expect(rollbackWrite).toBeGreaterThan(activeVaultCommit);
+    expect(switchBody).not.toContain('const oldSession = initialVault');
+  });
+
   it('clears the previous owner canary flag before best-effort sync', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),

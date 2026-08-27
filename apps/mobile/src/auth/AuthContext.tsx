@@ -2091,27 +2091,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw authCodeError('REGION_MISMATCH');
         }
 
-        const oldSession = initialVault.activeAccountKey
-          ? initialVault.resources[initialVault.activeAccountKey]
-          : null;
         const generation = ++authGenerationRef.current;
         refreshInFlightRef.current = null;
         try {
-          await serializeRefreshTokenMutation(() =>
-            writePersistedAuthSession(pair!.refreshToken, realm!),
-          );
-          await mutateMobileAccountVault((vault) => {
-            if (!vault.resources[accountKey]) {
-              throw authCodeError('SAVED_ACCOUNT_NOT_FOUND');
+          await serializeRefreshTokenMutation(async () => {
+            if (authGenerationRef.current !== generation) {
+              throw authCodeError('AUTH_FLOW_SUPERSEDED');
             }
-            vault.activeAccountKey = accountKey;
+            // Capture the latest durable session only after entering the same
+            // queue used by refresh rotation. A switch that started from T0
+            // must roll back to a concurrently persisted T1, never its stale
+            // initial vault snapshot.
+            const previousSession = await readPersistedAuthSessionStrict();
+            await writePersistedAuthSession(pair!.refreshToken, realm!);
+            try {
+              await mutateMobileAccountVault((vault) => {
+                if (!vault.resources[accountKey]) {
+                  throw authCodeError('SAVED_ACCOUNT_NOT_FOUND');
+                }
+                vault.activeAccountKey = accountKey;
+              });
+            } catch (error) {
+              if (previousSession) {
+                await writePersistedAuthSession(
+                  previousSession.refreshToken,
+                  previousSession.realm,
+                );
+              } else {
+                await deleteSecureItem(AUTH_SESSION_KEY);
+              }
+              throw error;
+            }
           });
         } catch (error) {
-          if (oldSession) {
-            await serializeRefreshTokenMutation(() =>
-              writePersistedAuthSession(oldSession.refreshToken, oldSession.realm),
-            ).catch(() => undefined);
-          }
           setMobileAuthOwner(userRef.current?.id ?? null);
           throw error;
         }
@@ -2727,9 +2739,11 @@ function authCodeError(code: string): Error & { code: string } {
 }
 
 async function readPersistedAuthSession(): Promise<AuthSessionRecord | null> {
-  return parseAuthSessionRecord(
-    await getSecureItem(AUTH_SESSION_KEY).catch(() => null),
-  );
+  return readPersistedAuthSessionStrict().catch(() => null);
+}
+
+async function readPersistedAuthSessionStrict(): Promise<AuthSessionRecord | null> {
+  return parseAuthSessionRecord(await getSecureItem(AUTH_SESSION_KEY));
 }
 
 async function writePersistedAuthSession(

@@ -341,13 +341,46 @@ describe('auth login-flow reset', () => {
     const initializeEnd = source.indexOf('\n}\n\n/**\n * 冷启动 refresh 流程本体', initializeStart);
     const initializeBody = source.slice(initializeStart, initializeEnd);
     const localGuard = initializeBody.indexOf("getActiveAppSession().mode === 'local'");
-    const refreshTokenRead = initializeBody.indexOf('readPersistedAuthSession()');
+    const refreshTokenRead = initializeBody.indexOf(
+      'await reconcileDesktopActiveAuthSession()',
+    );
 
     expect(localGuard).toBeGreaterThan(-1);
     expect(refreshTokenRead).toBeGreaterThan(localGuard);
     expect(initializeBody.slice(localGuard, refreshTokenRead)).toContain(
       'return snapshotAuthState();',
     );
+  });
+
+  it('repairs an interrupted active-session projection before cold-start refresh', () => {
+    const helperStart = source.indexOf(
+      'async function reconcileDesktopActiveAuthSession()',
+    );
+    const helperEnd = source.indexOf(
+      '\n}\n\nfunction readPersistedRefreshToken',
+      helperStart,
+    );
+    const helperBody = source.slice(helperStart, helperEnd);
+    expect(helperBody).toContain('authAccountVaultLockPath()');
+    expect(helperBody).toContain("label: 'auth-account-vault-reconcile'");
+    expect(helperBody).toContain('vault.resources[vault.activeAccountKey]');
+    expect(helperBody).toContain('session.refreshToken !== activeResource.refreshToken');
+    expect(helperBody).toContain('writePersistedAuthSessionOrThrow(');
+
+    const initializeStart = source.indexOf('export async function initialize(');
+    const initializeEnd = source.indexOf(
+      '\n}\n\n/**\n * 冷启动 refresh 流程本体',
+      initializeStart,
+    );
+    const initializeBody = source.slice(initializeStart, initializeEnd);
+    const reconcileAt = initializeBody.indexOf(
+      'await reconcileDesktopActiveAuthSession()',
+    );
+    const refreshAt = initializeBody.indexOf(
+      'runColdStartRefreshFlow(storedToken, persistedSession.realm)',
+    );
+    expect(reconcileAt).toBeGreaterThan(-1);
+    expect(refreshAt).toBeGreaterThan(reconcileAt);
   });
 
   it('activates a restored realm only after the refreshed membership passes build policy', () => {

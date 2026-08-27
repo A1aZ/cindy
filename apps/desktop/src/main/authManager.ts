@@ -1303,6 +1303,43 @@ function readPersistedAuthSession() {
   return parseAuthSessionRecord(readSafe(AUTH_SESSION_KEY));
 }
 
+/**
+ * The aggregate vault is the crash-consistent owner record. Repair its
+ * compatibility session projection under the same cross-process lock before
+ * cold start can send a refresh request with a consumed token generation.
+ */
+async function reconcileDesktopActiveAuthSession(): Promise<
+  ReturnType<typeof readPersistedAuthSession>
+> {
+  return withCrossProcessLock(
+    authAccountVaultLockPath(),
+    { label: 'auth-account-vault-reconcile', waitMs: 5_000 },
+    async (status) => {
+      if (!status.held) throw accountVaultLockError(status.reason);
+      const vault = readAuthAccountVault();
+      const session = readPersistedAuthSession();
+      const activeResource = vault.activeAccountKey
+        ? vault.resources[vault.activeAccountKey]
+        : undefined;
+      if (!activeResource) return session;
+      if (
+        session?.realm !== activeResource.realm ||
+        session.refreshToken !== activeResource.refreshToken
+      ) {
+        writePersistedAuthSessionOrThrow(
+          activeResource.refreshToken,
+          activeResource.realm,
+        );
+      }
+      return {
+        version: 1,
+        realm: activeResource.realm,
+        refreshToken: activeResource.refreshToken,
+      };
+    },
+  );
+}
+
 function readPersistedRefreshToken(realm = activeAuthRealm): string | null {
   const session = readPersistedAuthSession();
   return session?.realm === realm ? session.refreshToken : null;
@@ -3622,7 +3659,16 @@ export async function initialize(options: AuthInitializeOptions = {}): Promise<A
     removeSafe(LEGACY_REFRESH_TOKEN_KEY);
     removeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY);
   }
-  let persistedSession = readPersistedAuthSession();
+  let persistedSession: ReturnType<typeof readPersistedAuthSession>;
+  try {
+    persistedSession = await reconcileDesktopActiveAuthSession();
+  } catch (error) {
+    log.warn(
+      'cold-start active credential reconciliation failed; preserving credentials for retry',
+      error,
+    );
+    return finishColdStartSignedOut('cold-start-credential-reconcile-unavailable');
+  }
   if (!persistedSession) {
     // 旧版只保存裸 refresh token，没有 realm 可供校验。只有独占 userData 的
     // primary 才能按当前构建区域迁移它；passive 若猜 AUTH_REGION，恰好会在旧

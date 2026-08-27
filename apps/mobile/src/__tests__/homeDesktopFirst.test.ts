@@ -485,6 +485,34 @@ describe('mobile home desktop-first surface', () => {
     expect(source).not.toContain('refreshControl={<RefreshControl refreshing={loading}');
   });
 
+  it('binds every Home device projection and async continuation to the active account generation', () => {
+    const source = readSource('app/devices/index.tsx');
+
+    // Home remains mounted across saved-account activation, so clearing the shared DeviceLink
+    // stores is insufficient: page-local refs/state must disappear before the next paint too.
+    expect(source).toContain('const { accountGeneration, apiFetch, deviceId: selfDeviceId, user } = auth;');
+    expect(source).toContain('const homeAccountGenerationRef = useRef(accountGeneration);');
+    expect(source).toContain('useLayoutEffect(() => {');
+    expect(source).toContain('syncInFlightRef.current = null;');
+    expect(source).toContain('devicesRef.current = [];');
+    expect(source).toContain('setDevices([]);');
+    expect(source).toContain('setDeviceConnectionStates({});');
+    expect(source).toContain('setScheduleIndex(new Map());');
+
+    // Both REST and per-device WS hydrations capture the owner generation and refuse every late
+    // write. The old task's finally block must not drain a queue now owned by the next account.
+    expect(source).toContain('const accountGenerationAtStart = accountGeneration;');
+    expect(source).toContain('hydrateDeviceSessions(item.device, accountGenerationAtStart)');
+    expect(source).toContain('homeAccountGenerationRef.current !== expectedAccountGeneration');
+    expect(source).toContain('return { failure: null, offline: false, superseded: true };');
+    expect(source).toContain('if (syncInFlightRef.current !== task) return;');
+
+    // A late account-keyed startup cache read is another producer of the same projection and must
+    // pass the identical owner fence before hydrating the shared session store.
+    expect(source).toContain('const expectedAccountGeneration = accountGeneration;');
+    expect(source).toMatch(/cancelled\s*\|\| homeAccountGenerationRef\.current !== expectedAccountGeneration/);
+  });
+
   it('does not show the no-device empty state before startup sync settles', () => {
     const source = readSource('app/devices/index.tsx');
 

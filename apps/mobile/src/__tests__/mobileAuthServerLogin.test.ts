@@ -379,6 +379,14 @@ describe('mobile auth-server login', () => {
     );
     expect(switchRefreshAccount).toBeGreaterThan(-1);
     expect(switchReadMemberships).toBeGreaterThan(switchRefreshAccount);
+    expect(switchBody).toContain('replaceMobileResourceSessionIfCurrent({');
+    expect(switchBody).toContain('removeMobileResourceSessionIfCurrent({');
+    expect(switchBody).toContain(
+      'expectedRefreshToken: resource.refreshToken',
+    );
+    expect(switchBody).toContain('validateBeforeWrite: () => {');
+    expect(switchBody).toContain("if (removal === 'stale')");
+    expect(switchBody).toContain("error.code === 'DEVICE_MISMATCH'");
     const resourceStored = switchBody.indexOf(
       'await rememberMobileResourceSession(',
     );

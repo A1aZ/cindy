@@ -28,7 +28,9 @@ import {
   mutateMobileAccountVault,
   parseMobileAccountVault,
   removeMobilePassportSessionIfCurrent,
+  removeMobileResourceSessionIfCurrent,
   replaceMobilePassportSessionIfCurrent,
+  replaceMobileResourceSessionIfCurrent,
   transactMobileAccountVault,
 } from '../mobileAccountVault';
 
@@ -201,6 +203,98 @@ describe('mobile account vault', () => {
       ),
     ).resolves.toBe(true);
     expect(parseMobileAccountVault(secureStorage.value).passports).toEqual({});
+  });
+
+  it('replaces a Resource generation only while its consumed token is current', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-old',
+          metadata,
+          lastUsedAt: 10,
+        },
+      },
+      passports: {},
+    });
+    const pair = {
+      accessToken: 'access-new',
+      refreshToken: 'resource-new',
+      membership: {
+        id: metadata.membershipId,
+        passportId: metadata.passportId,
+        displayName: metadata.displayName,
+        email: metadata.email,
+        avatarUrl: metadata.avatarUrl,
+        kind: metadata.kind,
+        role: metadata.role,
+        orgId: metadata.orgId,
+        orgName: metadata.orgName,
+        orgLogoUrl: metadata.orgLogoUrl,
+      },
+    };
+
+    await expect(
+      replaceMobileResourceSessionIfCurrent({
+        accountKey,
+        expectedRefreshToken: 'resource-old',
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+      }),
+    ).resolves.toBe('stored');
+    await expect(
+      replaceMobileResourceSessionIfCurrent({
+        accountKey,
+        expectedRefreshToken: 'resource-old',
+        pair: { ...pair, refreshToken: 'resource-late' },
+        realm: 'global',
+        passportId: metadata.passportId,
+      }),
+    ).resolves.toBe('stale');
+    expect(
+      parseMobileAccountVault(secureStorage.value).resources[accountKey]
+        ?.refreshToken,
+    ).toBe('resource-new');
+  });
+
+  it('does not delete a Resource generation replaced by a later login', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-new-login',
+          metadata,
+          lastUsedAt: 20,
+        },
+      },
+      passports: {},
+    });
+
+    await expect(
+      removeMobileResourceSessionIfCurrent({
+        accountKey,
+        expectedRefreshToken: 'resource-old-request',
+      }),
+    ).resolves.toBe('stale');
+    expect(
+      parseMobileAccountVault(secureStorage.value).resources[accountKey]
+        ?.refreshToken,
+    ).toBe('resource-new-login');
+
+    await expect(
+      removeMobileResourceSessionIfCurrent({
+        accountKey,
+        expectedRefreshToken: 'resource-new-login',
+      }),
+    ).resolves.toBe('removed');
+    expect(parseMobileAccountVault(secureStorage.value).resources).toEqual({});
   });
 
   it('does not overwrite saved credentials when SecureStore cannot be read', async () => {

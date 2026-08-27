@@ -232,10 +232,12 @@ export async function rememberMobileResourceSession(
   realm: AuthRegion,
   passportId = pair.membership.passportId,
   markActive = true,
+  validateBeforeWrite: () => void = () => undefined,
 ): Promise<string | null> {
   if (!passportId) return null;
   const key = accountVaultKey(realm, pair.membership.id);
   await mutateMobileAccountVault((vault) => {
+    validateBeforeWrite();
     delete vault.signedOutAt;
     vault.resources[key] = {
       realm,
@@ -246,6 +248,63 @@ export async function rememberMobileResourceSession(
     if (markActive) vault.activeAccountKey = key;
   });
   return key;
+}
+
+export type MobileResourceSessionReplacementResult =
+  | 'stored'
+  | 'stale'
+  | 'missing';
+
+/** Store a rotated Resource token only while its consumed generation is current. */
+export async function replaceMobileResourceSessionIfCurrent(input: {
+  accountKey: string;
+  expectedRefreshToken: string;
+  pair: AuthTokenPair;
+  realm: AuthRegion;
+  passportId: string;
+  validateBeforeWrite?: () => void;
+}): Promise<MobileResourceSessionReplacementResult> {
+  return mutateMobileAccountVault((vault) => {
+    input.validateBeforeWrite?.();
+    const current = vault.resources[input.accountKey];
+    if (!current) return 'missing';
+    if (current.refreshToken !== input.expectedRefreshToken) return 'stale';
+    delete vault.signedOutAt;
+    vault.resources[input.accountKey] = {
+      realm: input.realm,
+      refreshToken: input.pair.refreshToken,
+      metadata: storedAccountMetadataFromMembership(
+        input.pair.membership,
+        input.passportId,
+      ),
+      lastUsedAt: Date.now(),
+    };
+    return 'stored';
+  });
+}
+
+export type MobileResourceSessionRemovalResult =
+  | 'removed'
+  | 'stale'
+  | 'missing';
+
+/** Delete only the Resource token generation that a request proved unusable. */
+export async function removeMobileResourceSessionIfCurrent(input: {
+  accountKey: string;
+  expectedRefreshToken: string;
+  validateBeforeWrite?: () => void;
+}): Promise<MobileResourceSessionRemovalResult> {
+  return mutateMobileAccountVault((vault) => {
+    input.validateBeforeWrite?.();
+    const current = vault.resources[input.accountKey];
+    if (!current) return 'missing';
+    if (current.refreshToken !== input.expectedRefreshToken) return 'stale';
+    delete vault.resources[input.accountKey];
+    if (vault.activeAccountKey === input.accountKey) {
+      vault.activeAccountKey = null;
+    }
+    return 'removed';
+  });
 }
 
 export async function rememberMobilePassportSession(input: {

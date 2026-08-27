@@ -417,7 +417,7 @@ describe('mobile auth-server login', () => {
       targetWrite,
     );
     const rollbackWrite = switchBody.indexOf(
-      'previousSession.refreshToken,',
+      'await restorePersistedAuthSession(previousSession);',
       activeVaultCommit,
     );
 
@@ -427,6 +427,43 @@ describe('mobile auth-server login', () => {
     expect(activeVaultCommit).toBeGreaterThan(targetWrite);
     expect(rollbackWrite).toBeGreaterThan(activeVaultCommit);
     expect(switchBody).not.toContain('const oldSession = initialVault');
+  });
+
+  it('durably commits an added account before clearing the previous runtime', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const acceptStart = authSource.indexOf('const acceptOutcome = useCallback');
+    const acceptBody = authSource.slice(
+      acceptStart,
+      authSource.indexOf('const refresh = useCallback', acceptStart),
+    );
+    const serialized = acceptBody.indexOf(
+      'const persisted = await serializeRefreshTokenMutation(async () => {',
+    );
+    const targetWrite = acceptBody.indexOf(
+      'await writePersistedAuthSession(outcome.refreshToken, committedRealm);',
+      serialized,
+    );
+    const activeVaultCommit = acceptBody.indexOf(
+      'await mutateMobileAccountVault((vault) => {',
+      targetWrite,
+    );
+    const rollback = acceptBody.indexOf(
+      'await restorePersistedAuthSession(previousPersistedSession);',
+      activeVaultCommit,
+    );
+    const runtimeClear = acceptBody.indexOf(
+      'await clearAccountScopedRuntimeForSwitch();',
+      rollback,
+    );
+
+    expect(serialized).toBeGreaterThan(-1);
+    expect(targetWrite).toBeGreaterThan(serialized);
+    expect(activeVaultCommit).toBeGreaterThan(targetWrite);
+    expect(rollback).toBeGreaterThan(activeVaultCommit);
+    expect(runtimeClear).toBeGreaterThan(rollback);
   });
 
   it('clears the previous owner canary flag before best-effort sync', () => {

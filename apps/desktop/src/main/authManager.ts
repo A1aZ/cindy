@@ -87,6 +87,7 @@ import {
 } from './authBoundaryQuarantine.js';
 import { buildFocusDeepLink } from './deepLink';
 import { getResolvedMainLocale, t } from './i18n';
+import { atomicWriteFileSync } from './utils/atomicWriteFile.js';
 import {
   activateClientEndpointRealm,
   getClientEndpoint,
@@ -524,6 +525,87 @@ function writeSafe(key: string, value: string): boolean {
   }
 }
 
+/**
+ * The aggregate account vault needs atomic replacement because one partial
+ * write would otherwise discard every saved resource and Passport session.
+ * During the Windows backup-swap fallback, readers use the old backup rather
+ * than trying to restore it while the writer still owns the vault lock.
+ */
+function readAtomicSafe(key: string): string | null {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (atomic read)', key);
+      return null;
+    }
+    const filepath = path.join(SAFE_STORAGE_DIR(), `${key}.enc`);
+    let content: string;
+    try {
+      content = fs.readFileSync(filepath, 'utf-8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      content = fs.readFileSync(`${filepath}.bak`, 'utf-8');
+    }
+    return safeStorage.decryptString(Buffer.from(content, 'base64'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    logSafeStorageIssueOnce('atomic decrypt failed', key, err);
+    return null;
+  }
+}
+
+function isAtomicPersistedSecretAbsent(key: string): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  const filepath = path.join(SAFE_STORAGE_DIR(), `${key}.enc`);
+  for (const candidate of [filepath, `${filepath}.bak`]) {
+    try {
+      fs.accessSync(candidate, fs.constants.F_OK);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') return false;
+    }
+  }
+  return true;
+}
+
+function writeAtomicSafe(key: string, value: string): boolean {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (atomic write)', key);
+      return false;
+    }
+    atomicWriteFileSync(
+      path.join(SAFE_STORAGE_DIR(), `${key}.enc`),
+      safeStorage.encryptString(value).toString('base64'),
+    );
+    return true;
+  } catch (err) {
+    logSafeStorageIssueOnce('atomic encrypt/persist failed', key, err);
+    return false;
+  }
+}
+
+function removeAtomicSafeOrThrow(key: string): void {
+  const filepath = path.join(SAFE_STORAGE_DIR(), `${key}.enc`);
+  try {
+    // Remove the backup first so deleting the main file cannot resurrect an
+    // older vault on the next atomic write.
+    for (const candidate of [`${filepath}.bak`, filepath]) {
+      try {
+        fs.unlinkSync(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+    }
+  } catch (error) {
+    logSafeStorageIssueOnce('atomic delete failed', key, error);
+    throw new AuthApiError(
+      'CREDENTIAL_STORE_UNAVAILABLE',
+      503,
+      'Could not clear saved account credentials',
+    );
+  }
+}
+
 function removeSafe(key: string): void {
   try {
     fs.unlinkSync(path.join(SAFE_STORAGE_DIR(), `${key}.enc`));
@@ -562,9 +644,9 @@ function isStoredAccountMetadata(value: unknown): value is StoredAccountMetadata
 }
 
 function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): AuthAccountVault {
-  const raw = readSafe(AUTH_ACCOUNT_VAULT_KEY);
+  const raw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
   if (raw === null) {
-    if (isPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)) return emptyAuthAccountVault();
+    if (isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)) return emptyAuthAccountVault();
     log.warn('encrypted auth account vault exists but is temporarily unreadable');
     if (options.allowUnreadable) return emptyAuthAccountVault();
     throw new AuthApiError(
@@ -636,7 +718,7 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
 }
 
 function writeAuthAccountVault(vault: AuthAccountVault): boolean {
-  return writeSafe(AUTH_ACCOUNT_VAULT_KEY, JSON.stringify(vault));
+  return writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY, JSON.stringify(vault));
 }
 
 function writeAuthAccountVaultOrThrow(vault: AuthAccountVault): void {
@@ -688,7 +770,7 @@ async function clearAuthAccountVault(): Promise<void> {
     { label: 'auth-account-vault-clear', waitMs: 5_000 },
     async (status) => {
       if (!status.held) throw accountVaultLockError(status.reason);
-      removeSafe(AUTH_ACCOUNT_VAULT_KEY);
+      removeAtomicSafeOrThrow(AUTH_ACCOUNT_VAULT_KEY);
     },
   );
 }
@@ -968,6 +1050,25 @@ function writePersistedAuthSessionOrThrow(refreshToken: string, realm = activeAu
     503,
     'Could not persist the active account session',
   );
+}
+
+function restorePersistedAuthSessionIfCurrent(
+  expectedRefreshToken: string,
+  expectedRealm: AuthRegion,
+  previousSession: ReturnType<typeof readPersistedAuthSession>,
+): void {
+  const expected = serializeAuthSessionRecord(expectedRealm, expectedRefreshToken);
+  if (readSafe(AUTH_SESSION_KEY) !== expected) return;
+  if (previousSession) {
+    if (!writePersistedAuthSession(previousSession.refreshToken, previousSession.realm)) {
+      log.warn('failed to restore the previous persisted auth session after login rollback');
+    }
+    return;
+  }
+  const removed = removeSafeIfUnchanged(AUTH_SESSION_KEY, expected);
+  if (removed === 'deleted' && expectedRealm === AUTH_REGION) {
+    removeSafeIfUnchanged(LEGACY_RESOURCE_REFRESH_TOKEN_KEY, expectedRefreshToken);
+  }
 }
 
 /**
@@ -3578,13 +3679,16 @@ async function completeLogin(
     outcome.accountDeletionRestored === true || pendingAccountDeletionRestored;
   const nextUser = mapMembershipToAuthUser(outcome.membership);
   const previousSession = getActiveAppSession();
-  if (authStateEpoch !== loginEpoch) {
-    throw new AuthApiError(
-      'AUTH_FLOW_SUPERSEDED',
-      409,
-      'Login was superseded by a newer auth action',
-    );
-  }
+  const assertTransitionCurrent = (): void => {
+    if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch) {
+      throw new AuthApiError(
+        'AUTH_FLOW_SUPERSEDED',
+        409,
+        'Login was superseded by a newer auth action',
+      );
+    }
+  };
+  assertTransitionCurrent();
 
   const committedRealm = pendingAuthRealm ?? AUTH_REGION;
   const accountRefreshToken = outcome.accountRefreshToken ?? pendingAccountRefreshToken;
@@ -3592,6 +3696,7 @@ async function completeLogin(
   // target session before tearing down the current owner so a later local
   // boundary failure cannot strand the newly authenticated account.
   await rememberResourceSession(outcome, committedRealm, { markActive: true });
+  assertTransitionCurrent();
   if (accountRefreshToken && nextUser.passportId) {
     await rememberPassportSession({
       realm: committedRealm,
@@ -3600,71 +3705,73 @@ async function completeLogin(
       memberships:
         pendingAccountMemberships.length > 0 ? pendingAccountMemberships : [outcome.membership],
     });
+    assertTransitionCurrent();
   }
   // Switching is not committed until the compatibility active-session record
   // is durable. Failing here keeps the old owner and its runtimes intact;
   // ignoring this write would report success only in memory and lose the
   // selected account on restart.
+  assertTransitionCurrent();
+  const previousPersistedSession = readPersistedAuthSession();
   writePersistedAuthSessionOrThrow(outcome.refreshToken, committedRealm);
-  await withCloudOwnerCommit({
-    previousOwnerId: previousSession.dataOwnerId,
-    nextOwnerId: nextUser.id,
-    prepareTransition: async () => {
-      if (!accountSwitchTeardown) {
-        throw new Error('login cloud owner transition requires a teardown hook');
-      }
-      await accountSwitchTeardown({
-        previousUserId: previousSession.dataOwnerId ?? previousSession.mode,
-        nextUserId: nextUser.id,
-      });
-    },
-    prepareCommit: async () => {
-      if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch) {
-        throw new AuthApiError(
-          'AUTH_FLOW_SUPERSEDED',
-          409,
-          'Login was superseded by a newer auth action',
-        );
-      }
-      await claimLegacyNamespaceForVerifiedUser(nextUser.id);
-      if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch) {
-        throw new AuthApiError(
-          'AUTH_FLOW_SUPERSEDED',
-          409,
-          'Login was superseded by a newer auth action',
-        );
-      }
-    },
-    commit: () => {
-      pendingAccountToken = null;
-      pendingAccountRefreshToken = null;
-      pendingAccountMemberships = [];
-      pendingAccountDeletionRestored = false;
-      accessToken = outcome.accessToken;
-      persistedRefreshTokenNeedsIdentityCheck = false;
-      clearReplacementIntegrationReloadTimers();
-      activateClientEndpointRealm(committedRealm);
-      activeAuthRealm = committedRealm;
-      if (!isPassiveSharedUserDataInstance()) {
-        removeSafe(LEGACY_REFRESH_TOKEN_KEY);
-      }
-      lastAcceptedRefreshToken = outcome.refreshToken;
-      if (!isPassiveSharedUserDataInstance()) {
-        removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
-        clearReloginFlag();
-      }
-      accountDeletionRestoredNoticePending = deletionWasRestored;
-      // 显式登录解除本进程登出墓碑(passive / foreign-device)。
-      passiveLocalSignOut = false;
-      foreignDeviceLocalSignOut = false;
-      currentUser = nextUser;
-      commitCloudAppSession(currentUser.id);
-      if (!isPassiveSharedUserDataInstance()) {
-        canaryFlagStore.clear();
-      }
-      pendingAuthRealm = null;
-    },
-  });
+  try {
+    await withCloudOwnerCommit({
+      previousOwnerId: previousSession.dataOwnerId,
+      nextOwnerId: nextUser.id,
+      prepareTransition: async () => {
+        assertTransitionCurrent();
+        if (!accountSwitchTeardown) {
+          throw new Error('login cloud owner transition requires a teardown hook');
+        }
+        await accountSwitchTeardown({
+          previousUserId: previousSession.dataOwnerId ?? previousSession.mode,
+          nextUserId: nextUser.id,
+        });
+        assertTransitionCurrent();
+      },
+      prepareCommit: async () => {
+        assertTransitionCurrent();
+        await claimLegacyNamespaceForVerifiedUser(nextUser.id);
+        assertTransitionCurrent();
+      },
+      commit: () => {
+        pendingAccountToken = null;
+        pendingAccountRefreshToken = null;
+        pendingAccountMemberships = [];
+        pendingAccountDeletionRestored = false;
+        accessToken = outcome.accessToken;
+        persistedRefreshTokenNeedsIdentityCheck = false;
+        clearReplacementIntegrationReloadTimers();
+        activateClientEndpointRealm(committedRealm);
+        activeAuthRealm = committedRealm;
+        if (!isPassiveSharedUserDataInstance()) {
+          removeSafe(LEGACY_REFRESH_TOKEN_KEY);
+        }
+        lastAcceptedRefreshToken = outcome.refreshToken;
+        if (!isPassiveSharedUserDataInstance()) {
+          removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
+          clearReloginFlag();
+        }
+        accountDeletionRestoredNoticePending = deletionWasRestored;
+        // 显式登录解除本进程登出墓碑(passive / foreign-device)。
+        passiveLocalSignOut = false;
+        foreignDeviceLocalSignOut = false;
+        currentUser = nextUser;
+        commitCloudAppSession(currentUser.id);
+        if (!isPassiveSharedUserDataInstance()) {
+          canaryFlagStore.clear();
+        }
+        pendingAuthRealm = null;
+      },
+    });
+  } catch (error) {
+    restorePersistedAuthSessionIfCurrent(
+      outcome.refreshToken,
+      committedRealm,
+      previousPersistedSession,
+    );
+    throw error;
+  }
   scheduleCanaryFlagSync({
     token: outcome.accessToken,
     expectedAuthEpoch: loginEpoch,

@@ -918,12 +918,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         userRef.current !== null &&
         (previousRealm !== committedRealm ||
           userRef.current?.id !== outcome.membership.id);
-      if (replacesActiveSession) {
-        await clearAccountScopedRuntimeForSwitch();
-        assertLoginFlowCurrent(expectedLoginFlowEpoch);
-      }
       const generation = ++authGenerationRef.current;
       refreshInFlightRef.current = null;
+      const nextAccountKey = passportId
+        ? accountVaultKey(committedRealm, outcome.membership.id)
+        : null;
       const persisted = await serializeRefreshTokenMutation(async () => {
         if (
           authGenerationRef.current !== generation ||
@@ -931,11 +930,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ) {
           return false;
         }
+        const previousPersistedSession = await readPersistedAuthSessionStrict();
         await writePersistedAuthSession(outcome.refreshToken, committedRealm);
-        return (
-          authGenerationRef.current === generation &&
-          loginFlowEpochRef.current === expectedLoginFlowEpoch
-        );
+        try {
+          if (nextAccountKey) {
+            await mutateMobileAccountVault((vault) => {
+              assertLoginFlowCurrent(expectedLoginFlowEpoch);
+              if (vault.resources[nextAccountKey]) {
+                vault.activeAccountKey = nextAccountKey;
+              }
+            });
+          }
+          if (
+            authGenerationRef.current !== generation ||
+            loginFlowEpochRef.current !== expectedLoginFlowEpoch
+          ) {
+            throw authCodeError('AUTH_FLOW_SUPERSEDED');
+          }
+          return true;
+        } catch (error) {
+          await restorePersistedAuthSession(previousPersistedSession);
+          throw error;
+        }
       });
       if (!persisted) throw authCodeError('AUTH_FLOW_SUPERSEDED');
       if (
@@ -943,17 +959,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loginFlowEpochRef.current !== expectedLoginFlowEpoch
       )
         throw authCodeError('AUTH_FLOW_SUPERSEDED');
-      if (passportId) {
-        const nextAccountKey = accountVaultKey(
-          committedRealm,
-          outcome.membership.id,
-        );
-        await mutateMobileAccountVault((vault) => {
-          assertLoginFlowCurrent(expectedLoginFlowEpoch);
-          if (vault.resources[nextAccountKey]) {
-            vault.activeAccountKey = nextAccountKey;
-          }
-        });
+      if (replacesActiveSession) {
+        await clearAccountScopedRuntimeForSwitch();
         assertLoginFlowCurrent(expectedLoginFlowEpoch);
       }
       activateMobileSessionRealm(committedRealm);
@@ -2112,14 +2119,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 vault.activeAccountKey = accountKey;
               });
             } catch (error) {
-              if (previousSession) {
-                await writePersistedAuthSession(
-                  previousSession.refreshToken,
-                  previousSession.realm,
-                );
-              } else {
-                await deleteSecureItem(AUTH_SESSION_KEY);
-              }
+              await restorePersistedAuthSession(previousSession);
               throw error;
             }
           });
@@ -2754,6 +2754,16 @@ async function writePersistedAuthSession(
     AUTH_SESSION_KEY,
     serializeAuthSessionRecord(realm, refreshToken),
   );
+}
+
+async function restorePersistedAuthSession(
+  session: AuthSessionRecord | null,
+): Promise<void> {
+  if (session) {
+    await writePersistedAuthSession(session.refreshToken, session.realm);
+  } else {
+    await deleteSecureItem(AUTH_SESSION_KEY);
+  }
 }
 
 async function readCachedUserProfile(): Promise<MobileUser | null> {

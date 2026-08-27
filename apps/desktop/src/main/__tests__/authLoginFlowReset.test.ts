@@ -42,7 +42,9 @@ describe('auth login-flow reset', () => {
     const completeStart = source.indexOf('async function completeLogin(');
     const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
     const completeBody = source.slice(completeStart, completeEnd);
-    expect(completeBody).toContain('if (authStateEpoch !== loginEpoch)');
+    expect(completeBody).toContain(
+      'if (authStateEpoch !== loginEpoch || loginFlowEpoch !== expectedLoginFlowEpoch)',
+    );
     expect(completeBody).toContain('notifyRenderer();');
     // 防复活:主机飞书 token 链已随 refresh-feishu 退役(2026-07-17),
     // authManager 不得再接 FeishuTokenManager(飞书授权归 xd-feishu 意识
@@ -114,7 +116,7 @@ describe('auth login-flow reset', () => {
     expect(source).toContain("const AUTH_ACCOUNT_VAULT_KEY = 'cindy_auth_accounts_v1';");
     expect(source).toContain('client.refreshAccount(current.accountRefreshToken)');
     expect(source).toContain('client.logoutAccount(pair.accountToken)');
-    expect(source).toContain('writeSafe(AUTH_ACCOUNT_VAULT_KEY');
+    expect(source).toContain('writeAtomicSafe(AUTH_ACCOUNT_VAULT_KEY');
     expect(source).not.toContain('writeSafe(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY');
     expect(source).not.toContain('accountToken: accountAccessToken');
 
@@ -183,6 +185,23 @@ describe('auth login-flow reset', () => {
     }
   });
 
+  it('atomically replaces the aggregate saved-account vault', () => {
+    const writeStart = source.indexOf('function writeAtomicSafe(');
+    const writeEnd = source.indexOf('\n}\n\nfunction removeAtomicSafeOrThrow', writeStart);
+    const writeBody = source.slice(writeStart, writeEnd);
+    expect(writeBody).toContain('atomicWriteFileSync(');
+    expect(writeBody).toContain("safeStorage.encryptString(value).toString('base64')");
+
+    const readStart = source.indexOf('function readAtomicSafe(');
+    const readEnd = source.indexOf('\n}\n\nfunction isAtomicPersistedSecretAbsent', readStart);
+    expect(source.slice(readStart, readEnd)).toContain('fs.readFileSync(`${filepath}.bak`');
+
+    const clearStart = source.indexOf('function removeAtomicSafeOrThrow(');
+    const clearEnd = source.indexOf('\n}\n\nfunction removeSafe(', clearStart);
+    const clearBody = source.slice(clearStart, clearEnd);
+    expect(clearBody.indexOf('`${filepath}.bak`')).toBeLessThan(clearBody.indexOf('filepath])'));
+  });
+
   it('fails a Desktop account switch before owner teardown when session persistence fails', () => {
     const completeStart = source.indexOf('async function completeLogin(');
     const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
@@ -209,6 +228,14 @@ describe('auth login-flow reset', () => {
     const completeBody = source.slice(completeStart, completeEnd);
     expect(completeBody).toContain('expectedLoginFlowEpoch = loginFlowEpoch');
     expect(completeBody).toContain('loginFlowEpoch !== expectedLoginFlowEpoch');
+    const resourceStored = completeBody.indexOf('await rememberResourceSession(');
+    const resourceRecheck = completeBody.indexOf('assertTransitionCurrent();', resourceStored);
+    const durableSession = completeBody.indexOf('writePersistedAuthSessionOrThrow(');
+    const teardown = completeBody.indexOf('await accountSwitchTeardown(');
+    expect(resourceRecheck).toBeGreaterThan(resourceStored);
+    expect(durableSession).toBeGreaterThan(resourceRecheck);
+    expect(completeBody.lastIndexOf('assertTransitionCurrent();', teardown)).toBeLessThan(teardown);
+    expect(completeBody).toContain('restorePersistedAuthSessionIfCurrent(');
 
     const cancelStart = source.indexOf('export function cancelAddAccountLogin(): void {');
     const cancelEnd = source.indexOf('\n}', cancelStart);

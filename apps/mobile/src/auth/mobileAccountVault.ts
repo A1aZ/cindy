@@ -255,6 +255,58 @@ export type MobileResourceSessionReplacementResult =
   | 'stale'
   | 'missing';
 
+/**
+ * Commit an active runtime session refresh only while it still owns the active
+ * Resource token generation. A missing entry is accepted solely for the
+ * one-time legacy migration where no vault account has been activated yet.
+ */
+export async function commitMobileRuntimeResourceSession(input: {
+  expectedRefreshToken: string;
+  pair: AuthTokenPair;
+  realm: AuthRegion;
+  passportId: string;
+  validateBeforeWrite?: () => void;
+  afterPersist?: () => void | Promise<void>;
+}): Promise<'stored' | 'stale'> {
+  const key = accountVaultKey(input.realm, input.pair.membership.id);
+  return transactMobileAccountVault(
+    (vault) => {
+      input.validateBeforeWrite?.();
+      const current = vault.resources[key];
+      if (current) {
+        if (
+          vault.activeAccountKey !== key ||
+          current.realm !== input.realm ||
+          current.refreshToken !== input.expectedRefreshToken
+        ) {
+          return 'stale';
+        }
+      } else if (
+        vault.activeAccountKey !== null ||
+        typeof vault.signedOutAt === 'number'
+      ) {
+        return 'stale';
+      }
+
+      delete vault.signedOutAt;
+      vault.resources[key] = {
+        realm: input.realm,
+        refreshToken: input.pair.refreshToken,
+        metadata: storedAccountMetadataFromMembership(
+          input.pair.membership,
+          input.passportId,
+        ),
+        lastUsedAt: Date.now(),
+      };
+      vault.activeAccountKey = key;
+      return 'stored';
+    },
+    async (result) => {
+      if (result === 'stored') await input.afterPersist?.();
+    },
+  );
+}
+
 /** Store a rotated Resource token only while its consumed generation is current. */
 export async function replaceMobileResourceSessionIfCurrent(input: {
   accountKey: string;

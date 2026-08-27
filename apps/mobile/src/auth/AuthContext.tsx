@@ -88,6 +88,7 @@ import {
 import {
   clearMobileAccountVault,
   commitMobileLoginSessions,
+  commitMobileRuntimeResourceSession,
   commitMobileSavedAccountActivation,
   listMobileSavedAccounts,
   mutateMobileAccountVault,
@@ -100,7 +101,6 @@ import {
   replaceMobileResourceSessionIfCurrent,
   replaceMobilePassportSessionIfCurrent,
   removeMobilePassport,
-  removeMobileSavedAccount,
   type MobileSavedAccount,
 } from '@/auth/mobileAccountVault';
 import {
@@ -1054,6 +1054,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const persistedVault = await readMobileAccountVault().catch(
           () => null,
         );
+        const activeResourceAtStart = persistedVault?.activeAccountKey
+          ? {
+              accountKey: persistedVault.activeAccountKey,
+              resource:
+                persistedVault.resources[persistedVault.activeAccountKey],
+            }
+          : null;
         if (typeof persistedVault?.signedOutAt === 'number') {
           await serializeRefreshTokenMutation(() =>
             deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
@@ -1077,23 +1084,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             session.refreshToken,
           );
           if (authGenerationRef.current !== generation) return null;
-          const persisted = await serializeRefreshTokenMutation(async () => {
-            if (authGenerationRef.current !== generation) return false;
-            await writePersistedAuthSession(pair.refreshToken, session.realm);
-            return authGenerationRef.current === generation;
-          });
-          if (!persisted) return null;
-          if (authGenerationRef.current !== generation) return null;
           const passportId =
             pair.membership.passportId ??
             (userRef.current?.id === pair.membership.id
               ? userRef.current.passportId
               : undefined);
-          await rememberMobileResourceSession(
-            pair,
-            session.realm,
-            passportId,
-          );
+          const persisted = await serializeRefreshTokenMutation(async () => {
+            if (authGenerationRef.current !== generation) return false;
+            if (!passportId) {
+              await writePersistedAuthSession(pair.refreshToken, session.realm);
+              return authGenerationRef.current === generation;
+            }
+            const resourceCommit =
+              await commitMobileRuntimeResourceSession({
+                expectedRefreshToken: session.refreshToken,
+                pair,
+                realm: session.realm,
+                passportId,
+                validateBeforeWrite: () => {
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+                },
+                afterPersist: async () => {
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+                  await writePersistedAuthSession(
+                    pair.refreshToken,
+                    session.realm,
+                  );
+                  if (authGenerationRef.current !== generation) {
+                    throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                  }
+                },
+              });
+            return (
+              resourceCommit === 'stored' &&
+              authGenerationRef.current === generation
+            );
+          });
+          if (!persisted) return null;
+          if (authGenerationRef.current !== generation) return null;
           setToken(pair.accessToken);
           applyUser(
             mergeMembershipWithExisting(
@@ -1110,13 +1142,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch (error) {
           if (authGenerationRef.current !== generation) return null;
           if (isRejectedRefresh(error)) {
-            const vault = await readMobileAccountVault().catch(() => null);
-            if (vault?.activeAccountKey) {
-              await removeMobileSavedAccount(vault.activeAccountKey).catch(
-                () => undefined,
-              );
+            const rejectedAccountKey =
+              activeResourceAtStart?.resource?.realm === session.realm &&
+              activeResourceAtStart.resource.refreshToken ===
+                session.refreshToken
+                ? activeResourceAtStart.accountKey
+                : null;
+            if (
+              rejectedAccountKey &&
+              !(
+                error instanceof AuthApiError &&
+                error.code === 'DEVICE_MISMATCH'
+              )
+            ) {
+              try {
+                const removal = await removeMobileResourceSessionIfCurrent({
+                  accountKey: rejectedAccountKey,
+                  expectedRefreshToken: session.refreshToken,
+                  validateBeforeWrite: () => {
+                    if (authGenerationRef.current !== generation) {
+                      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+                    }
+                  },
+                });
+                if (removal !== 'removed') return null;
+              } catch (removalError) {
+                if (authGenerationRef.current !== generation) return null;
+                throw removalError;
+              }
               void refreshSavedAccountsSnapshot();
             }
+            if (authGenerationRef.current !== generation) return null;
             await terminateSessionImplRef.current();
             return null;
           }

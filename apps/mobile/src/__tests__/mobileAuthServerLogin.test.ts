@@ -309,7 +309,7 @@ describe('mobile auth-server login', () => {
     const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
     const refreshBody = authSource.slice(refreshStart, refreshEnd);
     const resourceVaultWrite = refreshBody.indexOf(
-      'await rememberMobileResourceSession(',
+      'await commitMobileRuntimeResourceSession({',
     );
     const publishAccessToken = refreshBody.indexOf(
       'setToken(pair.accessToken);',
@@ -321,8 +321,14 @@ describe('mobile auth-server login', () => {
       '.catch(',
     );
     expect(refreshBody).toMatch(
-      /if \(authGenerationRef\.current !== generation\) return null;\s+const passportId =[\s\S]*?setToken\(pair\.accessToken\);/,
+      /if \(authGenerationRef\.current !== generation\) return null;\s+const passportId =[\s\S]*?expectedRefreshToken: session\.refreshToken,[\s\S]*?if \(authGenerationRef\.current !== generation\) return null;\s+setToken\(pair\.accessToken\);/,
     );
+    expect(refreshBody).toContain('removeMobileResourceSessionIfCurrent({');
+    expect(refreshBody).toContain(
+      'expectedRefreshToken: session.refreshToken',
+    );
+    expect(refreshBody).toContain("error.code === 'DEVICE_MISMATCH'");
+    expect(refreshBody).not.toContain('removeMobileSavedAccount(');
     // 2026-07 产品 /api/user/me 退役:身份只经 auth-server getMe,防复活。
     expect(authSource).not.toContain("'/api/user/me'");
     expect(authSource).toContain("throw authCodeError('AUTH_FLOW_SUPERSEDED')");

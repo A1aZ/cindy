@@ -23,6 +23,7 @@ vi.mock('../secureStorage', () => ({
 import {
   clearMobileAccountVault,
   commitMobileLoginSessions,
+  commitMobileRuntimeResourceSession,
   commitMobileSavedAccountActivation,
   listMobileSavedAccounts,
   mutateMobileAccountVault,
@@ -259,6 +260,162 @@ describe('mobile account vault', () => {
       parseMobileAccountVault(secureStorage.value).resources[accountKey]
         ?.refreshToken,
     ).toBe('resource-new');
+  });
+
+  it('commits a runtime refresh only for its active Resource owner and token generation', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    const otherAccountKey = JSON.stringify(['global', 'membership-2']);
+    const afterPersist = vi.fn(async () => undefined);
+    const pair = {
+      accessToken: 'access-late',
+      refreshToken: 'resource-late',
+      membership: {
+        id: metadata.membershipId,
+        passportId: metadata.passportId,
+        displayName: metadata.displayName,
+        email: metadata.email,
+        avatarUrl: metadata.avatarUrl,
+        kind: metadata.kind,
+        role: metadata.role,
+        orgId: metadata.orgId,
+        orgName: metadata.orgName,
+        orgLogoUrl: metadata.orgLogoUrl,
+      },
+    };
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: otherAccountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-old',
+          metadata,
+          lastUsedAt: 10,
+        },
+        [otherAccountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-new-login',
+          metadata: { ...metadata, membershipId: 'membership-2' },
+          lastUsedAt: 20,
+        },
+      },
+      passports: {},
+    });
+
+    await expect(
+      commitMobileRuntimeResourceSession({
+        expectedRefreshToken: 'resource-old',
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+        afterPersist,
+      }),
+    ).resolves.toBe('stale');
+    const vault = parseMobileAccountVault(secureStorage.value);
+    expect(vault.activeAccountKey).toBe(otherAccountKey);
+    expect(vault.resources[accountKey]?.refreshToken).toBe('resource-old');
+    expect(vault.resources[otherAccountKey]?.refreshToken).toBe(
+      'resource-new-login',
+    );
+    expect(afterPersist).not.toHaveBeenCalled();
+
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-new-login',
+          metadata,
+          lastUsedAt: 30,
+        },
+      },
+      passports: {},
+    });
+    await expect(
+      commitMobileRuntimeResourceSession({
+        expectedRefreshToken: 'resource-old',
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+        afterPersist,
+      }),
+    ).resolves.toBe('stale');
+    expect(
+      parseMobileAccountVault(secureStorage.value).resources[accountKey]
+        ?.refreshToken,
+    ).toBe('resource-new-login');
+    expect(afterPersist).not.toHaveBeenCalled();
+
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-old',
+          metadata,
+          lastUsedAt: 40,
+        },
+      },
+      passports: {},
+    });
+    await expect(
+      commitMobileRuntimeResourceSession({
+        expectedRefreshToken: 'resource-old',
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+        afterPersist,
+      }),
+    ).resolves.toBe('stored');
+    expect(
+      parseMobileAccountVault(secureStorage.value).resources[accountKey]
+        ?.refreshToken,
+    ).toBe('resource-late');
+    expect(afterPersist).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not recreate a runtime Resource after a signed-out tombstone', async () => {
+    const pair = {
+      accessToken: 'access-late',
+      refreshToken: 'resource-late',
+      membership: {
+        id: metadata.membershipId,
+        passportId: metadata.passportId,
+        displayName: metadata.displayName,
+        email: metadata.email,
+        avatarUrl: metadata.avatarUrl,
+        kind: metadata.kind,
+        role: metadata.role,
+        orgId: metadata.orgId,
+        orgName: metadata.orgName,
+        orgLogoUrl: metadata.orgLogoUrl,
+      },
+    };
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: {},
+      signedOutAt: 123,
+    });
+
+    await expect(
+      commitMobileRuntimeResourceSession({
+        expectedRefreshToken: 'resource-old',
+        pair,
+        realm: 'global',
+        passportId: metadata.passportId,
+      }),
+    ).resolves.toBe('stale');
+    expect(parseMobileAccountVault(secureStorage.value)).toEqual(
+      expect.objectContaining({
+        activeAccountKey: null,
+        resources: {},
+        signedOutAt: 123,
+      }),
+    );
   });
 
   it('does not delete a Resource generation replaced by a later login', async () => {

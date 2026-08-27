@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const source = fs.readFileSync(path.resolve(__dirname, '../window.ts'), 'utf8');
+const controllerSource = fs.readFileSync(path.resolve(__dirname, '../controller.ts'), 'utf8');
 const preloadSource = fs.readFileSync(
   path.resolve(__dirname, '../../../preload/resourceUsagePreload.ts'),
   'utf8',
@@ -11,8 +12,12 @@ const preloadSource = fs.readFileSync(
 describe('resource usage BrowserWindow security contract', () => {
   it('stays hidden and uses the dedicated preload with Electron isolation enabled', () => {
     expect(source).toContain('show: false');
+    expect(source).not.toContain('fullscreen: false');
+    expect(source).not.toContain('fullscreenable: false');
     expect(source).toContain("t('titleBar.menuItems.resourceUsage')");
-    expect(source).toContain("process.platform === 'darwin' || !parent || parent.isDestroyed()");
+    expect(source).toContain(
+      "process.platform === 'darwin' || !parent || parent.isDestroyed() ? {} : { parent };",
+    );
     expect(source).toContain("path.join(__dirname, 'resourceUsagePreload.js')");
     expect(source).toContain('sandbox: true');
     expect(source).toContain('contextIsolation: true');
@@ -21,6 +26,18 @@ describe('resource usage BrowserWindow security contract', () => {
     expect(source).toContain('allowRunningInsecureContent: false');
     expect(source).toContain('navigateOnDragDrop: false');
     expect(source).not.toContain("once('ready-to-show'");
+  });
+
+  it('does not explicitly drive fullscreen and follows its own native fullscreen events', () => {
+    expect(controllerSource).not.toContain('.setFullScreen(');
+    expect(controllerSource).not.toContain("'enter-full-screen'");
+    expect(controllerSource).not.toContain("'leave-full-screen'");
+    expect(source).toContain("win.on('enter-full-screen'");
+    expect(source).toContain("win.on('leave-full-screen'");
+    expect(preloadSource).toContain('onFullscreenChange: fanOutFullscreenChange');
+    expect(preloadSource).toContain(
+      "getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state')",
+    );
   });
 
   it('keeps the dedicated preload read-only outside resource-window actions', () => {

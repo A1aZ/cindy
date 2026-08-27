@@ -1041,22 +1041,33 @@ function assertPassportReplacementStored(result: PassportSessionReplacementResul
   );
 }
 
-type RuntimeRefreshCredentialCommit = 'active' | 'inactive' | 'discarded';
+type ActiveRefreshCredentialCommit = 'active' | 'inactive' | 'discarded';
 
-async function commitDesktopRuntimeRefreshCredentials(
+async function commitDesktopRefreshCredentials(
   pair: AuthTokenPair,
   realm: AuthRegion,
   requestedRefreshToken: string,
-): Promise<RuntimeRefreshCredentialCommit> {
+  options: {
+    allowUnclaimedVault?: boolean;
+    validateBeforeWrite?: () => void;
+  } = {},
+): Promise<ActiveRefreshCredentialCommit> {
   return transactAuthAccountVault(
     (vault) => {
+      options.validateBeforeWrite?.();
       const key = accountVaultKey(realm, pair.membership.id);
       const latestSession = readPersistedAuthSession();
       const requestedTokenStillStored =
         (latestSession?.realm === realm && latestSession.refreshToken === requestedRefreshToken) ||
         (realm === AUTH_REGION &&
           readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) === requestedRefreshToken);
-      const stillOwnsActiveSession = requestedTokenStillStored && vault.activeAccountKey === key;
+      const canClaimUninitializedVault =
+        options.allowUnclaimedVault === true &&
+        vault.activeAccountKey === null &&
+        Object.keys(vault.resources).length === 0;
+      const stillOwnsActiveSession =
+        requestedTokenStillStored &&
+        (vault.activeAccountKey === key || canClaimUninitializedVault);
       const passportId = pair.membership.passportId;
       if (passportId && (stillOwnsActiveSession || vault.resources[key])) {
         // A passive stale refresh may still rotate account A's resource token
@@ -3711,6 +3722,7 @@ async function runColdStartRefreshFlow(
       attempts,
       failureAction,
       rejectedTokens,
+      requestedToken,
     } = await runAuthRefreshWithReplacementRetry(storedToken, {
       phase: 'cold-start',
       realm: storedRealm,
@@ -3774,34 +3786,41 @@ async function runColdStartRefreshFlow(
     }
 
     const refreshData = refreshResult.data as RefreshResponse;
+    const credentialCommit = await commitDesktopRefreshCredentials(
+      refreshData,
+      storedRealm,
+      requestedToken,
+      {
+        allowUnclaimedVault: true,
+        validateBeforeWrite: () => {
+          if (epochChanged('before-cold-start-credential-commit')) {
+            throw new AuthApiError(
+              'AUTH_FLOW_SUPERSEDED',
+              409,
+              'Cold-start credential commit was superseded',
+            );
+          }
+        },
+      },
+    );
+    if (credentialCommit !== 'active') {
+      log.warn(
+        `cold-start refresh lost active credential ownership (${credentialCommit}); preserved only the still-saved account token`,
+      );
+      return finishColdStartSignedOut('cold-start-credential-ownership-lost');
+    }
+    lastAcceptedRefreshToken = refreshData.refreshToken;
     if (
       !canRestoreAuthSessionForMembership(AUTH_REGION, storedRealm, refreshData.membership.kind)
     ) {
-      // refresh token 可能已由 auth-server 轮换。即使当前构建不能接受这枚个人
-      // 会话，也必须把新 token 写回原 realm，供拥有该 realm 的实例继续使用。
-      writePersistedAuthSession(refreshData.refreshToken, storedRealm);
+      // The credential transaction above already preserved the rotated token
+      // in its issuing realm. This process must not publish that identity.
       resetActiveAuthRealmToBuild();
       log.warn(
         `cold-start refresh rejected cross-realm personal session realm=${storedRealm} buildRegion=${AUTH_REGION}`,
       );
       return finishColdStartSignedOut('cold-start-incompatible-membership');
     }
-    // Refresh is token-rotating. Preserve the server-issued replacement before
-    // the cross-process projection gate can reject or defer the owner commit.
-    writePersistedAuthSession(refreshData.refreshToken, storedRealm);
-    await rememberResourceSession(refreshData, storedRealm, {
-      markActive: true,
-      validateBeforeWrite: () => {
-        if (epochChanged('before-cold-start-vault-write')) {
-          throw new AuthApiError(
-            'AUTH_FLOW_SUPERSEDED',
-            409,
-            'Cold-start Resource session write was superseded',
-          );
-        }
-      },
-    });
-    lastAcceptedRefreshToken = refreshData.refreshToken;
     const previousSession = getActiveAppSession();
     await withCloudOwnerCommit({
       previousOwnerId: previousSession.dataOwnerId,
@@ -4623,7 +4642,7 @@ export async function refresh(): Promise<boolean> {
 
       const authRealmChanged = refreshRealm !== activeAuthRealm;
       const data = result.data as RefreshResponse;
-      const credentialCommit = await commitDesktopRuntimeRefreshCredentials(
+      const credentialCommit = await commitDesktopRefreshCredentials(
         data,
         refreshRealm,
         requestedToken,

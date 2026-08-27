@@ -360,13 +360,23 @@ describe('auth login-flow reset', () => {
     const coldStart = source.indexOf('async function runColdStartRefreshFlow(');
     const coldEnd = source.indexOf('\n}\n\nasync function loadLoginProviders()', coldStart);
     const coldBody = source.slice(coldStart, coldEnd);
+    const coldCredentialCommit = coldBody.indexOf(
+      'await commitDesktopRefreshCredentials(',
+    );
     const coldPolicyGuard = coldBody.indexOf('!canRestoreAuthSessionForMembership(');
     const coldRealmActivation = coldBody.indexOf('activateClientEndpointRealm(storedRealm);');
+    expect(coldCredentialCommit).toBeGreaterThan(-1);
     expect(coldPolicyGuard).toBeGreaterThan(-1);
+    expect(coldCredentialCommit).toBeLessThan(coldPolicyGuard);
     expect(coldRealmActivation).toBeGreaterThan(coldPolicyGuard);
-    expect(coldBody).toContain('writePersistedAuthSession(refreshData.refreshToken, storedRealm);');
-    expect(coldBody).toContain("epochChanged('before-cold-start-vault-write')");
-    expect(coldBody).toContain("'Cold-start Resource session write was superseded'");
+    expect(coldBody).toContain('requestedToken,');
+    expect(coldBody).toContain('allowUnclaimedVault: true');
+    expect(coldBody).toContain("epochChanged('before-cold-start-credential-commit')");
+    expect(coldBody).toContain("credentialCommit !== 'active'");
+    expect(coldBody).not.toContain(
+      'writePersistedAuthSession(refreshData.refreshToken, storedRealm)',
+    );
+    expect(coldBody).not.toContain('rememberResourceSession(refreshData');
 
     const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');
     const refreshEnd = source.indexOf('\n}\n\nexport async function logout()', refreshStart);
@@ -377,7 +387,7 @@ describe('auth login-flow reset', () => {
     );
     expect(runtimePolicyGuard).toBeGreaterThan(-1);
     expect(runtimeRealmActivation).toBeGreaterThan(runtimePolicyGuard);
-    expect(refreshBody).toContain('await commitDesktopRuntimeRefreshCredentials(');
+    expect(refreshBody).toContain('await commitDesktopRefreshCredentials(');
     expect(refreshBody).toContain(
       "await expireRuntimeAuth(currentUser.id, 'replaced-elsewhere', {",
     );
@@ -435,10 +445,13 @@ describe('auth login-flow reset', () => {
     expect(refreshBody).toContain('latestSession.refreshToken === requestedToken');
     expect(refreshBody).toContain("credentialCommit !== 'active'");
 
-    const helperStart = source.indexOf('async function commitDesktopRuntimeRefreshCredentials(');
+    const helperStart = source.indexOf('async function commitDesktopRefreshCredentials(');
     const helperEnd = source.indexOf('\n}\n\n/** Persist a rotated Passport', helperStart);
     const helperBody = source.slice(helperStart, helperEnd);
     expect(helperBody).toContain('vault.activeAccountKey === key');
+    expect(helperBody).toContain('options.validateBeforeWrite?.()');
+    expect(helperBody).toContain('canClaimUninitializedVault');
+    expect(helperBody).toContain('Object.keys(vault.resources).length === 0');
     expect(helperBody).toContain('readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY)');
     expect(helperBody).toContain('markActive: stillOwnsActiveSession');
     expect(helperBody).toContain("if (commit === 'active') {");
@@ -451,7 +464,7 @@ describe('auth login-flow reset', () => {
     const refreshBody = source.slice(refreshStart, refreshEnd);
 
     expect(refreshBody).toContain('const authRealmChanged = refreshRealm !== activeAuthRealm;');
-    expect(refreshBody).toContain('await commitDesktopRuntimeRefreshCredentials(');
+    expect(refreshBody).toContain('await commitDesktopRefreshCredentials(');
     expect(refreshBody).toContain('activeAuthRealm = refreshRealm;');
     expect(refreshBody).toContain(
       'const membershipKindChanged = previousMembershipKind !== nextUser.membershipKind;',

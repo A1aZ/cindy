@@ -286,6 +286,7 @@ export default function HomeScreen() {
   const [chromeMenuOpen, setChromeMenuOpen] = useState(false);
   const [accountSwitcherOpen, setAccountSwitcherOpen] = useState(false);
   const [chromeMenuCloseInstant, setChromeMenuCloseInstant] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   // 菜单关闭动画完成(Modal 卸载)后要执行的动作。iOS 上两个兄弟 Modal 重叠时,第二个 Modal
   // 是叠在菜单 Modal 的 VC 上 present 的,菜单淡出后卸载会把它连带 dismiss 掉——所以从菜单里
   // 打开重命名 / 撤销授权弹窗必须等菜单完全卸载(onClosed)后再挂载,不能同一帧直接 set。
@@ -1327,6 +1328,16 @@ export default function HomeScreen() {
     });
   }, [guardedPush, home.primaryDevice, newSessionDeviceOptions, selectedDeviceId, t]);
 
+  const logout = useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await auth.logout();
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [auth, loggingOut]);
+
   const toggleProject = useCallback((key: string) => {
     configureCollapseAnimation();
     setCollapsedProjectKeys((current) =>
@@ -1981,6 +1992,7 @@ export default function HomeScreen() {
       />
       <HomeChromeDrawer
         closeInstant={chromeMenuCloseInstant}
+        loggingOut={loggingOut}
         onClose={() => {
           setChromeMenuCloseInstant(false);
           setChromeMenuOpen(false);
@@ -2005,6 +2017,7 @@ export default function HomeScreen() {
           setChromeMenuCloseInstant(true);
           setChromeMenuOpen(false);
         }}
+        onLogout={() => void logout()}
         open={chromeMenuOpen}
         user={user}
       />

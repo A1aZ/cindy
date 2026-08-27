@@ -123,6 +123,17 @@ describe('mobile home desktop-first surface', () => {
     expect(chromeDrawer).toContain('testID="devices.settingsButton"');
     expect(chromeDrawer).toContain('testID="home.chromeDrawer.search"');
     expect(chromeDrawer).toContain('testID="home.chromeDrawer.account"');
+    expect(chromeDrawer).toContain('testID="home.chromeDrawer.accounts"');
+    expect(chromeDrawer).toContain('testID="home.chromeDrawer.logout"');
+    expect(chromeDrawer.indexOf('testID="devices.settingsButton"'))
+      .toBeLessThan(chromeDrawer.indexOf('testID="home.chromeDrawer.accounts"'));
+    expect(chromeDrawer.indexOf('testID="home.chromeDrawer.accounts"'))
+      .toBeLessThan(chromeDrawer.indexOf('testID="home.chromeDrawer.logout"'));
+    expect(chromeDrawer).toContain('<View style={styles.menuDivider} />');
+    expect(chromeDrawer.indexOf('<View style={styles.menuDivider} />'))
+      .toBeLessThan(chromeDrawer.indexOf('testID="home.chromeDrawer.logout"'));
+    expect(chromeDrawer.match(/onPress=\{onOpenAccounts\}/g)).toHaveLength(1);
+    expect(chromeDrawer).toContain("t('settings.account.logout')");
     expect(chromeDrawer).toContain('openSettingsImmediately');
     expect(chromeDrawer).toContain('closeInstant');
     expect(chromeDrawer).not.toContain('remoteSettings');

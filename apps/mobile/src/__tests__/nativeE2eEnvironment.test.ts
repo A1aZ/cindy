@@ -260,7 +260,10 @@ describe('native e2e environment', () => {
     expect(cleanupBody.indexOf('await clearAllMobileVoiceInputHistories().catch(() => undefined);')).toBeLessThan(refreshTokenDelete);
     const logoutStart = authContext.indexOf('const logout = useCallback(async () => {');
     const logoutBody = authContext.slice(logoutStart, authContext.indexOf('}, [', logoutStart));
-    expect(logoutBody).toContain('await persistAccountDeletionReceipt(null);');
+    expect(logoutBody).toContain('clearMobileLoginCredentialsForLogout({');
+    expect(logoutBody).toContain(
+      'clearReceipt: () => persistAccountDeletionReceipt(null),',
+    );
     expect(logoutBody).toContain(
       'await clearLocalSession({ persistedAuthAlreadyCleared: true });',
     );

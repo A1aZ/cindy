@@ -716,7 +716,9 @@ function isStoredAccountMetadata(value: unknown): value is StoredAccountMetadata
   );
 }
 
-function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): AuthAccountVault {
+function readAuthAccountVault(
+  options: { allowUnreadable?: boolean; recoverInvalid?: boolean } = {},
+): AuthAccountVault {
   const raw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
   if (raw === null) {
     if (isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY)) return emptyAuthAccountVault();
@@ -745,7 +747,7 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
     const resources: Record<string, StoredResourceSession> = {};
     for (const [key, candidate] of Object.entries(parsed.resources)) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        if (options.allowUnreadable) continue;
+        if (options.allowUnreadable || options.recoverInvalid) continue;
         throw new Error('invalid saved resource credential');
       }
       const item = candidate as Partial<StoredResourceSession>;
@@ -755,7 +757,7 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
         !isStoredAccountMetadata(item.metadata) ||
         typeof item.lastUsedAt !== 'number'
       ) {
-        if (options.allowUnreadable) continue;
+        if (options.allowUnreadable || options.recoverInvalid) continue;
         throw new Error('invalid saved resource credential');
       }
       resources[key] = item as StoredResourceSession;
@@ -763,7 +765,7 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
     const passports: Record<string, StoredPassportSession> = {};
     for (const [key, candidate] of Object.entries(parsed.passports)) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        if (options.allowUnreadable) continue;
+        if (options.allowUnreadable || options.recoverInvalid) continue;
         throw new Error('invalid saved Passport credential');
       }
       const item = candidate as Partial<StoredPassportSession>;
@@ -773,11 +775,15 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
         typeof item.accountRefreshToken !== 'string' ||
         !Array.isArray(item.memberships)
       ) {
-        if (options.allowUnreadable) continue;
+        if (options.allowUnreadable || options.recoverInvalid) continue;
         throw new Error('invalid saved Passport credential');
       }
       const memberships = item.memberships.filter(isStoredAccountMetadata);
-      if (!options.allowUnreadable && memberships.length !== item.memberships.length) {
+      if (
+        !options.allowUnreadable &&
+        !options.recoverInvalid &&
+        memberships.length !== item.memberships.length
+      ) {
         throw new Error('invalid saved Passport membership');
       }
       passports[key] = {
@@ -787,10 +793,11 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
         memberships,
       };
     }
+    const active =
+      typeof parsed.activeAccountKey === 'string' ? parsed.activeAccountKey : null;
     return {
       version: 1,
-      activeAccountKey:
-        typeof parsed.activeAccountKey === 'string' ? parsed.activeAccountKey : null,
+      activeAccountKey: active && resources[active] ? active : null,
       resources,
       passports,
       ...(typeof parsed.signedOutAt === 'number'
@@ -798,6 +805,10 @@ function readAuthAccountVault(options: { allowUnreadable?: boolean } = {}): Auth
         : {}),
     };
   } catch (error) {
+    if (options.recoverInvalid) {
+      log.warn('encrypted auth account vault is invalid; recovering it for explicit login', error);
+      return emptyAuthAccountVault();
+    }
     log.warn('encrypted auth account vault is invalid; ignoring it without deleting', error);
     if (options.allowUnreadable) return emptyAuthAccountVault();
     throw new AuthApiError(
@@ -842,6 +853,7 @@ function accountVaultLockError(reason: 'busy' | 'unavailable'): AuthApiError {
 async function transactAuthAccountVault<T>(
   operation: (vault: AuthAccountVault) => T | Promise<T>,
   afterPersist: (result: T) => void | Promise<void> = () => undefined,
+  options: { recoverInvalidForExplicitLogin?: boolean } = {},
 ): Promise<T> {
   return withCrossProcessLock(
     authAccountVaultLockPath(),
@@ -851,7 +863,9 @@ async function transactAuthAccountVault<T>(
       const previousRaw = readAtomicSafe(AUTH_ACCOUNT_VAULT_KEY);
       const previousWasAbsent =
         previousRaw === null && isAtomicPersistedSecretAbsent(AUTH_ACCOUNT_VAULT_KEY);
-      const vault = readAuthAccountVault();
+      const vault = readAuthAccountVault({
+        recoverInvalid: options.recoverInvalidForExplicitLogin,
+      });
       const result = await operation(vault);
       writeAuthAccountVaultOrThrow(vault);
       try {
@@ -1057,24 +1071,28 @@ async function commitDesktopLoginSessions(
   },
   commitTransition: () => void | Promise<void>,
 ): Promise<void> {
-  await transactAuthAccountVault((vault) => {
-    if (!input.passportId) {
-      // Legacy login responses may only be able to persist the compatibility
-      // session. They are still an explicit login and must supersede a prior
-      // logout-all tombstone so cold start can migrate the Resource later.
-      delete vault.signedOutAt;
-      return;
-    }
-    writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId);
-    if (input.accountRefreshToken) {
-      writePassportSessionToVault(vault, {
-        realm: input.realm,
-        passportId: input.passportId,
-        accountRefreshToken: input.accountRefreshToken,
-        memberships: input.memberships,
-      });
-    }
-  }, commitTransition);
+  await transactAuthAccountVault(
+    (vault) => {
+      if (!input.passportId) {
+        // Legacy login responses may only be able to persist the compatibility
+        // session. They are still an explicit login and must supersede a prior
+        // logout-all tombstone so cold start can migrate the Resource later.
+        delete vault.signedOutAt;
+        return;
+      }
+      writeResourceSessionToVault(vault, input.pair, input.realm, input.passportId);
+      if (input.accountRefreshToken) {
+        writePassportSessionToVault(vault, {
+          realm: input.realm,
+          passportId: input.passportId,
+          accountRefreshToken: input.accountRefreshToken,
+          memberships: input.memberships,
+        });
+      }
+    },
+    commitTransition,
+    { recoverInvalidForExplicitLogin: true },
+  );
 }
 
 /** Persist a rotated Passport only while the request still owns the token it consumed. */

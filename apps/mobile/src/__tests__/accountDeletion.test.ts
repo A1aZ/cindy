@@ -158,13 +158,35 @@ describe("mobile account deletion", () => {
       logoutStart,
       context.indexOf("const getAccessToken", logoutStart),
     );
-    expect(
-      logoutBody.indexOf("persistAccountDeletionReceipt(null)"),
-    ).toBeLessThan(
-      logoutBody.indexOf(
-        "clearLocalSession({ persistedAuthAlreadyCleared: true })",
-      ),
+    const vaultClear = logoutBody.indexOf(
+      "clearMobileLoginCredentialsForLogout({",
     );
+    const sessionSnapshot = logoutBody.indexOf(
+      "readSessionRaw: () => getSecureItem(AUTH_SESSION_KEY)",
+      vaultClear,
+    );
+    const sessionDelete = logoutBody.indexOf(
+      "clearSession: () => deleteSecureItem(AUTH_SESSION_KEY)",
+      sessionSnapshot,
+    );
+    const receiptDelete = logoutBody.indexOf(
+      "clearReceipt: () => persistAccountDeletionReceipt(null)",
+      sessionDelete,
+    );
+    const sessionRestore = logoutBody.indexOf(
+      "restoreSessionRaw: restorePersistedAuthSessionRaw",
+      sessionDelete,
+    );
+    const runtimeClear = logoutBody.indexOf(
+      "clearLocalSession({ persistedAuthAlreadyCleared: true })",
+    );
+    expect(sessionSnapshot).toBeGreaterThan(-1);
+    expect(vaultClear).toBeGreaterThan(-1);
+    expect(sessionSnapshot).toBeGreaterThan(vaultClear);
+    expect(sessionDelete).toBeGreaterThan(sessionSnapshot);
+    expect(receiptDelete).toBeGreaterThan(sessionDelete);
+    expect(sessionRestore).toBeGreaterThan(sessionDelete);
+    expect(runtimeClear).toBeGreaterThan(receiptDelete);
 
     const statusStart = context.indexOf("const getAccountDeletionStatus");
     const statusBody = context.slice(

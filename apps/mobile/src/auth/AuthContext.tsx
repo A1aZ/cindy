@@ -86,7 +86,7 @@ import {
   setSecureItem,
 } from '@/auth/secureStorage';
 import {
-  clearMobileAccountVault,
+  clearMobileLoginCredentialsForLogout,
   commitMobileLoginSessions,
   commitMobileRuntimeResourceSession,
   commitMobileSavedAccountActivation,
@@ -979,7 +979,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ) {
           return false;
         }
-        const previousPersistedSession = await readPersistedAuthSessionStrict();
+        const previousPersistedSessionRaw = await getSecureItem(AUTH_SESSION_KEY);
         try {
           await commitMobileLoginSessions(
             {
@@ -1051,7 +1051,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
           return true;
         } catch (error) {
-          await restorePersistedAuthSession(previousPersistedSession);
+          await restorePersistedAuthSessionRaw(previousPersistedSessionRaw);
           if (
             runtimeCleanupStarted &&
             authGenerationRef.current === generation
@@ -2343,7 +2343,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // queue used by refresh rotation. A switch that started from T0
             // must roll back to a concurrently persisted T1, never its stale
             // initial vault snapshot.
-            const previousSession = await readPersistedAuthSessionStrict();
+            const previousSessionRaw = await getSecureItem(AUTH_SESSION_KEY);
             try {
               await commitMobileSavedAccountActivation(
                 accountKey,
@@ -2385,7 +2385,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 },
               );
             } catch (error) {
-              await restorePersistedAuthSession(previousSession);
+              await restorePersistedAuthSessionRaw(previousSessionRaw);
               if (
                 runtimeCleanupStarted &&
                 authGenerationRef.current === generation
@@ -2576,9 +2576,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 移动推送 token 的注销收口在 clearLocalSession(覆盖 logout 与全部终止路径)。
     // 普通登出代表放弃尚未确认的 challenge；确认注销走 clearLocalSession 直达，
     // 不调用本函数，因此已确认请求的 receipt 仍会保留供登录页查询。
-    await persistAccountDeletionReceipt(null);
     await serializeRefreshTokenMutation(() =>
-      clearMobileAccountVault(() => deleteSecureItem(AUTH_SESSION_KEY)),
+      clearMobileLoginCredentialsForLogout({
+        readSessionRaw: () => getSecureItem(AUTH_SESSION_KEY),
+        clearSession: () => deleteSecureItem(AUTH_SESSION_KEY),
+        restoreSessionRaw: restorePersistedAuthSessionRaw,
+        // Keep the receipt behind the same refresh → vault → receipt lock
+        // order used by login. The helper restores the compatibility session
+        // and vault before releasing either queue if this deletion fails.
+        clearReceipt: () => persistAccountDeletionReceipt(null),
+      }),
     );
     await clearLocalSession({ persistedAuthAlreadyCleared: true });
     setSavedAccounts([]);
@@ -3096,13 +3103,11 @@ async function writePersistedAuthSession(
   );
 }
 
-async function restorePersistedAuthSession(
-  session: AuthSessionRecord | null,
-): Promise<void> {
-  if (session) {
-    await writePersistedAuthSession(session.refreshToken, session.realm);
-  } else {
+async function restorePersistedAuthSessionRaw(raw: string | null): Promise<void> {
+  if (raw === null) {
     await deleteSecureItem(AUTH_SESSION_KEY);
+  } else {
+    await setSecureItem(AUTH_SESSION_KEY, raw);
   }
 }
 

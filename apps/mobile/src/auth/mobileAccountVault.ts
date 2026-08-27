@@ -159,13 +159,23 @@ async function writeMobileAccountVault(vault: MobileAccountVault): Promise<void>
 export function transactMobileAccountVault<T>(
   operation: (vault: MobileAccountVault) => T | Promise<T>,
   afterPersist: (result: T) => void | Promise<void> = () => undefined,
+  options: { recoverInvalidForExplicitLogin?: boolean } = {},
 ): Promise<T> {
   return enqueueMobileVaultOperation(async () => {
     // A SecureStore read failure is not an empty vault. Propagate it so a
     // transient keychain error can never turn the next mutation into a write
     // that erases every saved credential.
     const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
-    const vault = parseMobileAccountVaultRecord(raw);
+    let vault: MobileAccountVault;
+    try {
+      vault = parseMobileAccountVaultRecord(raw);
+    } catch (error) {
+      if (!options.recoverInvalidForExplicitLogin) throw error;
+      // A completed explicit login supplies a newly verified Resource session,
+      // so it is the only mutation allowed to recover malformed content. Keep
+      // every valid child we can parse; malformed top-level JSON starts fresh.
+      vault = parseMobileAccountVault(raw);
+    }
     const result = await operation(vault);
     await writeMobileAccountVault(vault);
     try {
@@ -256,6 +266,24 @@ export async function clearMobileAccountVault(
     } catch (error) {
       if (raw === null) await deleteSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
       else await setSecureItem(MOBILE_ACCOUNT_VAULT_KEY, raw);
+      throw error;
+    }
+  });
+}
+
+export async function clearMobileLoginCredentialsForLogout(input: {
+  readSessionRaw(): Promise<string | null>;
+  clearSession(): Promise<void>;
+  restoreSessionRaw(raw: string | null): Promise<void>;
+  clearReceipt(): Promise<void>;
+}): Promise<void> {
+  const previousSessionRaw = await input.readSessionRaw();
+  await clearMobileAccountVault(async () => {
+    await input.clearSession();
+    try {
+      await input.clearReceipt();
+    } catch (error) {
+      await input.restoreSessionRaw(previousSessionRaw);
       throw error;
     }
   });
@@ -505,6 +533,7 @@ export async function commitMobileLoginSessions(
       return key;
     },
     afterPersist,
+    { recoverInvalidForExplicitLogin: true },
   );
 }
 

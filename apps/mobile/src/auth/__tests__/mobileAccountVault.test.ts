@@ -22,6 +22,7 @@ vi.mock('../secureStorage', () => ({
 
 import {
   clearMobileAccountVault,
+  clearMobileLoginCredentialsForLogout,
   commitMobileLoginSessions,
   commitMobileRuntimeResourceSession,
   commitMobileSavedAccountActivation,
@@ -537,6 +538,34 @@ describe('mobile account vault', () => {
       }),
     ).rejects.toThrow('keychain temporarily unavailable');
 
+    await expect(
+      commitMobileLoginSessions(
+        {
+          pair: {
+            accessToken: 'access',
+            refreshToken: 'resource-refresh',
+            membership: {
+              id: metadata.membershipId,
+              passportId: metadata.passportId,
+              displayName: metadata.displayName,
+              email: metadata.email,
+              avatarUrl: metadata.avatarUrl,
+              kind: metadata.kind,
+              role: metadata.role,
+              orgId: metadata.orgId,
+              orgName: metadata.orgName,
+              orgLogoUrl: metadata.orgLogoUrl,
+            },
+          },
+          realm: 'global',
+          passportId: metadata.passportId,
+          accountRefreshToken: null,
+          memberships: [metadata],
+        },
+        async () => undefined,
+      ),
+    ).rejects.toThrow('keychain temporarily unavailable');
+
     expect(secureStorage.value).toBe(original);
     expect(secureStorage.set).not.toHaveBeenCalled();
   });
@@ -552,6 +581,110 @@ describe('mobile account vault', () => {
 
     expect(secureStorage.value).toBe('{bad-json');
     expect(secureStorage.set).not.toHaveBeenCalled();
+  });
+
+  it('lets a completed explicit login recover malformed content with exact rollback', async () => {
+    const malformed = '{bad-json';
+    const input = {
+      pair: {
+        accessToken: 'access',
+        refreshToken: 'resource-refresh',
+        membership: {
+          id: metadata.membershipId,
+          passportId: metadata.passportId,
+          displayName: metadata.displayName,
+          email: metadata.email,
+          avatarUrl: metadata.avatarUrl,
+          kind: metadata.kind,
+          role: metadata.role,
+          orgId: metadata.orgId,
+          orgName: metadata.orgName,
+          orgLogoUrl: metadata.orgLogoUrl,
+        },
+      },
+      realm: 'global' as const,
+      passportId: metadata.passportId,
+      accountRefreshToken: 'account-refresh',
+      memberships: [metadata],
+    };
+    secureStorage.value = malformed;
+
+    await expect(
+      commitMobileLoginSessions(input, async () => {
+        throw new Error('owner commit failed');
+      }),
+    ).rejects.toThrow('owner commit failed');
+    expect(secureStorage.value).toBe(malformed);
+
+    await commitMobileLoginSessions(input, async () => undefined);
+
+    const recovered = parseMobileAccountVault(secureStorage.value);
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    expect(recovered.activeAccountKey).toBe(accountKey);
+    expect(recovered.resources[accountKey]?.refreshToken).toBe('resource-refresh');
+    expect(recovered.passports).toEqual(
+      expect.objectContaining({
+        [JSON.stringify(['global', metadata.passportId])]: expect.objectContaining({
+          accountRefreshToken: 'account-refresh',
+        }),
+      }),
+    );
+  });
+
+  it('preserves valid vault children while explicit login filters a damaged child', async () => {
+    const existingKey = JSON.stringify(['global', metadata.membershipId]);
+    const newMetadata = {
+      ...metadata,
+      membershipId: 'membership-2',
+      passportId: 'passport-2',
+      displayName: 'Second Account',
+    };
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: existingKey,
+      resources: {
+        [existingKey]: {
+          realm: 'global',
+          refreshToken: 'existing-refresh',
+          metadata,
+          lastUsedAt: 10,
+        },
+        damaged: { realm: 'global', refreshToken: 'damaged-refresh' },
+      },
+      passports: {},
+    });
+
+    await commitMobileLoginSessions(
+      {
+        pair: {
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          membership: {
+            id: newMetadata.membershipId,
+            passportId: newMetadata.passportId,
+            displayName: newMetadata.displayName,
+            email: newMetadata.email,
+            avatarUrl: newMetadata.avatarUrl,
+            kind: newMetadata.kind,
+            role: newMetadata.role,
+            orgId: newMetadata.orgId,
+            orgName: newMetadata.orgName,
+            orgLogoUrl: newMetadata.orgLogoUrl,
+          },
+        },
+        realm: 'global',
+        passportId: newMetadata.passportId,
+        accountRefreshToken: null,
+        memberships: [newMetadata],
+      },
+      async () => undefined,
+    );
+
+    const recovered = parseMobileAccountVault(secureStorage.value);
+    const newKey = JSON.stringify(['global', newMetadata.membershipId]);
+    expect(recovered.resources[existingKey]?.refreshToken).toBe('existing-refresh');
+    expect(recovered.resources[newKey]?.refreshToken).toBe('new-refresh');
+    expect(recovered.resources.damaged).toBeUndefined();
   });
 
   it('does not rewrite a vault containing a damaged resource child', async () => {
@@ -745,5 +878,64 @@ describe('mobile account vault', () => {
       }),
     ).rejects.toThrow('session delete failed');
     expect(secureStorage.value).toBe(malformed);
+  });
+
+  it('rolls vault and compatibility session back when receipt deletion fails', async () => {
+    const originalVault = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: {},
+    });
+    secureStorage.value = originalVault;
+    let sessionRaw: string | null = 'original-session';
+    const clearReceipt = vi.fn(async () => {
+      throw new Error('receipt delete failed');
+    });
+
+    await expect(
+      clearMobileLoginCredentialsForLogout({
+        readSessionRaw: async () => sessionRaw,
+        clearSession: async () => {
+          sessionRaw = null;
+        },
+        restoreSessionRaw: async (raw) => {
+          sessionRaw = raw;
+        },
+        clearReceipt,
+      }),
+    ).rejects.toThrow('receipt delete failed');
+
+    expect(secureStorage.value).toBe(originalVault);
+    expect(sessionRaw).toBe('original-session');
+    expect(clearReceipt).toHaveBeenCalledOnce();
+  });
+
+  it('commits vault, compatibility session, and receipt clearing together', async () => {
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: {},
+    });
+    let sessionRaw: string | null = 'original-session';
+    const clearReceipt = vi.fn(async () => undefined);
+
+    await clearMobileLoginCredentialsForLogout({
+      readSessionRaw: async () => sessionRaw,
+      clearSession: async () => {
+        sessionRaw = null;
+      },
+      restoreSessionRaw: async (raw) => {
+        sessionRaw = raw;
+      },
+      clearReceipt,
+    });
+
+    expect(parseMobileAccountVault(secureStorage.value).signedOutAt).toEqual(
+      expect.any(Number),
+    );
+    expect(sessionRaw).toBeNull();
+    expect(clearReceipt).toHaveBeenCalledOnce();
   });
 });

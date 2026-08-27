@@ -431,7 +431,7 @@ describe('mobile auth-server login', () => {
       'await serializeRefreshTokenMutation(async () => {',
     );
     const latestRead = switchBody.indexOf(
-      'const previousSession = await readPersistedAuthSessionStrict();',
+      'const previousSessionRaw = await getSecureItem(AUTH_SESSION_KEY);',
       serialized,
     );
     const targetWrite = switchBody.indexOf(
@@ -447,7 +447,7 @@ describe('mobile auth-server login', () => {
       targetWrite,
     );
     const rollbackWrite = switchBody.indexOf(
-      'await restorePersistedAuthSession(previousSession);',
+      'await restorePersistedAuthSessionRaw(previousSessionRaw);',
       runtimeClear,
     );
 
@@ -556,6 +556,10 @@ describe('mobile auth-server login', () => {
     const serialized = acceptBody.indexOf(
       'const persisted = await serializeRefreshTokenMutation(async () => {',
     );
+    const previousSessionSnapshot = acceptBody.indexOf(
+      'const previousPersistedSessionRaw = await getSecureItem(AUTH_SESSION_KEY);',
+      serialized,
+    );
     const vaultTransaction = acceptBody.indexOf(
       'await commitMobileLoginSessions(',
       serialized,
@@ -573,12 +577,13 @@ describe('mobile auth-server login', () => {
       runtimeClear,
     );
     const rollback = acceptBody.indexOf(
-      'await restorePersistedAuthSession(previousPersistedSession);',
+      'await restorePersistedAuthSessionRaw(previousPersistedSessionRaw);',
       ownerCommit,
     );
 
     expect(serialized).toBeGreaterThan(-1);
-    expect(vaultTransaction).toBeGreaterThan(serialized);
+    expect(previousSessionSnapshot).toBeGreaterThan(serialized);
+    expect(vaultTransaction).toBeGreaterThan(previousSessionSnapshot);
     expect(targetWrite).toBeGreaterThan(vaultTransaction);
     expect(runtimeClear).toBeGreaterThan(targetWrite);
     expect(ownerCommit).toBeGreaterThan(runtimeClear);
@@ -599,13 +604,18 @@ describe('mobile auth-server login', () => {
       authSource.indexOf('const getAccessToken = useCallback', logoutStart),
     );
     const durableClear = logoutBody.indexOf(
-      'clearMobileAccountVault(() => deleteSecureItem(AUTH_SESSION_KEY))',
+      'clearMobileLoginCredentialsForLogout({',
+    );
+    const receiptClear = logoutBody.indexOf(
+      'clearReceipt: () => persistAccountDeletionReceipt(null),',
+      durableClear,
     );
     const runtimeClear = logoutBody.indexOf(
       'await clearLocalSession({ persistedAuthAlreadyCleared: true });',
     );
     expect(durableClear).toBeGreaterThan(-1);
-    expect(runtimeClear).toBeGreaterThan(durableClear);
+    expect(receiptClear).toBeGreaterThan(durableClear);
+    expect(runtimeClear).toBeGreaterThan(receiptClear);
     expect(logoutBody).not.toContain('clearMobileAccountVault().catch');
     expect(authSource).toContain(
       "typeof persistedAccountVault?.signedOutAt === 'number'",

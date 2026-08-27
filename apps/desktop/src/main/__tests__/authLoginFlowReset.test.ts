@@ -163,7 +163,7 @@ describe('auth login-flow reset', () => {
     const mutationBody = source.slice(mutationStart, mutationEnd);
     expect(mutationBody).toContain('withCrossProcessLock(');
     expect(mutationBody).toContain('if (!status.held) throw accountVaultLockError(status.reason);');
-    expect(mutationBody.indexOf('const vault = readAuthAccountVault();')).toBeGreaterThan(
+    expect(mutationBody.indexOf('const vault = readAuthAccountVault({')).toBeGreaterThan(
       mutationBody.indexOf('if (!status.held)'),
     );
     expect(mutationBody.indexOf('writeAuthAccountVaultOrThrow(vault);')).toBeGreaterThan(
@@ -197,11 +197,45 @@ describe('auth login-flow reset', () => {
     const readEnd = source.indexOf('\n}\n\nfunction writeAuthAccountVault', readStart);
     const readBody = source.slice(readStart, readEnd);
 
-    expect(readBody).toContain('if (options.allowUnreadable) continue;');
+    expect(readBody).toContain(
+      'if (options.allowUnreadable || options.recoverInvalid) continue;',
+    );
     expect(readBody).toContain("throw new Error('invalid saved resource credential')");
     expect(readBody).toContain("throw new Error('invalid saved Passport credential')");
     expect(readBody).toContain("throw new Error('invalid saved Passport membership')");
     expect(readBody).toContain('memberships.length !== item.memberships.length');
+    expect(readBody).toContain('active && resources[active] ? active : null');
+  });
+
+  it('recovers invalid Desktop vault content only for a completed explicit login', () => {
+    const readStart = source.indexOf('function readAuthAccountVault(');
+    const readEnd = source.indexOf('\n}\n\nfunction writeAuthAccountVault', readStart);
+    const readBody = source.slice(readStart, readEnd);
+    const unreadableBranch = readBody.slice(
+      readBody.indexOf('if (raw === null)'),
+      readBody.indexOf('try {'),
+    );
+    expect(unreadableBranch).not.toContain('recoverInvalid');
+    expect(readBody).toContain('options.allowUnreadable || options.recoverInvalid');
+
+    const transactionStart = source.indexOf('async function transactAuthAccountVault');
+    const transactionEnd = source.indexOf(
+      '\n}\n\nasync function mutateAuthAccountVault',
+      transactionStart,
+    );
+    const transactionBody = source.slice(transactionStart, transactionEnd);
+    expect(transactionBody).toContain('recoverInvalidForExplicitLogin?: boolean');
+    expect(transactionBody).toContain(
+      'recoverInvalid: options.recoverInvalidForExplicitLogin',
+    );
+
+    const loginStart = source.indexOf('async function commitDesktopLoginSessions(');
+    const loginEnd = source.indexOf(
+      '\n}\n\n/** Persist a rotated Passport',
+      loginStart,
+    );
+    const loginBody = source.slice(loginStart, loginEnd);
+    expect(loginBody).toContain('{ recoverInvalidForExplicitLogin: true }');
   });
 
   it('atomically replaces the aggregate saved-account vault', () => {

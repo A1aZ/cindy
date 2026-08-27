@@ -94,6 +94,7 @@ import {
   mutateMobileAccountVault,
   patchMobileAccountMetadata,
   readMobileAccountVault,
+  reconcileMobileActiveAuthSession,
   rememberMobilePassportSession,
   rememberMobileResourceSession,
   removeMobileResourceSessionIfCurrent,
@@ -1051,9 +1052,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const did =
           knownDeviceId ?? deviceIdRef.current ?? (await ensureDeviceId());
         deviceIdRef.current = did;
-        const persistedVault = await readMobileAccountVault().catch(
-          () => null,
-        );
+        const reconciledAuth = await serializeRefreshTokenMutation(() =>
+          reconcileMobileActiveAuthSession({
+            readPersistedSession: readPersistedAuthSessionStrict,
+            writePersistedSession: writePersistedAuthSession,
+            clearPersistedSession: () => deleteSecureItem(AUTH_SESSION_KEY),
+          }),
+        ).catch(() => null);
+        if (!reconciledAuth) return null;
+        const persistedVault = reconciledAuth.vault;
         const activeResourceAtStart = persistedVault?.activeAccountKey
           ? {
               accountKey: persistedVault.activeAccountKey,
@@ -1062,14 +1069,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
           : null;
         if (typeof persistedVault?.signedOutAt === 'number') {
-          await serializeRefreshTokenMutation(() =>
-            deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined),
-          );
+          await clearCanaryChannel().catch(() => undefined);
           return null;
         }
-        const session = await serializeRefreshTokenMutation(
-          readPersistedAuthSession,
-        );
+        const session = reconciledAuth.session;
         if (authGenerationRef.current !== generation) return null;
         if (!session) {
           await clearCanaryChannel().catch(() => undefined);

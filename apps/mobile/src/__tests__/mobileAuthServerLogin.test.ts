@@ -308,6 +308,18 @@ describe('mobile auth-server login', () => {
     const refreshStart = authSource.indexOf('const refresh = useCallback');
     const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
     const refreshBody = authSource.slice(refreshStart, refreshEnd);
+    const crashReconcile = refreshBody.indexOf(
+      'reconcileMobileActiveAuthSession({',
+    );
+    const networkRefresh = refreshBody.indexOf('.refresh(', crashReconcile);
+    expect(crashReconcile).toBeGreaterThan(-1);
+    expect(networkRefresh).toBeGreaterThan(crashReconcile);
+    expect(refreshBody).toContain(
+      'readPersistedSession: readPersistedAuthSessionStrict',
+    );
+    expect(refreshBody).toContain(
+      'clearPersistedSession: () => deleteSecureItem(AUTH_SESSION_KEY)',
+    );
     const resourceVaultWrite = refreshBody.indexOf(
       'await commitMobileRuntimeResourceSession({',
     );

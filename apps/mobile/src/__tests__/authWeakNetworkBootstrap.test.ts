@@ -135,8 +135,12 @@ describe('auth weak-network bootstrap', () => {
       refreshStart,
       authSource.indexOf('\n  useEffect(() => {', refreshStart),
     );
+    const reconcileAt = refreshBody.indexOf(
+      'reconcileMobileActiveAuthSession({',
+    );
     const readSessionAt = refreshBody.indexOf(
-      'const session = await serializeRefreshTokenMutation(',
+      'const session = reconciledAuth.session;',
+      reconcileAt,
     );
     const emptySessionAt = refreshBody.indexOf('if (!session) {');
     const loadRealmAt = refreshBody.indexOf(
@@ -151,7 +155,8 @@ describe('auth weak-network bootstrap', () => {
       ),
     ].map((match) => match.index);
 
-    expect(readSessionAt).toBeGreaterThanOrEqual(0);
+    expect(reconcileAt).toBeGreaterThanOrEqual(0);
+    expect(readSessionAt).toBeGreaterThan(reconcileAt);
     expect(
       guards.some((index) => index > readSessionAt && index < emptySessionAt),
     ).toBe(true);

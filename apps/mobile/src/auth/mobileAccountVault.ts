@@ -7,6 +7,7 @@ import {
   type AccountMembership,
   type AuthMembership,
   type AuthRegion,
+  type AuthSessionRecord,
   type AuthTokenPair,
   type StoredAccountMetadata,
 } from '@cindy/auth-client';
@@ -45,6 +46,12 @@ export interface MobileSavedAccount extends StoredAccountMetadata {
 }
 
 let mutation = Promise.resolve();
+
+function enqueueMobileVaultOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const run = mutation.then(operation);
+  mutation = run.then(() => undefined, () => undefined);
+  return run;
+}
 
 export function emptyMobileAccountVault(): MobileAccountVault {
   return { version: 1, activeAccountKey: null, resources: {}, passports: {} };
@@ -153,14 +160,13 @@ export function transactMobileAccountVault<T>(
   operation: (vault: MobileAccountVault) => T | Promise<T>,
   afterPersist: (result: T) => void | Promise<void> = () => undefined,
 ): Promise<T> {
-  let result!: T;
-  const run = mutation.then(async () => {
+  return enqueueMobileVaultOperation(async () => {
     // A SecureStore read failure is not an empty vault. Propagate it so a
     // transient keychain error can never turn the next mutation into a write
     // that erases every saved credential.
     const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
     const vault = parseMobileAccountVaultRecord(raw);
-    result = await operation(vault);
+    const result = await operation(vault);
     await writeMobileAccountVault(vault);
     try {
       // Keep the vault queue owned until every related durable write and
@@ -172,9 +178,60 @@ export function transactMobileAccountVault<T>(
       else await setSecureItem(MOBILE_ACCOUNT_VAULT_KEY, raw);
       throw error;
     }
+    return result;
   });
-  mutation = run.then(() => undefined, () => undefined);
-  return run.then(() => result);
+}
+
+export interface ReconciledMobileAuthState {
+  vault: MobileAccountVault;
+  session: AuthSessionRecord | null;
+}
+
+/**
+ * Repair the compatibility auth session from the crash-consistent active
+ * Resource record before any refresh request can consume a stale generation.
+ * The vault queue remains owned through the repair so an account transition
+ * cannot interleave between the snapshot and the projection write.
+ */
+export function reconcileMobileActiveAuthSession(input: {
+  readPersistedSession: () => Promise<AuthSessionRecord | null>;
+  writePersistedSession: (
+    refreshToken: string,
+    realm: AuthRegion,
+  ) => Promise<void>;
+  clearPersistedSession: () => Promise<void>;
+}): Promise<ReconciledMobileAuthState> {
+  return enqueueMobileVaultOperation(async () => {
+    const raw = await getSecureItem(MOBILE_ACCOUNT_VAULT_KEY);
+    const vault = parseMobileAccountVaultRecord(raw);
+    let session = await input.readPersistedSession();
+
+    if (typeof vault.signedOutAt === 'number') {
+      if (session) await input.clearPersistedSession();
+      return { vault, session: null };
+    }
+
+    const activeResource = vault.activeAccountKey
+      ? vault.resources[vault.activeAccountKey]
+      : undefined;
+    if (!activeResource) return { vault, session };
+
+    if (
+      session?.realm !== activeResource.realm ||
+      session.refreshToken !== activeResource.refreshToken
+    ) {
+      await input.writePersistedSession(
+        activeResource.refreshToken,
+        activeResource.realm,
+      );
+      session = {
+        version: 1,
+        realm: activeResource.realm,
+        refreshToken: activeResource.refreshToken,
+      };
+    }
+    return { vault, session };
+  });
 }
 
 export function mutateMobileAccountVault<T>(

@@ -28,6 +28,7 @@ import {
   listMobileSavedAccounts,
   mutateMobileAccountVault,
   parseMobileAccountVault,
+  reconcileMobileActiveAuthSession,
   removeMobilePassportSessionIfCurrent,
   removeMobileResourceSessionIfCurrent,
   replaceMobilePassportSessionIfCurrent,
@@ -117,6 +118,72 @@ describe('mobile account vault', () => {
         orgLogoUrl: 'https://example.com/org.png',
       }),
     ]);
+  });
+
+  it('repairs an interrupted compatibility-session write from the active vault before refresh', async () => {
+    const accountKey = JSON.stringify(['global', metadata.membershipId]);
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: accountKey,
+      resources: {
+        [accountKey]: {
+          realm: 'global',
+          refreshToken: 'resource-new',
+          metadata,
+          lastUsedAt: 10,
+        },
+      },
+      passports: {},
+    });
+    let session: {
+      version: 1;
+      realm: 'cn' | 'global';
+      refreshToken: string;
+    } = {
+      version: 1,
+      realm: 'global',
+      refreshToken: 'resource-old',
+    };
+    const writePersistedSession = vi.fn(
+      async (refreshToken: string, realm: 'cn' | 'global') => {
+        session = { version: 1, realm, refreshToken };
+      },
+    );
+    const clearPersistedSession = vi.fn(async () => undefined);
+
+    const reconciled = await reconcileMobileActiveAuthSession({
+      readPersistedSession: async () => session,
+      writePersistedSession,
+      clearPersistedSession,
+    });
+
+    expect(reconciled.session).toEqual({
+      version: 1,
+      realm: 'global',
+      refreshToken: 'resource-new',
+    });
+    expect(writePersistedSession).toHaveBeenCalledWith(
+      'resource-new',
+      'global',
+    );
+    expect(clearPersistedSession).not.toHaveBeenCalled();
+    expect(secureStorage.set).not.toHaveBeenCalled();
+
+    secureStorage.value = JSON.stringify({
+      version: 1,
+      activeAccountKey: null,
+      resources: {},
+      passports: {},
+      signedOutAt: 123,
+    });
+    await expect(
+      reconcileMobileActiveAuthSession({
+        readPersistedSession: async () => session,
+        writePersistedSession,
+        clearPersistedSession,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ session: null }));
+    expect(clearPersistedSession).toHaveBeenCalledTimes(1);
   });
 
   it('does not trust an active key whose resource credential is missing', () => {

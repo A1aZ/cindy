@@ -182,7 +182,11 @@ import {
 import * as imageCacheStore from '../imageCacheStore.js';
 import * as cindyChatAttachments from '../cindy-media/chatAttachments.js';
 import { materializeGeneratedImage } from '../cindy-media/generatedMedia.js';
-import { getDbClient, isDbClientNotReadyError } from '../localDb/client/current.js';
+import {
+  getCurrentDbClientSnapshot,
+  getDbClient,
+  isDbClientNotReadyError,
+} from '../localDb/client/current.js';
 import { getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import {
   awaitAgentInputQueueSnapshotPersistence,
@@ -737,11 +741,13 @@ import {
 import {
   createContextOverflowRollover,
   isContextOverflowErrorData,
+  isOversizedHistoryErrorData,
   isPiPromptRpcTimeoutError,
   lookupVerifiedContextWindow,
   persistedUserContentToWireMessage,
   shouldRebuildPiNativeSession,
 } from './contextOverflowRollover.js';
+import { classifyCodexHistoryOversized } from '../maker-host/codex-local-sessions.js';
 import { hydrateQueuedAgentReferences } from './agentInputReferences.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { clearSealedCodexPlanState, readCodexPlanState } from '../localDb/codexPlanState.js';
@@ -938,6 +944,7 @@ import {
 } from './agentSkillListIpcBoundary.js';
 import {
   captureDataOwnerBroadcastScope,
+  isDataOwnerBroadcastScopeCurrent,
   tapWindowBroadcast,
 } from '../device-link/broadcast-tap.js';
 import { emitSessionCreated } from '../localDb/ipc/sessionCreatedBroadcast.js';
@@ -4448,7 +4455,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         !session.remoteHostId &&
         event.type === 'error' &&
         isTerminalTurnErrorEvent(event) &&
-        isContextOverflowErrorData(event.data);
+        (isContextOverflowErrorData(event.data) ||
+          isOversizedHistoryErrorData(event.data));
       if (suppressOverflowBroadcast) {
         overflowSuppressedBroadcasts.set(session.id, {
           sessionId: session.id,
@@ -4580,7 +4588,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           !isRemoteAuthRetry &&
           !isGatewayProxyTokenRecovery &&
           !autoResumeSuppressesPersist &&
-          isContextOverflowErrorData(attributedEvent.data)
+          (isContextOverflowErrorData(attributedEvent.data) ||
+            isOversizedHistoryErrorData(attributedEvent.data))
             ? (contextOverflowRolloverHolder?.claim(session.id) ?? 'idle')
             : 'idle';
         if (overflowClaim === 'claimed') {
@@ -11954,11 +11963,112 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           contextWindow: sessions.contextWindow,
           model: sessions.model,
           providerId: sessions.providerId,
+          workingDir: sessions.workingDir,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
         .limit(1);
       return row ?? null;
+    },
+    tryStripOversizedCodexHistory: async ({ sessionId, threadId, model, providerId, workingDir }) => {
+      const ownerScope = captureDataOwnerBroadcastScope();
+      const dbSnapshot = getCurrentDbClientSnapshot();
+      let committed = false;
+      try {
+        const classified = await classifyCodexHistoryOversized(threadId);
+        if (
+          !isDataOwnerBroadcastScopeCurrent(ownerScope) ||
+          !dbSnapshot ||
+          getCurrentDbClientSnapshot()?.clientEpoch !== dbSnapshot.clientEpoch
+        ) {
+          return 'stale';
+        }
+        if (classified === 'healthy') return 'not-needed';
+        if (classified !== 'oversized') return 'failed';
+        const live = getMaker().getSession(sessionId);
+        // busy ≠ failed：外层已守卫 turn-running；这里若仍撞上，中止而不是升级成 rebuild。
+        if (live?.isTurnRunning()) return 'busy';
+        if (live) await getMaker().closeSession(sessionId);
+        const forked = await getMaker().forkSdkSession('codex', {
+          sourceSdkSessionId: threadId,
+          model: model ?? undefined,
+          providerId,
+          upToMessageId: undefined,
+          workingDir: workingDir ?? undefined,
+          stripEncryptedReasoning: true,
+          remoteHostId: null,
+        });
+        if (!isDataOwnerBroadcastScopeCurrent(ownerScope)) return 'stale';
+        const currentDb = getCurrentDbClientSnapshot();
+        if (!dbSnapshot || !currentDb || currentDb.clientEpoch !== dbSnapshot.clientEpoch) {
+          return 'stale';
+        }
+        const now = Date.now();
+        const write = await dbSnapshot.client
+          .drizzle.update(sessions)
+          .set({ sdkSessionId: forked.newSdkSessionId, updatedAt: now })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.sdkSessionId, threadId)))
+          .run();
+        if (write.changes === 0) return 'failed';
+        committed = true;
+        try {
+          broadcastSessionPatched(
+            sessionId,
+            {
+              sdkSessionId: forked.newSdkSessionId,
+              updatedAt: new Date(now).toISOString(),
+            },
+            ownerScope,
+          );
+          const cardOwnerCurrent =
+            isDataOwnerBroadcastScopeCurrent(ownerScope) &&
+            getCurrentDbClientSnapshot()?.clientEpoch === dbSnapshot.clientEpoch;
+          if (!cardOwnerCurrent) {
+            log.warn('codex oversized history card skipped: owner changed after relink', {
+              sessionId,
+              threadId,
+              toThreadId: forked.newSdkSessionId,
+            });
+          } else {
+            await createDbMessage(
+              sessionId,
+              {
+                clientId: `context-rebuild-card:${createId()}`,
+                role: 'assistant',
+                content: '',
+                agentKind: 'codex',
+                agentMeta: { contextRebuild: { reason: 'codex-history-strip' } } as AgentMeta,
+              },
+              {
+                broadcastOwnerScope: ownerScope,
+                shouldBroadcast: () =>
+                  isDataOwnerBroadcastScopeCurrent(ownerScope) &&
+                  getCurrentDbClientSnapshot()?.clientEpoch === dbSnapshot.clientEpoch,
+              },
+            );
+          }
+        } catch (postError) {
+          log.warn('codex oversized history relink post-commit failed', {
+            sessionId,
+            threadId,
+            toThreadId: forked.newSdkSessionId,
+            error: postError instanceof Error ? postError.message : String(postError),
+          });
+        }
+        log.info('codex oversized history relinked in place', {
+          sessionId,
+          fromThreadId: threadId,
+          toThreadId: forked.newSdkSessionId,
+        });
+        return 'recovered';
+      } catch (error) {
+        log.warn('codex oversized history relink failed', {
+          sessionId,
+          threadId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return committed ? 'recovered' : 'failed';
+      }
     },
     getAutoCompactThresholdPct: () => readCompactionPct(),
     resolveVerifiedWindow: (agentKind, modelId, providerId) => {

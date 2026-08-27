@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '@/auth/AuthContext';
 import { Text } from '@/components/AppText';
+import { formatRemoteError } from '@/device-link/remoteStatus';
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { SheetModal } from '@/session/SheetModal';
 import { SheetSurface } from '@/session/SheetSurface';
@@ -62,7 +63,7 @@ export function AccountSwitcherSheet({
   useEffect(() => {
     if (!visible) return;
     setSnap('half');
-    void auth.syncSavedAccounts();
+    void auth.syncSavedAccounts().catch(() => undefined);
   }, [auth.syncSavedAccounts, visible]);
 
   const confirmBoundary = (action: () => void) => {
@@ -90,7 +91,9 @@ export function AccountSwitcherSheet({
       void auth
         .switchAccount(accountKey)
         .then(onClose)
-        .catch(() => undefined)
+        .catch((error) => {
+          Alert.alert(t('devices.list.alert.actionFailed'), formatRemoteError(error));
+        })
         .finally(() => setSwitchingKey(null));
     });
   };

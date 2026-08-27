@@ -2,6 +2,7 @@ import { useFocusEffect } from 'expo-router';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Easing,
   Modal,
@@ -1435,10 +1436,12 @@ export default function HomeScreen() {
     setLoggingOut(true);
     try {
       await auth.logout();
+    } catch (error) {
+      Alert.alert(t('devices.list.alert.actionFailed'), formatRemoteError(error));
     } finally {
       setLoggingOut(false);
     }
-  }, [auth, loggingOut]);
+  }, [auth, loggingOut, t]);
 
   const toggleProject = useCallback((key: string) => {
     configureCollapseAnimation();

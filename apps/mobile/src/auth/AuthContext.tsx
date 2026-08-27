@@ -629,9 +629,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
           accountDeletionReceiptRealmRef.current = realm;
         } else {
-          await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY).catch(
-            () => undefined,
-          );
+          // Account-bound transitions await this helper before publishing the
+          // new owner. A failed durable delete must reject so their vault and
+          // active-session transactions roll back instead of reviving the
+          // previous identity's receipt after restart.
+          await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY);
           accountDeletionReceiptRealmRef.current = null;
         }
         setAccountDeletionReceipt(receiptToken);

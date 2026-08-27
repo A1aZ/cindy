@@ -656,6 +656,9 @@ describe('mobile auth-server login', () => {
     expect(sheetSource).not.toContain(
       'disabled={auth.accountsLoading || switchingKey !== null}',
     );
+    expect(sheetSource).toContain("t('devices.list.alert.actionFailed')");
+    expect(sheetSource).toContain('formatRemoteError(error)');
+    expect(sheetSource).not.toContain('.catch(() => undefined)\n        .finally');
   });
 
   it('clears every Device Link account projection when accountGeneration changes', () => {

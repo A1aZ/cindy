@@ -352,7 +352,7 @@ export function LoginScreen({
         if (cancelled || !status) return;
         if (status.status === 'cancelled') {
           stopPolling();
-          await auth.clearAccountDeletionReceipt();
+          await auth.clearAccountDeletionReceipt().catch(() => undefined);
           if (!cancelled) setAccountDeletionStatus(null);
           return;
         }
@@ -364,7 +364,7 @@ export function LoginScreen({
           cause.code === 'ACCOUNT_DELETION_RECEIPT_INVALID'
         ) {
           stopPolling();
-          await auth.clearAccountDeletionReceipt();
+          await auth.clearAccountDeletionReceipt().catch(() => undefined);
         } else if (
           cause instanceof AuthApiError &&
           cause.code === 'INVALID_RESPONSE'
@@ -1429,7 +1429,7 @@ export function LoginScreen({
             frame={deletionBubbleFrame}
             onDismiss={
               accountDeletionStatus.status === 'completed'
-                ? () => void auth.clearAccountDeletionReceipt()
+                ? () => void auth.clearAccountDeletionReceipt().catch(() => undefined)
                 : undefined
             }
             status={accountDeletionStatus}

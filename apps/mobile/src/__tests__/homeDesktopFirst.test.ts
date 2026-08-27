@@ -46,6 +46,19 @@ describe('mobile Home startup reads', () => {
 });
 
 describe('mobile home desktop-first surface', () => {
+  it('surfaces durable logout failures from the home drawer', () => {
+    const source = readSource('app/devices/index.tsx');
+    const logoutStart = source.indexOf('const logout = useCallback');
+    const logoutBody = source.slice(
+      logoutStart,
+      source.indexOf('const toggleProject', logoutStart),
+    );
+
+    expect(logoutBody).toContain('await auth.logout();');
+    expect(logoutBody).toContain("t('devices.list.alert.actionFailed')");
+    expect(logoutBody).toContain('formatRemoteError(error)');
+  });
+
   it('uses the desktop-sidebar Home as the authenticated root instead of a device picker route', () => {
     const indexSource = readSource('app/index.tsx');
     const layoutSource = readSource('app/_layout.tsx');

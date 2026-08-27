@@ -68,6 +68,19 @@ describe("mobile account deletion", () => {
     expect(context).toContain(
       "serializeAccountDeletionReceiptRecord(realm, receiptToken)",
     );
+    const persistStart = context.indexOf(
+      "const persistAccountDeletionReceipt = useCallback",
+    );
+    const persistBody = context.slice(
+      persistStart,
+      context.indexOf("/* ── 登录人机验证", persistStart),
+    );
+    expect(persistBody).toContain(
+      "await deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY);",
+    );
+    expect(persistBody).not.toContain(
+      "deleteSecureItem(ACCOUNT_DELETION_RECEIPT_KEY).catch",
+    );
     expect(requestBody).toContain("activeAuthRealmRef.current,\n    );");
     expect(confirmBody).toContain("await clearLocalSession();");
     expect(confirmBody).not.toContain(

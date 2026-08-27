@@ -103,8 +103,47 @@ describe("mobile account deletion", () => {
       transactionalClearBody.indexOf("commit();"),
     );
     expect(transactionalClearBody).not.toContain("await commit()");
-    expect(requestBody).toContain("activeAuthRealmRef.current,\n    );");
-    expect(confirmBody).toContain("await clearLocalSession();");
+    expect(requestBody).toContain(
+      "const expectedGeneration = authGenerationRef.current;",
+    );
+    expect(requestBody).toContain(
+      "const expectedRealm = activeAuthRealmRef.current;",
+    );
+    expect(requestBody).toContain(
+      "const expectedPassportId = userRef.current?.passportId ?? '';",
+    );
+    expect(requestBody).toContain(
+      "await serializeRefreshTokenMutation(async () => {",
+    );
+    expect(requestBody).toContain(
+      "await persistAccountDeletionReceipt(\n        challenge.receiptToken,\n        expectedRealm,",
+    );
+    const capturePassport = confirmBody.indexOf(
+      "const deletedPassportId = userRef.current?.passportId ?? '';",
+    );
+    const confirmRequest = confirmBody.indexOf(
+      "client.confirmAccountDeletion(token",
+    );
+    expect(capturePassport).toBeGreaterThan(-1);
+    expect(confirmRequest).toBeGreaterThan(capturePassport);
+    expect(confirmBody).toContain(
+      "const deletionGeneration = authGenerationRef.current;",
+    );
+    expect(confirmBody).toContain(
+      "const deletedRealm = activeAuthRealmRef.current;",
+    );
+    expect(confirmBody).toContain(
+      "await serializeRefreshTokenMutation(async () => {",
+    );
+    expect(confirmBody).toContain(
+      "userRef.current?.passportId === deletedPassportId",
+    );
+    expect(confirmBody).toContain(
+      "await removeMobilePassport(deletedRealm, deletedPassportId);",
+    );
+    expect(confirmBody).toContain(
+      "await clearLocalSession({ persistedAuthAlreadyCleared: true });",
+    );
     expect(confirmBody).not.toContain(
       "persistAccountDeletionReceipt(input.receiptToken)",
     );

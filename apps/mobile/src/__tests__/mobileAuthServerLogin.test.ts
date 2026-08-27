@@ -518,6 +518,31 @@ describe('mobile auth-server login', () => {
     );
   });
 
+  it('routes every background saved-account snapshot through rejection handling', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const helperStart = authSource.indexOf(
+      'const refreshSavedAccountsSnapshotBestEffort = useCallback',
+    );
+    const helperBody = authSource.slice(
+      helperStart,
+      authSource.indexOf(
+        '\n\n  const clearAccountScopedRuntimeForSwitch',
+        helperStart,
+      ),
+    );
+
+    expect(helperBody).toContain(
+      'void refreshSavedAccountsSnapshot().catch(() => undefined);',
+    );
+    expect(authSource).not.toContain('void refreshSavedAccountsSnapshot();');
+    expect(
+      authSource.match(/refreshSavedAccountsSnapshotBestEffort\(\);/g)?.length,
+    ).toBeGreaterThanOrEqual(4);
+  });
+
   it('keeps the added-account vault transaction through runtime cleanup and owner commit', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),

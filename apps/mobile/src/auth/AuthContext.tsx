@@ -825,6 +825,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSavedAccounts(listMobileSavedAccounts(vault));
   }, []);
 
+  const refreshSavedAccountsSnapshotBestEffort = useCallback((): void => {
+    void refreshSavedAccountsSnapshot().catch(() => undefined);
+  }, [refreshSavedAccountsSnapshot]);
+
   const clearAccountScopedRuntimeForSwitch = useCallback(async () => {
     setMobileAuthOwner(null);
     await Promise.all([
@@ -1064,7 +1068,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       });
       if (!persisted) throw authCodeError('AUTH_FLOW_SUPERSEDED');
-      void refreshSavedAccountsSnapshot();
+      refreshSavedAccountsSnapshotBestEffort();
       void clearCanaryChannel().catch(() => undefined);
       scheduleCanaryChannelSync(outcome.accessToken, generation);
       scheduleXdOrgBetaDefault(outcome.accessToken, generation);
@@ -1080,7 +1084,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loadMe,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,
-      refreshSavedAccountsSnapshot,
+      refreshSavedAccountsSnapshotBestEffort,
       serializeRefreshTokenMutation,
       setToken,
       updateLoginState,
@@ -1185,7 +1189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               passportId,
             ),
           );
-          void refreshSavedAccountsSnapshot();
+          refreshSavedAccountsSnapshotBestEffort();
           scheduleCanaryChannelSync(pair.accessToken, generation);
           scheduleXdOrgBetaDefault(pair.accessToken, generation);
           void loadMe(pair.accessToken, did, generation).catch(() => undefined);
@@ -1221,7 +1225,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 if (authGenerationRef.current !== generation) return null;
                 throw removalError;
               }
-              void refreshSavedAccountsSnapshot();
+              refreshSavedAccountsSnapshotBestEffort();
             }
             if (authGenerationRef.current !== generation) return null;
             await terminateSessionImplRef.current();
@@ -1237,7 +1241,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       applyUser,
       loadMe,
-      refreshSavedAccountsSnapshot,
+      refreshSavedAccountsSnapshotBestEffort,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,
       serializeRefreshTokenMutation,
@@ -2398,7 +2402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw error;
         }
 
-        void refreshSavedAccountsSnapshot().catch(() => undefined);
+        refreshSavedAccountsSnapshotBestEffort();
         void clearCanaryChannel().catch(() => undefined);
         scheduleCanaryChannelSync(pair.accessToken, generation);
         scheduleXdOrgBetaDefault(pair.accessToken, generation);
@@ -2417,6 +2421,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       commitWithClearedAccountDeletionReceipt,
       loadMe,
       refreshSavedAccountsSnapshot,
+      refreshSavedAccountsSnapshotBestEffort,
       scheduleCanaryChannelSync,
       scheduleXdOrgBetaDefault,
       serializeRefreshTokenMutation,
@@ -2623,11 +2628,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   /** Keep direct authenticated auth-client calls on the same terminal boundary. */
   const runProtectedAuthRequest = useCallback(
-    async <T,>(request: () => Promise<T>): Promise<T> => {
+    async <T,>(
+      request: () => Promise<T>,
+      expectedAuthGeneration: number,
+    ): Promise<T> => {
       try {
         return await request();
       } catch (error) {
-        if (isAccountUnavailableAuthError(error)) {
+        if (
+          isAccountUnavailableAuthError(error) &&
+          authGenerationRef.current === expectedAuthGeneration
+        ) {
           await terminateSession('ACCOUNT_UNAVAILABLE');
         }
         throw error;
@@ -2637,37 +2648,76 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const getAccountDeletionAvailability = useCallback(async () => {
+    const expectedGeneration = authGenerationRef.current;
+    const expectedRealm = activeAuthRealmRef.current;
     const token = await getAccessToken();
     if (!token) throw authCodeError('UNAUTHENTICATED');
+    if (authGenerationRef.current !== expectedGeneration) {
+      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+    }
     const did = deviceIdRef.current ?? (await ensureDeviceId());
     deviceIdRef.current = did;
-    return runProtectedAuthRequest(() =>
-      authClientFor(
-        did,
-        activeAuthRealmRef.current,
-      ).getAccountDeletionAvailability(token),
+    if (authGenerationRef.current !== expectedGeneration) {
+      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+    }
+    const availability = await runProtectedAuthRequest(
+      () =>
+        authClientFor(did, expectedRealm).getAccountDeletionAvailability(
+          token,
+        ),
+      expectedGeneration,
     );
+    if (authGenerationRef.current !== expectedGeneration) {
+      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+    }
+    return availability;
   }, [getAccessToken, runProtectedAuthRequest]);
 
   const requestAccountDeletionChallenge = useCallback(async () => {
+    const expectedGeneration = authGenerationRef.current;
+    const expectedRealm = activeAuthRealmRef.current;
+    const expectedPassportId = userRef.current?.passportId ?? '';
+    if (!expectedPassportId) throw authCodeError('UNAUTHENTICATED');
     const token = await getAccessToken();
     if (!token) throw authCodeError('UNAUTHENTICATED');
+    if (authGenerationRef.current !== expectedGeneration) {
+      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+    }
     const did = deviceIdRef.current ?? (await ensureDeviceId());
     deviceIdRef.current = did;
-    const challenge = await runProtectedAuthRequest(() =>
-      authClientFor(
-        did,
-        activeAuthRealmRef.current,
-      ).requestAccountDeletionChallenge(token),
+    if (authGenerationRef.current !== expectedGeneration) {
+      throw authCodeError('AUTH_FLOW_SUPERSEDED');
+    }
+    const challenge = await runProtectedAuthRequest(
+      () =>
+        authClientFor(did, expectedRealm).requestAccountDeletionChallenge(
+          token,
+        ),
+      expectedGeneration,
     );
     // 先持久化查询凭证，再把 challenge 交给 UI。即使确认成功后的响应丢失，
-    // 下一次冷启动仍能查询注销状态。
-    await persistAccountDeletionReceipt(
-      challenge.receiptToken,
-      activeAuthRealmRef.current,
-    );
+    // 下一次冷启动仍能查询注销状态。账号切换也使用 refresh-token 队列，
+    // 因此 owner 校验与 receipt 写入之间不会插入另一个账号的提交。
+    await serializeRefreshTokenMutation(async () => {
+      if (
+        authGenerationRef.current !== expectedGeneration ||
+        activeAuthRealmRef.current !== expectedRealm ||
+        userRef.current?.passportId !== expectedPassportId
+      ) {
+        throw authCodeError('AUTH_FLOW_SUPERSEDED');
+      }
+      await persistAccountDeletionReceipt(
+        challenge.receiptToken,
+        expectedRealm,
+      );
+    });
     return challenge;
-  }, [getAccessToken, persistAccountDeletionReceipt, runProtectedAuthRequest]);
+  }, [
+    getAccessToken,
+    persistAccountDeletionReceipt,
+    runProtectedAuthRequest,
+    serializeRefreshTokenMutation,
+  ]);
 
   const confirmAccountDeletion = useCallback(
     async (input: {
@@ -2675,18 +2725,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       receiptToken: string;
       code: string;
     }): Promise<AccountDeletionStatus> => {
+      const deletionGeneration = authGenerationRef.current;
+      const deletedRealm = activeAuthRealmRef.current;
+      const deletedPassportId = userRef.current?.passportId ?? '';
+      if (!deletedPassportId) throw authCodeError('UNAUTHENTICATED');
       const token = await getAccessToken();
       if (!token) throw authCodeError('UNAUTHENTICATED');
+      if (authGenerationRef.current !== deletionGeneration) {
+        throw authCodeError('AUTH_FLOW_SUPERSEDED');
+      }
       const did = deviceIdRef.current ?? (await ensureDeviceId());
       deviceIdRef.current = did;
-      const client = authClientFor(did, activeAuthRealmRef.current);
+      if (authGenerationRef.current !== deletionGeneration) {
+        throw authCodeError('AUTH_FLOW_SUPERSEDED');
+      }
+      const client = authClientFor(did, deletedRealm);
       let status: AccountDeletionStatus;
       try {
-        status = await runProtectedAuthRequest(() =>
-          client.confirmAccountDeletion(token, {
-            ...input,
-            acknowledged: true,
-          }),
+        status = await runProtectedAuthRequest(
+          () =>
+            client.confirmAccountDeletion(token, {
+              ...input,
+              acknowledged: true,
+            }),
+          deletionGeneration,
         );
       } catch (cause) {
         const ambiguous =
@@ -2705,22 +2767,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // confirm 已在服务端撤销 refresh token；当前客户端只做本地
       // 清理，不再调用普通 logout，以免覆盖或依赖已撤销的会话。receipt 已在
       // challenge 返回前持久化，不做可能阻断本地登出的冗余二次写入。
-      const deletedPassportId = userRef.current?.passportId ?? '';
-      const deletedRealm = activeAuthRealmRef.current;
-      await clearLocalSession();
-      if (deletedPassportId) {
-        await removeMobilePassport(deletedRealm, deletedPassportId).catch(
-          () => undefined,
-        );
-        await refreshSavedAccountsSnapshot().catch(() => undefined);
-      }
+      await serializeRefreshTokenMutation(async () => {
+        const deletedOwnerIsCurrent =
+          activeAuthRealmRef.current === deletedRealm &&
+          userRef.current?.passportId === deletedPassportId;
+        if (deletedOwnerIsCurrent) {
+          // Account switching uses this same queue. Keep it owned through the
+          // owner check, vault cleanup and runtime clear so a newly selected
+          // account can never be cleared by this older deletion response.
+          try {
+            await removeMobilePassport(deletedRealm, deletedPassportId);
+          } finally {
+            await deleteSecureItem(AUTH_SESSION_KEY).catch(() => undefined);
+            await clearLocalSession({ persistedAuthAlreadyCleared: true });
+          }
+          return;
+        }
+        await removeMobilePassport(deletedRealm, deletedPassportId);
+      });
+      refreshSavedAccountsSnapshotBestEffort();
       return status;
     },
     [
       clearLocalSession,
       getAccessToken,
-      refreshSavedAccountsSnapshot,
+      refreshSavedAccountsSnapshotBestEffort,
       runProtectedAuthRequest,
+      serializeRefreshTokenMutation,
     ],
   );
 

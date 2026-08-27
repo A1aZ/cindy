@@ -366,6 +366,10 @@ describe("CindyAuthClient", () => {
     expect(fetch.mock.calls[3]?.[1]?.headers).toMatchObject({
       Authorization: "Bearer rotated-account-access",
     });
+    expect(fetch.mock.calls[3]?.[1]).toMatchObject({
+      method: "POST",
+      body: "{}",
+    });
   });
 
   it("maps server errors without leaking malformed responses", async () => {

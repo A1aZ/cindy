@@ -308,6 +308,18 @@ describe('mobile auth-server login', () => {
     const refreshStart = authSource.indexOf('const refresh = useCallback');
     const refreshEnd = authSource.indexOf('\n  useEffect(() => {', refreshStart);
     const refreshBody = authSource.slice(refreshStart, refreshEnd);
+    const resourceVaultWrite = refreshBody.indexOf(
+      'await rememberMobileResourceSession(',
+    );
+    const publishAccessToken = refreshBody.indexOf(
+      'setToken(pair.accessToken);',
+      resourceVaultWrite,
+    );
+    expect(resourceVaultWrite).toBeGreaterThan(-1);
+    expect(publishAccessToken).toBeGreaterThan(resourceVaultWrite);
+    expect(refreshBody.slice(resourceVaultWrite, publishAccessToken)).not.toContain(
+      '.catch(',
+    );
     expect(refreshBody).toMatch(
       /if \(authGenerationRef\.current !== generation\) return null;\s+const passportId =[\s\S]*?setToken\(pair\.accessToken\);/,
     );

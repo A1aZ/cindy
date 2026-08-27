@@ -336,7 +336,7 @@ export class CindyAuthClient {
     await this.request(
       "/api/auth/account/logout",
       z.object({ status: z.literal("ok") }),
-      undefined,
+      {},
       { token: accountToken },
     );
   }

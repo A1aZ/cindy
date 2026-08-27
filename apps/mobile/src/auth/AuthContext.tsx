@@ -1050,7 +1050,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             pair,
             session.realm,
             passportId,
-          ).catch(() => null);
+          );
           setToken(pair.accessToken);
           applyUser(
             mergeMembershipWithExisting(

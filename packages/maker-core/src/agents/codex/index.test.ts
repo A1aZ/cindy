@@ -3805,6 +3805,7 @@ describe('CodexAgent.startSession developerInstructions', () => {
     )?.[1] as { modelProvider?: string };
 
     expect(params.modelProvider).toBeUndefined();
+    expect(handle.codexCindyRemoteCompactionCompatible).toBe(false);
     await handle.close();
   });
 

@@ -5284,12 +5284,14 @@ export class CodexAgent extends BaseAgent {
     // 独立 Subagent 只在 proxy 层改写 Provider/model，Codex child thread 仍继承 root
     // 的 model provider identity。若 child 不是同一 Cindy Codex 后端，给 root 打开
     // remote compaction 会让 child 也错误调用不兼容上游；该组合保持本地压缩。
-    const cindyProviderRemoteCompaction = cindyProviderRemoteCompactionRequested && (
+    const cindyProviderRemoteCompactionCompatible = (
       !independentSubagentRoute || isCindyProviderCodexRemoteCompactionRoute({
         providerId: independentSubagentRoute.providerId,
         model: independentSubagentRoute.catalogModel,
       })
     );
+    const cindyProviderRemoteCompaction =
+      cindyProviderRemoteCompactionRequested && cindyProviderRemoteCompactionCompatible;
     const threadCredentialFamily =
       credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
     const threadModelProvider = opts.remoteHostId
@@ -11082,6 +11084,9 @@ export class CodexAgent extends BaseAgent {
       get model() { return mutableModel; },
       get codexProxyActive() { return hostUsesCodexProxy; },
       get codexThreadModelProviderId() { return codexThreadModelProviderId; },
+      get codexCindyRemoteCompactionCompatible() {
+        return cindyProviderRemoteCompactionCompatible;
+      },
       get codexProductPromptDelivery() { return codexProductPromptDelivery; },
 
       validateSendOptions(sendOpts: SendOptions) {

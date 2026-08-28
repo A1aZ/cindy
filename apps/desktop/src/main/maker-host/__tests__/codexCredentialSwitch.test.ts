@@ -63,6 +63,21 @@ describe('shouldCloseSessionForCredentialSwitch codex mode', () => {
     expect(shouldCloseSessionForCredentialSwitch(input)).toBe(false);
   });
 
+  it('keeps a local-compaction Cindy Codex thread when its independent subagent is incompatible', () => {
+    const input = {
+      agentKind: 'codex',
+      currentProviderId: 'xd',
+      nextProviderId: 'xd',
+      currentModel: 'codex/gpt-5.5',
+      nextModel: 'codex/gpt-5.6-sol',
+      currentCodexProxyActive: true,
+      currentCodexThreadModelProviderId: 'cindy_gateway',
+      currentCodexCindyRemoteCompactionCompatible: false,
+    } as const;
+    expect(isCodexThreadModelProviderIdentityMismatch(input)).toBe(false);
+    expect(shouldCloseSessionForCredentialSwitch(input)).toBe(false);
+  });
+
   it('keeps a proxy-active OAuth Codex session for oauth-family model changes', () => {
     expect(shouldCloseSessionForCredentialSwitch({
       agentKind: 'codex',

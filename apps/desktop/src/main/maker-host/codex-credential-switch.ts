@@ -1,6 +1,7 @@
 import {
   canReuseCodexHostForCredentialMode,
   canReuseHostForCredentialMode,
+  isCindyProviderCodexRemoteCompactionRoute,
   resolveAgentCredentialMode,
   type AgentCredentialMode,
   type AgentKind,
@@ -8,6 +9,7 @@ import {
 
 import { claudeToolSearchMode } from './claude-behavior-flags.js';
 import {
+  CODEX_CINDY_COMPACT_PROVIDER_ID,
   CODEX_GATEWAY_PROVIDER_ID,
   CODEX_OPENAI_COMPACT_PROVIDER_ID,
 } from './codex-gateway-config.js';
@@ -161,7 +163,12 @@ export function isCodexThreadModelProviderIdentityMismatch(
   });
   const effectiveNextMode = nextMode ?? credentialFamilyFromAuthInjection(input.codexAuthInjection);
   const expectedThreadModelProviderId =
-    effectiveNextMode === 'oauth-bearer'
+    isCindyProviderCodexRemoteCompactionRoute({
+      providerId: nextProviderId,
+      model: input.nextModel,
+    })
+      ? CODEX_CINDY_COMPACT_PROVIDER_ID
+      : effectiveNextMode === 'oauth-bearer'
       ? CODEX_OPENAI_COMPACT_PROVIDER_ID
       : effectiveNextMode !== undefined
         ? CODEX_GATEWAY_PROVIDER_ID
@@ -171,6 +178,7 @@ export function isCodexThreadModelProviderIdentityMismatch(
   );
   const actualThreadIdentityKnown =
     actualThreadModelProviderId === CODEX_OPENAI_COMPACT_PROVIDER_ID ||
+    actualThreadModelProviderId === CODEX_CINDY_COMPACT_PROVIDER_ID ||
     actualThreadModelProviderId === CODEX_GATEWAY_PROVIDER_ID;
 
   return (

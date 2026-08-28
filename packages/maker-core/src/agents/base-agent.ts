@@ -363,13 +363,11 @@ export interface CodexExtraSpawnConfig {
   buildSessionMcpConfig?: (sessionInstanceId: string) => Record<string, unknown>;
   codexProxyActive?: boolean;
   /**
-   * spawn args 中定义的「OpenAI 身份」provider id(name 逐字为 "OpenAI",
-   * codex 据 name 判定 supports_remote_compaction)。仅 oauth-bearer spawn 下发。
-   * CodexAgent 只对 ChatGPT 订阅直连路由的 thread 在 thread/start|resume 传
-   * modelProvider=该 id,启用 OpenAI 远端压缩;其余 thread 保持默认 provider
-   * (本地压缩)—— 网关 / xAI / 自定义供应商上游不实现远端压缩,错配是硬失败。
+   * ChatGPT 订阅直连的内部 OpenAI transport identity，仅 oauth-bearer spawn 下发。
    */
   codexRemoteCompactionProviderId?: string;
+  /** Cindy Provider codex/* 的内部 OpenAI transport identity；固定走 HTTP。 */
+  codexCindyRemoteCompactionProviderId?: string;
 }
 
 export type CodexAppServerProcessRole = 'task-host' | 'control-plane-service';

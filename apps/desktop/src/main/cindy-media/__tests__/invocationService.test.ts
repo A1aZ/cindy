@@ -311,9 +311,9 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(result).toMatchObject({
       ok: true,
       status: 'complete',
-      _xdt_render_image: false,
     });
     expect(String(result.hint)).toContain('只嵌入展示一次');
+    expect(result).not.toHaveProperty('_xdt_render_image');
     const [, init] = mocks.outboundFetch.mock.calls[0];
     expect(mocks.outboundFetch.mock.calls[0][0]).toBe(
       'https://gateway.example.com/images/generations',
@@ -326,7 +326,6 @@ describe('Cindy Core media invocation state and security boundary', () => {
       ok: true,
       status: 'complete',
       xdt_image_urls: [`cindy-media://blobs/${'a'.repeat(64)}.png`],
-      _xdt_render_image: false,
     });
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
     expect(mocks.ingestMedia).toHaveBeenCalledTimes(1);

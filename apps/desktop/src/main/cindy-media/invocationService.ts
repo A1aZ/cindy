@@ -911,14 +911,11 @@ function completedInvocationResult(invocation: StoredMediaInvocation): Record<st
   if (!media || typeof media !== 'object' || Array.isArray(media)) {
     throw new MediaInvocationError('MEDIA_RESULT_INVALID', '已完成调用保存的媒体结果不合法');
   }
-  const agentControlsImageRendering =
-    invocation.capability === 'image.generate' || invocation.capability === 'image.edit';
   return {
     ...(media as Record<string, unknown>),
-    ...(agentControlsImageRendering
+    ...(invocation.capability === 'image.generate' || invocation.capability === 'image.edit'
       ? {
-          _xdt_render_image: false,
-          hint: '图片不会从工具结果自动重复渲染；请在最终回复中使用返回的 cindy-media:// 地址只嵌入展示一次。',
+          hint: '请在最终回复中使用返回的 cindy-media:// 地址只嵌入展示一次；若未嵌入，客户端会用工具结果兜底展示。',
         }
       : {}),
     ok: true,

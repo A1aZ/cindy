@@ -2152,9 +2152,8 @@ export function createTurnRunner(
    * 投递给 streaming handle, 让 finalize 时跟文本里的 markdown 图一起
    * upload + 拼到卡片上。
    *
-   * 这是未采用 Agent 正文内联语义的媒体工具结果旁路。Core 图片结果会用
-   * `_xdt_render_image:false` 关闭此旁路，由 Agent 最终回复中的 markdown 图片
-   * 走 materializeTurnLocalImages 送达，避免桌面和 IM 都出现重复图片。
+   * 这是媒体工具结果的可靠兜底。Agent 最终回复若也用 markdown 引用了同一张图，
+   * materializeTurnLocalImages 会按真实路径去重并清理正文引用，渠道最终只发一份。
    */
   function handleToolResultFullEvent(turn: TurnState, event: AgentEvent): void {
     const data = event.data as { fullText?: unknown } | null;

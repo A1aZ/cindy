@@ -233,7 +233,10 @@ import {
 import { setTelegramRemoteSource } from './device-link/telegramRemoteControl';
 import * as authManager from './authManager';
 import { hasPersistedSessionHint } from './authSessionHint';
-import { warmStaleProcessProvenance } from './ownerNamespaceMigration.js';
+import {
+  hasExclusiveSharedLegacyUserDataAccess,
+  warmStaleProcessProvenance,
+} from './ownerNamespaceMigration.js';
 import { createAccountDeletionIpcHandlers } from './accountDeletionIpc';
 import * as profileEdit from './profileEdit';
 import { uploadPublicAsset } from './ossPublicUpload';
@@ -281,7 +284,10 @@ import {
   stageLocalFileToCache,
 } from './file-browser/remote-file-cache';
 import { sweepLegacyDialogueWorkingDirs } from './localDb/dialogueWorkdirSelfHeal';
-import { legacyDialogueUserDataDirNames } from '@cindy/maker-shared/brand-identity';
+import {
+  BRAND_IDENTITY,
+  legacyDialogueUserDataDirNames,
+} from '@cindy/maker-shared/brand-identity';
 import * as videoCacheStore from './videoCacheStore';
 import { imageSchemePrivilege, registerImageProtocolHandler } from './imageProtocol';
 import { videoSchemePrivilege, registerVideoProtocolHandler } from './videoProtocol';
@@ -327,6 +333,12 @@ import {
   registerLegacyMigrationIpc,
   runLegacyUserDataMigrationForUser,
 } from './legacyUserDataMigration';
+import {
+  adoptLocalProfileDatabase,
+  createProductionLocalProfileDataMigrationDeps,
+  inspectPassiveLocalProfileAdoption,
+} from './localProfileDataMigration';
+import { acquireWindowsPackagedInstanceBarrier } from './windowsPackagedInstanceBarrier';
 import { registerFsBrowseIpc } from './fsBrowse/ipc';
 import {
   ensureReady as localDbEnsureReady,
@@ -8038,9 +8050,61 @@ app.on('ready', async () => {
       }
       const user = authManager.getAuthState().user;
       if (user == null || user.id !== userId) return;
+      if (authManager.isPassiveSharedUserDataInstance()) {
+        const passivePreflight = await inspectPassiveLocalProfileAdoption(
+          user.id,
+          createProductionLocalProfileDataMigrationDeps(
+            app.getPath('userData'),
+            BRAND_IDENTITY.dbFilePrefix,
+            () => hasExclusiveSharedLegacyUserDataAccess(),
+          ),
+        );
+        if (passivePreflight.status === 'required') {
+          throw new Error('local profile database adoption is pending in the primary instance');
+        }
+        if (passivePreflight.status === 'failed') {
+          throw new Error(
+            `local profile database adoption preflight failed: ${passivePreflight.error}`,
+          );
+        }
+        return;
+      }
       // 首登轻量迁移(老 xdt-maker userData → Cindy):内部自带 marker 防重入与
       // 全量兜底,绝不 throw,失败不阻塞登录(ensureReady 照常建新库)。
       await runLegacyUserDataMigrationForUser(user.id);
+      // 登录前 local-v1 与登录后的 cloud owner 使用不同数据库文件。目标库不存在时
+      // 采用本地库，避免用户刚登录就看到空的任务/项目空间；目标库已存在则保持原样，
+      // 绝不覆盖账号已有内容。
+      const localProfileMigration = await adoptLocalProfileDatabase(
+        user.id,
+        createProductionLocalProfileDataMigrationDeps(
+          app.getPath('userData'),
+          BRAND_IDENTITY.dbFilePrefix,
+          () => hasExclusiveSharedLegacyUserDataAccess(),
+          process.platform === 'win32'
+            ? () =>
+                acquireWindowsPackagedInstanceBarrier({
+                  userDataDir: app.getPath('userData'),
+                  programName: BRAND_IDENTITY.executableName,
+                })
+            : undefined,
+        ),
+      );
+      if (localProfileMigration.status === 'failed') {
+        dbClientLog.error('local profile database adoption failed; blocking cloud database open', {
+          userId,
+          error: localProfileMigration.error,
+        });
+        throw new Error(`local profile database adoption failed: ${localProfileMigration.error}`);
+      } else if (localProfileMigration.status === 'claimed-by-other-owner') {
+        dbClientLog.warn('local profile database is already reserved for another cloud owner', {
+          userId,
+        });
+      } else if (localProfileMigration.status === 'adopted') {
+        dbClientLog.info('local profile database adopted for first cloud owner', {
+          userId,
+        });
+      }
     },
     onReady: async (userId) => {
       const startupHooksStartedAt = performance.now();

@@ -182,7 +182,8 @@ ls apps/desktop/src/renderer/themes/builtin/*.ts | wc -l
 
 | 事项 | 现状 | 裁决人 | 规则 |
 | --- | --- | --- | --- |
-| PermissionPrompt 圆角 | `apps/desktop/src/renderer/components/new-chat/PermissionPrompt.tsx` 混用 `rounded-[8px]`×4、`rounded-[4px]`×4、`rounded-[12px]`×1（2026-08-29 实测），与 `DESIGN.md` pill-first 及 §5 圆角档位的关系待定；同时待定：允许/拒绝的视觉主次、危险授权样式、双端几何是否一致 | 设计师 | 裁决未关闭前，Permission 相关文件不得进入任何迁移 PR 的 diff；裁决结论按 `DESIGN.md §13` 机制回写正文并在 [`design-decision-log.md`](./design-decision-log.md) 归档 |
+| PermissionPrompt 圆角 | **已关闭（2026-08-29 裁决）**：三档不变、按钮一律胶囊、8px = 盒内非按钮、4px 不入档（存量为债、新代码禁止）、「看起来小」不是改档理由。全文见 [`design-decision-log.md`](./design-decision-log.md)「08-29」条，`DESIGN.md §5` 已同步加硬 | 设计师 | 已按 `DESIGN.md §13` 机制回写并归档 |
+| Permission 迁移余项 | 待裁决：允许/拒绝按钮的视觉主次、危险授权样式、Desktop 与 Mobile 权限弹窗几何是否一致 | 设计师 | 余项未关闭前，Permission 相关文件不得进入任何迁移 PR 的 diff（DS-6 前置）；结论同样回写 `DESIGN.md` 并归档 |
 
 ## 11. 存量门禁与文档处置表
 

@@ -24,13 +24,14 @@ Cindy 的新界面大量由非设计师贡献。本合同要达成的状态：
 | 真相 | 载体 | 负责 | 不负责 |
 | --- | --- | --- | --- |
 | 规则真相 | [`DESIGN.md`](./DESIGN.md) | 设计原则、MUST/SHOULD/NEVER、组件使用时机、豁免登记 | 不再人工维护精确数值总表（见 §11 处置表对 `DESIGN.md §10 Tier-1` 表与 `§16.1` 表的过渡安排） |
-| 数值真相 | 现阶段：`apps/desktop/src/renderer/themes/colors.ts`（Desktop）与 `apps/mobile/src/theme/tokens.ts`（Mobile）。目标阶段：`packages/design-tokens` 标准 DTCG JSON（见 §3） | 每个 Token 的唯一取值 | 不承载运行时派生值（见 §3.4） |
+| 数值真相 | 现阶段：Desktop 颜色 → `apps/desktop/src/renderer/themes/colors.ts`；Desktop 非颜色（字号/行高/动效时长与曲线等）现行仍分散在 `apps/desktop/src/renderer/styles/globals.css`（`--text-*`、`--motion-*`）与 `apps/desktop/tailwind.config.ts`（`fontSize`/`borderRadius` 映射），尚未收拢；Mobile 颜色与非颜色数值统一在 `apps/mobile/src/theme/tokens.ts`。目标阶段：全部收拢进 `packages/design-tokens` 标准 DTCG JSON（见 §3） | 每个 Token 的唯一取值 | 不承载运行时派生值（见 §3.4） |
 | 台账真相 | `docs/design-rules/design-inventory.md`（由后续 inventory PR 建立，schema 见 §2.1） | 生产可达 UI 范围、每个 surface 的迁移状态与保护标签 | 不保存截图与历史日志（证据外置，见 §6） |
 | 视觉真相 | 真实运行的 Desktop / Mobile 截图 | 视觉验收的唯一依据 | SSR / 静态渲染样张（含 UI 设计哨兵产物）不得充当 |
 
 在 `packages/design-tokens` 建立并完成生产生成切换（路线图 PR-8）**之前**，`colors.ts`
-仍是 Desktop 数值权威——这与 `DESIGN.md §10`「`colors.ts` itself is the only
-authoritative inventory」的现行表述一致，本合同不提前改变它。
+仍是 Desktop **颜色**数值权威——这与 `DESIGN.md §10`「`colors.ts` itself is the only
+authoritative inventory」的现行表述一致（该句本身也限定在颜色 Token 登记范围内），本合同
+不提前改变它；Desktop 非颜色数值的现行来源见上表。
 
 ### 2.1 台账 schema（约束未来的 inventory PR）
 
@@ -120,11 +121,17 @@ Primitive 与 Pattern 默认只绑定 semantic 角色。只有品牌表达、兼
 - 从生产源码/样式解析出规则台账，锁 Token 表达式、Light/Dark 双模式覆盖与关键对比度；
 - 声明「零视觉变化」的 PR：迁移前后 computed 值逐值一致，或场景截图逐像素一致。
 
-### Level 2：真实 Cindy 截图（每张可见 PR 必须）
+### Level 2：真实 Cindy 截图（每张可见 PR 必须，按受影响平台采集）
 
-- 真实 Desktop 构建运行采集 Light/Dark 各一份（可复用 `scripts/desktop-dev-runner.mjs`
-  与 `scripts/cdp-eval.mjs` 基础）；使用独立临时 `userData`，不触真实数据库、凭证与外部网络；
-- 记录 commit SHA、主题、日期；材料外置到 `docs/design-evidence/YYYY-MM-DD/` 或 PR
+- Desktop 改动：真实 Desktop 构建运行采集 Light/Dark 各一份（可复用
+  `scripts/desktop-dev-runner.mjs` 与 `scripts/cdp-eval.mjs` 基础）；使用独立临时
+  `userData`，不触真实数据库、凭证与外部网络；
+- Mobile 改动：真实 Mobile 构建采集 Light/Dark 各一份，复用 `apps/mobile/scripts/
+  visual-baseline-check.mjs` 与 `apps/mobile/e2e/maestro/`（§11 已登记的现行 baseline
+  工具，不建第二套）；
+- 同时改动 Desktop 与 Mobile 的 PR：两个平台的 Light/Dark 均需采集，不得只交一侧；
+- 提交只覆盖未受影响平台的截图（如 Mobile-only 改动附 Desktop 截图）不算满足本条；
+- 记录 commit SHA、平台、主题、日期；材料外置到 `docs/design-evidence/YYYY-MM-DD/` 或 PR
   artifact，台账与文档只保存稳定链接与最近结论；
 - 本合同与 `DESIGN.md §10` 双模式交付门槛的关系：实现双模式是硬性要求；实机目检按该门槛
   执行 best-effort 并如实申报，不得把「复用了 themed 样式」上报为「双模式已验证」。
@@ -197,8 +204,9 @@ ls apps/desktop/src/renderer/themes/builtin/*.ts | wc -l
 
 ## 12. 实施路线图（施工期条目，完成后归档）
 
-九张主线 PR；拆分依据是 §7 的风险类别。依赖：1 → 2 → 3 → 4 → 5/6（可并行）→ 7 → 8 → 9；
-DS-6 另需 §10 圆角裁决关闭；DS-7 升阻断需 §8 管理员审核。
+十张主线 PR（DS-2 的台账与阻断守卫风险类别不同，按 §7 拆为 2a/2b）；拆分依据是 §7 的
+风险类别。依赖：1 → 2a → 2b → 3 → 4 → 5/6（可并行）→ 7 → 8 → 9；DS-6 另需 §10 圆角裁决
+关闭；DS-2b、DS-7 升阻断均需 §8 管理员审核。
 
 ### 系列命名规则
 
@@ -213,7 +221,8 @@ DS-6 另需 §10 圆角裁决关闭；DS-7 升阻断需 §8 管理员审核。
 | # | 标题 | 风险类别 | PR |
 | --- | --- | --- | --- |
 | DS-1 | `docs(design-system): DS-1 建立治理合同与存量门禁处置表`（本张） | 零视觉（纯文档） | — |
-| DS-2 | `test(design-system): DS-2 生产 UI 台账与主题兼容冻结` | 零视觉 | — |
+| DS-2a | `test(design-system): DS-2a 生产 UI 台账` | 零视觉 | — |
+| DS-2b | `ci(design-system): DS-2b 主题兼容冻结守卫`（新增阻断需 §8 管理员审核） | CI 门禁 | — |
 | DS-3 | `feat(design-system): DS-3 最小语义 Token 影子层` | 零视觉 | — |
 | DS-4 | `feat(design-system): DS-4 Button 与 Input 标准组件`（落入既有 `components/ui/`） | 有意可见 | — |
 | DS-5 | `refactor(design-system): DS-5 AI 对话区 Pattern 迁移`（Tool Call / Reasoning / Message / Attachment） | 有意可见 | — |
@@ -222,5 +231,5 @@ DS-6 另需 §10 圆角裁决关闭；DS-7 升阻断需 §8 管理员审核。
 | DS-8 | `refactor(design-system): DS-8 Terrazzo 生产生成切换` | 零视觉（大型基建） | — |
 | DS-9 | `feat(design-system): DS-9 Mobile 扩展` | 有意可见 | — |
 
-本节随施工推进更新完成状态；九张全部合入后，本节归档进
+本节随施工推进更新完成状态；十张全部合入后，本节归档进
 [`design-decision-log.md`](./design-decision-log.md)，本文其余章节转入长期生效。

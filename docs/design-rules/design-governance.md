@@ -164,7 +164,7 @@ Primitive 与 Pattern 默认只绑定 semantic 角色。只有品牌表达、兼
 
 ```bash
 # registerColor 总数（2026-08-29 快照：506）
-git grep -c "registerColor(" -- apps/desktop/src/renderer/themes/ | awk -F: '{s+=$NF} END {print s}'
+git grep -c "registerColor(" -- apps/desktop/src/renderer/themes/colors.ts | awk -F: '{s+=$NF} END {print s}'
 # 内置主题数（2026-08-29 快照：11）
 ls apps/desktop/src/renderer/themes/builtin/*.ts | wc -l
 ```
@@ -220,7 +220,7 @@ DS-6 另需 §10 圆角裁决关闭；DS-7 升阻断需 §8 管理员审核。
 | DS-6 | `refactor(design-system): DS-6 Permission Pattern 迁移`（裁决关闭后） | 有意可见 | — |
 | DS-7 | `ci(design-system): DS-7 新增裸设计值棘轮` | CI 门禁 | — |
 | DS-8 | `refactor(design-system): DS-8 Terrazzo 生产生成切换` | 零视觉（大型基建） | — |
-| DS-9 | `feat(design-system): DS-9 Mobile 扩展` | 可见 + 基建 | — |
+| DS-9 | `feat(design-system): DS-9 Mobile 扩展` | 有意可见 | — |
 
 本节随施工推进更新完成状态；九张全部合入后，本节归档进
 [`design-decision-log.md`](./design-decision-log.md)，本文其余章节转入长期生效。

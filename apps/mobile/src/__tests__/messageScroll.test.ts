@@ -33,6 +33,7 @@ import {
   mobileMessageListBottomPadding,
   mobileMessageListNearBottomThreshold,
   previousUserMessageJumpTarget,
+  previousUserMessageJumpTargetForWindow,
   shouldAutoFollowMessages,
   shouldAutoLoadEarlier,
   shouldShowNewMessageIndicator,
@@ -208,6 +209,19 @@ describe('messageScroll', () => {
       preview: 'first question',
     });
     expect(previousUserMessageJumpTarget(items, 0)).toBeNull();
+
+    // The mounted list may be a tail slice. Relative viewability indices must be translated
+    // back to the complete model, while navigation keeps track of whether the target is mounted.
+    expect(previousUserMessageJumpTargetForWindow(items, 2, 1)).toMatchObject({
+      itemKey: 'message-u2',
+      index: 2,
+      windowIndex: 0,
+    });
+    expect(previousUserMessageJumpTargetForWindow(items, 3, 0)).toMatchObject({
+      itemKey: 'message-u2',
+      index: 2,
+      windowIndex: null,
+    });
   });
 
   it('maps client ids inside folded render items to the top-level scroll target', () => {

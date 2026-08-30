@@ -499,6 +499,11 @@ export interface MobilePreviousUserJumpTarget {
   preview: string;
 }
 
+export interface MobileWindowedPreviousUserJumpTarget extends MobilePreviousUserJumpTarget {
+  /** Index inside the currently mounted list window, or null when the target is still outside it. */
+  windowIndex: number | null;
+}
+
 export function previousUserMessageJumpTarget(
   items: readonly MobileMessageRenderItem[],
   firstVisibleIndex: number,
@@ -519,6 +524,26 @@ export function previousUserMessageJumpTarget(
     };
   }
   return null;
+}
+
+export function previousUserMessageJumpTargetForWindow(
+  items: readonly MobileMessageRenderItem[],
+  windowStartIndex: number,
+  firstVisibleWindowIndex: number,
+): MobileWindowedPreviousUserJumpTarget | null {
+  const safeWindowStartIndex = Number.isFinite(windowStartIndex)
+    ? Math.max(0, Math.floor(windowStartIndex))
+    : 0;
+  const target = previousUserMessageJumpTarget(
+    items,
+    safeWindowStartIndex + firstVisibleWindowIndex,
+  );
+  if (!target) return null;
+  const windowIndex = target.index - safeWindowStartIndex;
+  return {
+    ...target,
+    windowIndex: windowIndex >= 0 ? windowIndex : null,
+  };
 }
 
 export function findMobileRenderItemKeyByClientId(

@@ -2222,7 +2222,7 @@ export default function SessionScreen() {
   const showSyncingShell = sessionOperationLayout.composerSlot === 'missing-session'
     && !remoteUnavailableReason;
   // 同步/加载期消息区不显示「暂无消息」(会话其实在加载、不是空),改为渲染「正在同步」
-  // loading 占位(MessageRenderer 的 SyncingMessages,延迟显形防快速路径闪烁);看过的会话
+  // loading 占位(MessageRenderer 的 SyncingMessages);看过的会话
   // 此时已被本地缓存(②)填充正常渲染,不进 empty 分支。还包含冷开首帧:currentSession 立即
   // 就有但消息未到、loading 尚未翻 true 的窗口(本次打开未同步过)。只有同步完成过
   // (lastSyncedAt 有值)且确实 0 条时才显示「暂无消息」;离线/被撤销(remoteUnavailableReason)

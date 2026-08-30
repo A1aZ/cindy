@@ -22,6 +22,18 @@ describe('mobile message list container', () => {
     // 估高 + 小预渲窗口:挂载集小、mount 帧压进一帧(不可退回大挂载树)。
     expect(listSource).toContain('estimatedItemSize={MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE}');
     expect(listSource).toContain('drawDistance={MOBILE_MESSAGE_DRAW_DISTANCE}');
+    // 首批 cell 必须从尾部创建；否则长任务会先在顶部创建少量 cell，再花数秒测量/补滚到底。
+    // 完整 render model 仍供业务逻辑使用，LegendList 首帧只接尾部 4 项；用户上翻时
+    // 再按 12 项小块 prepend，不能在首绘后一次灌回完整长任务。
+    expect(source).toContain('const MOBILE_INITIAL_TAIL_ITEM_COUNT = 4;');
+    expect(source).toContain('const MOBILE_TAIL_REVEAL_ITEM_COUNT = 12;');
+    expect(source).toContain('const [tailWindowAnchor, setTailWindowAnchor] = useState<{');
+    expect(source).toContain('listData.slice(tailWindowStartIndex)');
+    expect(source).toContain('tailWindowStartIndex - MOBILE_TAIL_REVEAL_ITEM_COUNT');
+    expect(listSource).toContain('data={visibleListData}');
+    expect(source).not.toContain('const initialTailTarget = useMemo(');
+    expect(listSource).not.toMatch(/\binitialScrollIndex\s*=/);
+    expect(listSource).not.toMatch(/\binitialScrollAtEnd\s*=/);
     // 内置贴底 + prepend 防跳(替代手搓 open-settle / follow rAF / prepend-settle,勿回潮)。
     expect(listSource).toContain('alignItemsAtEnd');
     expect(listSource).toContain('maintainScrollAtEnd');
@@ -55,21 +67,45 @@ describe('mobile message list container', () => {
     expect(focusEffectSource).toContain('lastAutoLoadEarlierKeyRef.current = null');
   });
 
-  it('protects follow state while imperative scroll and verifies the cold-open anchor', () => {
+  it('protects follow state while revealing the local tail window in bounded chunks', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
     expect(source).toContain('programmaticScrollInFlight: programmaticScrollInFlightRef.current');
     expect(source).toContain('evaluateMobileAnchorVerify({');
-    expect(source).toContain('initialAnchorVerifyFrameRef');
+    expect(source).not.toContain('initialAnchorVerifyFrameRef');
     expect(source).toContain('scrollToEndProgrammatically(false)');
     // mVCP 对 data / size 都常开；普通尾部追加与流式 resize 必须先记 settle 安静窗，
-    // 两套 verifier 都不能再只依赖 readingOlderRef 判断是否等待。
+    // 跟随 verifier 不能只依赖 readingOlderRef 判断是否等待。
     expect(source).toContain('mvcpSettleAtRef.current = mobileMvcpSettleDeadline(');
     expect(source).toContain('markMobileMvcpSettle();');
     expect(source).toContain('mobileMessageListKeysSignature(itemKeys)');
     expect(source).toContain('[itemKeysSignature, markMobileMvcpSettle]');
     expect(source).not.toContain('[itemKeys, markMobileMvcpSettle]');
     expect(source.match(/isMobileMvcpSettling\(Date\.now\(\), mvcpSettleAtRef\.current\)/g))
-      .toHaveLength(2);
+      .toHaveLength(1);
+
+    // 冷开的空列表不能吞掉真实首批消息的尾部索引；empty → ready 明确重挂一次。
+    expect(source).toContain("listData.length === 0 ? 'empty' : 'ready'");
+    expect(source).toContain('key={listMountKey}');
+    expect(source).toContain('setTailWindowAnchor({ identity: listMountKey, firstKey: nextFirstKey })');
+    expect(source).toContain('if (userScrollForOlderRef.current) revealEarlierTailWindow();');
+    expect(source).toContain('revealEarlierTailWindow(true);');
+    expect(source).toContain('if (initialTailWindowActive) return;');
+    expect(source).toContain('previousUserMessageJumpTargetForWindow(');
+    expect(source).toContain('if (previousUserTarget.windowIndex !== null)');
+    expect(source).toContain('revealTailWindowFromIndex(previousUserTarget.index)');
+    expect(source).toContain(
+      '!initialTailWindowActive && loadEarlierAction.visible',
+    );
+    // 非空尾窗一挂载就直接显示；完整数组的后台接回不能用 overlay / opacity 再把
+    // 已经创建好的 cell 遮住。只有 data 仍为空的真实同步期才显示 SyncingMessages。
+    expect(source).not.toContain('initialTailLoadingOverlay');
+    // 普通 index=0 首绘完成后才做一次贴底校正并交给 content-size 跟随。列表不使用
+    // initialScrollIndex、opacity 或 timer 遮罩，因此 JS 忙也不会白屏。
+    expect(source).toContain('onLoad={handleListLoad}');
+    expect(source).toContain('if (!initialListReadyRef.current) return;');
+    expect(source).not.toContain('messageListSettling');
+    expect(source).not.toContain('MOBILE_INITIAL_ANCHOR_SETTLE_MS');
+    expect(source).not.toContain('MOBILE_INITIAL_ANCHOR_REVEAL_MAX_MS');
   });
 
   it('resets identity-bound row state before a recycled cell displays another item', () => {

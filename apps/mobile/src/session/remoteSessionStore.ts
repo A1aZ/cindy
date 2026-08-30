@@ -639,6 +639,7 @@ const EMPTY_TASK_UPDATES: ReadonlyMap<string, AgentTaskUpdate> = new Map();
 const REGULAR_SESSION_GLOBAL_MESSAGE_BUDGET = 800;
 const REGULAR_SESSION_GLOBAL_MESSAGE_BYTES_BUDGET = 64 * 1024 * 1024;
 const MESSAGE_STRUCTURAL_BYTES_ESTIMATE = 512;
+const MESSAGE_BYTES_ESTIMATE_LIMIT = REGULAR_SESSION_GLOBAL_MESSAGE_BYTES_BUDGET + 1;
 const messageBytesEstimates = new WeakMap<RemoteMessage, number>();
 const sessionLastAccessOrder = new Map<string, number>();
 let nextSessionAccessOrder = 0;
@@ -663,34 +664,91 @@ function touchSessionAccess(sessionId: string): void {
  * conservative walk counts primitive payloads and container overhead without
  * materializing a large temporary string.
  */
-function estimateValueBytes(value: unknown, depth = 0, seen = new Set<object>()): number {
-  if (value == null) return 0;
-  if (typeof value === 'string') return value.length * 2;
-  if (typeof value === 'number' || typeof value === 'boolean') return 16;
-  if (typeof value !== 'object') return 8;
-  if (seen.has(value)) return 0;
-  seen.add(value);
-  if (depth >= 3) return 64;
-  if (Array.isArray(value)) {
-    let bytes = 24;
-    for (const item of value) bytes += 8 + estimateValueBytes(item, depth + 1, seen);
-    return bytes;
+function estimateValueBytes(value: unknown, maxBytes = MESSAGE_BYTES_ESTIMATE_LIMIT): number {
+  type ContainerFrame =
+    | { kind: 'array'; value: readonly unknown[]; nextIndex: number }
+    | { kind: 'object'; value: Record<string, unknown>; keys: string[]; nextIndex: number };
+
+  if (maxBytes <= 0) return 0;
+  const seen = new Set<object>();
+  const frames: ContainerFrame[] = [];
+  let bytes = 0;
+  let current: unknown = value;
+
+  // Walk one child at a time instead of recursively visiting or pushing an
+  // entire container. Deep payloads cannot overflow the JS stack, and large
+  // arrays do not create a second array-sized work queue just for accounting.
+  while (true) {
+    if (current == null) {
+      // null/undefined carry no payload bytes beyond their container slot.
+    } else if (typeof current === 'string') {
+      bytes += current.length * 2;
+    } else if (typeof current === 'number' || typeof current === 'boolean') {
+      bytes += 16;
+    } else if (typeof current !== 'object') {
+      bytes += 8;
+    } else if (!seen.has(current)) {
+      seen.add(current);
+      if (Array.isArray(current)) {
+        bytes += 24;
+        if (current.length > 0) {
+          bytes += 8;
+          frames.push({ kind: 'array', value: current, nextIndex: 1 });
+          current = current[0];
+          if (bytes >= maxBytes) return maxBytes;
+          continue;
+        }
+      } else {
+        const objectValue = current as Record<string, unknown>;
+        const keys = Object.keys(objectValue);
+        bytes += 32;
+        if (keys.length > 0) {
+          const key = keys[0]!;
+          bytes += 16 + key.length * 2;
+          frames.push({ kind: 'object', value: objectValue, keys, nextIndex: 1 });
+          current = objectValue[key];
+          if (bytes >= maxBytes) return maxBytes;
+          continue;
+        }
+      }
+    }
+
+    if (bytes >= maxBytes) return maxBytes;
+    let advanced = false;
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      if (frame.kind === 'array' && frame.nextIndex < frame.value.length) {
+        current = frame.value[frame.nextIndex];
+        frame.nextIndex += 1;
+        bytes += 8;
+        advanced = true;
+        break;
+      }
+      if (frame.kind === 'object' && frame.nextIndex < frame.keys.length) {
+        const key = frame.keys[frame.nextIndex]!;
+        frame.nextIndex += 1;
+        current = frame.value[key];
+        bytes += 16 + key.length * 2;
+        advanced = true;
+        break;
+      }
+      frames.pop();
+    }
+    if (!advanced) return bytes;
   }
-  let bytes = 32;
-  for (const [key, item] of Object.entries(value)) {
-    bytes += 16 + key.length * 2 + estimateValueBytes(item, depth + 1, seen);
-  }
-  return bytes;
 }
 
 function estimateMessageBytes(message: RemoteMessage): number {
   const cached = messageBytesEstimates.get(message);
   if (cached !== undefined) return cached;
   let bytes = MESSAGE_STRUCTURAL_BYTES_ESTIMATE;
-  if (typeof message.content === 'string') bytes += message.content.length * 2;
-  else if (message.content != null) bytes += estimateValueBytes(message.content);
-  if (message.agentMeta) bytes += estimateValueBytes(message.agentMeta);
-  if (message.systemCardData) bytes += estimateValueBytes(message.systemCardData);
+  const addValue = (value: unknown): void => {
+    if (value == null || bytes >= MESSAGE_BYTES_ESTIMATE_LIMIT) return;
+    bytes += estimateValueBytes(value, MESSAGE_BYTES_ESTIMATE_LIMIT - bytes);
+  };
+  addValue(message.content);
+  addValue(message.agentMeta);
+  addValue(message.systemCardData);
   messageBytesEstimates.set(message, bytes);
   return bytes;
 }

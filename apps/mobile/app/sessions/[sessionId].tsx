@@ -1677,8 +1677,9 @@ export default function SessionScreen() {
   }
   // 远程媒体取件队列:屏实例级缓存 + 同 url 去重 + 并发上限(每次取件都让桌面端
   // 真实上传一次 OSS,列表缩略图懒取件后必须收敛)。deps 经 ref 透传保持队列实例稳定;
-  // 队列生命周期 = 单个会话:切 sessionId / 退屏时 releaseAll + 补删 + 换新实例
-  // (见下方 sessionId 键控的清理 effect),上一会话的 OSS 对象不跨会话累积。
+  // 队列生命周期 = 单个会话:切 sessionId / 页面卸载时 releaseAll + 补删,
+  // 下个会话首次取件再懒建新实例(见下方 sessionId 键控的清理 effect),
+  // 上一会话的 OSS 对象不跨会话累积。
   const remoteMediaDepsRef = useRef({ auth, maker });
   // useLayoutEffect 而非 useEffect:子组件(MediaPreview)的取件是被动 effect,
   // 会晚于父层 layout effect、早于父层被动 effect——切会话首批取件必须已看到
@@ -4780,18 +4781,14 @@ export default function SessionScreen() {
     [createRemoteMediaQueue],
   );
 
-  // 仅 video/audio 仍走「查看器关闭即删」;image 缩略图常驻列表,缓存保留到退屏统一清理。
+  // 查看器关闭只逐出 JS cache。OSS 对象仍可能被同屏其它已挂载行持有,
+  // 统一延迟到换会话或页面卸载时删除。
   const releaseRemoteMedia = useCallback((
     sourceUrl: string,
-    media: MobileResolvedRemoteMedia,
+    _media: MobileResolvedRemoteMedia,
   ) => {
     remoteMediaQueueRef.current?.evict(sourceUrl);
-    void auth.apiFetch('/api/device-link/media', {
-      baseUrl: DEVICE_LINK_API_BASE_URL,
-      method: 'DELETE',
-      body: { key: media.ossKey },
-    }).catch(() => undefined);
-  }, [auth]);
+  }, []);
 
   // 全屏查看器的分享:确保拿到本地 file://(磁盘缓存命中或先落盘)再唤起系统分享单。
   // 分享失败静默提示——旧 dev client 未包含 expo-sharing 原生模块时也走这条兜底。
@@ -4842,11 +4839,11 @@ export default function SessionScreen() {
     }
   }, [diskCacheSourceOf, t]);
 
-  // 换会话与退屏共用一套清理:本屏切 sessionId 不重挂载,若只在 unmount 清理,
+  // 换会话与页面卸载共用一套最终清理:本屏切 sessionId 不重挂载,若只在 unmount 清理,
   // 连续浏览多个多图会话会让上一会话的 OSS 对象一路累积。cleanup 在 sessionId
   // 变化与 unmount 时都执行:releaseAll + 补删(fire-and-forget;App 被杀等不触发
-  // cleanup 的情况由 OSS 生命周期规则兜底),并换上全新队列实例(released 标志
-  // 一次性,释放过的队列不能复用;unmount 分支多建一个空队列无害)。
+  // cleanup 的情况由 OSS 生命周期规则兜底)。队列实例带一次性 released 标志,
+  // 下个会话首次取件时由 resolveRemoteMedia 懒创建新实例。
   const releaseRemoteMediaQueue = useCallback(() => {
     const released = remoteMediaQueueRef.current?.releaseAll() ?? [];
     for (const media of released) {
@@ -4857,31 +4854,9 @@ export default function SessionScreen() {
     remoteMediaQueueRef.current = null;
   }, [deleteRemoteMediaObject]);
 
-  useFocusEffect(
-    useCallback(() => () => {
-      releaseRemoteMediaQueue();
-    }, [releaseRemoteMediaQueue]),
-  );
-
   useEffect(() => () => {
     releaseRemoteMediaQueue();
   }, [releaseRemoteMediaQueue, sessionId]);
-
-  // Navigation focus does not change when Android backgrounds the activity.
-  // Release resolved media and queued fetches at the AppState boundary too;
-  // the next foreground request lazily creates a fresh queue.
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState !== 'active') {
-        releaseRemoteMediaQueue();
-        return;
-      }
-      if (!remoteMediaQueueRef.current) {
-        remoteMediaQueueRef.current = createRemoteMediaQueue();
-      }
-    });
-    return () => subscription.remove();
-  }, [createRemoteMediaQueue, releaseRemoteMediaQueue]);
 
   /** 单调递增的补齐轮次计数器;`latest` 是本屏最新那一轮的序号(旧轮据此自我作废)。 */
   const backfillRunSeqRef = useRef(0);

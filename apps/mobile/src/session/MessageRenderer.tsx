@@ -618,7 +618,7 @@ export function MessageRenderer({
   /** 空列表且本次打开的首同步未完成:渲染「正在同步」占位(延迟显形防闪)而非「暂无消息」。 */
   syncingWhileEmpty?: boolean;
   testID?: string;
-  /** DEV-only A/B switch; production keeps row recycling disabled until verified. */
+  /** DEV-only A/B switch; production always enables verified row recycling. */
   devRecycleItems?: boolean;
   /** 全屏图片查看器的分享回调(由会话屏落地本地文件后唤起系统分享单)。 */
   onShareImage?: (
@@ -5835,8 +5835,8 @@ function MessagePayloadBody({
 
   useEffect(() => () => {
     const resolved = resolvedRemoteMediaRef.current;
-    // image 不再关闭即删:缩略图常驻列表共用同一 OSS 对象,删了会把列表缩略图弄坏,
-    // 改为退出会话屏时统一清理(见 [sessionId].tsx)。video/audio 保持关闭即删。
+    // image 缩略图常驻列表,不随 payload viewer 关闭逐出。video/audio 关闭时只
+    // 逐出 JS cache,OSS 对象延迟到换会话/页面卸载统一删除(见 [sessionId].tsx)。
     if (remoteMedia?.url && resolved && remoteMedia.kind !== 'image') {
       onReleaseRemoteMedia?.(remoteMedia.url, resolved);
     }

@@ -98,14 +98,17 @@ describe('任务消息内存治理页面接线', () => {
     expect(store).toContain('remoteSessionStore.isSessionMessageAuthorityCurrent(authority)');
   });
 
-  it('屏幕失焦时也释放媒体队列，避免栈页面切换后累积内存条目', () => {
+  it('只在任务切换或页面卸载时最终释放媒体队列', () => {
     const queueStart = screen.indexOf('const releaseRemoteMediaQueue = useCallback');
     expect(queueStart).toBeGreaterThanOrEqual(0);
-    const queueBlock = screen.slice(queueStart, queueStart + 1400);
+    const queueEnd = screen.indexOf('const backfillRunSeqRef', queueStart);
+    const queueBlock = screen.slice(queueStart, queueEnd);
     expect(queueBlock).toContain('remoteMediaQueueRef.current?.releaseAll()');
     expect(queueBlock).toContain('remoteMediaQueueRef.current = null;');
-    expect(queueBlock).toContain('remoteMediaQueueRef.current = createRemoteMediaQueue();');
-    expect(queueBlock).toContain('useFocusEffect(');
+    expect(queueBlock).toContain('[releaseRemoteMediaQueue, sessionId]');
     expect(queueBlock).toContain('releaseRemoteMediaQueue();');
+    // 失焦或退后台时组件仍挂载且持有 resolved URL,不能提前 DELETE OSS。
+    expect(queueBlock).not.toContain('useFocusEffect(');
+    expect(queueBlock).not.toContain("AppState.addEventListener('change'");
   });
 });

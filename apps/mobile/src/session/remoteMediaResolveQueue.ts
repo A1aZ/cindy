@@ -67,10 +67,8 @@ export interface RemoteMediaResolveQueueDeps {
   /** 时钟注入,测试用;默认 Date.now。 */
   now?(): number;
   /**
-   * 不再被缓存持有、但对应 OSS 对象仍在世的条目的下水道,宿主拿到后补 DELETE:
-   *   - releaseAll 之后才完成的 in-flight 取件(缓存已被退屏清理接管);
-   *   - 刷新重取(presign 过期 / forceRefresh)时被新结果覆盖掉的旧条目。
-   * 不经此回调这些对象会漏出统一清理、悬到生命周期兜底。
+   * releaseAll 之后才完成的 in-flight 取件的下水道。此时队列已经完成最终释放,
+   * 无法再把新结果纳入 releaseAll,宿主拿到后立即补 DELETE。
    */
   onOrphanResolved?(media: MobileResolvedRemoteMedia): void;
 }
@@ -103,9 +101,9 @@ export interface RemoteMediaResolveQueue {
   request(media: RemoteMediaRequest, opts?: RemoteMediaRequestOptions): Promise<MobileResolvedRemoteMedia>;
   /** 同步读 fresh 缓存(未过期才返回),缓存命中的缩略图首帧直接出图。 */
   peekFresh(url: string): MobileResolvedRemoteMedia | null;
-  /** 使某 url 缓存失效(Image 加载失败重试 / video-audio 关闭即删路径用)。 */
+  /** 使某 url 缓存失效;对应 OSS 对象延迟到 releaseAll 统一交还宿主。 */
   evict(url: string): MobileResolvedRemoteMedia | null;
-  /** 清空缓存并返回全部已 resolve 条目,供退出会话屏批量 DELETE OSS。 */
+  /** 清空缓存并返回本屏产生过且仍在世的 OSS 条目,供最终离场批量 DELETE。 */
   releaseAll(): MobileResolvedRemoteMedia[];
   stats(): { inFlight: number; queued: number };
 }
@@ -144,6 +142,9 @@ export function createRemoteMediaResolveQueue(
 
   // 以下四个容器一律以 requestKeyOf 产出的**缓存键**为键(缩略图带前缀,原图 = 裸 url)。
   const cache = new Map<string, MobileResolvedRemoteMedia>();
+  // 从 JS cache 逐出的条目不能立刻 DELETE:列表行或播放器可能仍持有它的
+  // presign URL。这里只保留最终删除需要的小记录,不保留 inlineBase64 大字节。
+  const retired = new Map<string, MobileResolvedRemoteMedia>();
   let cacheBytes = 0;
   const errorCache = new Map<string, { message: string; until: number }>();
   /** key → entry;排队与 in-flight 的都在这里,靠 entry.inFlight 区分。 */
@@ -171,8 +172,21 @@ export function createRemoteMediaResolveQueue(
     return current;
   }
 
-  function setCacheEntry(key: string, media: MobileResolvedRemoteMedia): MobileResolvedRemoteMedia[] {
-    const evicted: MobileResolvedRemoteMedia[] = [];
+  function retire(media: MobileResolvedRemoteMedia | null | undefined): void {
+    if (!media?.ossKey) return;
+    // 最终 DELETE 只需要 key。不要让 retired 通过 url(data URI 也可能很大)
+    // 或 inlineBase64 间接抵消 cache 的字节上限。
+    retired.set(media.ossKey, {
+      url: '',
+      ossKey: media.ossKey,
+      mimeType: '',
+      size: 0,
+      expiresAt: '',
+      previewable: false,
+    });
+  }
+
+  function setCacheEntry(key: string, media: MobileResolvedRemoteMedia): void {
     deleteCacheEntry(key);
     cache.set(key, media);
     cacheBytes += estimateCacheBytes(media);
@@ -183,14 +197,7 @@ export function createRemoteMediaResolveQueue(
       const oldest = cache.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       const removed = deleteCacheEntry(oldest);
-      if (removed) evicted.push(removed);
-    }
-    return evicted;
-  }
-
-  function notifyEvicted(entriesToRelease: readonly MobileResolvedRemoteMedia[]): void {
-    for (const media of entriesToRelease) {
-      deps.onOrphanResolved?.(media);
+      retire(removed);
     }
   }
 
@@ -234,7 +241,7 @@ export function createRemoteMediaResolveQueue(
     const current = cache.get(key);
     if (!current) return;
     if (current.ossKey !== local.ossKey) return;
-    notifyEvicted(setCacheEntry(key, local));
+    setCacheEntry(key, local);
   }
 
   function pump(): void {
@@ -262,19 +269,19 @@ export function createRemoteMediaResolveQueue(
             return;
           }
           // 刷新重取覆盖旧条目时,旧 OSS 对象(ossKey 不同才是真被替换,相同则仍在用)
-          // 交还宿主补删,否则它不再出现在 releaseAll 里、悬到生命周期兜底。
+          // 退出 cache 但仍可能被已挂载行持有,延迟到最终 releaseAll 再删除。
           const prev = cache.get(key);
           if (prev && prev.ossKey && prev.ossKey !== resolved.ossKey) {
-            deps.onOrphanResolved?.(prev);
+            retire(prev);
           }
-          notifyEvicted(setCacheEntry(key, resolved));
+          setCacheEntry(key, resolved);
           errorCache.delete(key);
           const followUp = entry.forcedFollowUp;
           entry.forcedFollowUp = undefined;
           settleEntry(key, entry, resolved);
           if (followUp?.length) {
             // 强制重取等待者:携带 skipCache 立刻重飞一轮(插队头),
-            // 新结果经上面的 replaced-entry 路径覆盖缓存并补删旧对象。
+            // 新结果经上面的 replaced-entry 路径覆盖缓存并延后回收旧对象。
             const follow: QueueEntry = { media: entry.media, waiters: followUp, inFlight: false, skipCache: true };
             entries.set(key, follow);
             pendingOrder.unshift(key);
@@ -294,12 +301,12 @@ export function createRemoteMediaResolveQueue(
             });
             if (entry.skipCache) {
               // 强制重取失败:旧缓存条目已被 onError / 显式重试证伪,留着会让
-              // 后续被动请求继续命中坏对象;逐出并交还宿主补删,负缓存过期后
+              // 后续被动请求继续命中坏对象;逐出并登记最终回收,负缓存过期后
               // 重新走全新取件。
               const prev = cache.get(key);
               if (prev) {
                 deleteCacheEntry(key);
-                if (prev.ossKey) deps.onOrphanResolved?.(prev);
+                retire(prev);
               }
             }
           }
@@ -405,6 +412,7 @@ export function createRemoteMediaResolveQueue(
     },
     evict(url) {
       const cached = deleteCacheEntry(url);
+      retire(cached);
       errorCache.delete(url);
       return cached;
     },
@@ -418,8 +426,19 @@ export function createRemoteMediaResolveQueue(
         if (!entry || entry.inFlight) continue;
         settleEntry(key, entry, null, abortError());
       }
-      const all = [...cache.values()];
+      const allByOssKey = new Map(retired);
+      for (const media of cache.values()) {
+        if (!media.ossKey) continue;
+        if (media.inlineBase64 === undefined) {
+          allByOssKey.set(media.ossKey, media);
+        } else {
+          const { inlineBase64: _inlineBase64, ...smallRecord } = media;
+          allByOssKey.set(media.ossKey, smallRecord);
+        }
+      }
+      const all = [...allByOssKey.values()];
       cache.clear();
+      retired.clear();
       cacheBytes = 0;
       errorCache.clear();
       return all;

@@ -43,7 +43,7 @@ import {
   X,
 } from 'lucide-react-native';
 import { Gesture, GestureDetector } from '@/platform/gestureHandler';
-import Reanimated, { runOnJS, useAnimatedStyle, useSharedValue, type SharedValue } from 'react-native-reanimated';
+import Reanimated, { runOnJS, useAnimatedReaction, useAnimatedStyle, useSharedValue, type SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -221,8 +221,16 @@ import { fontWeight, iconSize, iconStroke, lineHeight, radius, spacing, typeScal
 const LIST_LIMIT = 200;
 const DEVICE_LIST_TIMEOUT_MS = 12_000;
 const HOME_LIST_SUBSCRIPTION_OWNER = 'device-list';
+// Keep the device-link channel responsive while All Sessions hydrates several
+// computers. This does not change the 200-row server limit; it only bounds the
+// number of device snapshots processed at once.
+const HOME_DEVICE_HYDRATE_CONCURRENCY = 2;
 // 项目组与自动化组展开后的子列表共用同一个预览限量(设备详情页也 import 复用,避免两处漂移)。
 export const PROJECT_PREVIEW_LIMIT = 5;
+const PROJECT_CHILD_WINDOW_THRESHOLD = 20;
+const PROJECT_CHILD_WINDOW_SIZE = 15;
+const PROJECT_CHILD_WINDOW_OVERSCAN = 4;
+const PROJECT_CHILD_WINDOW_SHIFT = 4;
 const HOME_SESSION_ROW_HEIGHT = 78;
 const HOME_SESSION_SINGLE_LINE_ROW_HEIGHT = 60;
 const CINDY_LIST_GUTTER = 20;
@@ -230,6 +238,17 @@ const CINDY_LIST_FAB_SIZE = 55;
 const CINDY_LIST_FAB_BOTTOM = 45;
 const HOME_HEADER_MIN_HEIGHT = 48;
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+function estimateHomeSessionRowHeight(item: RemoteSessionListItem): number {
+  const running = remoteSessionStore.isSessionRunning(item.session.id)
+    || item.scheduleInfo?.running === true
+    || item.liveActivity?.phase === 'running';
+  const hasPreview = item.automationGroup != null
+    || !!buildRemoteSessionCardPreview(item, { running })?.trim()
+    || !!item.scheduleInfo
+    || !!item.session.pinnedAt;
+  return hasPreview ? HOME_SESSION_ROW_HEIGHT : HOME_SESSION_SINGLE_LINE_ROW_HEIGHT;
+}
 
 type RemoteListStatusFilter = Extract<RemoteSessionStatusFilter, 'active' | 'archived' | 'all'>;
 type HomeDeviceConnectionState = 'idle' | 'syncing' | 'failed';
@@ -304,6 +323,9 @@ export default function HomeScreen() {
   const syncInFlightRef = useRef<Promise<void> | null>(null);
   const syncQueuedRef = useRef<{ visible?: boolean } | null>(null);
   const loadHomeRef = useRef<(options?: { visible?: boolean }) => Promise<void>>(async () => undefined);
+  const homePreviewCacheRef = useRef(new Map<string, { messages: readonly unknown[]; preview?: string }>());
+  const homePendingCacheRef = useRef(new Map<string, { pending: readonly unknown[]; count: number }>());
+  const homeLiveActivityIndexRef = useRef(new Map<string, RemoteSessionLiveActivity>());
   const devicesRef = useRef<DeviceView[]>([]);
   // HomeScreen stays mounted while switching saved accounts. Keep an owner generation beside every
   // local projection so requests started by the previous account cannot repopulate the new screen.
@@ -413,6 +435,7 @@ export default function HomeScreen() {
   const projectDragEpochRef = useRef(0);
   const [projectDrag, setProjectDrag] = useState<ProjectDragSession | null>(null);
   const projectDragY = useSharedValue(0);
+  const homeScrollY = useSharedValue(0);
   const [dialogueShowAll, setDialogueShowAll] = useState(false);
   const [priorityHoldEpoch, setPriorityHoldEpoch] = useState(0);
   // deviceId of the revoked-access device whose explanation tip is open (null = closed).
@@ -691,18 +714,20 @@ export default function HomeScreen() {
         };
       }
       const nextSessions = Array.isArray(list) ? list : [];
-      remoteSessionStore.setDeviceSessions(
-        device.deviceId,
-        device.name,
-        nextSessions,
-      );
-      if (Array.isArray(activeSessions)) {
-        remoteSessionStore.setActiveSessionSnapshots(
+      remoteSessionStore.batch(() => {
+        remoteSessionStore.setDeviceSessions(
           device.deviceId,
-          activeSessions,
-          activeSessionSnapshotEpoch,
+          device.name,
+          nextSessions,
         );
-      }
+        if (Array.isArray(activeSessions)) {
+          remoteSessionStore.setActiveSessionSnapshots(
+            device.deviceId,
+            activeSessions,
+            activeSessionSnapshotEpoch,
+          );
+        }
+      });
       // schedule-index(1+N 个 listRuns)是次要徽标数据,延后发,避开"开 app→立刻点会话"时和会话关键读
       // 抢同一条 WS 管道(见 scheduleIndexDefer / issue #324)。home 自动化分组与名称已由 fallbackScheduleInfo
       // 兜底,徽标晚半拍出现即可。
@@ -920,7 +945,7 @@ export default function HomeScreen() {
       const hydrateResults = await runHomeDeviceSyncBatch(syncRows, async (item) => {
         const result = await hydrateDeviceSessions(item.device, accountGenerationAtStart);
         return { deviceId: item.device.deviceId, result };
-      });
+      }, HOME_DEVICE_HYDRATE_CONCURRENCY);
       for (const { deviceId, result } of hydrateResults) {
         if (result.superseded || homeAccountGenerationRef.current !== accountGenerationAtStart) continue;
         if (result.failure) failures.push(result.failure);
@@ -1338,9 +1363,10 @@ export default function HomeScreen() {
   }, []);
 
   const onListScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    homeScrollY.value = event.nativeEvent.contentOffset.y;
     const next = event.nativeEvent.contentOffset.y > 8;
     setHeaderFrosted((current) => (current === next ? current : next));
-  }, []);
+  }, [homeScrollY]);
 
   const closeRenameDevice = useCallback(() => {
     if (renameSaving) return;
@@ -1586,27 +1612,63 @@ export default function HomeScreen() {
   // 重建出内容相同的新 Map——若不做内容稳定化,home → sections → 全列表行整链每次
   // emit 都重建(2026-07-18 重渲染风暴 trace 实锤)。useStableValue 在内容未变时保留
   // 旧引用,下游 useMemo 依赖即可短路;内容真变(某会话预览/交互数/活动态变化)照常穿透。
-  const messagePreviewIndexRaw = useMemo(
-    () => buildSessionMessagePreviewIndex(
-      sessions.map((session) => session.id),
-      (sessionId) => remoteSessionStore.getMessages(sessionId),
-    ),
-    [messageVersion, sessions],
-  );
+  const messagePreviewIndexRaw = useMemo(() => {
+    const next = new Map<string, string>();
+    const activeIds = new Set<string>();
+    for (const session of sessions) {
+      activeIds.add(session.id);
+      const messages = remoteSessionStore.getMessages(session.id);
+      const cached = homePreviewCacheRef.current.get(session.id);
+      if (cached?.messages === messages) {
+        if (cached.preview) next.set(session.id, cached.preview);
+        continue;
+      }
+      const preview = buildSessionMessagePreviewIndex([session.id], () => messages).get(session.id);
+      homePreviewCacheRef.current.set(session.id, { messages, preview });
+      if (preview) next.set(session.id, preview);
+    }
+    for (const sessionId of homePreviewCacheRef.current.keys()) {
+      if (!activeIds.has(sessionId)) homePreviewCacheRef.current.delete(sessionId);
+    }
+    return next;
+  }, [messageVersion, sessions]);
   const messagePreviewIndex = useStableValue(messagePreviewIndexRaw, mapContentEqual);
-  const pendingInteractionIndexRaw = useMemo(() => new Map(
-    sessions
-      .map((session) => [session.id, remoteSessionStore.getPendingInteractions(session.id).length] as const)
-      .filter(([, count]) => count > 0),
-  ), [sessions, storeVersion]);
+  const pendingInteractionIndexRaw = useMemo(() => {
+    const next = new Map<string, number>();
+    const activeIds = new Set<string>();
+    for (const session of sessions) {
+      activeIds.add(session.id);
+      const pending = remoteSessionStore.getPendingInteractions(session.id);
+      const cached = homePendingCacheRef.current.get(session.id);
+      const count = cached?.pending === pending ? cached.count : pending.length;
+      if (!cached || cached.pending !== pending) homePendingCacheRef.current.set(session.id, { pending, count });
+      if (count > 0) next.set(session.id, count);
+    }
+    for (const sessionId of homePendingCacheRef.current.keys()) {
+      if (!activeIds.has(sessionId)) homePendingCacheRef.current.delete(sessionId);
+    }
+    return next;
+  }, [sessions, storeVersion]);
   const pendingInteractionIndex = useStableValue(pendingInteractionIndexRaw, mapContentEqual);
   const liveActivityIndexRaw = useMemo(() => {
-    const entries: Array<[string, RemoteSessionLiveActivity]> = [];
+    const next = new Map<string, RemoteSessionLiveActivity>();
     for (const session of sessions) {
       const liveActivity = remoteSessionStore.getSessionLiveActivity(session.id);
-      if (liveActivity) entries.push([session.id, liveActivity]);
+      if (liveActivity) next.set(session.id, liveActivity);
     }
-    return new Map(entries);
+    const previous = homeLiveActivityIndexRef.current;
+    if (previous.size === next.size) {
+      let unchanged = true;
+      for (const [sessionId, value] of next) {
+        if (previous.get(sessionId) !== value) {
+          unchanged = false;
+          break;
+        }
+      }
+      if (unchanged) return previous;
+    }
+    homeLiveActivityIndexRef.current = next;
+    return next;
   }, [sessions, storeVersion]);
   const liveActivityIndex = useStableValue(liveActivityIndexRaw, mapContentEqual);
   // 列表隐藏 Orca worker 子会话(本期不支持进 worker 聊天);Lead + 普通会话保留。仅 mobile 侧过滤。
@@ -2200,6 +2262,7 @@ export default function HomeScreen() {
       onToggleProject={toggleProject}
       projectDragging={projectDrag?.key === (item.kind === 'project' ? item.project.key : '')}
       projectHeaderRefs={projectHeaderRefs}
+      homeScrollY={homeScrollY}
       onTogglePin={toggleSessionPinned}
       prevIsBlock={isBlockHomeRow(homeRowBefore(sections, section.key, index))}
       projectCollapsed={isFolderHomeRow(item) && collapsedProjectKeys.includes(item.project.key)}
@@ -2230,6 +2293,7 @@ export default function HomeScreen() {
     toggleAutomationGroup,
     toggleProject,
     toggleSessionPinned,
+    homeScrollY,
   ]);
 
   // 底部边到边:列表填满到物理屏底(内容滚到 home indicator 下方),用 inset 兜底而非靠 SafeAreaView 留白带。
@@ -3236,6 +3300,7 @@ function ProjectRow({
   onToggle,
   onToggleAutomationGroup,
   project,
+  homeScrollY,
   showAll = false,
   suppressTopBorder = false,
   swipe,
@@ -3254,6 +3319,7 @@ function ProjectRow({
   onToggle(): void;
   onToggleAutomationGroup(key: string): void;
   project: MobileHomeProjectGroup;
+  homeScrollY?: SharedValue<number>;
   /** 对话组「查看全部」在原地展开,不跳设备详情。 */
   showAll?: boolean;
   /** 前一行也是块(项目组 / 自动化组)时不画顶线:前块底线已是这根分割线。 */
@@ -3268,6 +3334,7 @@ function ProjectRow({
   // PureComponent bail)——以 storeVersion 订阅兜底感知运行态变化,与 AutomationGroup-
   // Children 同款(否则折叠线以下转入 running 的会话不会被豁免展开,review P1)。
   useRemoteSessionStoreVersion();
+  const storeVersion = remoteSessionStore.getStoreVersion();
   // 与桌面侧栏项目组同一套折叠策略:前 N 条之外豁免最近 24h 活动 / 需关注 / 运行中的条目
   // (豁免语义见共享层 getRemoteSessionPreviewCollapse 注释)。
   // 自动化折叠后 sessions 是"行"(组行代表多条会话):按钮显隐看隐藏行数(hiddenCount),
@@ -3279,6 +3346,54 @@ function ProjectRow({
       isSessionRunning: (sessionId) => remoteSessionStore.isSessionRunning(sessionId),
     },
   );
+  const projectTop = useSharedValue(0);
+  const projectRef = useRef<View>(null);
+  const [windowAnchor, setWindowAnchor] = useState(0);
+  const [projectLayoutReady, setProjectLayoutReady] = useState(false);
+  const estimatedChildHeights = useMemo(
+    () => visibleSessions.map(estimateHomeSessionRowHeight),
+    [visibleSessions, storeVersion],
+  );
+  // Windowing is only enabled for genuinely large, uniform child trees. The
+  // common project preview (five rows) remains byte-for-byte unchanged, while
+  // a large expanded group avoids mounting all rows at once without relying on
+  // a nested virtualized list.
+  const windowingEligible = !!homeScrollY
+    && !collapsed
+    && projectLayoutReady
+    && visibleSessions.length > PROJECT_CHILD_WINDOW_THRESHOLD
+    && estimatedChildHeights.every((height) => height === estimatedChildHeights[0]);
+  const scrollY = homeScrollY;
+  const estimatedRowHeight = estimatedChildHeights[0] ?? HOME_SESSION_ROW_HEIGHT;
+  useAnimatedReaction(
+    () => {
+      if (!windowingEligible) return -1;
+      const relativeY = Math.max(0, scrollY!.value - projectTop.value - HOME_SESSION_ROW_HEIGHT);
+      return Math.floor(relativeY / Math.max(1, estimatedRowHeight) / PROJECT_CHILD_WINDOW_SHIFT)
+        * PROJECT_CHILD_WINDOW_SHIFT;
+    },
+    (next, previous) => {
+      if (next < 0 || next === previous) return;
+      runOnJS(setWindowAnchor)(next);
+    },
+    [scrollY, windowingEligible, estimatedRowHeight],
+  );
+  const windowStart = windowingEligible
+    ? Math.max(0, Math.min(
+      Math.max(0, visibleSessions.length - PROJECT_CHILD_WINDOW_SIZE),
+      windowAnchor - PROJECT_CHILD_WINDOW_OVERSCAN,
+    ))
+    : 0;
+  const windowEnd = windowingEligible
+    ? Math.min(visibleSessions.length, windowStart + PROJECT_CHILD_WINDOW_SIZE + PROJECT_CHILD_WINDOW_OVERSCAN * 2)
+    : visibleSessions.length;
+  const renderedSessions = windowingEligible ? visibleSessions.slice(windowStart, windowEnd) : visibleSessions;
+  const leadingSpacerHeight = windowingEligible
+    ? estimatedChildHeights.slice(0, windowStart).reduce((sum, height) => sum + height, 0)
+    : 0;
+  const trailingSpacerHeight = windowingEligible
+    ? estimatedChildHeights.slice(windowEnd).reduce((sum, height) => sum + height, 0)
+    : 0;
   const groupTestID = kind === 'dialogue' ? 'home.dialogueGroup' : 'home.projectGroup';
   const rowTestID = kind === 'dialogue' ? 'home.dialogueRow' : 'home.projectRow';
   const childTestID = kind === 'dialogue' ? 'home.chatRow' : 'home.projectSessionRow';
@@ -3344,6 +3459,21 @@ function ProjectRow({
   );
   return (
     <View
+      onLayout={(event) => {
+        const fallbackY = event.nativeEvent.layout.y;
+        projectRef.current?.measureInWindow((_x, screenY) => {
+          projectTop.value = screenY + (homeScrollY?.value ?? 0);
+          setProjectLayoutReady(true);
+        });
+        // A native measure can be unavailable in shallow/unit renderers. Keep
+        // the local layout as a safe fallback; the real device measurement
+        // above is used whenever the row is mounted in a ScrollView.
+        if (!projectRef.current) {
+          projectTop.value = fallbackY;
+          setProjectLayoutReady(true);
+        }
+      }}
+      ref={projectRef}
       style={[styles.projectGroup, suppressTopBorder && styles.projectGroupNoTop]}
       testID={groupTestID}
     >
@@ -3351,7 +3481,22 @@ function ProjectRow({
 
       {collapsed ? null : (
         <View style={styles.projectChildren} testID="home.projectChildren">
-          {visibleSessions.map((item, index) => {
+          {leadingSpacerHeight > 0 ? <View pointerEvents="none" style={{ height: leadingSpacerHeight }} /> : null}
+          {renderedSessions.map((item, renderedIndex) => {
+            const index = windowStart + renderedIndex;
+            const itemKey = item.automationGroup?.key ?? item.session.id;
+            const swipeable = !!swipe
+              && !item.automationGroup
+              && conversationSearchAllowsLocalWrites(item);
+            // Window shifts used to key rows by session id, so crossing one
+            // four-row boundary destroyed and recreated four complete native
+            // swipe trees in the same frame. Keep a stable pool of render
+            // slots while windowing; the row receives new data without paying
+            // the native mount/unmount cost. Preserve identity keys outside the
+            // windowed path, and remount a slot when its outer shell changes.
+            const reactKey = windowingEligible
+              ? `${project.key}:window:${renderedIndex}:${swipeable ? 'swipe' : 'plain'}`
+              : itemKey;
             const row = (
               <HomeSessionRow
                 expandedAutomationGroups={expandedAutomationGroups}
@@ -3368,12 +3513,12 @@ function ProjectRow({
             );
             // 与顶层同一条规则:普通会话子行挂滑动,自动化组行不挂(组行语义含混,
             // 其展开子行由 AutomationGroupChildren 内的透传包裹)。
-            if (!swipe || item.automationGroup || !conversationSearchAllowsLocalWrites(item)) {
-              return <Fragment key={item.automationGroup?.key ?? item.session.id}>{row}</Fragment>;
+            if (!swipeable) {
+              return <Fragment key={reactKey}>{row}</Fragment>;
             }
             return (
               <SwipeableSessionRow
-                key={item.session.id}
+                key={reactKey}
                 onArchive={swipe.onArchive}
                 onShowOptions={swipe.onShowOptions}
                 onTogglePin={swipe.onTogglePin}
@@ -3385,6 +3530,7 @@ function ProjectRow({
               </SwipeableSessionRow>
             );
           })}
+          {trailingSpacerHeight > 0 ? <View pointerEvents="none" style={{ height: trailingSpacerHeight }} /> : null}
           {hiddenRowCount > 0 ? (
             <Pressable
               accessibilityLabel={t('devices.list.viewAllConversations', { count: project.sessionCount })}
@@ -3444,6 +3590,7 @@ function HomeListRowInner({
   projectCollapsed,
   projectDragging,
   projectHeaderRefs,
+  homeScrollY,
   registry,
   showAllDialogue,
   swipe,
@@ -3469,6 +3616,7 @@ function HomeListRowInner({
   projectCollapsed: boolean;
   projectDragging: boolean;
   projectHeaderRefs: MutableRefObject<Map<string, View>>;
+  homeScrollY?: SharedValue<number>;
   registry: ReturnType<typeof createSwipeRowRegistry>;
   showAllDialogue: boolean;
   swipe: SessionSwipeControls;
@@ -3490,6 +3638,7 @@ function HomeListRowInner({
         onToggle={() => onToggleProject(item.project.key)}
         onToggleAutomationGroup={onToggleAutomationGroup}
         project={item.project}
+        homeScrollY={homeScrollY}
         showAll={item.kind === 'dialogue' && showAllDialogue}
         suppressTopBorder={prevIsBlock}
         swipe={swipe}

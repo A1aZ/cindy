@@ -80,6 +80,8 @@ export interface RemoteMediaResolveQueueOptions {
   maxConcurrent?: number;
   /** 失败负缓存时长(ms),默认 20s。 */
   errorTtlMs?: number;
+  /** Approximate byte budget for resolved entries retained by this screen. */
+  maxCacheBytes?: number;
 }
 
 export interface RemoteMediaRequestOptions {
@@ -110,6 +112,7 @@ export interface RemoteMediaResolveQueue {
 
 const DEFAULT_MAX_CONCURRENT = 2;
 const DEFAULT_ERROR_TTL_MS = 20 * 1000;
+const DEFAULT_MAX_CACHE_BYTES = 32 * 1024 * 1024;
 
 interface QueueEntry {
   media: RemoteMediaRequest;
@@ -135,11 +138,13 @@ export function createRemoteMediaResolveQueue(
 ): RemoteMediaResolveQueue {
   const maxConcurrent = Math.max(1, options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   const errorTtlMs = options.errorTtlMs ?? DEFAULT_ERROR_TTL_MS;
+  const maxCacheBytes = Math.max(0, options.maxCacheBytes ?? DEFAULT_MAX_CACHE_BYTES);
   const isFresh = deps.isFresh ?? ((media, now) => isResolvedRemoteMediaFresh(media, now));
   const now = deps.now ?? (() => Date.now());
 
   // 以下四个容器一律以 requestKeyOf 产出的**缓存键**为键(缩略图带前缀,原图 = 裸 url)。
   const cache = new Map<string, MobileResolvedRemoteMedia>();
+  let cacheBytes = 0;
   const errorCache = new Map<string, { message: string; until: number }>();
   /** key → entry;排队与 in-flight 的都在这里,靠 entry.inFlight 区分。 */
   const entries = new Map<string, QueueEntry>();
@@ -148,6 +153,51 @@ export function createRemoteMediaResolveQueue(
   let inFlightCount = 0;
   /** releaseAll 已执行:此后完成的 in-flight 结果改走 onOrphanResolved,不回填缓存。 */
   let released = false;
+
+  function estimateCacheBytes(media: MobileResolvedRemoteMedia): number {
+    const inlineBytes = media.inlineBase64 ? media.inlineBase64.length * 2 : 0;
+    const metadataBytes = 256 + media.url.length * 2 + media.ossKey.length * 2;
+    const declaredBytes = Number.isFinite(media.size) && media.size > 0
+      ? Math.min(media.size, 8 * 1024 * 1024)
+      : 0;
+    return Math.max(metadataBytes + inlineBytes, declaredBytes);
+  }
+
+  function deleteCacheEntry(key: string): MobileResolvedRemoteMedia | null {
+    const current = cache.get(key);
+    if (!current) return null;
+    cache.delete(key);
+    cacheBytes = Math.max(0, cacheBytes - estimateCacheBytes(current));
+    return current;
+  }
+
+  function setCacheEntry(key: string, media: MobileResolvedRemoteMedia): MobileResolvedRemoteMedia[] {
+    const evicted: MobileResolvedRemoteMedia[] = [];
+    deleteCacheEntry(key);
+    cache.set(key, media);
+    cacheBytes += estimateCacheBytes(media);
+    // Keep the just-resolved item when it alone exceeds the budget: callers
+    // are about to receive it, and deleting its OSS object would invalidate the
+    // result. The next insertion can evict it normally once another entry exists.
+    while (cacheBytes > maxCacheBytes && cache.size > 1) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      const removed = deleteCacheEntry(oldest);
+      if (removed) evicted.push(removed);
+    }
+    return evicted;
+  }
+
+  function notifyEvicted(entriesToRelease: readonly MobileResolvedRemoteMedia[]): void {
+    for (const media of entriesToRelease) {
+      deps.onOrphanResolved?.(media);
+    }
+  }
+
+  function touchCacheEntry(key: string, media: MobileResolvedRemoteMedia): void {
+    cache.delete(key);
+    cache.set(key, media);
+  }
 
   function detachWaiter(entry: QueueEntry, waiter: QueueEntry['waiters'][number]): void {
     if (waiter.signal && waiter.onAbort) {
@@ -184,7 +234,7 @@ export function createRemoteMediaResolveQueue(
     const current = cache.get(key);
     if (!current) return;
     if (current.ossKey !== local.ossKey) return;
-    cache.set(key, local);
+    notifyEvicted(setCacheEntry(key, local));
   }
 
   function pump(): void {
@@ -217,7 +267,7 @@ export function createRemoteMediaResolveQueue(
           if (prev && prev.ossKey && prev.ossKey !== resolved.ossKey) {
             deps.onOrphanResolved?.(prev);
           }
-          cache.set(key, resolved);
+          notifyEvicted(setCacheEntry(key, resolved));
           errorCache.delete(key);
           const followUp = entry.forcedFollowUp;
           entry.forcedFollowUp = undefined;
@@ -248,7 +298,7 @@ export function createRemoteMediaResolveQueue(
               // 重新走全新取件。
               const prev = cache.get(key);
               if (prev) {
-                cache.delete(key);
+                deleteCacheEntry(key);
                 if (prev.ossKey) deps.onOrphanResolved?.(prev);
               }
             }
@@ -269,7 +319,10 @@ export function createRemoteMediaResolveQueue(
     // key 是队列/缓存键(缩略图带前缀,原图 = 裸 url),entry.media 才是原始请求。
     const key = requestKeyOf(media);
     const cached = cache.get(key);
-    if (cached && !opts.forceRefresh && isFresh(cached, now())) return Promise.resolve(cached);
+    if (cached && !opts.forceRefresh && isFresh(cached, now())) {
+      touchCacheEntry(key, cached);
+      return Promise.resolve(cached);
+    }
     if (opts.cachedOnly) {
       // 只读缓存模式:未命中直接拒绝,不入队、不碰负缓存(不污染同键的真实取件)。
       return Promise.reject(new Error(i18n.t('composer.attachments.mediaCacheMiss')));
@@ -346,11 +399,12 @@ export function createRemoteMediaResolveQueue(
     request,
     peekFresh(url) {
       const cached = cache.get(url);
-      return cached && isFresh(cached, now()) ? cached : null;
+      if (!cached || !isFresh(cached, now())) return null;
+      touchCacheEntry(url, cached);
+      return cached;
     },
     evict(url) {
-      const cached = cache.get(url) ?? null;
-      cache.delete(url);
+      const cached = deleteCacheEntry(url);
       errorCache.delete(url);
       return cached;
     },
@@ -366,6 +420,7 @@ export function createRemoteMediaResolveQueue(
       }
       const all = [...cache.values()];
       cache.clear();
+      cacheBytes = 0;
       errorCache.clear();
       return all;
     },

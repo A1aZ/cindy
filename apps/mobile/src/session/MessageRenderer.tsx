@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowLeftRight,
@@ -172,8 +172,9 @@ import {
   mobileMarkdownImageTitle,
   mobileMarkdownImageUrlForWorkdir,
   mobileMarkdownInlineImageSize,
-  parseMobileMarkdown,
+  parseMobileMarkdownIncremental,
   parseMobileMarkdownInlines,
+  type MobileMarkdownParseResult,
   type MobileMarkdownBlockGroup,
   type MobileMarkdownInline,
   type MobileMarkdownTextRunGroupingOptions,
@@ -330,6 +331,12 @@ import {
   type MermaidDiagramWebViewHandle,
 } from '@/session/mermaidWebView';
 import { MathFormulaWebView } from '@/session/mathWebView';
+import { getMobileMessageWebViewMetrics } from '@/session/mobileMessageWebViewMetrics';
+import {
+  getMobileMarkdownRenderMetrics,
+  recordMobileMarkdownParse,
+  recordMobileMessageRenderItem,
+} from '@/session/mobileMarkdownRenderMetrics';
 import { latexToUnicodeApproximation } from '@cindy/maker-shared/math-markdown';
 import type { RemoteTextFilePreviewResult } from '@/device-link/mobileMakerTransport';
 import { fontWeight, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
@@ -341,6 +348,11 @@ import { mobileToolRowWording } from '@/i18n/toolWording';
 const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };
 const MESSAGE_CONTROL_TOUCH_SIZE = 44;
 const MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD = 5;
+
+// Heavy Markdown blocks inherit the visibility of their outer list cell. Nested
+// work/sub-agent cards should not create a second visibility window of their own.
+const MessageHeavyContentVisibilityContext = createContext(true);
+const MessageListVisibleKeysContext = createContext<ReadonlySet<string> | null>(null);
 
 /** 分享模式吸顶 check 与行内 check 共用 44px 触达高度。 */
 const SHARE_STICKY_CHECK_HEIGHT = 44;
@@ -586,6 +598,7 @@ export function MessageRenderer({
   syncingWhileEmpty,
   testID,
   devExposeList,
+  devRecycleItems = false,
 }: {
   bottomOverlayHeight?: number;
   /** 顶部 chrome(绝对定位半透明工具栏)实测高度:内容顶部按此让位,详见 mobileMessageListTopPadding。 */
@@ -601,6 +614,8 @@ export function MessageRenderer({
   /** 空列表且本次打开的首同步未完成:渲染「正在同步」占位(延迟显形防闪)而非「暂无消息」。 */
   syncingWhileEmpty?: boolean;
   testID?: string;
+  /** DEV-only A/B switch; production keeps row recycling disabled until verified. */
+  devRecycleItems?: boolean;
   /** 全屏图片查看器的分享回调(由会话屏落地本地文件后唤起系统分享单)。 */
   onShareImage?: (
     media: Extract<MessagePayload, { kind: 'media' }>['media'],
@@ -621,6 +636,8 @@ export function MessageRenderer({
   devExposeList?: (api: {
     scrollTo: (y: number) => void;
     getMetrics: () => { contentHeight: number; offsetY: number; viewportHeight: number };
+    getWebViewMetrics: typeof getMobileMessageWebViewMetrics;
+    getMarkdownMetrics: typeof getMobileMarkdownRenderMetrics;
   }) => void;
 } & MessageActions) {
   const { colors } = useTheme();
@@ -701,6 +718,9 @@ export function MessageRenderer({
   const followVerifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // settle 遮罩:落底两段式期间列表保持 opacity 0,settle 窗口后揭开(规则 7 防跳动)。
   const [listRevealed, setListRevealed] = useState(false);
+  const [visibleMessageKeys, setVisibleMessageKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // 会话切换(scrollResetKey)的 ref 复位必须在渲染期同步完成,不能只靠下方的 reset effect:
   // effect 在 paint 后异步执行,而重挂的新列表(key={scrollResetKey})的首批 scroll /
   // onStartReached 回调、以及先于 reset effect 定义的 eligibility effect,都可能带着上个会话的
@@ -911,6 +931,8 @@ export function MessageRenderer({
     devExposeList?.({
       scrollTo: (y: number) => scrollToOffsetProgrammatically(y, false),
       getMetrics: () => scrollMetricsRef.current,
+      getWebViewMetrics: getMobileMessageWebViewMetrics,
+      getMarkdownMetrics: getMobileMarkdownRenderMetrics,
     });
   }, [devExposeList, scrollToOffsetProgrammatically]);
 
@@ -1159,11 +1181,22 @@ export function MessageRenderer({
     viewableItems: ViewToken<MobileMessageRenderItem>[];
   }) => {
     let nextIndex: number | null = null;
+    const nextVisibleMessageKeys = new Set<string>();
     for (const token of info.viewableItems) {
       if (typeof token.index !== 'number') continue;
       nextIndex = nextIndex === null ? token.index : Math.min(nextIndex, token.index);
+      if (token.isViewable && token.item?.key) nextVisibleMessageKeys.add(token.item.key);
     }
     if (nextIndex !== null) setFirstVisibleIndex(nextIndex);
+    setVisibleMessageKeys((previous) => {
+      if (
+        previous.size === nextVisibleMessageKeys.size
+        && [...previous].every((key) => nextVisibleMessageKeys.has(key))
+      ) {
+        return previous;
+      }
+      return nextVisibleMessageKeys;
+    });
   });
   const readActuallyVisibleShareableMessageIds = useCallback(async (
     viewport: ShareableMessageViewport,
@@ -1562,6 +1595,7 @@ export function MessageRenderer({
     setIsAwayFromBottom(false);
     setFirstVisibleIndex(0);
     setHasNewMessages(false);
+    setVisibleMessageKeys(new Set());
   }, [scrollResetKey]);
   // 卸载时清掉在飞的定时器/rAF(闭包引用 listRef,卸载后触发是无害 no-op,
   // 但不留悬挂句柄)。
@@ -1636,13 +1670,17 @@ export function MessageRenderer({
     requestLoadEarlier();
   }, [requestLoadEarlier]);
 
-  const renderMessageItem = useCallback(({ item }: { item: MobileMessageRenderItem }) => (
-    <RenderItemView
-      actions={actions}
-      focused={item.key === focusedItemKey}
-      item={item}
-    />
-  ), [actions, focusedItemKey]);
+  const renderMessageItem = useCallback(({ item }: { item: MobileMessageRenderItem }) => {
+    if (__DEV__) recordMobileMessageRenderItem();
+    return (
+      <RenderItemView
+        actions={actions}
+        focused={item.key === focusedItemKey}
+        isListItem
+        item={item}
+      />
+    );
+  }, [actions, focusedItemKey]);
   // pending_send 的展开态不改变 listData；LegendList 会复用现有行，单靠 renderItem
   // 闭包更新不足以保证可见行重绘。把选中项显式纳入 extraData，确保轻点气泡后
   // 「取消 / 编辑 / 插话」操作行立即出现，不依赖滚动触发回收重渲染。
@@ -1653,12 +1691,14 @@ export function MessageRenderer({
     ),
     [pendingSend?.selectedClientId, shareSelectionActive],
   );
+  const recycleItems = __DEV__ && devRecycleItems === true;
 
   return (
     // chat-text-quote:Provider 恒挂载(值可为 null),避免启用态翻转时整棵消息树
     // 因 Provider 增删而重挂;value 稳定(useMemo),不触发订阅方重渲。
     <SelectionQuoteContext.Provider value={selectionQuoteContextValue}>
     <View style={styles.messageFrame}>
+      <MessageListVisibleKeysContext.Provider value={visibleMessageKeys}>
       <LegendList
         // 每会话重挂:alignItemsAtEnd + initialScrollAtEnd 让新会话干净地重新锚到底部
         // (替代手搓的隐藏+rAF 落底 + open-settle)。
@@ -1667,7 +1707,7 @@ export function MessageRenderer({
         extraData={messageListExtraData}
         keyExtractor={(item) => item.key}
         renderItem={renderMessageItem}
-        recycleItems={false}
+        recycleItems={recycleItems}
         estimatedItemSize={MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE}
         drawDistance={MOBILE_MESSAGE_DRAW_DISTANCE}
         // 冷开落底不用 initialScrollAtEnd、贴底跟随不用 maintainScrollAtEnd:两者的内部
@@ -1716,6 +1756,7 @@ export function MessageRenderer({
         viewabilityConfig={viewabilityConfigRef.current}
         onViewableItemsChanged={handleViewableItemsChangedRef.current}
       />
+      </MessageListVisibleKeysContext.Provider>
       {previousUserTarget && previousUserButtonTop !== null ? (
         <MessageListActionButton
           accessibilityLabel={t('message.renderer.previousQuestionJump', { preview: previousUserTarget.preview || t('message.renderer.noPreview') })}
@@ -1787,12 +1828,19 @@ const RenderItemView = memo(function RenderItemView({
   item,
   actions,
   focused = false,
+  isListItem = false,
 }: {
   item: MobileMessageRenderItem | MobileWorkChildItem;
   actions: MessageActions & { firstUserMessageClientId?: string };
   focused?: boolean;
+  isListItem?: boolean;
 }) {
   const styles = useThemedStyles(makeStyles);
+  const inheritedHeavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
+  const visibleKeys = useContext(MessageListVisibleKeysContext);
+  const heavyContentVisible = isListItem
+    ? focused || visibleKeys === null || visibleKeys.has(item.key)
+    : inheritedHeavyContentVisible;
   // 「user 行渲染系统卡」形态(silent-stop 自动续跑 agentMeta.autoResume):渲染层
   // 降级为 kind='system' 再进 MessageBubble——presentation 的 isUserAligned 判定是
   // `align==='user' || kind==='user'`,保持 user kind 会右对齐成用户气泡并挂上
@@ -1882,9 +1930,11 @@ const RenderItemView = memo(function RenderItemView({
       break;
   }
   return (
-    <View style={focused ? styles.focusedItem : undefined} testID={focused ? 'message.focusedItem' : undefined}>
-      {node}
-    </View>
+    <MessageHeavyContentVisibilityContext.Provider value={heavyContentVisible}>
+      <View style={focused ? styles.focusedItem : undefined} testID={focused ? 'message.focusedItem' : undefined}>
+        {node}
+      </View>
+    </MessageHeavyContentVisibilityContext.Provider>
   );
 });
 
@@ -3975,6 +4025,7 @@ function MarkdownBody({
   const { colors } = useTheme();
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
+  const heavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
   const chatFilePathContext = useContext(ChatFilePathContext);
   // iOS UITextView 在 stretch/百分比宽度下会偶发只量出部分高度,LegendList 按这次
   // 偏矮的 onLayout 裁切 agent 回复;点分享会换上确定宽度的容器从而完整显示。
@@ -3990,7 +4041,25 @@ function MarkdownBody({
   const settledTextStyle = pinSettledWidth
     ? [styles.messageText, { width: contentWidth }]
     : styles.messageText;
-  const blocks = useMemo(() => parseMobileMarkdown(text), [text]);
+  const markdownParseRef = useRef<MobileMarkdownParseResult | null>(null);
+  const markdownParse = useMemo(() => {
+    const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+    const result = parseMobileMarkdownIncremental(text, markdownParseRef.current);
+    const finishedAt = typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+    return {
+      result,
+      durationMs: Math.max(0, finishedAt - startedAt),
+    };
+  }, [text]);
+  useLayoutEffect(() => {
+    markdownParseRef.current = markdownParse.result;
+    if (__DEV__) recordMobileMarkdownParse(markdownParse.result, markdownParse.durationMs);
+  }, [markdownParse]);
+  const blocks = markdownParse.result.blocks;
   // Android 的 selectable Text 内嵌 View(直连内联图)行为未定义,含这类 inline 的块不开选中。
   const inlinesSelectable = useCallback((inlines: readonly MobileMarkdownInline[]) => (
     selectable === true
@@ -4151,7 +4220,7 @@ function MarkdownBody({
           // 盖住整块——WebView 会吞掉触摸事件,不盖层拿不到点击)。
           return (
             <View key={block.key} testID="message.mermaidPreviewButton">
-              <MermaidDiagramWebView source={block.text} testID="message.mermaidDiagram" />
+              <MermaidDiagramWebView active={heavyContentVisible} source={block.text} testID="message.mermaidDiagram" />
               {onOpenPayload ? (
                 <Pressable
                   accessibilityLabel={t('message.renderer.openDiagramDetail')}
@@ -4169,6 +4238,7 @@ function MarkdownBody({
           // 公式在视觉上是正文的一部分,背景与气泡底色一致)。
           return (
             <MathFormulaWebView
+              active={heavyContentVisible}
               key={block.key}
               source={block.text}
               testID="message.mathFormula"

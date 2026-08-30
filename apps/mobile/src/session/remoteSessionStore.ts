@@ -578,7 +578,8 @@ const GENERATED_FALLBACK_MIN_PREFIX_LENGTH = 12;
 const TEXT_DELTA_BATCH_INTERVAL_MS = 32;
 const DEVICE_LINK_TRUNCATED_FLAG = '__deviceLinkTruncated';
 const pendingTextDeltaBatches = new Map<string, {
-  text: string;
+  /** Keep deltas as chunks; joining once per flush avoids O(n²) string copies. */
+  chunks: string[];
   persistId?: string;
   deviceId?: string;
   agentMeta: Record<string, unknown> | null;
@@ -654,14 +655,42 @@ function touchSessionAccess(sessionId: string): void {
   sessionLastAccessOrder.set(sessionId, ++nextSessionAccessOrder);
 }
 
+/**
+ * Budget accounting runs on every regular-session sweep.  Do not serialize the
+ * whole payload here: streaming rows replace their object on every flush, so a
+ * stringify would allocate a second copy of every large tool result and make
+ * the accounting pass itself a noticeable GC source.  This intentionally
+ * conservative walk counts primitive payloads and container overhead without
+ * materializing a large temporary string.
+ */
+function estimateValueBytes(value: unknown, depth = 0, seen = new Set<object>()): number {
+  if (value == null) return 0;
+  if (typeof value === 'string') return value.length * 2;
+  if (typeof value === 'number' || typeof value === 'boolean') return 16;
+  if (typeof value !== 'object') return 8;
+  if (seen.has(value)) return 0;
+  seen.add(value);
+  if (depth >= 3) return 64;
+  if (Array.isArray(value)) {
+    let bytes = 24;
+    for (const item of value) bytes += 8 + estimateValueBytes(item, depth + 1, seen);
+    return bytes;
+  }
+  let bytes = 32;
+  for (const [key, item] of Object.entries(value)) {
+    bytes += 16 + key.length * 2 + estimateValueBytes(item, depth + 1, seen);
+  }
+  return bytes;
+}
+
 function estimateMessageBytes(message: RemoteMessage): number {
   const cached = messageBytesEstimates.get(message);
   if (cached !== undefined) return cached;
   let bytes = MESSAGE_STRUCTURAL_BYTES_ESTIMATE;
   if (typeof message.content === 'string') bytes += message.content.length * 2;
-  else if (message.content != null) bytes += safeStableStringify(message.content).length * 2;
-  if (message.agentMeta) bytes += safeStableStringify(message.agentMeta).length * 2;
-  if (message.systemCardData) bytes += safeStableStringify(message.systemCardData).length * 2;
+  else if (message.content != null) bytes += estimateValueBytes(message.content);
+  if (message.agentMeta) bytes += estimateValueBytes(message.agentMeta);
+  if (message.systemCardData) bytes += estimateValueBytes(message.systemCardData);
   messageBytesEstimates.set(message, bytes);
   return bytes;
 }
@@ -894,6 +923,10 @@ function releaseSessionDetailProjections(sessionId: string): boolean {
   let changed = livePlanSnapshots.delete(sessionId);
   changed = sessionTaskUpdates.delete(sessionId) || changed;
   changed = sessionParkedTaskUpdates.delete(sessionId) || changed;
+  // Goal status is queried when the context sheet opens; retaining a full
+  // status payload for every backgrounded task only keeps detail-only data
+  // alive and can show stale state after a long absence.
+  changed = sessionGoalStatus.delete(sessionId) || changed;
   changed = inputProjections.delete(sessionId) || changed;
   // 即使投影已经为空也要抬升 authority：离场/LRU 前启动的慢查询不能在下一次
   // 打开同一任务后把旧 pending queue 或 continuation owner 写回来。
@@ -973,6 +1006,12 @@ function applyMessageWriteRetention(sessionId: string): void {
 let mergedSessions: RemoteSession[] = [];
 let messageVersion = 0;
 let storeVersion = 0;
+// A single remote snapshot often updates both the session shard and its
+// activity projection. Keep the writes synchronous, but notify subscribers
+// once after the snapshot is complete so the home screen does not render the
+// same device twice in one turn.
+let emitBatchDepth = 0;
+let emitBatchPending = false;
 
 type LiveRowCreatedAtAnchor = {
   createdAt: string | undefined;
@@ -1059,9 +1098,30 @@ let conversationSearchDeviceModels: readonly {
   state: string;
 }[] = [];
 
-function emit(): void {
+function emitNow(): void {
   storeVersion += 1;
   for (const sub of subs) sub();
+}
+
+function emit(): void {
+  if (emitBatchDepth > 0) {
+    emitBatchPending = true;
+    return;
+  }
+  emitNow();
+}
+
+function batch<T>(work: () => T): T {
+  emitBatchDepth += 1;
+  try {
+    return work();
+  } finally {
+    emitBatchDepth -= 1;
+    if (emitBatchDepth === 0 && emitBatchPending) {
+      emitBatchPending = false;
+      emitNow();
+    }
+  }
 }
 
 function bumpInputProjectionAuthorityEpoch(sessionId: string): number {
@@ -2019,7 +2079,11 @@ function streamingClientIdFor(sessionId: string, persistId: string | undefined):
 function upsertMessage(
   sessionId: string,
   message: RemoteMessage,
-  options: { retirePendingAssistantIdentityOnEqual?: boolean } = {},
+  options: {
+    retirePendingAssistantIdentityOnEqual?: boolean;
+    /** Streaming replacement preserves the already sorted message order. */
+    preserveOrderOnReplace?: boolean;
+  } = {},
 ): boolean {
   const existing = messages.get(sessionId) ?? [];
   const index = existing.findIndex((item) => messageIdentityMatches(item, message));
@@ -2076,7 +2140,13 @@ function upsertMessage(
   }
   const next = existing.slice();
   next[index] = replacement;
-  messages.set(sessionId, normalizeMessages(next));
+  // A live delta only changes content/metadata; sorting the whole window on
+  // every 32 ms flush needlessly allocates and scans all rows.  Callers that
+  // replace an authoritative row keep the historical normalization path.
+  messages.set(
+    sessionId,
+    options.preserveOrderOnReplace ? next : normalizeMessages(next),
+  );
   applyMessageWriteRetention(sessionId);
   if (message.role === 'assistant') {
     forgetPendingLiveAssistantMessageIdentity(
@@ -2283,7 +2353,7 @@ function applyRemoteTextEvent(
       new Date().toISOString(),
       hostCreatedAtAnchor?.createdAt,
     ),
-  });
+  }, { preserveOrderOnReplace: true });
   if (resetsTransportAssembly && !changed) {
     forgetPendingLiveAssistantMessageIdentity(
       sessionId,
@@ -2347,14 +2417,19 @@ function enqueueRemoteTextDelta(
   }
   const current = pendingTextDeltaBatches.get(sessionId);
   const incomingMeta = isRecord(event.agentMeta) ? event.agentMeta : null;
-  pendingTextDeltaBatches.set(sessionId, {
-    text: `${current?.text ?? ''}${text}`,
-    persistId: current?.persistId ?? persistId,
-    deviceId: current?.deviceId ?? deviceId,
-    agentMeta: incomingMeta
-      ? { ...(current?.agentMeta ?? {}), ...incomingMeta }
-      : current?.agentMeta ?? null,
-  });
+  if (current) {
+    current.chunks.push(text);
+    if (incomingMeta) current.agentMeta = { ...(current.agentMeta ?? {}), ...incomingMeta };
+    if (!current.persistId) current.persistId = persistId;
+    if (current.deviceId === undefined) current.deviceId = deviceId;
+  } else {
+    pendingTextDeltaBatches.set(sessionId, {
+      chunks: [text],
+      persistId,
+      deviceId,
+      agentMeta: incomingMeta,
+    });
+  }
   scheduleTextDeltaFlush();
   return changed;
 }
@@ -2368,7 +2443,7 @@ function flushPendingTextDelta(sessionId: string): boolean {
     sessionId,
     {
       type: 'text',
-      data: { text: batch.text, isFinal: false },
+      data: { text: batch.chunks.join(''), isFinal: false },
       ...(batch.agentMeta ? { agentMeta: batch.agentMeta } : {}),
     },
     batch.persistId,
@@ -2532,6 +2607,11 @@ function recallParkedTaskUpdates(
 }
 
 export const remoteSessionStore = {
+  /** Coalesce notifications for one logically atomic remote snapshot. */
+  batch<T>(work: () => T): T {
+    return batch(work);
+  },
+
   /**
    * 新建任务第一帧标题预览。只盖哨兵,权威标题一旦离开哨兵就让位。
    * 失败撤回走 {@link clearPendingTitlePreview}。

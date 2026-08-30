@@ -106,6 +106,19 @@ function SwipeableSessionRowInner({
   // render*Actions 的回调参数是库内部的 translation SharedValue,渲染期存进 ref,
   // 供松手回调(handleWillOpen)同步读取当前位移做全滑判定。
   const translationRef = useRef<SharedValue<number> | null>(null);
+  const previousRowKeyRef = useRef(rowKey);
+
+  // Project child windowing reuses a small pool of native swipe rows. When a
+  // slot starts representing another session, clear the previous gesture
+  // position immediately so an open/partially-open row cannot follow the slot
+  // onto the new session. The registry cleanup below separately retires the
+  // previous session id.
+  useEffect(() => {
+    if (previousRowKeyRef.current === rowKey) return;
+    methodsRef.current?.reset();
+    translationRef.current = null;
+    previousRowKeyRef.current = rowKey;
+  }, [rowKey]);
 
   // 行卸载(归档/删除后随数据消失、列表虚拟化回收)时注销;registry 内部只清
   // 「当前记录仍是自己」的条目,不会误伤已经接管的新行。

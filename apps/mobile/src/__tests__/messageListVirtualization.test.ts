@@ -27,7 +27,8 @@ describe('mobile message list container', () => {
     expect(listSource).toContain('maintainScrollAtEnd');
     expect(listSource).toContain('maintainVisibleContentPosition={{ data: true, size: true }}');
     // cell 含内部 state(展开态 / 手势图 / mermaid·math WebView),关闭回收避免实例错误复用。
-    expect(listSource).toContain('recycleItems={false}');
+    expect(source).toContain('const recycleItems = __DEV__ && devRecycleItems === true;');
+    expect(listSource).toContain('recycleItems={recycleItems}');
     // 上滑加载:LegendList 近顶阈值触发自动预取(替代手搓的滚动 metric 判定)。
     expect(listSource).toContain('onStartReached={handleStartReached}');
     // 自动预取必须是电平判定(shouldAutoLoadEarlier + 多时机重评估),不许退回只吃 onStartReached

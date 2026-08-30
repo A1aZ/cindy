@@ -98,6 +98,32 @@ describe('remoteMediaResolveQueue', () => {
     expect(resolve).toHaveBeenCalledTimes(1);
   });
 
+  it('bounds resolved cache bytes and evicts the least recently used entry', async () => {
+    const { pending, resolve } = manualResolver();
+    const orphaned: MobileResolvedRemoteMedia[] = [];
+    const queue = createRemoteMediaResolveQueue(
+      { resolve, onOrphanResolved: (media) => orphaned.push(media) },
+      { maxConcurrent: 1, maxCacheBytes: 2_000 },
+    );
+    const resolveOne = async (name: string): Promise<MobileResolvedRemoteMedia> => {
+      const promise = queue.request(imageRequest(name));
+      await flush();
+      pending.at(-1)?.resolve(resolvedMedia(name, { size: 1_000 }));
+      return promise;
+    };
+
+    await resolveOne('a.png');
+    await resolveOne('b.png');
+    // Refresh A so B becomes the oldest entry.
+    expect(queue.peekFresh(imageRequest('a.png').url)).not.toBeNull();
+    await resolveOne('c.png');
+
+    expect(queue.peekFresh(imageRequest('a.png').url)).not.toBeNull();
+    expect(queue.peekFresh(imageRequest('b.png').url)).toBeNull();
+    expect(queue.peekFresh(imageRequest('c.png').url)).not.toBeNull();
+    expect(orphaned.map((media) => media.ossKey)).toEqual(['key/b.png']);
+  });
+
   it('dedupes concurrent requests for the same url into one resolve call', async () => {
     const { pending, resolve } = manualResolver();
     const queue = createRemoteMediaResolveQueue({ resolve });

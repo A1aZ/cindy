@@ -1823,6 +1823,8 @@ export default function SessionScreen() {
       // 退屏后才完成的 in-flight 取件:缓存已被 releaseAll 清空接管不到,这里直接
       // 补 DELETE,避免「退出时正在取件」的对象漏出退屏统一清理悬到生命周期兜底。
       onOrphanResolved: (media) => deleteRemoteMediaObject(media),
+    }, {
+      maxCacheBytes: 16 * 1024 * 1024,
     }), [deleteRemoteMediaObject]);
   remoteMediaQueueRef.current ??= createRemoteMediaQueue();
   const voiceRecordingActiveRef = useRef(false);
@@ -4845,15 +4847,41 @@ export default function SessionScreen() {
   // 变化与 unmount 时都执行:releaseAll + 补删(fire-and-forget;App 被杀等不触发
   // cleanup 的情况由 OSS 生命周期规则兜底),并换上全新队列实例(released 标志
   // 一次性,释放过的队列不能复用;unmount 分支多建一个空队列无害)。
-  useEffect(() => () => {
+  const releaseRemoteMediaQueue = useCallback(() => {
     const released = remoteMediaQueueRef.current?.releaseAll() ?? [];
     for (const media of released) {
       // 仍在后台落盘的对象等落盘结束再删,避免 DELETE 抢先把落盘下载打成 404;
       // 磁盘缓存命中的空 ossKey 条目在 deleteRemoteMediaObject 内跳过。
       deleteRemoteMediaObject(media);
     }
-    remoteMediaQueueRef.current = createRemoteMediaQueue();
-  }, [sessionId, createRemoteMediaQueue, deleteRemoteMediaObject]);
+    remoteMediaQueueRef.current = null;
+  }, [deleteRemoteMediaObject]);
+
+  useFocusEffect(
+    useCallback(() => () => {
+      releaseRemoteMediaQueue();
+    }, [releaseRemoteMediaQueue]),
+  );
+
+  useEffect(() => () => {
+    releaseRemoteMediaQueue();
+  }, [releaseRemoteMediaQueue, sessionId]);
+
+  // Navigation focus does not change when Android backgrounds the activity.
+  // Release resolved media and queued fetches at the AppState boundary too;
+  // the next foreground request lazily creates a fresh queue.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        releaseRemoteMediaQueue();
+        return;
+      }
+      if (!remoteMediaQueueRef.current) {
+        remoteMediaQueueRef.current = createRemoteMediaQueue();
+      }
+    });
+    return () => subscription.remove();
+  }, [createRemoteMediaQueue, releaseRemoteMediaQueue]);
 
   /** 单调递增的补齐轮次计数器;`latest` 是本屏最新那一轮的序号(旧轮据此自我作废)。 */
   const backfillRunSeqRef = useRef(0);

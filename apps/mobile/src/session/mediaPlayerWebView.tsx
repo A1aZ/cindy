@@ -8,6 +8,7 @@ import {
   type MobileMediaPlayerKind,
   type MobileMediaPlayerStatus,
 } from '@/session/mediaPlayerWebViewHtml';
+import { registerMobileMessageWebView } from '@/session/mobileMessageWebViewMetrics';
 import { useTheme } from '@/theme';
 
 export function RemoteMediaPlayerWebView({
@@ -29,25 +30,40 @@ export function RemoteMediaPlayerWebView({
 }) {
   const { colors } = useTheme();
   const webViewRef = useRef<ComponentRef<typeof WebView>>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => registerMobileMessageWebView('media'), []);
   const pausePlayback = useCallback(() => {
     webViewRef.current?.postMessage(buildMediaPlayerWebViewCommand('pause'));
   }, []);
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', state => {
-      if (state !== 'active') pausePlayback();
-    });
-    return () => subscription.remove();
+  const stopPlaybackAndLoading = useCallback(() => {
+    pausePlayback();
+    webViewRef.current?.stopLoading();
   }, [pausePlayback]);
 
   useEffect(() => {
-    return pausePlayback;
-  }, [kind, pausePlayback, url]);
+    const subscription = AppState.addEventListener('change', state => {
+      if (state !== 'active') stopPlaybackAndLoading();
+    });
+    return () => {
+      subscription.remove();
+      stopPlaybackAndLoading();
+    };
+  }, [stopPlaybackAndLoading]);
 
-  const handleMessage = (event: WebViewMessageEvent) => {
+  useEffect(() => {
+    return stopPlaybackAndLoading;
+  }, [kind, stopPlaybackAndLoading, url]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    stopPlaybackAndLoading();
+  }, [stopPlaybackAndLoading]);
+
+  const handleMessage = useCallback((event: WebViewMessageEvent) => {
+    if (!mountedRef.current) return;
     const status = parseMediaPlayerWebViewMessage(event.nativeEvent.data);
     if (status) onStatusChange?.(status);
-  };
+  }, [onStatusChange]);
 
   return (
     <View style={style} testID={testID}>

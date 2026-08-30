@@ -97,4 +97,15 @@ describe('任务消息内存治理页面接线', () => {
     expect(store).toContain('isSessionMessageCacheWriteAuthorityCurrent(cacheAuthority)');
     expect(store).toContain('remoteSessionStore.isSessionMessageAuthorityCurrent(authority)');
   });
+
+  it('屏幕失焦时也释放媒体队列，避免栈页面切换后累积内存条目', () => {
+    const queueStart = screen.indexOf('const releaseRemoteMediaQueue = useCallback');
+    expect(queueStart).toBeGreaterThanOrEqual(0);
+    const queueBlock = screen.slice(queueStart, queueStart + 1400);
+    expect(queueBlock).toContain('remoteMediaQueueRef.current?.releaseAll()');
+    expect(queueBlock).toContain('remoteMediaQueueRef.current = null;');
+    expect(queueBlock).toContain('remoteMediaQueueRef.current = createRemoteMediaQueue();');
+    expect(queueBlock).toContain('useFocusEffect(');
+    expect(queueBlock).toContain('releaseRemoteMediaQueue();');
+  });
 });

@@ -26,16 +26,20 @@ describe('mobile message list container', () => {
     expect(listSource).toContain('alignItemsAtEnd');
     expect(listSource).toContain('maintainScrollAtEnd');
     expect(listSource).toContain('maintainVisibleContentPosition={{ data: true, size: true }}');
-    // cell 含内部 state(展开态 / 手势图 / mermaid·math WebView),关闭回收避免实例错误复用。
-    expect(source).toContain('const recycleItems = __DEV__ && devRecycleItems === true;');
+    // Release 开启 native cell 回收；DEV 仍保留 listperf 的 on/off 单变量开关。
+    // item type 分池 + recycling-aware state 防止菜单/展开态/媒体状态串到另一条消息。
+    expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
     expect(listSource).toContain('recycleItems={recycleItems}');
+    expect(listSource).toContain('getItemType={mobileMessageListItemType}');
+    expect(source).toContain('useRecyclingState');
     // 上滑加载:LegendList 近顶阈值触发自动预取(替代手搓的滚动 metric 判定)。
     expect(listSource).toContain('onStartReached={handleStartReached}');
     // 自动预取必须是电平判定(shouldAutoLoadEarlier + 多时机重评估),不许退回只吃 onStartReached
     // 边沿——边沿被业务 guard 吞掉后条件再就绪也等不到下一个边沿(顶部停留永不加载的回归)。
     expect(source).toContain('shouldAutoLoadEarlier({');
-    // 冷开允许有限补页,把短初窗上方历史自动补齐；预算耗尽或首项无进展即停止。
+    // 冷开只在列表同时贴住 start/end(首屏未填满)时有限补页。
     expect(source).toContain('MAX_INITIAL_HISTORY_AUTOFILL_PAGES');
+    expect(source).toContain('atStart: listState.isAtStart');
     expect(source).toContain('initialHistoryAutofillRemainingRef.current -= 1');
     // 所有 prepend 在请求期间抑制贴底，成功/空页/失败后延迟一帧释放；generation
     // 防止旧会话请求 settle 后误清新会话 / 新请求状态。
@@ -66,6 +70,21 @@ describe('mobile message list container', () => {
     expect(source).not.toContain('[itemKeys, markMobileMvcpSettle]');
     expect(source.match(/isMobileMvcpSettling\(Date\.now\(\), mvcpSettleAtRef\.current\)/g))
       .toHaveLength(2);
+  });
+
+  it('resets identity-bound row state before a recycled cell displays another item', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
+    const bubbleStart = source.indexOf('function MessageBubble');
+    const bubbleEnd = source.indexOf('function copyActionLabel', bubbleStart);
+    const bubbleSource = source.slice(bubbleStart, bubbleEnd);
+
+    expect(bubbleSource).toContain('useRecyclingState<CopyMessageStatus');
+    expect(bubbleSource).toContain('useRecyclingState(false)');
+    expect(bubbleSource).toContain('useRecyclingState<{');
+    expect(bubbleSource).toContain('useRecyclingState<string | null>(null)');
+    expect(source).toContain('const [contentWidth, setContentWidth] = useRecyclingState(0);');
+    expect(source).toContain('const [resolveState, setResolveState] = useRecyclingState<MediaThumbnailResolveState>');
+    expect(source).toContain('const [recycledLocalExpanded, setRecycledLocalExpanded] = useRecyclingState(defaultExpanded);');
   });
 
   it('clears stale history intent before verifying an explicit follow-latest request', () => {

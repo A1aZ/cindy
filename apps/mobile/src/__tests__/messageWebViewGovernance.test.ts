@@ -49,8 +49,9 @@ describe('message WebView visibility wiring', () => {
     expect(renderer).toContain('active={heavyContentVisible}');
     expect(renderer).toContain('getWebViewMetrics: getMobileMessageWebViewMetrics');
     expect(renderer).toContain('getMarkdownMetrics: getMobileMarkdownRenderMetrics');
-    expect(renderer).toContain('const recycleItems = __DEV__ && devRecycleItems === true;');
+    expect(renderer).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
     expect(renderer).toContain('recycleItems={recycleItems}');
+    expect(renderer).toContain('getItemType={mobileMessageListItemType}');
     expect(mermaid).toContain('active?: boolean;');
     expect(mermaid).toMatch(/active\s*\?\s*<WebView/);
     expect(math).toContain('active?: boolean;');

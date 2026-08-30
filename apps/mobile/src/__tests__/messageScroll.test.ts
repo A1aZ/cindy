@@ -253,6 +253,7 @@ describe('shouldAutoLoadEarlier', () => {
     actionDisabled: false,
     actionVisible: true,
     atEnd: false,
+    atStart: true,
     firstItemKey: 'message-a',
     initialAutoFillAllowed: false,
     lastAttemptedFirstItemKey: null,
@@ -283,9 +284,20 @@ describe('shouldAutoLoadEarlier', () => {
   it('cold-fills a near-start window while the initial bounded budget is available', () => {
     expect(shouldAutoLoadEarlier({
       ...eligible,
+      atEnd: true,
       initialAutoFillAllowed: true,
       userScrolledForOlder: false,
     })).toBe(true);
+  });
+
+  it('does not cold-fill after the initial window already fills the viewport', () => {
+    expect(shouldAutoLoadEarlier({
+      ...eligible,
+      atEnd: true,
+      atStart: false,
+      initialAutoFillAllowed: true,
+      userScrolledForOlder: false,
+    })).toBe(false);
   });
 
   it('keeps user-driven history prefetch disabled while pinned at the end', () => {
@@ -297,6 +309,7 @@ describe('shouldAutoLoadEarlier', () => {
     expect(shouldAutoLoadEarlier({
       ...eligible,
       atEnd: true,
+      atStart: true,
       initialAutoFillAllowed: true,
       userScrolledForOlder: false,
     })).toBe(true);

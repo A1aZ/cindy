@@ -135,6 +135,11 @@ import {
   type HomeStatusFilter,
 } from '@/session/homeListPriority';
 import {
+  buildHomeProjectChildOffsets,
+  findHomeProjectChildIndex,
+  resolveHomeProjectChildWindow,
+} from '@/session/homeProjectChildWindow';
+import {
   projectDropIndexFromY,
   reorderVisibleProjectByDropIndex,
   resolveVirtualizedDropIndex,
@@ -231,6 +236,8 @@ const PROJECT_CHILD_WINDOW_THRESHOLD = 20;
 const PROJECT_CHILD_WINDOW_SIZE = 15;
 const PROJECT_CHILD_WINDOW_OVERSCAN = 4;
 const PROJECT_CHILD_WINDOW_SHIFT = 4;
+const HOME_PROJECT_HEADER_HEIGHT = 56;
+const HOME_AUTOMATION_VIEW_ALL_ROW_HEIGHT = 54;
 const HOME_SESSION_ROW_HEIGHT = 78;
 const HOME_SESSION_SINGLE_LINE_ROW_HEIGHT = 60;
 const CINDY_LIST_GUTTER = 20;
@@ -248,6 +255,26 @@ function estimateHomeSessionRowHeight(item: RemoteSessionListItem): number {
     || !!item.scheduleInfo
     || !!item.session.pinnedAt;
   return hasPreview ? HOME_SESSION_ROW_HEIGHT : HOME_SESSION_SINGLE_LINE_ROW_HEIGHT;
+}
+
+function estimateHomeProjectChildHeight(
+  item: RemoteSessionListItem,
+  expandedAutomationGroups: ReadonlySet<string>,
+): number {
+  const rowHeight = estimateHomeSessionRowHeight(item);
+  const group = item.automationGroup;
+  if (!group || !expandedAutomationGroups.has(group.key)) return rowHeight;
+  const { visibleItems, hiddenCount } = getRemoteSessionPreviewCollapse(group.items, {
+    limit: PROJECT_PREVIEW_LIMIT,
+    isSessionRunning: (sessionId) => remoteSessionStore.isSessionRunning(sessionId),
+  });
+  const childrenHeight = visibleItems.reduce(
+    (height, child) => height + estimateHomeSessionRowHeight(child),
+    0,
+  );
+  return rowHeight
+    + childrenHeight
+    + (hiddenCount > 0 ? HOME_AUTOMATION_VIEW_ALL_ROW_HEIGHT : 0);
 }
 
 type RemoteListStatusFilter = Extract<RemoteSessionStatusFilter, 'active' | 'archived' | 'all'>;
@@ -3347,53 +3374,58 @@ function ProjectRow({
     },
   );
   const projectTop = useSharedValue(0);
+  const projectHeaderHeight = useSharedValue(HOME_PROJECT_HEADER_HEIGHT);
   const projectRef = useRef<View>(null);
   const [windowAnchor, setWindowAnchor] = useState(0);
   const [projectLayoutReady, setProjectLayoutReady] = useState(false);
-  const estimatedChildHeights = useMemo(
-    () => visibleSessions.map(estimateHomeSessionRowHeight),
-    [visibleSessions, storeVersion],
+  const estimatedChildHeights = useMemo(() => {
+    const expandedKeys = new Set(expandedAutomationGroups);
+    return visibleSessions.map((item) => estimateHomeProjectChildHeight(item, expandedKeys));
+  }, [expandedAutomationGroups, visibleSessions, storeVersion]);
+  const estimatedChildOffsets = useMemo(
+    () => buildHomeProjectChildOffsets(estimatedChildHeights),
+    [estimatedChildHeights],
   );
-  // Windowing is only enabled for genuinely large, uniform child trees. The
-  // common project preview (five rows) remains byte-for-byte unchanged, while
-  // a large expanded group avoids mounting all rows at once without relying on
-  // a nested virtualized list.
+  // Keep the common five-row preview unchanged. Large expanded groups use
+  // prefix-sum windowing for both 60/78px rows and expanded automation groups,
+  // so mixed content never falls back to mounting the whole project.
   const windowingEligible = !!homeScrollY
     && !collapsed
     && projectLayoutReady
-    && visibleSessions.length > PROJECT_CHILD_WINDOW_THRESHOLD
-    && estimatedChildHeights.every((height) => height === estimatedChildHeights[0]);
+    && visibleSessions.length > PROJECT_CHILD_WINDOW_THRESHOLD;
   const scrollY = homeScrollY;
-  const estimatedRowHeight = estimatedChildHeights[0] ?? HOME_SESSION_ROW_HEIGHT;
   useAnimatedReaction(
     () => {
       if (!windowingEligible) return -1;
-      const relativeY = Math.max(0, scrollY!.value - projectTop.value - HOME_SESSION_ROW_HEIGHT);
-      return Math.floor(relativeY / Math.max(1, estimatedRowHeight) / PROJECT_CHILD_WINDOW_SHIFT)
+      const relativeY = Math.max(0, scrollY!.value - projectTop.value - projectHeaderHeight.value);
+      const visibleIndex = findHomeProjectChildIndex(estimatedChildOffsets, relativeY);
+      return Math.floor(visibleIndex / PROJECT_CHILD_WINDOW_SHIFT)
         * PROJECT_CHILD_WINDOW_SHIFT;
     },
     (next, previous) => {
       if (next < 0 || next === previous) return;
       runOnJS(setWindowAnchor)(next);
     },
-    [scrollY, windowingEligible, estimatedRowHeight],
+    [estimatedChildOffsets, projectHeaderHeight, scrollY, windowingEligible],
   );
-  const windowStart = windowingEligible
-    ? Math.max(0, Math.min(
-      Math.max(0, visibleSessions.length - PROJECT_CHILD_WINDOW_SIZE),
-      windowAnchor - PROJECT_CHILD_WINDOW_OVERSCAN,
-    ))
-    : 0;
-  const windowEnd = windowingEligible
-    ? Math.min(visibleSessions.length, windowStart + PROJECT_CHILD_WINDOW_SIZE + PROJECT_CHILD_WINDOW_OVERSCAN * 2)
-    : visibleSessions.length;
+  const childWindow = windowingEligible
+    ? resolveHomeProjectChildWindow({
+        anchor: windowAnchor,
+        childOffsets: estimatedChildOffsets,
+        overscan: PROJECT_CHILD_WINDOW_OVERSCAN,
+        windowSize: PROJECT_CHILD_WINDOW_SIZE,
+      })
+    : {
+        end: visibleSessions.length,
+        leadingSpacerHeight: 0,
+        start: 0,
+        trailingSpacerHeight: 0,
+      };
+  const windowStart = childWindow.start;
+  const windowEnd = childWindow.end;
   const renderedSessions = windowingEligible ? visibleSessions.slice(windowStart, windowEnd) : visibleSessions;
-  const leadingSpacerHeight = windowingEligible
-    ? estimatedChildHeights.slice(0, windowStart).reduce((sum, height) => sum + height, 0)
-    : 0;
-  const trailingSpacerHeight = windowingEligible
-    ? estimatedChildHeights.slice(windowEnd).reduce((sum, height) => sum + height, 0)
-    : 0;
+  const leadingSpacerHeight = childWindow.leadingSpacerHeight;
+  const trailingSpacerHeight = childWindow.trailingSpacerHeight;
   const groupTestID = kind === 'dialogue' ? 'home.dialogueGroup' : 'home.projectGroup';
   const rowTestID = kind === 'dialogue' ? 'home.dialogueRow' : 'home.projectRow';
   const childTestID = kind === 'dialogue' ? 'home.chatRow' : 'home.projectSessionRow';
@@ -3428,6 +3460,10 @@ function ProjectRow({
         : t('devices.list.a11y.project', { title: project.title })}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
+      onLayout={(event) => {
+        const height = event.nativeEvent.layout.height;
+        if (Number.isFinite(height) && height > 0) projectHeaderHeight.value = height;
+      }}
       onPress={dragging ? undefined : onToggle}
       ref={(node) => {
         if (!headerRefs || kind !== 'project') return;

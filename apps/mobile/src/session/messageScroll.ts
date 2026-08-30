@@ -445,9 +445,11 @@ export interface MobileAutoLoadEarlierDecisionInput {
   actionVisible: boolean;
   /** 列表当前贴在内容末端(LegendList getState().isAtEnd,含 prepend 补偿后的记账)。 */
   atEnd: boolean;
+  /** 列表当前也贴在内容开头；与 atEnd 同时成立才说明内容未撑满视口。 */
+  atStart: boolean;
   /** 当前首个渲染项 key(prepend 落地后必变,作为「上次尝试有进展」的信号)。 */
   firstItemKey: string | null;
-  /** 冷开补齐预算尚有余额；只用于未经手势的初始短窗口。 */
+  /** 冷开补齐预算尚有余额；仍需 atStart + atEnd 确认视口未填满。 */
   initialAutoFillAllowed: boolean;
   /** 上一次自动触发时的首项 key;相同说明上次尝试无进展(失败/重复页),不再自动重试。 */
   lastAttemptedFirstItemKey: string | null;
@@ -479,10 +481,13 @@ export interface MobileAutoLoadEarlierDecisionInput {
  *   保证手势永远能重新驱动一次尝试。
  */
 export function shouldAutoLoadEarlier(input: MobileAutoLoadEarlierDecisionInput): boolean {
-  if (!input.userScrolledForOlder && !input.initialAutoFillAllowed) return false;
+  if (
+    !input.userScrolledForOlder
+    && (!input.initialAutoFillAllowed || !input.atStart || !input.atEnd)
+  ) return false;
   if (!input.actionVisible || input.actionDisabled) return false;
   if (!input.nearStart) return false;
-  if (input.atEnd && !input.initialAutoFillAllowed) return false;
+  if (input.atEnd && input.userScrolledForOlder) return false;
   if (!input.firstItemKey) return false;
   return input.lastAttemptedFirstItemKey !== input.firstItemKey;
 }

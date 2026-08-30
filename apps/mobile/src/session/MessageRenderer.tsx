@@ -57,7 +57,7 @@ import {
   type ViewToken,
 } from 'react-native';
 import { UITextView } from 'react-native-uitextview';
-import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
+import { LegendList, useRecyclingState, type LegendListRef } from '@legendapp/list/react-native';
 import { tokenizeCode, type CodeTokenKind } from '@/session/codeHighlight';
 import { buildComposerTouchLayout } from '@/session/composerTouchLayout';
 import { useFoldableExpandedState } from '@/session/expandedBlockMemory';
@@ -384,6 +384,10 @@ const MAX_LIVE_WORK_ACTIVITIES = 5;
 // LegendList 预渲距离(px,视口外每侧):约 1 屏,挂载集小 → 滚动 mount 帧压进一帧内(见 listperf 实测)。
 const MOBILE_MESSAGE_DRAW_DISTANCE = 800;
 const FOLDABLE_HEADER_HIT_SLOP = { bottom: 10, left: 4, right: 4, top: 10 };
+
+function mobileMessageListItemType(item: MobileMessageRenderItem): MobileMessageRenderItem['type'] {
+  return item.type;
+}
 // 「跳到底部」浮标直径:比 composer 里的语音按钮(28)大一档但不压过它,Telegram 同款层级感。
 const SCROLL_TO_BOTTOM_FAB_SIZE = 36;
 const stylesStatic = StyleSheet.create({
@@ -1303,7 +1307,7 @@ export function MessageRenderer({
   // nearStart / atEnd 读 LegendList getState() 的实时账:它的 scroll 记账含 prepend 锚点补偿,
   // 而 app 侧 onScroll 的原生 offsetY 在 prepend 后不再代表「距内容顶端的距离」,不可用于判顶。
   // prepend 防跳由内置 maintainVisibleContentPosition 处理,无需手动开 maintain。
-  // 冷开初始布局允许有界补三页,把短初窗上方的上下文补齐；真实上翻意图则继续沿用
+  // 冷开只在列表同时位于 start/end(内容未撑满首屏)时有界补页；真实上翻意图继续沿用
   // 不限页的近顶预取。两条路径都受首项进展去重保护,失败/重复页不会循环打 host。
   const requestLoadEarlier = useCallback(() => {
     if (!onLoadEarlier) return;
@@ -1343,6 +1347,7 @@ export function MessageRenderer({
       actionDisabled: loadEarlierAction.disabled,
       actionVisible: loadEarlierAction.visible,
       atEnd: listState.isAtEnd,
+      atStart: listState.isAtStart,
       firstItemKey,
       initialAutoFillAllowed,
       lastAttemptedFirstItemKey: lastAutoLoadEarlierKeyRef.current,
@@ -1691,7 +1696,10 @@ export function MessageRenderer({
     ),
     [pendingSend?.selectedClientId, shareSelectionActive],
   );
-  const recycleItems = __DEV__ && devRecycleItems === true;
+  // Production uses native cell recycling after every identity-bound local
+  // state below was made recycling-aware. DEV stays opt-in so listperf can
+  // continue running the on/off control with one bundle.
+  const recycleItems = __DEV__ ? devRecycleItems === true : true;
 
   return (
     // chat-text-quote:Provider 恒挂载(值可为 null),避免启用态翻转时整棵消息树
@@ -1705,6 +1713,7 @@ export function MessageRenderer({
         key={scrollResetKey}
         data={listData}
         extraData={messageListExtraData}
+        getItemType={mobileMessageListItemType}
         keyExtractor={(item) => item.key}
         renderItem={renderMessageItem}
         recycleItems={recycleItems}
@@ -2072,8 +2081,8 @@ function MessageBubble({
   const styles = useThemedStyles(makeStyles);
   const { colors, mode } = useTheme();
   const { t, i18n: i18nInstance } = useTranslation();
-  const [copyState, setCopyState] = useState<CopyMessageStatus | 'idle' | 'copying'>('idle');
-  const [actionSheetOpen, setActionSheetOpen] = useState(false);
+  const [copyState, setCopyState] = useRecyclingState<CopyMessageStatus | 'idle' | 'copying'>('idle');
+  const [actionSheetOpen, setActionSheetOpen] = useRecyclingState(false);
   // chat-text-quote:只解析持久化 quotesEncoded 明确标记的产品引用消息，避免
   // 把用户手写的 Markdown blockquote 误当产品引用。兼容 desktop 的交错
   // marker 块和 mobile 的前置引用。旧 markerless 消息保持 leading-only，
@@ -2252,13 +2261,13 @@ function MessageBubble({
   // 实测行数与被测 body 绑定存储:FlatList 复用组件实例时 body 可能原地变化
   // (服务端同步补丁等),旧实测值若不随内容失效,会在下一次 onTextLayout 到达
   // 前产生"过期行数"的错误收起判定;body 不匹配时视为未测量,回落估算兜底。
-  const [measuredBody, setMeasuredBody] = useState<{
+  const [measuredBody, setMeasuredBody] = useRecyclingState<{
     body: string;
     lines: number;
   } | null>(null);
   const measuredBodyLines =
     measuredBody && measuredBody.body === displayBubbleBody ? measuredBody.lines : null;
-  const [longMessageExpanded, setLongMessageExpanded] = useState(false);
+  const [longMessageExpanded, setLongMessageExpanded] = useRecyclingState(false);
   // 折叠判定单向闩锁(绑定 body,FlatList 复用换消息时自动失效):测量 Text
   // 的排版宽度跟随气泡宽度,而气泡宽度又随折叠状态变化(展开态的 markdown
   // 块级内容——公式 WebView / 表格等——会把气泡撑到最大宽)。行数恰好骑在
@@ -2266,7 +2275,7 @@ function MessageBubble({
   // 无限振荡(2026-07 数学公式块实测:14/15 行边界整屏闪动)。闩锁让「该
   // 收起」的判定只进不出:后续宽度变化跌回阈值以下不再自动展开;用户手动
   // 点「展开」走 longMessageExpanded,不受闩锁影响。
-  const [collapseLatchBody, setCollapseLatchBody] = useState<string | null>(null);
+  const [collapseLatchBody, setCollapseLatchBody] = useRecyclingState<string | null>(null);
   const collapseLatched = collapseLatchBody === displayBubbleBody;
   const collapseResolved = collapseMeasureEnabled
     && resolveUserMessageCollapse(displayBubbleBody, measuredBodyLines, collapseThreshold);
@@ -2304,11 +2313,16 @@ function MessageBubble({
     return () => clearTimeout(timer);
   }, [copyState]);
 
+  const copyOwnerRef = useRef(clientId);
+  copyOwnerRef.current = clientId;
   const copyMessage = useCallback(() => {
     if (!canCopy || copyState === 'copying') return;
     setCopyState('copying');
-    void copyMessageText(copyText).then(setCopyState);
-  }, [canCopy, copyState, copyText]);
+    const owner = clientId;
+    void copyMessageText(copyText).then((status) => {
+      if (copyOwnerRef.current === owner) setCopyState(status);
+    });
+  }, [canCopy, clientId, copyState, copyText, setCopyState]);
   const selectControlAction = useCallback((id: MobileMessageControlActionId) => {
     if (id === 'copy') {
       copyMessage();
@@ -3405,7 +3419,7 @@ function ExpandedWorkThinkingRow({
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const [expanded, toggleExpanded] = useFoldableExpandedState(`work-${item.key}`, false);
-  const [measuredLineCount, setMeasuredLineCount] = useState(1);
+  const [measuredLineCount, setMeasuredLineCount] = useRecyclingState(1);
   const rawContent = item.message.body.trim();
   const canExpand = rawContent.includes('\n') || measuredLineCount > 1;
   return (
@@ -3555,8 +3569,18 @@ function FoldablePanel({
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const [rememberedExpanded, toggleRememberedExpanded] = useFoldableExpandedState(blockId, defaultExpanded);
-  const expanded = controlledExpanded ?? rememberedExpanded;
-  const toggleExpanded = onControlledToggle ?? toggleRememberedExpanded;
+  // Todo/Orca panels intentionally do not use the process-wide block memory.
+  // Their local default must still be restored when LegendList assigns this
+  // recycled cell to another render item.
+  const [recycledLocalExpanded, setRecycledLocalExpanded] = useRecyclingState(defaultExpanded);
+  const localExpanded = blockId ? rememberedExpanded : recycledLocalExpanded;
+  const toggleLocalExpanded = useCallback(
+    () => setRecycledLocalExpanded((value) => !value),
+    [setRecycledLocalExpanded],
+  );
+  const expanded = controlledExpanded ?? localExpanded;
+  const toggleExpanded = onControlledToggle
+    ?? (blockId ? toggleRememberedExpanded : toggleLocalExpanded);
   const headerLayoutStyle = variant === 'plain'
     ? styles.foldHeaderPlain
     : {
@@ -3735,7 +3759,7 @@ function MobileAgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useRecyclingState(false);
   const from = agentSwitchEngineLabel(data?.fromAgentKind);
   const to = agentSwitchEngineLabel(data?.toAgentKind);
   const toModel = typeof data?.toModel === 'string' ? data.toModel : '';
@@ -3842,7 +3866,7 @@ function MobileAutoResumeActionRow({
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useRecyclingState(false);
   const presentation = getMobileAutoResumePresentation(data, inFlight);
   const { canExpand, hasProgress, info, state, summary } = presentation;
 
@@ -4031,7 +4055,7 @@ function MarkdownBody({
   // 偏矮的 onLayout 裁切 agent 回复;点分享会换上确定宽度的容器从而完整显示。
   // 外层始终 stretch 测可用宽,内层再钉像素宽:测宽不能钉在自己身上,否则旋转/
   // 分屏变宽后 onLayout 仍报旧值。1px 内抖动忽略,避免公式 WebView 重挂。
-  const [contentWidth, setContentWidth] = useState(0);
+  const [contentWidth, setContentWidth] = useRecyclingState(0);
   const handleSettledWidthLayout = useCallback((event: LayoutChangeEvent) => {
     if (!pinContentWidth) return;
     const nextWidth = Math.round(event.nativeEvent.layout.width);
@@ -4450,7 +4474,7 @@ function ChatPathChipSpan({
         : undefined,
     [ctx, target],
   );
-  const [verdict, setVerdict] = useState<RemotePathVerdict | undefined>(readVerdict);
+  const [verdict, setVerdict] = useRecyclingState<RemotePathVerdict | undefined>(readVerdict);
 
   // 本 key 的缓存变化(确定态落库 / 负缓存到期)→ 递增,**驱动下面的验证副作用重跑**。
   // 按 key 过滤:一屏几十个 chip 各自订阅,全量广播会让首屏 N 次 stat 引发 N×N 次重渲染。
@@ -4461,7 +4485,7 @@ function ChatPathChipSpan({
   // ForRender 回 undefined,于是 chip 只完成「降级成纯文本」、没完成「重验」,挂载期间
   // 永不自愈 —— 比重构前(一直乐观点亮)更糟。桌面同一处把 cacheGen 放进了验证副作用的
   // 依赖,手机漏了这一环(PR #1144 review 实捉:第 10 轮重构只做对了桌面那一半)。
-  const [cacheGen, setCacheGen] = useState(0);
+  const [cacheGen, setCacheGen] = useRecyclingState(0);
   useEffect(() => {
     if (!ctx || !target) return;
     const mine = remotePathVerdictKey(ctx.deviceId, ctx.workdir, target.absPath);
@@ -4993,11 +5017,11 @@ function MediaPreview({
   const styles = useThemedStyles(makeStyles);
   const preview = summarizeMessagePayloadPreview(buildMediaPayload(media, label));
   const autoResolve = shouldAutoResolveMediaThumbnail(media, !!onResolveRemoteMedia);
-  const [resolveState, setResolveState] = useState<MediaThumbnailResolveState>({ status: 'idle' });
+  const [resolveState, setResolveState] = useRecyclingState<MediaThumbnailResolveState>({ status: 'idle' });
   // attachment 变体的原图尺寸。初值走模块级缓存:FlatList 虚拟化会反复
   // unmount/remount 本组件,不缓存的话每次划回都重新 getSize、重演一次
   // 占位帧 → 真图尺寸的切换(规则 7 的跳变)。
-  const [intrinsicSize, setIntrinsicSize] = useState<AttachmentImageIntrinsicSize | null>(
+  const [intrinsicSize, setIntrinsicSize] = useRecyclingState<AttachmentImageIntrinsicSize | null>(
     () => attachmentIntrinsicSizeCache.get(media.url) ?? null,
   );
   // Image 加载失败(典型:presign 过期)只强制重取一次,防 onError↔重取死循环。

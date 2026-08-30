@@ -22,16 +22,14 @@ describe('mobile message list container', () => {
     // 估高 + 小预渲窗口:挂载集小、mount 帧压进一帧(不可退回大挂载树)。
     expect(listSource).toContain('estimatedItemSize={MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE}');
     expect(listSource).toContain('drawDistance={MOBILE_MESSAGE_DRAW_DISTANCE}');
-    // 首批 cell 必须从尾部创建；否则长任务会先在顶部创建少量 cell，再花数秒测量/补滚到底。
-    // 完整 render model 仍供业务逻辑使用，LegendList 首帧只接尾部 4 项；用户上翻时
-    // 再按 12 项小块 prepend，不能在首绘后一次灌回完整长任务。
-    expect(source).toContain('const MOBILE_INITIAL_TAIL_ITEM_COUNT = 4;');
-    expect(source).toContain('const MOBILE_TAIL_REVEAL_ITEM_COUNT = 12;');
-    expect(source).toContain('const [tailWindowAnchor, setTailWindowAnchor] = useState<{');
-    expect(source).toContain('listData.slice(tailWindowStartIndex)');
-    expect(source).toContain('tailWindowStartIndex - MOBILE_TAIL_REVEAL_ITEM_COUNT');
-    expect(listSource).toContain('data={visibleListData}');
-    expect(source).not.toContain('const initialTailTarget = useMemo(');
+    // 完整历史始终交给 LegendList，由其虚拟化/回收屏外 cell；初始位置使用原生
+    // offset-only 路径，不能退回会长时间隐藏 cell 的 index/end 测量 bootstrap。
+    expect(listSource).toContain('data={listData}');
+    expect(source).toContain('const initialScrollOffset = useMemo(() => {');
+    expect(listSource).toContain('initialScrollOffset={initialScrollOffset}');
+    expect(source).not.toContain('listData.slice(');
+    expect(source).not.toContain('MOBILE_INITIAL_TAIL_ITEM_COUNT');
+    expect(source).not.toContain('MOBILE_TAIL_REVEAL_ITEM_COUNT');
     expect(listSource).not.toMatch(/\binitialScrollIndex\s*=/);
     expect(listSource).not.toMatch(/\binitialScrollAtEnd\s*=/);
     // 内置贴底 + prepend 防跳(替代手搓 open-settle / follow rAF / prepend-settle,勿回潮)。
@@ -67,7 +65,7 @@ describe('mobile message list container', () => {
     expect(focusEffectSource).toContain('lastAutoLoadEarlierKeyRef.current = null');
   });
 
-  it('protects follow state while revealing the local tail window in bounded chunks', () => {
+  it('protects follow state while applying a visible offset-only initial position', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
     expect(source).toContain('programmaticScrollInFlight: programmaticScrollInFlightRef.current');
     expect(source).toContain('evaluateMobileAnchorVerify({');
@@ -83,24 +81,16 @@ describe('mobile message list container', () => {
     expect(source.match(/isMobileMvcpSettling\(Date\.now\(\), mvcpSettleAtRef\.current\)/g))
       .toHaveLength(1);
 
-    // 冷开的空列表不能吞掉真实首批消息的尾部索引；empty → ready 明确重挂一次。
+    // 冷开的空列表不能吞掉真实首批消息的初始 offset；empty → ready 明确重挂一次。
     expect(source).toContain("listData.length === 0 ? 'empty' : 'ready'");
     expect(source).toContain('key={listMountKey}');
-    expect(source).toContain('setTailWindowAnchor({ identity: listMountKey, firstKey: nextFirstKey })');
-    expect(source).toContain('if (userScrollForOlderRef.current) revealEarlierTailWindow();');
-    expect(source).toContain('revealEarlierTailWindow(true);');
-    expect(source).toContain('if (initialTailWindowActive) return;');
-    expect(source).toContain('previousUserMessageJumpTargetForWindow(');
-    expect(source).toContain('if (previousUserTarget.windowIndex !== null)');
-    expect(source).toContain('revealTailWindowFromIndex(previousUserTarget.index)');
-    expect(source).toContain(
-      '!initialTailWindowActive && loadEarlierAction.visible',
-    );
-    // 非空尾窗一挂载就直接显示；完整数组的后台接回不能用 overlay / opacity 再把
-    // 已经创建好的 cell 遮住。只有 data 仍为空的真实同步期才显示 SyncingMessages。
+    expect(source).not.toContain('tailWindowAnchor');
+    expect(source).toContain('previousUserMessageJumpTarget(listData, firstVisibleIndex)');
+    // 非空完整列表直接显示；不能用 overlay / opacity 再把已经创建好的 cell 遮住。
+    // 只有 data 仍为空的真实同步期才显示 SyncingMessages。
     expect(source).not.toContain('initialTailLoadingOverlay');
-    // 普通 index=0 首绘完成后才做一次贴底校正并交给 content-size 跟随。列表不使用
-    // initialScrollIndex、opacity 或 timer 遮罩，因此 JS 忙也不会白屏。
+    // offset-only 首绘完成后做一次贴底校正并交给 content-size 跟随。列表不使用
+    // initialScrollIndex、业务 opacity 或 timer 遮罩，因此 JS 忙也不会白屏。
     expect(source).toContain('onLoad={handleListLoad}');
     expect(source).toContain('if (!initialListReadyRef.current) return;');
     expect(source).not.toContain('messageListSettling');

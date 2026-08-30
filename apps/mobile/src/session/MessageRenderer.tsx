@@ -319,7 +319,7 @@ import {
   MOBILE_MESSAGE_LIST_BOTTOM_PADDING,
   type MessageScrollMetrics,
   mobileMessageListBottomPadding,
-  previousUserMessageJumpTargetForWindow,
+  previousUserMessageJumpTarget,
   resolveMobileNearBottomOnScroll,
   shouldAutoLoadEarlier,
   shouldUnpinMobileFollowOnDrag,
@@ -366,13 +366,6 @@ const MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS = 1400;
 /** Cold-open history fill is useful, but bounded so a short/duplicate host page cannot drain history forever. */
 const MAX_INITIAL_HISTORY_AUTOFILL_PAGES = 3;
 const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 140;
-/**
- * Cold/warm entry paints a tiny tail first, then prepends the full render model in-place.
- * A small tail avoids LegendList's hidden initial-scroll bootstrap. Older local items are
- * prepended in bounded chunks only when the user scrolls upward.
- */
-const MOBILE_INITIAL_TAIL_ITEM_COUNT = 4;
-const MOBILE_TAIL_REVEAL_ITEM_COUNT = 12;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS = 12;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH = 1800;
 const ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS: MobileMarkdownTextRunGroupingOptions = {
@@ -682,9 +675,6 @@ export function MessageRenderer({
   // load-earlier 的 prepend 撑高会被误当成底部增长 → scrollToEnd 把用户从刚加载的历史拽回最新(review P1)。
   // 用户重新拖动 / 主动跳底 / 切会话时解除。
   const readingOlderRef = useRef(false);
-  // “上一条用户消息”可能位于尚未挂载的本地尾窗之外；记录一次跳转，等目标 slice
-  // commit 后再用窗口内索引滚动。切会话必须同步清空，避免旧目标落到新列表。
-  const pendingPreviousUserJumpKeyRef = useRef<string | null>(null);
   // 每次补页分配 generation：旧会话 / 旧请求的异步 settle 不得清掉新请求的抑制态。
   const readingOlderRequestGenerationRef = useRef(0);
   // LegendList mVCP 始终开启；普通尾部 append / 流式 resize 同样会触发 native 锚点
@@ -734,7 +724,6 @@ export function MessageRenderer({
     initialHistoryAutofillRemainingRef.current = MAX_INITIAL_HISTORY_AUTOFILL_PAGES;
     lastAutoLoadEarlierKeyRef.current = null;
     readingOlderRef.current = false;
-    pendingPreviousUserJumpKeyRef.current = null;
     readingOlderRequestGenerationRef.current += 1;
     mvcpSettleAtRef.current = 0;
     programmaticScrollGenerationRef.current += 1;
@@ -923,52 +912,17 @@ export function MessageRenderer({
     });
   }, [devExposeList, scrollToOffsetProgrammatically]);
 
-  // 完整 render model 始终保留给搜索、画廊、分享、红点等业务逻辑。LegendList 首帧只接
-  // 尾部少量项，index 从 0 开始，不走 initialScrollIndex 的隐藏式 bootstrap。用户上翻时
-  // 再按小块 prepend 已在内存中的更早项，避免一次接回 100+ 变高行引发 mVCP 跳位。
+  // LegendList 始终接收完整 render model，由自身虚拟化 / 回收屏外 cell。冷进入常先以
+  // data=[] 挂载、再收到首批消息，因此 empty → ready 重挂一次，让非空列表重新应用初始
+  // offset。offset-only 路径直接写原生 contentOffset，不走 initialScrollIndex / AtEnd 的
+  // 多轮测量 bootstrap，也就不会在 bootstrap settle 期间长期隐藏 cell。
   const listData = useMemo(() => [...items], [items]);
-  // 冷进入常先以 data=[] 挂载、再收到首批消息；LegendList 的 onLoad 对同一实例只触发一次，
-  // 因此 empty → ready 重挂一次，让真实尾窗拥有独立的首绘回调。
   const listMountKey = `${scrollResetKey ?? 'default'}:${listData.length === 0 ? 'empty' : 'ready'}`;
-  const [tailWindowAnchor, setTailWindowAnchor] = useState<{
-    identity: string;
-    firstKey: string;
-  } | null>(null);
-  const defaultTailWindowStartIndex = Math.max(0, listData.length - MOBILE_INITIAL_TAIL_ITEM_COUNT);
-  const anchoredTailWindowStartIndex = tailWindowAnchor?.identity === listMountKey
-    ? listData.findIndex((item) => item.key === tailWindowAnchor.firstKey)
-    : -1;
-  const tailWindowStartIndex = anchoredTailWindowStartIndex >= 0
-    ? anchoredTailWindowStartIndex
-    : defaultTailWindowStartIndex;
-  const initialTailWindowActive = tailWindowStartIndex > 0;
-  const visibleListData = useMemo(
-    () => listData.slice(tailWindowStartIndex),
-    [listData, tailWindowStartIndex],
-  );
-  const tailWindowRevealGenerationRef = useRef(0);
-  const revealTailWindowFromIndex = useCallback((nextStartIndex: number) => {
-    if (nextStartIndex < 0 || nextStartIndex >= tailWindowStartIndex) return false;
-    const nextFirstKey = listData[nextStartIndex]?.key;
-    if (!nextFirstKey) return false;
-    const generation = tailWindowRevealGenerationRef.current + 1;
-    tailWindowRevealGenerationRef.current = generation;
-    readingOlderRef.current = true;
-    markMobileMvcpSettle();
-    setTailWindowAnchor({ identity: listMountKey, firstKey: nextFirstKey });
-    requestAnimationFrame(() => {
-      if (tailWindowRevealGenerationRef.current === generation) {
-        readingOlderRef.current = false;
-      }
-    });
-    return true;
-  }, [listData, listMountKey, markMobileMvcpSettle, tailWindowStartIndex]);
-  const revealEarlierTailWindow = useCallback((all = false) => {
-    if (tailWindowStartIndex <= 0) return false;
-    return revealTailWindowFromIndex(all
-      ? 0
-      : Math.max(0, tailWindowStartIndex - MOBILE_TAIL_REVEAL_ITEM_COUNT));
-  }, [revealTailWindowFromIndex, tailWindowStartIndex]);
+  const initialScrollOffset = useMemo(() => {
+    if (listData.length === 0) return 0;
+    const estimatedContentHeight = listData.length * MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE;
+    return Math.max(0, estimatedContentHeight - windowDimensions.height);
+  }, [listData.length, windowDimensions.height]);
   const prevListMountKeyRef = useRef(listMountKey);
   if (prevListMountKeyRef.current !== listMountKey) {
     prevListMountKeyRef.current = listMountKey;
@@ -1123,14 +1077,10 @@ export function MessageRenderer({
   const previousUserTarget = useMemo(
     () => (
       isAwayFromBottom
-        ? previousUserMessageJumpTargetForWindow(
-          listData,
-          tailWindowStartIndex,
-          firstVisibleIndex,
-        )
+        ? previousUserMessageJumpTarget(listData, firstVisibleIndex)
         : null
     ),
-    [firstVisibleIndex, isAwayFromBottom, listData, tailWindowStartIndex],
+    [firstVisibleIndex, isAwayFromBottom, listData],
   );
   const showJumpToLatest = isAwayFromBottom && !hasNewMessages;
   const focusRunKey = focusedItemKey
@@ -1295,23 +1245,8 @@ export function MessageRenderer({
     lastAutoLoadEarlierKeyRef.current = null;
     nearBottomRef.current = false;
     setIsAwayFromBottom(true);
-    if (previousUserTarget.windowIndex !== null) {
-      scrollToIndexProgrammatically(previousUserTarget.windowIndex, 0.12);
-      return;
-    }
-    // The target exists in the complete local model but is older than the mounted tail window.
-    // Mount only through that target, then issue the relative scroll after React commits the slice.
-    pendingPreviousUserJumpKeyRef.current = previousUserTarget.itemKey;
-    revealTailWindowFromIndex(previousUserTarget.index);
-  }, [previousUserTarget, revealTailWindowFromIndex, scrollToIndexProgrammatically]);
-  useEffect(() => {
-    const pendingKey = pendingPreviousUserJumpKeyRef.current;
-    if (!pendingKey) return;
-    const windowIndex = visibleListData.findIndex((item) => item.key === pendingKey);
-    if (windowIndex < 0) return;
-    pendingPreviousUserJumpKeyRef.current = null;
-    scrollToIndexProgrammatically(windowIndex, 0.12);
-  }, [scrollToIndexProgrammatically, visibleListData]);
+    scrollToIndexProgrammatically(previousUserTarget.index, 0.12);
+  }, [previousUserTarget, scrollToIndexProgrammatically]);
 
   // 「跳到最新」请求(会话外部触发,含发送消息后的跟随):命令式滚到底,随后跑一轮有界
   // 校验/补滚(runStickToLatestVerify)——单发的 scrollToEnd 落地一刻的 metrics 可能仍陈旧,
@@ -1374,9 +1309,6 @@ export function MessageRenderer({
 
   const attemptAutoLoadEarlier = useCallback(() => {
     if (!onLoadEarlier) return;
-    // 尾部本地窗口尚未展开完时，列表的“位于顶部”只代表临时尾窗，
-    // 不能据此请求网络历史；等 mVCP 锚定完整数组后再恢复正常电平判定。
-    if (initialTailWindowActive) return;
     // 热路径前置短路(滚动事件每 16ms 评估一次,getState() 每次新建状态对象):没有用户浏览意图
     // 且冷开预算已耗尽、或当前首项已尝试过时不碰 getState。完整判定仍以
     // shouldAutoLoadEarlier 为唯一真相,这里只做它的子集提前返回。
@@ -1404,7 +1336,6 @@ export function MessageRenderer({
     requestLoadEarlier();
   }, [
     firstItemKey,
-    initialTailWindowActive,
     loadEarlierAction.disabled,
     loadEarlierAction.visible,
     onLoadEarlier,
@@ -1479,21 +1410,11 @@ export function MessageRenderer({
     // 用户重新拖动 → 结束「读历史」态;解除态下滑回底的跟随恢复由 handleScroll
     // 的方向判定负责(nearBottomRef 翻 true 即重新打开贴底补滚)。
     readingOlderRef.current = false;
-    // 短尾窗可能一开始就同时位于 start/end，onStartReached 的初始边沿已被业务 guard
-    // 消费。用户在窗口顶部主动拖动时，先 prepend 一小块本地历史，不一次灌回完整任务。
-    if (initialTailWindowActive) {
-      const state = listRef.current?.getState();
-      if (state?.isAtStart || state?.isNearStart) revealEarlierTailWindow();
-    }
     // 翻完 refs 立即补一次电平评估:列表已顶死时(Android 无 bounce 尤甚)这次拖动不产生
     // offset 变化,不会有 onScroll / onStartReached,ref 写入也不驱动 effect——没有这一刀,
     // 「失败后停在顶部再拖一下重试」的信号会整体丢失(review P2)。
     attemptAutoLoadEarlier();
-  }, [
-    attemptAutoLoadEarlier,
-    initialTailWindowActive,
-    revealEarlierTailWindow,
-  ]);
+  }, [attemptAutoLoadEarlier]);
 
   // 拖动结束(手指离开,可能进入惯性滚动)→ 关闭拖动追踪。惯性阶段的上滑不需要再判
   // 解除:上滑手势的拖动段必然已越过死区完成解除;下滑回底的恢复由 scroll 方向判定接手。
@@ -1503,12 +1424,8 @@ export function MessageRenderer({
   }, []);
 
   const handleStartReached = useCallback(() => {
-    if (initialTailWindowActive) {
-      if (userScrollForOlderRef.current) revealEarlierTailWindow();
-      return;
-    }
     attemptAutoLoadEarlier();
-  }, [attemptAutoLoadEarlier, initialTailWindowActive, revealEarlierTailWindow]);
+  }, [attemptAutoLoadEarlier]);
 
   // eligibility 变化时重评估:上一页加载结束(disabled 翻 false)、入口点亮(visible 翻 true)、
   // prepend 落地(firstItemKey 变)。覆盖「用户停在顶部等待、无滚动事件」的全部哑火场景;
@@ -1523,17 +1440,15 @@ export function MessageRenderer({
     scrollMetricsRef.current = { ...scrollMetricsRef.current, viewportHeight };
   }, []);
 
-  // 尾窗完成首绘后直接显示并贴底；本地更早项只在用户上翻时按块前插。
-  // 不使用 initialScrollIndex：LegendList 会在该 bootstrap 完成前把 cell 容器 opacity 置 0，
-  // 即使目标只有几项也会人为制造“数据已在、消息仍空白”的窗口。
-  // 后续小块 prepend 由 maintainVisibleContentPosition 保住当前可见项。
+  // offset-only 初始定位不等待变高 cell 的多轮测量；onLoad 后仍做一次真实贴底校正，
+  // 随后的高度结算交给 content-size 跟随与 verifier。
   const handleListLoad = useCallback(() => {
     initialListReadyRef.current = true;
-    if (visibleListData.length > 0) {
+    if (listData.length > 0) {
       scrollToEndProgrammatically(false);
       runStickToLatestVerify();
     }
-  }, [runStickToLatestVerify, scrollToEndProgrammatically, visibleListData.length]);
+  }, [listData.length, runStickToLatestVerify, scrollToEndProgrammatically]);
 
   // 记录 contentHeight 供近底判定 fallback + DEV harness 就绪判定;并承担**唯一的贴底跟随**:
   // 内容长高(流式增长、大块一帧撑高、冷开测量结算)时,用户本就贴底(nearBottomRef,与
@@ -1597,7 +1512,7 @@ export function MessageRenderer({
   ]);
 
   // 会话切换(scrollResetKey):重置浮标/近底等 UI 状态;LegendList 本体经 listMountKey
-  // 重挂并从 index=0 建立有界尾窗。
+  // 重挂并用完整 data 的 offset-only 路径定位末尾。
   // 滚动/自动加载相关的 ref 复位已在渲染期同步块完成(见 prevScrollResetKeyRef,防切会话
   // 竞态误触发自动拉历史),此处不重复。
   useEffect(() => {
@@ -1644,12 +1559,6 @@ export function MessageRenderer({
       lastAppliedFocusKeyRef.current = null;
       return;
     }
-    // 深链/搜索使用完整数组索引；先一次展开本地尾窗，再定位，避免把完整数组的 index
-    // 发给临时窗口。下一次 effect 在完整 data 落地后继续执行。
-    if (initialTailWindowActive) {
-      revealEarlierTailWindow(true);
-      return;
-    }
     if (lastAppliedFocusKeyRef.current === focusRunKey) return;
     const index = listData.findIndex((item) => item.key === focusedItemKey);
     if (index < 0) return;
@@ -1664,9 +1573,7 @@ export function MessageRenderer({
   }, [
     focusRunKey,
     focusedItemKey,
-    initialTailWindowActive,
     listData,
-    revealEarlierTailWindow,
     scrollToIndexProgrammatically,
   ]);
 
@@ -1727,9 +1634,9 @@ export function MessageRenderer({
     <View style={styles.messageFrame}>
       <MessageListVisibleKeysContext.Provider value={visibleMessageKeys}>
       <LegendList
-        // 每会话重挂；冷开的 empty → ready 也重挂一次，让真实尾窗重新触发 onLoad。
+        // 每会话重挂；冷开的 empty → ready 也重挂一次，让非空完整列表应用初始 offset。
         key={listMountKey}
-        data={visibleListData}
+        data={listData}
         extraData={messageListExtraData}
         getItemType={mobileMessageListItemType}
         keyExtractor={(item) => item.key}
@@ -1737,10 +1644,11 @@ export function MessageRenderer({
         recycleItems={recycleItems}
         estimatedItemSize={MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE}
         drawDistance={MOBILE_MESSAGE_DRAW_DISTANCE}
+        initialScrollOffset={initialScrollOffset}
         // 冷开不用 initialScrollIndex / initialScrollAtEnd、贴底跟随不用
-        // maintainScrollAtEnd：这些内部程序化滚动会先隐藏 cell，且曾在特定内容形态下
-        // 与手动贴底互相触发。首帧只喂尾部 4 项，用户上翻时再按 12 项小块前插
-        // 本地历史；后续贴底由 handleContentSize 的手动补滚（带振荡断路器）接管。
+        // maintainScrollAtEnd：index/end 的测量 bootstrap 会长时间隐藏 cell，且曾在特定
+        // 内容形态下与手动贴底互相触发。这里用 offset-only 直接给原生初值，完整 data
+        // 始终在列表内；后续贴底由 handleContentSize 的手动补滚（带振荡断路器）接管。
         //
         // 历史：initialScrollAtEnd / initialScrollIndex 的程序化滚动在特定
         // 内容形态下会与布局结算互相触发,形成无限 onScroll 风暴把 JS 线程打满——表现为
@@ -1759,7 +1667,7 @@ export function MessageRenderer({
           ? <SyncingMessages />
           : <EmptyMessages testID={emptyTestID} />}
         ListHeaderComponent={
-          !initialTailWindowActive && loadEarlierAction.visible ? (
+          loadEarlierAction.visible ? (
             <MessageListActionButton
               accessibilityLabel={loadEarlierAction.accessibilityLabel}
               disabled={loadEarlierAction.disabled}

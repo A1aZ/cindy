@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "07e2bc1d-caea-4143-afdd-f3082daa0c19",
-  "prevId": "96b877bd-5cae-4720-9b5d-d46d15e1f6cb",
+  "id": "0301f553-95d2-4bd4-a120-d131780848c7",
+  "prevId": "90063e36-1470-45d3-84d6-4bb6139dd4a5",
   "tables": {
     "account_usage_snapshots": {
       "name": "account_usage_snapshots",
@@ -1321,15 +1321,6 @@
             "rewind_at"
           ],
           "isUnique": false
-        },
-        "idx_messages_active_error_tail": {
-          "name": "idx_messages_active_error_tail",
-          "columns": [
-            "session_id",
-            "created_at"
-          ],
-          "isUnique": false,
-          "where": "\"messages\".\"role\" = 'error' AND \"messages\".\"rewind_at\" IS NULL"
         }
       },
       "foreignKeys": {
@@ -2043,22 +2034,6 @@
           "autoincrement": false,
           "default": 0
         },
-        "sdk_estimated_value_amount": {
-          "name": "sdk_estimated_value_amount",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "cost_provider_attribution_version": {
-          "name": "cost_provider_attribution_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
         "cost_currency": {
           "name": "cost_currency",
           "type": "text",
@@ -2119,50 +2094,6 @@
             "fired_at"
           ],
           "isUnique": false
-        },
-        "idx_schedule_runs_running_schedule": {
-          "name": "idx_schedule_runs_running_schedule",
-          "columns": [
-            "schedule_id"
-          ],
-          "isUnique": false,
-          "where": "\"schedule_runs\".\"status\" = 'running'"
-        },
-        "idx_schedule_runs_running_heartbeat": {
-          "name": "idx_schedule_runs_running_heartbeat",
-          "columns": [
-            "heartbeat_at"
-          ],
-          "isUnique": false,
-          "where": "\"schedule_runs\".\"status\" = 'running' AND \"schedule_runs\".\"heartbeat_at\" IS NOT NULL"
-        },
-        "idx_schedule_runs_running_legacy": {
-          "name": "idx_schedule_runs_running_legacy",
-          "columns": [
-            "fired_at"
-          ],
-          "isUnique": false,
-          "where": "\"schedule_runs\".\"status\" = 'running' AND \"schedule_runs\".\"heartbeat_at\" IS NULL"
-        },
-        "idx_schedule_runs_unread_terminal": {
-          "name": "idx_schedule_runs_unread_terminal",
-          "columns": [
-            "schedule_id",
-            "status",
-            "fired_at"
-          ],
-          "isUnique": false,
-          "where": "\"schedule_runs\".\"read_at\" IS NULL AND \"schedule_runs\".\"status\" IN ('success', 'failed', 'aborted', 'interrupted')"
-        },
-        "idx_schedule_runs_session_latest": {
-          "name": "idx_schedule_runs_session_latest",
-          "columns": [
-            "session_id",
-            "fired_at",
-            "id"
-          ],
-          "isUnique": false,
-          "where": "\"schedule_runs\".\"session_id\" IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -2190,72 +2121,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "schedule_session_latest_runs": {
-      "name": "schedule_session_latest_runs",
-      "columns": {
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "fired_at": {
-          "name": "fired_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "idx_schedule_session_latest_runs_run": {
-          "name": "idx_schedule_session_latest_runs_run",
-          "columns": [
-            "run_id"
-          ],
-          "isUnique": true
-        }
-      },
-      "foreignKeys": {
-        "schedule_session_latest_runs_session_id_sessions_id_fk": {
-          "name": "schedule_session_latest_runs_session_id_sessions_id_fk",
-          "tableFrom": "schedule_session_latest_runs",
-          "tableTo": "sessions",
-          "columnsFrom": [
-            "session_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "schedule_session_latest_runs_run_id_schedule_runs_id_fk": {
-          "name": "schedule_session_latest_runs_run_id_schedule_runs_id_fk",
-          "tableFrom": "schedule_session_latest_runs",
-          "tableTo": "schedule_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -3125,14 +2990,6 @@
           "autoincrement": false,
           "default": "'[]'"
         },
-        "writable_dirs": {
-          "name": "writable_dirs",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'[]'"
-        },
         "remote_host_id": {
           "name": "remote_host_id",
           "type": "text",
@@ -3156,27 +3013,6 @@
         },
         "last_turn_ended_at": {
           "name": "last_turn_ended_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "list_preview": {
-          "name": "list_preview",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "list_preview_role": {
-          "name": "list_preview_role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "list_message_count": {
-          "name": "list_message_count",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

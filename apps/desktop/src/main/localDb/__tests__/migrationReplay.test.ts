@@ -166,12 +166,12 @@ describeMigrationReplay('migration replay', () => {
     }
   });
 
-  it('marks pre-0097 Scheduler cost snapshots as legacy provider attribution', () => {
+  it('marks pre-0100 Scheduler cost snapshots as legacy provider attribution', () => {
     const { db, cleanup } = createTempDb();
-    const stagedDir = mkdtempSync(path.join(tmpdir(), 'xdmaker-drizzle-pre0097-'));
+    const stagedDir = mkdtempSync(path.join(tmpdir(), 'xdmaker-drizzle-pre0100-'));
     try {
       for (const migration of listMigrations(drizzleDir())) {
-        if (migration.seq >= 97) continue;
+        if (migration.seq >= 100) continue;
         copyFileSync(migration.sqlPath, path.join(stagedDir, migration.fileName));
         if (migration.tsScriptPath) {
           mkdirSync(path.join(stagedDir, 'scripts'), { recursive: true });

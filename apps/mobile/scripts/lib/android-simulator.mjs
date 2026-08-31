@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { win32 as win32Path } from 'node:path';
 
 export const DEFAULT_ANDROID_AVD = 'cindy-api36';
 const DEFAULT_BOOT_TIMEOUT_MS = 180_000;
@@ -54,12 +54,12 @@ export function resolveAndroidSdkTools({
   const candidates = [
     env.ANDROID_SDK_ROOT,
     env.ANDROID_HOME,
-    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Android', 'Sdk') : null,
+    env.LOCALAPPDATA ? win32Path.join(env.LOCALAPPDATA, 'Android', 'Sdk') : null,
   ].filter(Boolean);
 
   for (const sdkRoot of [...new Set(candidates)]) {
-    const adb = join(sdkRoot, 'platform-tools', 'adb.exe');
-    const emulator = join(sdkRoot, 'emulator', 'emulator.exe');
+    const adb = win32Path.join(sdkRoot, 'platform-tools', 'adb.exe');
+    const emulator = win32Path.join(sdkRoot, 'emulator', 'emulator.exe');
     if (exists(adb) && exists(emulator)) return { sdkRoot, adb, emulator };
   }
 

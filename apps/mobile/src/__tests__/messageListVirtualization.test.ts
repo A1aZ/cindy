@@ -4,10 +4,9 @@ import { describe, expect, it } from 'vitest';
 
 // 消息列表容器契约:LegendList(替代 FlatList —— 滚动 mount 卡顿的实测解,见 listperf profiling:
 // windowSize=21 的大挂载树 p95≈167ms/jank46,换 LegendList 小预渲窗口后 p95≈20ms/jank4)。
-// 关键 prop 不可回退:估高 + 小 drawDistance(挂载集小)+ 内置贴底/防跳(替代已删除的手搓 open-settle
-// / follow rAF / prepend-settle 锚定机制)。
+// 关键 prop 不可回退:估高 + 小 drawDistance(挂载集小)+ 尺寸锚定 + 应用层 prepend 事务。
 describe('mobile message list container', () => {
-  it('uses LegendList with estimated-size virtualization and built-in chat anchoring', () => {
+  it('uses LegendList virtualization with app-owned history anchoring', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
 
     // 已完全迁出 FlatList:不再出现 FlatList 容器,也不再有其虚拟化专有 prop。
@@ -32,10 +31,22 @@ describe('mobile message list container', () => {
     expect(source).not.toContain('MOBILE_INITIAL_TAIL_ITEM_COUNT');
     expect(source).not.toContain('MOBILE_TAIL_REVEAL_ITEM_COUNT');
     expect(listSource).not.toMatch(/\binitialScrollIndex\s*=/);
-    // 内置贴底 + prepend 防跳(替代手搓 open-settle / follow rAF / prepend-settle,勿回潮)。
+    // Manual data prepend 不能与 Android native MVCP 并行:它会在 cell 位置提交后异步补
+    // offset，中间坐标窗无 cell 而白屏。普通 data / size 变化仍由 LegendList 锚定。
     expect(listSource).toContain('alignItemsAtEnd');
     expect(listSource).toContain('maintainScrollAtEnd');
-    expect(listSource).toContain('maintainVisibleContentPosition={{ data: true, size: true }}');
+    expect(listSource).toContain('maintainVisibleContentPosition={historyPrependNativeMvcpDisabled');
+    expect(listSource).toContain('? false');
+    expect(listSource).toContain(': { data: true, size: true }}');
+    expect(source).toContain('captureMobileHistoryAnchor(');
+    expect(source).toContain('resolveMobileHistoryAnchorOffset(anchor, listState)');
+    expect(source).toContain('scheduleHistoryAnchorRestore(transaction.generation)');
+    const historyRestoreStart = source.indexOf('const scheduleHistoryAnchorRestore = useCallback');
+    const historyRestoreStep = source.indexOf('const step = (', historyRestoreStart);
+    const historyRestoreSetup = source.slice(historyRestoreStart, historyRestoreStep);
+    expect(historyRestoreSetup).toContain('if (historyAnchorVerifyFrameRef.current !== null) return;');
+    expect(historyRestoreSetup).not.toContain('cancelAnimationFrame(historyAnchorVerifyFrameRef.current)');
+    expect(source).toContain('useLayoutEffect(() => {');
     // Release 开启 native cell 回收；DEV 仍保留 listperf 的 on/off 单变量开关。
     // item type 分池 + recycling-aware state 防止菜单/展开态/媒体状态串到另一条消息。
     expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
@@ -49,6 +60,7 @@ describe('mobile message list container', () => {
     expect(source).toContain('shouldAutoLoadEarlier({');
     // 冷开只在列表同时贴住 start/end(首屏未填满)时有限补页。
     expect(source).toContain('MAX_INITIAL_HISTORY_AUTOFILL_PAGES');
+    expect(source).toContain('const initialAutoFillAllowed = listRevealed');
     expect(source).toContain('atStart: listState.isAtStart');
     expect(source).toContain('listState.isAtStart || nativeAtStart');
     expect(source).toContain('listState.isNearStart || nativeNearStart');
@@ -60,37 +72,75 @@ describe('mobile message list container', () => {
     expect(source).toContain('onTouchEnd={handleHistoryTouchEnd}');
     expect(source).toContain('onTouchCancel={handleHistoryTouchCancel}');
     expect(listSource).not.toContain('onTouchMove={handleHistoryTouchMove}');
-    expect(source).toContain('if (readingOlderRef.current) return;');
+    expect(source).toContain('if (readingOlderRef.current || queuedLoadEarlierRef.current) return;');
     expect(source).toContain('const firstItemKey = loadEarlierProgressKey ?? itemKeys[0] ?? null;');
     expect(source).toContain('initialHistoryAutofillRemainingRef.current -= 1');
-    // 所有 prepend 在请求和新页提交期间抑制贴底；只有 loadingEarlier 的完成态进入
-    // 当前 render commit 后才延迟释放。generation 防止旧请求误清新会话 / 新请求。
+    // 所有 prepend 在请求、新页提交和锚点恢复期间抑制贴底。Promise settlement 强制
+    // 一次 render，layout effect 确认新 cursor 已提交后才允许释放；generation 隔离旧请求。
     expect(source).toContain('onLoadEarlier?: () => void | Promise<void>');
     expect(source).toContain('readingOlderRef.current = true');
-    expect(source).toContain('readingOlderLoadingObservedRef.current = true');
     expect(source).toContain('void Promise.resolve(result).then(');
-    expect(source).toContain('const releaseAfterRequestSettles = () => {');
-    expect(source).toContain('scheduleReadingOlderRelease(readingOlderRequestGenerationRef.current)');
-    expect(source).toContain('readingOlderRequestGenerationRef.current === generation');
-    expect(source).toContain('!loadingEarlierRef.current');
-    // The settle deadline bounds only native prepend layout. It must never unlock while a slow
-    // active-session page still reports loadingEarlier=true.
-    expect(source).toContain('if (loadingEarlierRef.current) {');
-    expect(source).toContain('readingOlderReleaseDeadlineRef.current = 0;');
-    expect(source).not.toContain('|| Date.now() >= readingOlderReleaseDeadlineRef.current');
+    expect(source).toContain('transaction.promiseSettled = true');
+    expect(source).toContain('transaction.startProgressKey !== firstItemKey');
+    expect(source).toContain('transaction.pageCommitted = true');
+    expect(source).toContain('transaction.anchorStable = true');
+    expect(source).toContain('loadingEarlierRef.current || !transaction.promiseSettled');
     expect(source).toContain('setLoadEarlierEvaluationVersion((version) => version + 1);');
     expect(source).toContain('[attemptAutoLoadEarlier, loadEarlierEvaluationVersion]');
-    expect(source).toMatch(/Math\.min\(\r?\n\s+mvcpSettleAtRef\.current,/);
-    expect(source).toContain('MOBILE_HISTORY_PREPEND_SETTLE_MAX_MS');
-    const loadEarlierStart = source.indexOf('const requestLoadEarlier = useCallback');
-    const loadEarlierEnd = source.indexOf('const attemptAutoLoadEarlier', loadEarlierStart);
-    const loadEarlierSource = source.slice(loadEarlierStart, loadEarlierEnd);
-    expect(loadEarlierSource).toContain('if (userScrollForOlderRef.current)');
-    expect(loadEarlierSource).toContain('nearBottomRef.current = false');
+    expect(source).toContain('MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES');
+    expect(source).toContain('MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS');
+    expect(source).toContain('Date.now() < currentTransaction.verifyDeadlineAt');
+    expect(source).toContain('Complex pages can keep refining estimates beyond the retry window');
+    expect(source).toContain('if (finalTarget !== null) scrollToOffsetProgrammatically(finalTarget, false);');
+    expect(source).toContain('const restoreHistoryAnchorOnce = useCallback');
+    expect(source).toContain('restoreHistoryAnchorOnce(transaction.generation)');
+    expect(source).toContain('transaction.userControlledAfterCommit = true');
+    // 直接拖动结束前不发请求，避免远端页在手指仍控制 ScrollView 时落地。
+    expect(source).toContain('queuedLoadEarlierRef.current = true');
+    expect(source).toContain('setHistoryPrependNativeMvcpDisabled(true)');
+    expect(source).toContain('if (!historyPrependNativeMvcpDisabledRef.current)');
+    expect(source).toContain('if (!historyPrependNativeMvcpDisabled) return;');
+    expect(source).toContain('flushQueuedLoadEarlier();');
+    expect(source).toContain('isMomentumScrollingRef.current');
+    expect(listSource).toContain('onMomentumScrollBegin={handleMomentumScrollBegin}');
+    expect(listSource).toContain('onMomentumScrollEnd={handleMomentumScrollEnd}');
+    const beginLoadEarlierStart = source.indexOf('const beginLoadEarlier = useCallback');
+    const beginLoadEarlierEnd = source.indexOf('const flushQueuedLoadEarlier', beginLoadEarlierStart);
+    const beginLoadEarlierSource = source.slice(beginLoadEarlierStart, beginLoadEarlierEnd);
+    const flushLoadEarlierStart = source.indexOf('const flushQueuedLoadEarlier = useCallback');
+    const flushLoadEarlierEnd = source.indexOf('const requestLoadEarlier', flushLoadEarlierStart);
+    const flushLoadEarlierSource = source.slice(flushLoadEarlierStart, flushLoadEarlierEnd);
+    expect(beginLoadEarlierSource).toContain('if (userScrollForOlderRef.current)');
+    expect(beginLoadEarlierSource).toContain('nearBottomRef.current = false');
+    expect(flushLoadEarlierSource).toContain('isDraggingRef.current');
+    expect(flushLoadEarlierSource).toContain('isMomentumScrollingRef.current');
+    expect(flushLoadEarlierSource).toContain('historyTouchStartYRef.current !== null');
     // A second touch while the page is in flight must not reopen follow-to-latest.
     const dragStart = source.indexOf('const handleScrollBeginDrag = useCallback');
     const dragEnd = source.indexOf('const handleScrollEndDrag', dragStart);
-    expect(source.slice(dragStart, dragEnd)).not.toContain('readingOlderRef.current = false');
+    const dragSource = source.slice(dragStart, dragEnd);
+    expect(dragSource).not.toContain('readingOlderRef.current = false');
+    expect(dragSource).toContain('isMomentumScrollingRef.current = false');
+    expect(dragSource).toContain('handoffHistoryPrependToUser();');
+    const touchStart = source.indexOf('const handleHistoryTouchStart = useCallback');
+    const touchMove = source.indexOf('const maybeTriggerHistoryTouch', touchStart);
+    expect(source.slice(touchStart, touchMove)).toContain('isMomentumScrollingRef.current = false');
+    const scrollStart = source.indexOf('const handleScroll = useCallback');
+    const scrollEnd = source.indexOf('const handleHistoryTouchStart', scrollStart);
+    const scrollSource = source.slice(scrollStart, scrollEnd);
+    expect(scrollSource.indexOf('if (readingOlderRef.current)'))
+      .toBeLessThan(scrollSource.indexOf('resolveMobileNearBottomOnScroll({'));
+    expect(scrollSource.slice(
+      scrollSource.indexOf('if (readingOlderRef.current)'),
+      scrollSource.indexOf('const wasNearBottom'),
+    )).toContain('handoffHistoryPrependToUser();');
+    expect(scrollSource.slice(
+      scrollSource.indexOf('if (readingOlderRef.current)'),
+      scrollSource.indexOf('const wasNearBottom'),
+    )).toContain('return;');
+    expect(scrollSource).toContain('shouldPreserveMobileHistoryBrowseIntent({');
+    expect(scrollSource).toContain('historyBrowseIntent: userScrollForOlderRef.current');
+    expect(scrollSource).toContain('userControllingScroll: isDraggingRef.current');
     // 深链 / 搜索定位本身就是明确的历史浏览意图,后续近顶自动补页无需再拖一下。
     const focusEffectStart = source.indexOf('// 深链/搜索:滚到指定消息');
     const focusEffectEnd = source.indexOf('// 新消息红点', focusEffectStart);
@@ -100,14 +150,14 @@ describe('mobile message list container', () => {
     expect(focusEffectSource).toContain('lastAutoLoadEarlierKeyRef.current = null');
   });
 
-  it('hides main-compatible initial correction while keeping full history mounted', () => {
+  it('bounds the hidden initial correction while keeping full history mounted', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
     expect(source).toContain('programmaticScrollInFlight: programmaticScrollInFlightRef.current');
     expect(source).toContain('evaluateMobileAnchorVerify({');
     expect(source).toContain('initialAnchorVerifyFrameRef');
     expect(source).toContain('scrollToEndProgrammatically(false)');
-    // mVCP 对 data / size 都常开；普通尾部追加与流式 resize 必须先记 settle 安静窗，
-    // 跟随 verifier 不能只依赖 readingOlderRef 判断是否等待。
+    // mVCP 只对 size 常开；流式 resize 仍需记 settle 安静窗，跟随 verifier 不能只依赖
+    // readingOlderRef 判断是否等待。
     expect(source).toContain('mvcpSettleAtRef.current = mobileMvcpSettleDeadline(');
     expect(source).toContain('markMobileMvcpSettle();');
     expect(source).toContain('mobileMessageListKeysSignature(itemKeys)');
@@ -115,19 +165,32 @@ describe('mobile message list container', () => {
     expect(source).not.toContain('[itemKeys, markMobileMvcpSettle]');
     expect(source.match(/isMobileMvcpSettling\(Date\.now\(\), mvcpSettleAtRef\.current\)/g))
       .toHaveLength(2);
+    expect(source).toContain('const nextStableFrames = settled ? stableFrames + 1 : 0;');
 
     expect(source).toContain('key={scrollResetKey}');
     expect(source).not.toContain('tailWindowAnchor');
     expect(source).toContain('previousUserMessageJumpTarget(listData, firstVisibleIndex)');
-    // main 的校正仍会命令式落底，但整个过程处于 opacity 遮罩下，settled/give-up 后
-    // 才一次性揭开；进入详情不暴露任何补滚帧。
+    // 首次校正仍会命令式落底，但 opacity 揭示必须立即交给 UI-thread native driver；
+    // 复杂消息占满 JS 时不能把 300ms 隐藏窗拖成长达数秒的白屏。
     expect(source).not.toContain('onLoad={handleListLoad}');
     expect(source).toContain('const [listRevealed, setListRevealed] = useState(false);');
     expect(source).toContain('setListRevealed(true);');
-    expect(source).toContain('style={[styles.messageList, !listRevealed && styles.messageListSettling]}');
-    expect(source).toContain('messageListSettling: { opacity: 0 }');
+    expect(source).toContain('const initialRevealProgress = useMemo(');
+    expect(source).toContain('const initialRevealOpacity = useMemo(');
+    expect(source).toContain('<Animated.View style={[styles.messageList, { opacity: initialRevealOpacity }]}>');
     expect(source).toContain('MOBILE_INITIAL_ANCHOR_SETTLE_MS');
-    expect(source).not.toContain('MOBILE_INITIAL_ANCHOR_REVEAL_MAX_MS');
+    expect(source).toContain('MOBILE_INITIAL_REVEAL_MAX_MS');
+    const initialAnchorEffectStart = source.indexOf('// 首次落底：完整历史已经在列表里');
+    const initialAnchorEffectEnd = source.indexOf('// 会话切换(scrollResetKey)', initialAnchorEffectStart);
+    const initialAnchorEffectSource = source.slice(initialAnchorEffectStart, initialAnchorEffectEnd);
+    expect(initialAnchorEffectSource).toContain('Animated.timing(initialRevealProgress, {');
+    expect(initialAnchorEffectSource).toContain('useNativeDriver: true');
+    expect(initialAnchorEffectSource).toContain('Date.now() >= revealDeadlineAt');
+    expect(initialAnchorEffectSource).not.toContain('setTimeout(');
+    expect(initialAnchorEffectSource).toContain('scrollToEndProgrammatically(false);');
+    expect(initialAnchorEffectSource).toContain('initialAnchorVerifyFrameRef.current = requestAnimationFrame(() => {');
+    expect(source).not.toContain('initialRevealTimerRef');
+    expect(source).not.toContain('messageListSettling');
   });
 
   it('resets identity-bound row state before a recycled cell displays another item', () => {
@@ -172,7 +235,7 @@ describe('mobile message list container', () => {
     expect(scrollAt).toBeGreaterThan(-1);
     expect(verifyAt).toBeGreaterThan(scrollAt);
     expect(callbackSource).toContain(
-      '}, [runStickToLatestVerify, scrollToEndProgrammatically]);',
+      '}, [cancelHistoryPrependTransaction, runStickToLatestVerify, scrollToEndProgrammatically]);',
     );
   });
 

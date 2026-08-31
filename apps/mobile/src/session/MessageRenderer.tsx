@@ -325,8 +325,15 @@ import {
   previousUserMessageJumpTarget,
   resolveMobileNearBottomOnScroll,
   shouldAutoLoadEarlier,
+  shouldPreserveMobileHistoryBrowseIntent,
   shouldUnpinMobileFollowOnDrag,
 } from '@/session/messageScroll';
+import {
+  captureMobileHistoryAnchor,
+  isMobileHistoryAnchorSettled,
+  resolveMobileHistoryAnchorOffset,
+  type MobileHistoryAnchor,
+} from '@/session/messageHistoryAnchor';
 import { ImageLightbox, type ImageLightboxAnnotationConfig } from '@/session/ImageLightbox';
 import {
   MermaidDiagramWebView,
@@ -362,8 +369,12 @@ const SHARE_STICKY_CHECK_HEIGHT = 44;
 const STICKY_SHARE_CHECK_THROTTLE_MS = 150;
 const SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD = 10;
 // LegendList 变高 item 的初始估高(仅影响首帧布局定位,LegendList 挂载后按实测尺寸修正)。
-/** Keep main's initial correction hidden until the latest-message anchor has settled. */
+/** Bound the hidden initial correction so live measurement churn cannot blank the list for seconds. */
 const MOBILE_INITIAL_ANCHOR_SETTLE_MS = 300;
+/** Fade in on the UI thread after the hidden correction window; JS may be busy mounting cells. */
+const MOBILE_INITIAL_REVEAL_FADE_MS = 100;
+const MOBILE_INITIAL_REVEAL_MAX_MS = MOBILE_INITIAL_ANCHOR_SETTLE_MS
+  + MOBILE_INITIAL_REVEAL_FADE_MS;
 /** Maximum time a native imperative scroll may be reported as in-flight. */
 const MOBILE_PROGRAMMATIC_SCROLL_SETTLE_MS = 1000;
 /** Animated jump-to-latest commands get a little more time to settle. */
@@ -371,8 +382,10 @@ const MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS = 1400;
 /** Cold-open history fill is useful, but bounded so a short/duplicate host page cannot drain history forever. */
 const MAX_INITIAL_HISTORY_AUTOFILL_PAGES = 3;
 const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 140;
-/** Streaming/async measurement must not keep history-pagination protection alive forever. */
-const MOBILE_HISTORY_PREPEND_SETTLE_MAX_MS = 500;
+/** Manual prepend anchoring retries layout positions for at most ~3 seconds, even under resize churn. */
+const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES = 180;
+const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS = 3000;
+const MOBILE_HISTORY_ANCHOR_STABLE_FRAMES = 2;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS = 12;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH = 1800;
 const ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS: MobileMarkdownTextRunGroupingOptions = {
@@ -387,6 +400,17 @@ const FOLDABLE_HEADER_HIT_SLOP = { bottom: 10, left: 4, right: 4, top: 10 };
 
 function mobileMessageListItemType(item: MobileMessageRenderItem): MobileMessageRenderItem['type'] {
   return item.type;
+}
+
+interface MobileHistoryPrependTransaction {
+  anchor: MobileHistoryAnchor | null;
+  anchorStable: boolean;
+  generation: number;
+  pageCommitted: boolean;
+  promiseSettled: boolean;
+  startProgressKey: string | null;
+  userControlledAfterCommit: boolean;
+  verifyDeadlineAt: number;
 }
 // 「跳到底部」浮标直径:比 composer 里的语音按钮(28)大一档但不压过它,Telegram 同款层级感。
 const SCROLL_TO_BOTTOM_FAB_SIZE = 36;
@@ -671,6 +695,7 @@ export function MessageRenderer({
   // 距离阈值(≥228px)在流式期间与程序化贴底滚动竞态,慢速小幅上滑会被反复拽回
   // (桌面版同源 bug 的手机版变体,见 messageScroll.ts)。
   const isDraggingRef = useRef(false);
+  const isMomentumScrollingRef = useRef(false);
   const dragStartOffsetYRef = useRef<number | null>(null);
   // 用户是否主动拖动过(区分「冷开初始布局」与「用户上翻」):自动加载更早只在用户真拖过之后才允许,
   // 否则短会话(只加载了少量最新消息但 hasOlderMessages)冷开时会落在 onStartReachedThreshold 内、
@@ -691,16 +716,23 @@ export function MessageRenderer({
   const readingOlderRef = useRef(false);
   // 每次补页分配 generation：旧会话 / 旧请求的异步 settle 不得清掉新请求的抑制态。
   const readingOlderRequestGenerationRef = useRef(0);
-  const readingOlderReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const readingOlderReleaseDeadlineRef = useRef(0);
-  // 分页 Promise 会早于 React/LegendList 完成新页提交。只有真正观察到 loadingEarlier
-  // 从 true 回到 false，才把“请求完成”视为“新页已进入当前 render commit”。
-  const readingOlderLoadingObservedRef = useRef(false);
+  // data-change anchoring is app-owned instead of delegated to Android MVCP. The transaction
+  // keeps the old visible row pinned until the new page, layout, and non-animated correction all
+  // settle; this removes the frame where cells move before native contentOffset catches up.
+  const historyPrependTransactionRef = useRef<MobileHistoryPrependTransaction | null>(null);
+  const historyAnchorVerifyFrameRef = useRef<number | null>(null);
+  const queuedLoadEarlierRef = useRef(false);
+  const queuedLoadEarlierFlushFrameRef = useRef<number | null>(null);
+  // Keep native MVCP for ordinary data/size changes, but turn it fully off before starting a
+  // history request. LegendList maps either `data` or `size` to the same RN ScrollView prop, so
+  // `{ data:false, size:true }` would still race the app-owned prepend correction on Android.
+  const [historyPrependNativeMvcpDisabled, setHistoryPrependNativeMvcpDisabled] = useState(false);
+  const historyPrependNativeMvcpDisabledRef = useRef(historyPrependNativeMvcpDisabled);
+  historyPrependNativeMvcpDisabledRef.current = historyPrependNativeMvcpDisabled;
   const loadingEarlierRef = useRef(loadingEarlier === true);
   loadingEarlierRef.current = loadingEarlier === true;
-  // LegendList mVCP 始终开启；普通尾部 append / 流式 resize 同样会触发 native 锚点
-  // 调整，不能只拿 readingOlderRef 代表 settle 状态。每次 data / size 变化延长一个短
-  // 安静窗，verifier 在窗内只等待，不消耗 6 次补滚预算。
+  // Data/size changes extend a short quiet window. During a manual prepend, the app-owned anchor
+  // keeps correcting against the same key until that layout window ends.
   const mvcpSettleAtRef = useRef(0);
   const programmaticScrollGenerationRef = useRef(0);
   const programmaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -720,13 +752,26 @@ export function MessageRenderer({
   // 断路到期后的 one-shot 贴底清账 timer:断路窗内错过的最终高度可能停在半空且
   // 之后再无 contentSize 事件,到期补一次(仍在贴底跟随时)把账清平(review P1)。
   const followEndPinRecoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // main 已验证的首次进入锚定：完整历史从挂载起就在列表中，命令式落底与测量校正
-  // 只在 opacity 遮罩下运行；settle 后一次性揭开，不能把补滚画面暴露给用户。
+  // 首次进入锚定：完整历史从挂载起就在列表中，命令式落底与测量校正只在短暂
+  // opacity 遮罩下运行；揭示动画启动后完全交给 UI 线程，首批复杂消息占满 JS 时也不会
+  // 把 300ms 窗口拖成长达数秒的白屏。
   const initialAnchorDoneRef = useRef(false);
   const initialAnchorGenerationRef = useRef(0);
   const initialAnchorVerifyFrameRef = useRef<number | null>(null);
   const initialAnchorFrameRef = useRef<number | null>(null);
-  const initialRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialRevealAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const initialRevealProgress = useMemo(
+    () => new Animated.Value(0),
+    [scrollResetKey],
+  );
+  const initialRevealOpacity = useMemo(() => initialRevealProgress.interpolate({
+    inputRange: [
+      0,
+      MOBILE_INITIAL_ANCHOR_SETTLE_MS / MOBILE_INITIAL_REVEAL_MAX_MS,
+      1,
+    ],
+    outputRange: [0, 0, 1],
+  }), [initialRevealProgress]);
   const followVerifyGenerationRef = useRef(0);
   const followVerifyFrameRef = useRef<number | null>(null);
   const followVerifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -748,6 +793,7 @@ export function MessageRenderer({
     prevScrollResetKeyRef.current = scrollResetKey;
     nearBottomRef.current = true;
     isDraggingRef.current = false;
+    isMomentumScrollingRef.current = false;
     dragStartOffsetYRef.current = null;
     userScrollForOlderRef.current = false;
     historyTouchStartYRef.current = null;
@@ -756,11 +802,16 @@ export function MessageRenderer({
     lastAutoLoadEarlierKeyRef.current = null;
     readingOlderRef.current = false;
     readingOlderRequestGenerationRef.current += 1;
-    readingOlderLoadingObservedRef.current = false;
-    readingOlderReleaseDeadlineRef.current = 0;
-    if (readingOlderReleaseTimerRef.current !== null) {
-      clearTimeout(readingOlderReleaseTimerRef.current);
-      readingOlderReleaseTimerRef.current = null;
+    historyPrependTransactionRef.current = null;
+    queuedLoadEarlierRef.current = false;
+    if (historyPrependNativeMvcpDisabled) setHistoryPrependNativeMvcpDisabled(false);
+    if (queuedLoadEarlierFlushFrameRef.current !== null) {
+      cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
+      queuedLoadEarlierFlushFrameRef.current = null;
+    }
+    if (historyAnchorVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
+      historyAnchorVerifyFrameRef.current = null;
     }
     mvcpSettleAtRef.current = 0;
     programmaticScrollGenerationRef.current += 1;
@@ -784,10 +835,8 @@ export function MessageRenderer({
       cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
       initialAnchorVerifyFrameRef.current = null;
     }
-    if (initialRevealTimerRef.current !== null) {
-      clearTimeout(initialRevealTimerRef.current);
-      initialRevealTimerRef.current = null;
-    }
+    initialRevealAnimationRef.current?.stop();
+    initialRevealAnimationRef.current = null;
     followVerifyGenerationRef.current += 1;
     if (followVerifyTimerRef.current !== null) {
       clearTimeout(followVerifyTimerRef.current);
@@ -877,6 +926,212 @@ export function MessageRenderer({
     markProgrammaticScroll(true);
     void listRef.current?.scrollToIndex({ animated: true, index, viewPosition });
   }, [markProgrammaticScroll]);
+
+  const captureCurrentHistoryAnchor = useCallback((): MobileHistoryAnchor | null => {
+    const listState = listRef.current?.getState();
+    return listState
+      ? captureMobileHistoryAnchor(
+        listState,
+        (item) => (item as MobileMessageRenderItem).key,
+      )
+      : null;
+  }, []);
+
+  const finishHistoryPrependTransaction = useCallback((generation: number) => {
+    const transaction = historyPrependTransactionRef.current;
+    if (!transaction || transaction.generation !== generation) return;
+    if (historyAnchorVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
+      historyAnchorVerifyFrameRef.current = null;
+    }
+    historyPrependTransactionRef.current = null;
+    readingOlderRef.current = false;
+    setHistoryPrependNativeMvcpDisabled(false);
+    setLoadEarlierEvaluationVersion((version) => version + 1);
+  }, []);
+
+  const maybeFinishHistoryPrependTransaction = useCallback((generation: number) => {
+    const transaction = historyPrependTransactionRef.current;
+    if (!transaction || transaction.generation !== generation) return;
+    if (loadingEarlierRef.current || !transaction.promiseSettled) return;
+    if (transaction.pageCommitted && !transaction.anchorStable) return;
+    finishHistoryPrependTransaction(generation);
+  }, [finishHistoryPrependTransaction]);
+
+  const handoffHistoryPrependToUser = useCallback(() => {
+    const transaction = historyPrependTransactionRef.current;
+    if (!transaction) return;
+    const currentAnchor = captureCurrentHistoryAnchor();
+    if (currentAnchor) transaction.anchor = currentAnchor;
+    if (!transaction.pageCommitted) return;
+    transaction.userControlledAfterCommit = true;
+    transaction.anchorStable = true;
+    if (historyAnchorVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
+      historyAnchorVerifyFrameRef.current = null;
+    }
+    maybeFinishHistoryPrependTransaction(transaction.generation);
+  }, [captureCurrentHistoryAnchor, maybeFinishHistoryPrependTransaction]);
+
+  const cancelHistoryPrependTransaction = useCallback(() => {
+    readingOlderRequestGenerationRef.current += 1;
+    readingOlderRef.current = false;
+    historyPrependTransactionRef.current = null;
+    queuedLoadEarlierRef.current = false;
+    setHistoryPrependNativeMvcpDisabled(false);
+    if (queuedLoadEarlierFlushFrameRef.current !== null) {
+      cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
+      queuedLoadEarlierFlushFrameRef.current = null;
+    }
+    if (historyAnchorVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
+      historyAnchorVerifyFrameRef.current = null;
+    }
+  }, []);
+
+  const scheduleHistoryAnchorRestore = useCallback((generation: number) => {
+    const transaction = historyPrependTransactionRef.current;
+    if (
+      !transaction
+      || transaction.generation !== generation
+      || !transaction.pageCommitted
+      || transaction.userControlledAfterCommit
+    ) return;
+    // The running verifier already re-resolves the anchor on every frame. Restarting it for every
+    // tail content-size event prevents a live session from ever accumulating two stable frames.
+    if (historyAnchorVerifyFrameRef.current !== null) return;
+    transaction.anchorStable = false;
+    if (transaction.verifyDeadlineAt === 0) {
+      transaction.verifyDeadlineAt = Date.now() + MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS;
+    }
+    markMobileMvcpSettle();
+
+    const step = (
+      attempts: number,
+      stableFrames: number,
+      previousTargetOffset: number | null,
+    ) => {
+      const currentTransaction = historyPrependTransactionRef.current;
+      if (
+        !currentTransaction
+        || currentTransaction.generation !== generation
+        || currentTransaction.userControlledAfterCommit
+      ) return;
+      const withinDeadline = Date.now() < currentTransaction.verifyDeadlineAt;
+      const anchor = currentTransaction.anchor;
+      const listState = listRef.current?.getState();
+      const targetOffset = anchor && listState
+        ? resolveMobileHistoryAnchorOffset(anchor, listState)
+        : null;
+
+      if (targetOffset !== null && listState) {
+        const currentOffset = listState.scroll;
+        const settled = isMobileHistoryAnchorSettled(
+          currentOffset,
+          targetOffset,
+          previousTargetOffset,
+          MOBILE_ANCHOR_VERIFY_TOLERANCE,
+        );
+        // Only the anchor row's resolved position matters here. A running session can keep
+        // growing below the reader while history is settling; treating every tail size change as
+        // anchor instability keeps this verifier alive for the full retry bound and needlessly
+        // churns cells/GC. If a layout change above the anchor matters, targetOffset changes and
+        // the two-frame stability check resets on its own.
+        const nextStableFrames = settled ? stableFrames + 1 : 0;
+        if (Math.abs(currentOffset - targetOffset) > MOBILE_ANCHOR_VERIFY_TOLERANCE) {
+          scrollToOffsetProgrammatically(targetOffset, false);
+        }
+        if (nextStableFrames >= MOBILE_HISTORY_ANCHOR_STABLE_FRAMES) {
+          historyAnchorVerifyFrameRef.current = null;
+          currentTransaction.anchorStable = true;
+          maybeFinishHistoryPrependTransaction(generation);
+          return;
+        }
+        if (withinDeadline && attempts < MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES) {
+          historyAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
+            historyAnchorVerifyFrameRef.current = null;
+            step(attempts + 1, nextStableFrames, targetOffset);
+          });
+          return;
+        }
+      } else if (withinDeadline && attempts < MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES) {
+        historyAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
+          historyAnchorVerifyFrameRef.current = null;
+          step(attempts + 1, 0, null);
+        });
+        return;
+      }
+
+      if (targetOffset !== null && listState) {
+        // Complex pages can keep refining estimates beyond the retry window even though the anchor
+        // key remains valid. End with two bounded, non-animated corrections instead of warning and
+        // re-enabling native MVCP against a stale offset. The history-intent guard keeps these
+        // resulting scroll events from being mistaken for a user return to the latest edge.
+        scrollToOffsetProgrammatically(targetOffset, false);
+        historyAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
+          const finalTransaction = historyPrependTransactionRef.current;
+          if (
+            !finalTransaction
+            || finalTransaction.generation !== generation
+            || finalTransaction.userControlledAfterCommit
+          ) return;
+          const finalState = listRef.current?.getState();
+          const finalTarget = finalTransaction.anchor && finalState
+            ? resolveMobileHistoryAnchorOffset(finalTransaction.anchor, finalState)
+            : null;
+          if (finalTarget !== null) scrollToOffsetProgrammatically(finalTarget, false);
+          historyAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
+            historyAnchorVerifyFrameRef.current = null;
+            const settledTransaction = historyPrependTransactionRef.current;
+            if (
+              !settledTransaction
+              || settledTransaction.generation !== generation
+              || settledTransaction.userControlledAfterCommit
+            ) return;
+            settledTransaction.anchorStable = true;
+            maybeFinishHistoryPrependTransaction(generation);
+          });
+        });
+        return;
+      }
+
+      // The key should survive a prepend. Keep an actually unresolved page bounded so malformed
+      // host data cannot lock history browsing forever; follow-to-latest remains disabled.
+      console.warn('[message-list] history prepend anchor could not be resolved before the retry bound');
+      historyAnchorVerifyFrameRef.current = null;
+      currentTransaction.anchorStable = true;
+      maybeFinishHistoryPrependTransaction(generation);
+    };
+
+    // useLayoutEffect calls this before paint. Run the first correction synchronously so Android
+    // never displays the intermediate coordinate system where the old rows have moved but the
+    // ScrollView offset still belongs to the pre-prepend data.
+    step(0, 0, null);
+  }, [
+    markMobileMvcpSettle,
+    maybeFinishHistoryPrependTransaction,
+    scrollToOffsetProgrammatically,
+  ]);
+
+  const restoreHistoryAnchorOnce = useCallback((generation: number) => {
+    const transaction = historyPrependTransactionRef.current;
+    if (
+      !transaction
+      || transaction.generation !== generation
+      || transaction.userControlledAfterCommit
+    ) return;
+    const listState = listRef.current?.getState();
+    const targetOffset = transaction.anchor && listState
+      ? resolveMobileHistoryAnchorOffset(transaction.anchor, listState)
+      : null;
+    if (
+      targetOffset !== null
+      && listState
+      && Math.abs(listState.scroll - targetOffset) > MOBILE_ANCHOR_VERIFY_TOLERANCE
+    ) {
+      scrollToOffsetProgrammatically(targetOffset, false);
+    }
+  }, [scrollToOffsetProgrammatically]);
 
   // 贴底跟随的落底校验/补滚环:两条手动补滚路径——「跳到最新」(followLatestRequestKey)
   // 与 handleContentSize 的贴底追赶——都只发一次命令式 scrollToEnd,不校验是否真的到达内容
@@ -985,11 +1240,37 @@ export function MessageRenderer({
     () => mobileMessageListKeysSignature(itemKeys),
     [itemKeys],
   );
+  const firstItemKey = loadEarlierProgressKey ?? itemKeys[0] ?? null;
+  // A successful history page changes the oldest host cursor. Restore the captured visible row
+  // in a layout effect: LegendList has accepted the new data, but React Native has not painted the
+  // shifted absolute positions yet. This is the atomic point missing from Android native MVCP.
+  useLayoutEffect(() => {
+    const transaction = historyPrependTransactionRef.current;
+    if (!transaction) return;
+    if (transaction.startProgressKey !== firstItemKey) {
+      transaction.pageCommitted = true;
+      scheduleHistoryAnchorRestore(transaction.generation);
+      maybeFinishHistoryPrependTransaction(transaction.generation);
+      return;
+    }
+    if (transaction.promiseSettled && !loadingEarlier) {
+      // Failed, empty, or duplicate page: the current render has observed Promise settlement with
+      // no oldest-cursor progress, so there is no prepend coordinate change to restore.
+      transaction.anchorStable = true;
+      maybeFinishHistoryPrependTransaction(transaction.generation);
+    }
+  }, [
+    firstItemKey,
+    itemKeysSignature,
+    loadEarlierEvaluationVersion,
+    loadingEarlier,
+    maybeFinishHistoryPrependTransaction,
+    scheduleHistoryAnchorRestore,
+  ]);
   // 只认行身份（追加 / 换行 / 重排）。流式改内容会换 items 引用，但不能续安静窗。
   useEffect(() => {
     markMobileMvcpSettle();
   }, [itemKeysSignature, markMobileMvcpSettle]);
-  const firstItemKey = loadEarlierProgressKey ?? itemKeys[0] ?? null;
   // 本地缩略兜底映射版本:collect 内部对 cindy-oss-attach:// 附件读全局 store 做 overlay,
   // hydrate / 新注册后 gallery 需要重建,否则点开气泡本地图时 initialUrl 对不上图集条目。
   const sentThumbsVersion = useSentAttachmentThumbsVersion();
@@ -1271,7 +1552,7 @@ export function MessageRenderer({
   // 跳底先命令式 scrollToEnd,随后复用同一轮有界落底校验。
   const scrollToBottom = useCallback(() => {
     nearBottomRef.current = true;
-    readingOlderRef.current = false;
+    cancelHistoryPrependTransaction();
     userScrollForOlderRef.current = false;
     // 用户主动跳底是明确的重锚意图:重建补滚护栏(清掉可能仍开着的断路窗,
     // 让跳底后的贴底跟随立即恢复;振荡若还在会重新跳闸,review P2)。在飞的
@@ -1285,7 +1566,7 @@ export function MessageRenderer({
     setHasNewMessages(false);
     scrollToEndProgrammatically(true);
     runStickToLatestVerify();
-  }, [runStickToLatestVerify, scrollToEndProgrammatically]);
+  }, [cancelHistoryPrependTransaction, runStickToLatestVerify, scrollToEndProgrammatically]);
 
   const jumpToPreviousUserMessage = useCallback(() => {
     if (!previousUserTarget) return;
@@ -1308,7 +1589,7 @@ export function MessageRenderer({
     previousFollowLatestRequestKeyRef.current = followLatestRequestKey;
     if (followLatestRequestKey === null || followLatestRequestKey === undefined) return;
     nearBottomRef.current = true;
-    readingOlderRef.current = false;
+    cancelHistoryPrependTransaction();
     // 发送后的显式贴底已经取代旧的历史浏览意图。先清掉该标记,否则 verifier 的
     // stickToLatest 会被一次更早的拖动永久压成 false,退化回不可靠的单次 scrollToEnd。
     // 用户若在校验期间再次拖动,onScrollBeginDrag 会重新置 true 并自然中止补滚。
@@ -1323,7 +1604,12 @@ export function MessageRenderer({
     setIsAwayFromBottom(false);
     scrollToEndProgrammatically(true);
     runStickToLatestVerify();
-  }, [followLatestRequestKey, runStickToLatestVerify, scrollToEndProgrammatically]);
+  }, [
+    cancelHistoryPrependTransaction,
+    followLatestRequestKey,
+    runStickToLatestVerify,
+    scrollToEndProgrammatically,
+  ]);
 
   // 自动加载更早:电平触发判定(shouldAutoLoadEarlier),在所有可能改变判定结果的时机重评估
   // (scroll 事件 / LegendList onStartReached 边沿 / eligibility 变化 effect)。
@@ -1331,94 +1617,32 @@ export function MessageRenderer({
   // (或阈值内 data 变化)才会再发;这里的业务 guard(没拖动过 / 正在加载 / 入口未点亮)吞掉一次
   // 边沿后,条件就绪时不会有下一个边沿,用户就停在顶部干等(短加载窗口的会话冷开即中招:
   // 列表底部已落在近顶阈值内,边沿在拖动前就被消费,之后永远滚不出复位区 → 永久哑火)。
-  // nearStart / atEnd 读 LegendList getState() 的实时账:它的 scroll 记账含 prepend 锚点补偿,
-  // 而 app 侧 onScroll 的原生 offsetY 在 prepend 后不再代表「距内容顶端的距离」,不可用于判顶。
-  // prepend 防跳由内置 maintainVisibleContentPosition 处理,无需手动开 maintain。
+  // nearStart / atEnd 读 LegendList getState() 的实时账；app 侧 onScroll 的原生 offsetY
+  // 在 prepend 提交期间不代表「距内容顶端的距离」，不可用于判顶。prepend 防跳由上面的
+  // key + viewportOffset 事务处理；请求开始前会暂时关闭 Android native MVCP，恢复完成后重开。
   // 冷开只在列表同时位于 start/end(内容未撑满首屏)时有界补页；真实上翻意图继续沿用
   // 不限页的近顶预取。两条路径都受首项进展去重保护,失败/重复页不会循环打 host。
-  const scheduleReadingOlderRelease = useCallback((generation: number) => {
-    if (readingOlderReleaseTimerRef.current !== null) {
-      clearTimeout(readingOlderReleaseTimerRef.current);
-      readingOlderReleaseTimerRef.current = null;
-    }
-    const attemptRelease = () => {
-      readingOlderReleaseTimerRef.current = null;
-      if (
-        readingOlderRequestGenerationRef.current !== generation
-        || !readingOlderRef.current
-      ) return;
-      // Never apply the native-anchor settle deadline to the remote request itself. A legitimately
-      // slow active-session page must keep prepend protection until the parent commits
-      // loadingEarlier=false; the 500 ms bound starts only after that network/loading phase ends.
-      if (loadingEarlierRef.current) {
-        readingOlderReleaseDeadlineRef.current = 0;
-        readingOlderReleaseTimerRef.current = setTimeout(attemptRelease, 16);
-        return;
-      }
-      if (readingOlderReleaseDeadlineRef.current === 0) {
-        readingOlderReleaseDeadlineRef.current = Date.now()
-          + MOBILE_HISTORY_PREPEND_SETTLE_MAX_MS;
-      }
-      const quietWindowRemainingMs = Math.max(
-        0,
-        Math.min(
-          mvcpSettleAtRef.current,
-          readingOlderReleaseDeadlineRef.current,
-        ) - Date.now(),
-      );
-      if (quietWindowRemainingMs > 0) {
-        readingOlderReleaseTimerRef.current = setTimeout(
-          attemptRelease,
-          quietWindowRemainingMs,
-        );
-        return;
-      }
-      // Passive effects run after the page has joined the React tree; two more frames leave the
-      // native ScrollView/LegendList MVCP adjustment ahead of any follow-to-end compensation.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (
-            readingOlderRequestGenerationRef.current === generation
-            && readingOlderRef.current
-            && !loadingEarlierRef.current
-          ) {
-            const extendedQuietWindowMs = Math.max(
-              0,
-              Math.min(
-                mvcpSettleAtRef.current,
-                readingOlderReleaseDeadlineRef.current,
-              ) - Date.now(),
-            );
-            if (extendedQuietWindowMs > 0) {
-              readingOlderReleaseTimerRef.current = setTimeout(
-                attemptRelease,
-                extendedQuietWindowMs,
-              );
-              return;
-            }
-            readingOlderRef.current = false;
-            readingOlderLoadingObservedRef.current = false;
-            readingOlderReleaseDeadlineRef.current = 0;
-            setLoadEarlierEvaluationVersion((version) => version + 1);
-          } else if (
-            readingOlderRequestGenerationRef.current === generation
-            && readingOlderRef.current
-          ) {
-            readingOlderReleaseDeadlineRef.current = 0;
-            readingOlderReleaseTimerRef.current = setTimeout(attemptRelease, 16);
-          }
-        });
-      });
-    };
-    attemptRelease();
-  }, []);
-
-  const requestLoadEarlier = useCallback(() => {
+  const beginLoadEarlier = useCallback(() => {
     if (!onLoadEarlier) return;
     const generation = readingOlderRequestGenerationRef.current + 1;
     readingOlderRequestGenerationRef.current = generation;
-    readingOlderLoadingObservedRef.current = false;
-    readingOlderReleaseDeadlineRef.current = 0;
+    const listState = listRef.current?.getState();
+    const anchor = listState
+      ? captureMobileHistoryAnchor(
+        listState,
+        (item) => (item as MobileMessageRenderItem).key,
+      )
+      : null;
+    historyPrependTransactionRef.current = {
+      anchor,
+      anchorStable: false,
+      generation,
+      pageCommitted: false,
+      promiseSettled: false,
+      startProgressKey: firstItemKey,
+      userControlledAfterCommit: false,
+      verifyDeadlineAt: 0,
+    };
     readingOlderRef.current = true;
     // A short list can be simultaneously atStart and atEnd. Once the user explicitly browses
     // older history, it must no longer be treated as following the latest edge; otherwise the
@@ -1427,44 +1651,84 @@ export function MessageRenderer({
       nearBottomRef.current = false;
       setIsAwayFromBottom(true);
     }
-    const releaseAfterRequestSettles = () => {
-      // React Native may batch loadingEarlier=true and loadingEarlier=false around a fast page,
-      // so the child is not guaranteed to observe the intermediate loading render. Promise
-      // settlement is the authoritative bounded fallback; the effect below still releases after
-      // the committed loading transition when it is observable.
-      if (readingOlderRequestGenerationRef.current === generation) {
-        scheduleReadingOlderRelease(generation);
-      }
+    const markRequestSettled = () => {
+      const transaction = historyPrependTransactionRef.current;
+      if (!transaction || transaction.generation !== generation) return;
+      transaction.promiseSettled = true;
+      // Force one render after Promise settlement. The parent may batch loading=true, the merged
+      // page, and loading=false; the layout effect above is the authoritative point where we decide
+      // whether a page actually committed before releasing the transaction.
+      setLoadEarlierEvaluationVersion((version) => version + 1);
     };
     try {
       const result = onLoadEarlier();
       void Promise.resolve(result).then(
-        releaseAfterRequestSettles,
-        releaseAfterRequestSettles,
+        markRequestSettled,
+        markRequestSettled,
       );
     } catch {
-      releaseAfterRequestSettles();
+      markRequestSettled();
     }
-  }, [onLoadEarlier, scheduleReadingOlderRelease]);
+  }, [firstItemKey, onLoadEarlier]);
 
-  useEffect(() => {
-    if (!readingOlderRef.current) return;
-    if (loadingEarlier === true) {
-      readingOlderLoadingObservedRef.current = true;
+  const flushQueuedLoadEarlier = useCallback(() => {
+    if (
+      !queuedLoadEarlierRef.current
+      || isDraggingRef.current
+      || isMomentumScrollingRef.current
+      || historyTouchStartYRef.current !== null
+    ) return;
+    // The request must not start until a committed render has removed RN's native MVCP prop.
+    // Otherwise a fast local/relay response can prepend before the prop update reaches Android.
+    if (!historyPrependNativeMvcpDisabledRef.current) {
+      setHistoryPrependNativeMvcpDisabled(true);
       return;
     }
-    if (!readingOlderLoadingObservedRef.current) return;
-    scheduleReadingOlderRelease(readingOlderRequestGenerationRef.current);
-  }, [itemKeysSignature, loadingEarlier, scheduleReadingOlderRelease]);
+    queuedLoadEarlierRef.current = false;
+    beginLoadEarlier();
+  }, [beginLoadEarlier]);
+
+  const scheduleQueuedLoadEarlierFlush = useCallback(() => {
+    if (queuedLoadEarlierFlushFrameRef.current !== null) return;
+    queuedLoadEarlierFlushFrameRef.current = requestAnimationFrame(() => {
+      queuedLoadEarlierFlushFrameRef.current = null;
+      flushQueuedLoadEarlier();
+    });
+  }, [flushQueuedLoadEarlier]);
+
+  const requestLoadEarlier = useCallback(() => {
+    if (!onLoadEarlier || readingOlderRef.current || queuedLoadEarlierRef.current) return;
+    // Queueing itself owns the history-browse lock: a running task may append/resize messages while
+    // the current drag or momentum is still settling, and those contentSize events must not follow
+    // the latest edge before the history request actually starts.
+    queuedLoadEarlierRef.current = true;
+    readingOlderRef.current = true;
+    if (userScrollForOlderRef.current) {
+      nearBottomRef.current = false;
+      setIsAwayFromBottom(true);
+    }
+    // The first safe frame disables native MVCP. Its committed layout effect below then starts the
+    // request, keeping the unanchored interval to a single React commit with no network in flight.
+    scheduleQueuedLoadEarlierFlush();
+  }, [onLoadEarlier, scheduleQueuedLoadEarlierFlush]);
+
+  useLayoutEffect(() => {
+    if (!historyPrependNativeMvcpDisabled) return;
+    flushQueuedLoadEarlier();
+  }, [flushQueuedLoadEarlier, historyPrependNativeMvcpDisabled]);
 
   const attemptAutoLoadEarlier = useCallback((nativeMetrics?: MessageScrollMetrics) => {
     if (!onLoadEarlier) return;
-    if (readingOlderRef.current) return;
+    if (readingOlderRef.current || queuedLoadEarlierRef.current) return;
     // 热路径前置短路(滚动事件每 16ms 评估一次,getState() 每次新建状态对象):没有用户浏览意图
     // 且冷开预算已耗尽、或当前首项已尝试过时不碰 getState。完整判定仍以
     // shouldAutoLoadEarlier 为唯一真相,这里只做它的子集提前返回。
     const userScrolledForOlder = userScrollForOlderRef.current;
-    const initialAutoFillAllowed = !userScrolledForOlder
+    // Reveal the latest cached page before cold-open autofill starts. Otherwise the initial
+    // scroll-to-end verifier waits behind one or more history requests while the whole list is
+    // still opacity-hidden, which turns a background prefetch into a multi-second blank screen.
+    const initialAutoFillAllowed = listRevealed
+      && !userScrolledForOlder
       && initialHistoryAutofillRemainingRef.current > 0;
     if (!userScrolledForOlder && !initialAutoFillAllowed) return;
     if (firstItemKey !== null && lastAutoLoadEarlierKeyRef.current === firstItemKey) return;
@@ -1496,6 +1760,7 @@ export function MessageRenderer({
     firstItemKey,
     loadEarlierAction.disabled,
     loadEarlierAction.visible,
+    listRevealed,
     onLoadEarlier,
     requestLoadEarlier,
   ]);
@@ -1513,9 +1778,24 @@ export function MessageRenderer({
       viewportHeight: event.nativeEvent.layoutMeasurement.height,
     };
     const previousOffsetY = scrollMetricsRef.current.offsetY;
-    const wasNearBottom = nearBottomRef.current;
-    const scrollDelta = readingOlderRef.current ? 0 : metrics.offsetY - previousOffsetY;
     scrollMetricsRef.current = metrics;
+    if (readingOlderRef.current) {
+      if (
+        isDraggingRef.current
+        || isMomentumScrollingRef.current
+        || historyTouchTriggeredRef.current
+      ) {
+        handoffHistoryPrependToUser();
+      }
+      // Prepend layout can transiently report an empty/short content range. Never feed those
+      // metrics into near-bottom resolution: it would flip false→true and the next size event
+      // would force the reader to the latest message.
+      attemptAutoLoadEarlier(metrics);
+      if (shareSelectionActiveRef.current) scheduleStickyShareCheck();
+      return;
+    }
+    const wasNearBottom = nearBottomRef.current;
+    const scrollDelta = metrics.offsetY - previousOffsetY;
     if (
       nearBottomRef.current
       && shouldUnpinMobileFollowOnDrag({
@@ -1527,13 +1807,21 @@ export function MessageRenderer({
       nearBottomRef.current = false;
       setIsAwayFromBottom(true);
     } else {
-      const nearBottom = resolveMobileNearBottomOnScroll({
-        wasNearBottom: nearBottomRef.current,
-        metrics,
-        programmaticScrollInFlight: programmaticScrollInFlightRef.current,
-        scrollDelta,
-        bottomOverlayHeight,
+      const preserveHistoryBrowseIntent = shouldPreserveMobileHistoryBrowseIntent({
+        historyBrowseIntent: userScrollForOlderRef.current,
+        userControllingScroll: isDraggingRef.current
+          || isMomentumScrollingRef.current
+          || historyTouchStartYRef.current !== null,
       });
+      const nearBottom = preserveHistoryBrowseIntent
+        ? false
+        : resolveMobileNearBottomOnScroll({
+          wasNearBottom: nearBottomRef.current,
+          metrics,
+          programmaticScrollInFlight: programmaticScrollInFlightRef.current,
+          scrollDelta,
+          bottomOverlayHeight,
+        });
       nearBottomRef.current = nearBottom;
       // A genuine downward false→true transition means the user manually returned to the
       // latest edge. The old history-browsing intent no longer owns follow verification;
@@ -1552,10 +1840,14 @@ export function MessageRenderer({
   }, [
     attemptAutoLoadEarlier,
     bottomOverlayHeight,
+    handoffHistoryPrependToUser,
     scheduleStickyShareCheck,
   ]);
 
   const handleHistoryTouchStart = useCallback((event: GestureResponderEvent) => {
+    // Android may omit momentum-end when a new finger stops a fling. The new touch owns the
+    // ScrollView now, so the old momentum flag must not keep a queued history request suspended.
+    isMomentumScrollingRef.current = false;
     historyTouchStartYRef.current = event.nativeEvent.pageY;
     historyTouchTriggeredRef.current = false;
   }, []);
@@ -1570,8 +1862,9 @@ export function MessageRenderer({
     historyTouchTriggeredRef.current = true;
     userScrollForOlderRef.current = true;
     lastAutoLoadEarlierKeyRef.current = null;
+    handoffHistoryPrependToUser();
     attemptAutoLoadEarlier(scrollMetricsRef.current);
-  }, [attemptAutoLoadEarlier]);
+  }, [attemptAutoLoadEarlier, handoffHistoryPrependToUser]);
 
   const handleHistoryTouchMove = useCallback((event: GestureResponderEvent) => {
     maybeTriggerHistoryTouch(event.nativeEvent.pageY);
@@ -1583,12 +1876,14 @@ export function MessageRenderer({
     maybeTriggerHistoryTouch(event.nativeEvent.pageY);
     historyTouchStartYRef.current = null;
     historyTouchTriggeredRef.current = false;
-  }, [maybeTriggerHistoryTouch]);
+    scheduleQueuedLoadEarlierFlush();
+  }, [maybeTriggerHistoryTouch, scheduleQueuedLoadEarlierFlush]);
 
   const handleHistoryTouchCancel = useCallback(() => {
     historyTouchStartYRef.current = null;
     historyTouchTriggeredRef.current = false;
-  }, []);
+    scheduleQueuedLoadEarlierFlush();
+  }, [scheduleQueuedLoadEarlierFlush]);
 
   // 用户开始拖动 → 标记「上翻意图」,放行自动加载更早(onScrollBeginDrag 仅用户手势触发,
   // 程序化 scrollToEnd 不会触发,故不会误置);同时记录拖动起点 offset,供
@@ -1600,25 +1895,38 @@ export function MessageRenderer({
       viewportHeight: event.nativeEvent.layoutMeasurement.height,
     };
     clearProgrammaticScroll();
+    isMomentumScrollingRef.current = false;
     isDraggingRef.current = true;
     dragStartOffsetYRef.current = event.nativeEvent.contentOffset.y;
     userScrollForOlderRef.current = true;
     // 新手势 = 允许重新尝试一次自动加载(上次失败 / 无进展的去重记录随手势作废)。
     lastAutoLoadEarlierKeyRef.current = null;
     attemptAutoLoadEarlier(nativeMetrics);
+    handoffHistoryPrependToUser();
     // 请求仍在飞或新页仍在做 mVCP 布局时，新的触摸不能提前解除历史锚点保护。
     // 下滑回底的显式按钮/跟随请求会主动清理；普通手势在分页落地后由方向判定恢复。
     // 翻完 refs 立即补一次电平评估:列表已顶死时(Android 无 bounce 尤甚)这次拖动不产生
     // offset 变化,不会有 onScroll / onStartReached,ref 写入也不驱动 effect——没有这一刀,
     // 「失败后停在顶部再拖一下重试」的信号会整体丢失(review P2)。
-  }, [attemptAutoLoadEarlier]);
+  }, [attemptAutoLoadEarlier, handoffHistoryPrependToUser]);
 
   // 拖动结束(手指离开,可能进入惯性滚动)→ 关闭拖动追踪。惯性阶段的上滑不需要再判
   // 解除:上滑手势的拖动段必然已越过死区完成解除;下滑回底的恢复由 scroll 方向判定接手。
   const handleScrollEndDrag = useCallback(() => {
     isDraggingRef.current = false;
     dragStartOffsetYRef.current = null;
+    // Wait one frame so Android can report whether this drag transitioned into momentum.
+    scheduleQueuedLoadEarlierFlush();
+  }, [scheduleQueuedLoadEarlierFlush]);
+
+  const handleMomentumScrollBegin = useCallback(() => {
+    isMomentumScrollingRef.current = true;
   }, []);
+
+  const handleMomentumScrollEnd = useCallback(() => {
+    isMomentumScrollingRef.current = false;
+    scheduleQueuedLoadEarlierFlush();
+  }, [scheduleQueuedLoadEarlierFlush]);
 
   const handleStartReached = useCallback(() => {
     attemptAutoLoadEarlier();
@@ -1647,7 +1955,23 @@ export function MessageRenderer({
     const { viewportHeight } = scrollMetricsRef.current;
     scrollMetricsRef.current = { ...scrollMetricsRef.current, contentHeight: height };
     // readingOlderRef:load-earlier 的 prepend 也会撑高 contentHeight,但那是顶部增长、不该贴底(review P1)。
-    if (readingOlderRef.current) return;
+    if (readingOlderRef.current) {
+      const transaction = historyPrependTransactionRef.current;
+      if (transaction) {
+        if (transaction.pageCommitted) {
+          scheduleHistoryAnchorRestore(transaction.generation);
+        } else if (
+          !isDraggingRef.current
+          && !isMomentumScrollingRef.current
+          && historyTouchStartYRef.current === null
+        ) {
+          // Native MVCP is intentionally disabled before the request starts. Keep the current row
+          // pinned while an image/Markdown/live row changes height during that network window.
+          restoreHistoryAnchorOnce(transaction.generation);
+        }
+      }
+      return;
+    }
     if (nearBottomRef.current && viewportHeight > 0 && height > viewportHeight) {
       // Animated jump/send follow owns the viewport until its settle window closes. Content
       // growth during that animation only reschedules the verifier; a false-animated pin here
@@ -1693,15 +2017,19 @@ export function MessageRenderer({
     }
   }, [
     markMobileMvcpSettle,
+    restoreHistoryAnchorOnce,
     runStickToLatestVerify,
+    scheduleHistoryAnchorRestore,
     scrollToEndProgrammatically,
   ]);
 
-  // 与 main 一致的首次落底：完整历史已经在列表里，所有命令式补滚与动态高度校正
-  // 都在 opacity 遮罩下完成；确认到达内容末端（或有界放弃）后再一次性揭开。
-  useEffect(() => {
+  // 首次落底：完整历史已经在列表里。短暂遮住命令式落底与首轮测量校正，随后由 native
+  // Animated 在 UI 线程按真实时间揭开；运行中消息持续 resize 或复杂 cell 占满 JS 时，
+  // 都不能把数据已在本地的消息区继续隐藏数秒。
+  useLayoutEffect(() => {
     if (initialAnchorDoneRef.current) return;
     if (listData.length === 0) {
+      initialRevealProgress.setValue(1);
       setListRevealed(true);
       return;
     }
@@ -1711,7 +2039,10 @@ export function MessageRenderer({
     initialAnchorGenerationRef.current = generation;
     if (initialAnchorFrameRef.current !== null) cancelAnimationFrame(initialAnchorFrameRef.current);
     if (initialAnchorVerifyFrameRef.current !== null) cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
-    if (initialRevealTimerRef.current) clearTimeout(initialRevealTimerRef.current);
+    initialRevealAnimationRef.current?.stop();
+    initialRevealProgress.setValue(0);
+    setListRevealed(false);
+    const revealDeadlineAt = Date.now() + MOBILE_INITIAL_REVEAL_MAX_MS;
 
     const finish = () => {
       if (initialAnchorGenerationRef.current !== generation) return;
@@ -1719,13 +2050,32 @@ export function MessageRenderer({
         cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
         initialAnchorVerifyFrameRef.current = null;
       }
-      initialRevealTimerRef.current = null;
       setListRevealed(true);
     };
 
-    const startedAt = Date.now();
+    const revealAnimation = Animated.timing(initialRevealProgress, {
+      duration: MOBILE_INITIAL_REVEAL_MAX_MS,
+      easing: Easing.linear,
+      toValue: 1,
+      useNativeDriver: true,
+    });
+    initialRevealAnimationRef.current = revealAnimation;
+    revealAnimation.start(({ finished }) => {
+      if (initialRevealAnimationRef.current === revealAnimation) {
+        initialRevealAnimationRef.current = null;
+      }
+      if (finished) finish();
+    });
+
     const verify = (attempts: number, waitRounds: number) => {
       if (initialAnchorGenerationRef.current !== generation) return;
+      // The native reveal is a real wall-clock deadline. If JS resumes after it, do not expose a
+      // late corrective scroll on an already-visible list.
+      if (Date.now() >= revealDeadlineAt) {
+        initialAnchorVerifyFrameRef.current = null;
+        setListRevealed(true);
+        return;
+      }
       const preserveVisibleContentPosition = readingOlderRef.current
         || isMobileMvcpSettling(Date.now(), mvcpSettleAtRef.current);
       const action = evaluateMobileAnchorVerify({
@@ -1737,12 +2087,9 @@ export function MessageRenderer({
         waitRounds,
       });
       if (action === 'settled' || action === 'give-up') {
-        const remaining = Math.max(
-          0,
-          MOBILE_INITIAL_ANCHOR_SETTLE_MS - (Date.now() - startedAt),
-        );
-        if (remaining === 0) finish();
-        else initialRevealTimerRef.current = setTimeout(finish, remaining);
+        // The native animation owns the visual deadline. Settling early only stops verification;
+        // it must not replace that deadline or expose the hidden correction frames.
+        initialAnchorVerifyFrameRef.current = null;
         return;
       }
       if (action === 'retry') scrollToEndProgrammatically(false);
@@ -1757,10 +2104,12 @@ export function MessageRenderer({
       });
     };
 
+    // Issue the first correction synchronously in the layout effect so native receives it before
+    // the UI-thread reveal starts, even when subsequent Markdown/cell work blocks JS.
+    scrollToEndProgrammatically(false);
     initialAnchorFrameRef.current = requestAnimationFrame(() => {
       initialAnchorFrameRef.current = null;
       if (initialAnchorGenerationRef.current !== generation) return;
-      scrollToEndProgrammatically(false);
       initialAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
         initialAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
           initialAnchorVerifyFrameRef.current = null;
@@ -1769,7 +2118,12 @@ export function MessageRenderer({
         });
       });
     });
-  }, [listData.length, scrollResetKey, scrollToEndProgrammatically]);
+  }, [
+    initialRevealProgress,
+    listData.length,
+    scrollResetKey,
+    scrollToEndProgrammatically,
+  ]);
 
   // 会话切换(scrollResetKey):重置浮标/近底等 UI 状态;LegendList 本体完整重挂并重新落底。
   // 滚动/自动加载相关的 ref 复位已在渲染期同步块完成(见 prevScrollResetKeyRef,防切会话
@@ -1790,14 +2144,18 @@ export function MessageRenderer({
   // 但不留悬挂句柄)。
   useEffect(() => () => {
     initialAnchorGenerationRef.current += 1;
+    readingOlderRequestGenerationRef.current += 1;
+    historyPrependTransactionRef.current = null;
     followVerifyGenerationRef.current += 1;
     if (followEndPinRecoveryTimerRef.current) clearTimeout(followEndPinRecoveryTimerRef.current);
     clearProgrammaticScroll();
     if (initialAnchorFrameRef.current !== null) cancelAnimationFrame(initialAnchorFrameRef.current);
     if (initialAnchorVerifyFrameRef.current !== null) cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
     if (followVerifyFrameRef.current !== null) cancelAnimationFrame(followVerifyFrameRef.current);
+    if (queuedLoadEarlierFlushFrameRef.current !== null) cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
+    if (historyAnchorVerifyFrameRef.current !== null) cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
     if (followVerifyTimerRef.current !== null) clearTimeout(followVerifyTimerRef.current);
-    if (initialRevealTimerRef.current) clearTimeout(initialRevealTimerRef.current);
+    initialRevealAnimationRef.current?.stop();
   }, [clearProgrammaticScroll]);
 
   // 顶部 chrome(如连接横幅)出现/消失 → topPadding 变 → contentContainerStyle.paddingTop 变 →
@@ -1912,6 +2270,7 @@ export function MessageRenderer({
       onTouchCancel={handleHistoryTouchCancel}
     >
       <MessageListVisibleKeysContext.Provider value={visibleMessageKeys}>
+      <Animated.View style={[styles.messageList, { opacity: initialRevealOpacity }]}>
       <LegendList
         // 与 main 一致：每个任务用完整历史重挂；首次命令式落底在 opacity 遮罩下完成。
         key={scrollResetKey}
@@ -1929,7 +2288,12 @@ export function MessageRenderer({
         // 二分实锤,3.3.2 / 3.3.3 均复现)。
         alignItemsAtEnd
         maintainScrollAtEnd={false}
-        maintainVisibleContentPosition={{ data: true, size: true }}
+        // Ordinary updates keep LegendList's native data/size anchoring. Manual history prepends
+        // disable the whole prop before the request starts because RN exposes one native switch:
+        // leaving either flag on would race the app-owned key/offset correction on Android.
+        maintainVisibleContentPosition={historyPrependNativeMvcpDisabled
+          ? false
+          : { data: true, size: true }}
         contentContainerStyle={[
           styles.messages,
           { paddingBottom: bottomPadding, paddingTop: topPadding },
@@ -1958,15 +2322,18 @@ export function MessageRenderer({
         onScroll={handleScroll}
         onScrollBeginDrag={handleScrollBeginDrag}
         onScrollEndDrag={handleScrollEndDrag}
+        onMomentumScrollBegin={handleMomentumScrollBegin}
+        onMomentumScrollEnd={handleMomentumScrollEnd}
         onStartReached={handleStartReached}
         onStartReachedThreshold={2}
         scrollEventThrottle={16}
         ref={listRef}
-        style={[styles.messageList, !listRevealed && styles.messageListSettling]}
+        style={styles.messageList}
         testID={testID ?? 'message.list'}
         viewabilityConfig={viewabilityConfigRef.current}
         onViewableItemsChanged={handleViewableItemsChangedRef.current}
       />
+      </Animated.View>
       </MessageListVisibleKeysContext.Provider>
       {previousUserTarget && previousUserButtonTop !== null ? (
         <MessageListActionButton
@@ -6953,8 +7320,6 @@ function headingSizeStyle(
 const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   messageFrame: { flex: 1, minHeight: 0 },
   messageList: { flex: 1 },
-  // main 的首次锚定遮罩：列表仍正常布局/测量，只是不把内部补滚过程暴露出来。
-  messageListSettling: { opacity: 0 },
   messages: {
     flexGrow: 1,
     // Anchor a short conversation to the bottom (just above the composer) like a normal chat,

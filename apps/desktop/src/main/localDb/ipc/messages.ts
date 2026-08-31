@@ -11,15 +11,16 @@ import { and, asc, eq, inArray, lt, lte, gt, gte, desc, isNull, or, sql, type SQ
 import { createId } from '@paralleldrive/cuid2';
 
 import { getDbClient } from '../client/current';
-import { latestVisiblePreview, latestVisiblePreviewRow } from '../latestMessageText';
+import { latestVisiblePreviewRow } from '../latestMessageText';
 import { messages, sessions } from '../schema';
+import { persistSessionListPreview } from '../sessionListProjection';
 import {
   messageToCamel,
   messageCreateToRow,
   safeStringify,
   extractMessagePreview,
 } from '../mapper';
-import { optionalEnum, throwIpcError, requireObject, requireString } from '../../utils/ipcValidate';
+import { throwIpcError, requireString } from '../../utils/ipcValidate';
 import * as broadcastTap from '../../device-link/broadcast-tap';
 import { createLogger } from '../../logger';
 import { collectCindyMediaHashes, commitMessageMediaRefs } from '../../cindy-media/chatAttachments';
@@ -30,7 +31,6 @@ import {
 import { importExternalCodexMessagesForSession } from '../../maker-host/codex-local-sessions';
 import { importExternalClaudeCodeMessagesForSession } from '../../maker-host/claude-local-sessions';
 import { isDeviceLinkInvoke } from '../../device-link/invoke-context';
-import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { onMessageCreated as onChatMessageCreatedForEmbedding } from '../../embedders/chat-history-embedder';
 import { recomputePrRefsForSession, recordPrRefsForMessage } from '../../git-context/prRefsStore';
 import {
@@ -40,21 +40,15 @@ import {
 import { resolveStaleCodexSubscriptionValueEstimate } from '../../../shared/codexSubscriptionValue.js';
 import { normalizeTurnUsageDetails } from '../../../shared/turnUsageDetails.js';
 import {
-  inferLegacyCustomProviderCostFlag,
-  projectSdkCostMoneyWithBreakdown,
-  resolveCustomProviderCostFlag,
-  resolveTurnSdkCostPresentation,
-} from '../../../shared/customProviderBilling.js';
-import {
   addCompatibleRegionalMoney,
   asValueEstimateMoney,
   legacyUsdMoney,
   normalizeRegionalMoney,
   usdMoney,
   type RegionalMoney,
-  type SdkCostPresentation,
 } from '../../../shared/regionalMoney.js';
 import { capReferenceMessageRows } from './history.js';
+import { maybeUpgradeCodexHistoryOversizedError } from '../codexHistoryOversizedUpgrade';
 import type { Message, MessageRole, AgentMeta } from '../../../renderer/lib/ccAgent.types';
 
 const log = createLogger('localDb/messages');
@@ -62,17 +56,7 @@ const log = createLogger('localDb/messages');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const MESSAGE_DELETION_USER_BOUNDARY_PAGE_SIZE = 32;
-// Keep IN (...) bind counts well below SQLite's historical 999 variable limit.
-const SQLITE_IN_CHUNK_SIZE = 500;
 const messageRowid = sql<number>`rowid`;
-function chunkArray<T>(items: readonly T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
-}
-
 /**
  * Skip silent-stop autoResume user rows without letting one bad historical
  * agent_meta blob fail the whole page query. SQLite may evaluate
@@ -187,9 +171,13 @@ async function maybeBroadcastSessionListPreview(
   }
   if (latest?.clientId !== row.clientId) return;
   if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
+  const preview = extractMessagePreview(row.content, row.role);
+  // 不在这里落库。insert/update 事务已经把 list_preview 置空；事后 persist 无法
+  // 校验同一 clientId 的内容版本，交错改写会把旧正文写回非 NULL 缓存。
+  // 侧栏即时刷新靠广播；下次 list/回填从 messages 现算。
   broadcastOwnedPayload(
     'local-db:sessions:patched',
-    { sessionId, patch: { preview: extractMessagePreview(row.content, row.role) } },
+    { sessionId, patch: { preview } },
     ownerScope,
   );
 }
@@ -209,37 +197,10 @@ function isAutoResumeUserRow(agentMetaJson: string | null): boolean {
   }
 }
 
-// DbClient uses better-sqlite3 `.all()`: never return whole message bodies for
-// retention bookkeeping. JSON1 extracts only the distinct paths that startup
-// cleanup needs, while LIKE avoids invoking json_each for unrelated history.
-const PERSISTED_CHAT_ATTACHMENT_CONTENT_PATTERN = '%chat-attachment-cache%';
-const PERSISTED_CHAT_ATTACHMENT_PATHS_SQL = `SELECT DISTINCT
-         attachment.atom AS filePath
-   FROM messages AS m
-   JOIN sessions AS s ON s.id = m.session_id
-   JOIN json_tree(
-          CASE WHEN json_valid(m.content) THEN m.content ELSE '{}' END,
-          '$.files'
-        ) AS attachment
-  WHERE s.status != 'deleted'
-    AND m.rewind_at IS NULL
-    AND m.content LIKE ?
-    AND attachment.key = 'path'
-    AND attachment.type = 'text'`;
-
 export interface EstimatedSessionValueEntry {
   clientId: string;
-  money?: RegionalMoney;
+  money: RegionalMoney;
   costUsd?: number;
-  /**
-   * Pre-upgrade custom-provider SDK amounts were persisted as actual cost.  The
-   * renderer subtracts this read-only projection from the session ledger before
-   * presenting the remaining provider/Gateway spend.
-   */
-  excludedActualMoney?: RegionalMoney;
-  turnCostIsCustomProvider?: boolean;
-  turnCostProviderId?: string | null;
-  turnUsageDetails?: unknown;
 }
 
 /**
@@ -262,15 +223,6 @@ const VALID_ROLES: ReadonlySet<MessageRole> = new Set([
   'plan_review',
   'thinking',
 ] as const);
-
-/** Return all staged attachment paths retained by the current owner's message DB. */
-export async function listPersistedChatAttachmentPaths(): Promise<string[]> {
-  const rows = await getDbClient().query<{ filePath: unknown }>(
-    PERSISTED_CHAT_ATTACHMENT_PATHS_SQL,
-    [PERSISTED_CHAT_ATTACHMENT_CONTENT_PATTERN],
-  );
-  return rows.flatMap((row) => (typeof row.filePath === 'string' ? [row.filePath] : []));
-}
 
 export function registerMessageIpc(): void {
   ipcMain.handle('local-db:messages:list', async (_e, sessionId: unknown, opts: unknown) => {
@@ -362,9 +314,24 @@ export function registerMessageIpc(): void {
       )
       .limit(limit);
     const orderedRows = afterCursor ? rows.slice().reverse() : rows;
-    return projectLegacyMessageBilling(
-      await hydrateLegacyUserTurnCosts(orderedRows.map(messageToCamelWithRowid)),
-    );
+    const listed = hydrateLegacyUserTurnCosts(orderedRows.map(messageToCamelWithRowid));
+    // 不阻塞首屏。旧 reconnect-stalled 横幅只在首页扫描一次，分页不再读 rollout。
+    if (!before && beforeTs == null && !after) {
+      const ownerScope = captureOwnerBroadcastScope();
+      void maybeUpgradeCodexHistoryOversizedError(sid)
+        .then((upgrade) => {
+          if (upgrade.result !== 'upgraded' || !upgrade.message) return;
+          if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
+          broadcastMessageRow(sid, upgrade.message, ownerScope);
+        })
+        .catch((error) => {
+          log.warn('codex oversized history upgrade rejected', {
+            sessionId: sid,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
+    return listed;
   });
 
   ipcMain.handle(
@@ -443,10 +410,8 @@ export function registerMessageIpc(): void {
         .orderBy(asc(messages.createdAt), asc(messageRowid))
         .limit(radius);
 
-      return projectLegacyMessageBilling(
-        await hydrateLegacyUserTurnCosts(
-          [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
-        ),
+      return hydrateLegacyUserTurnCosts(
+        [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
       );
     },
   );
@@ -529,118 +494,52 @@ export function registerMessageIpc(): void {
         .orderBy(asc(messages.createdAt), asc(messageRowid))
         .limit(radius);
 
-      const rows = await projectLegacyMessageBilling(
-        await hydrateLegacyUserTurnCosts(
-          [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
-        ),
+      const rows = await hydrateLegacyUserTurnCosts(
+        [...before.reverse(), anchor, ...after].map(messageToCamelWithRowid),
       );
       return capReferenceMessageRows(rows, contentCharLimit);
     },
   );
 
-  ipcMain.handle(
-    'local-db:messages:estimatedSessionValue',
-    async (
-      event,
-      sessionId: unknown,
-      presentationValue?: unknown,
-      showSdkEstimateValue?: unknown,
-    ) => {
-      if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
-      const sid = requireString(sessionId, 'sessionId');
-      const { presentation, showSdkEstimate } = parseEstimatedSessionValuePresentation(
-        presentationValue,
-        showSdkEstimateValue,
-      );
-      const db = getDbClient().drizzle;
+  ipcMain.handle('local-db:messages:estimatedSessionValue', async (_e, sessionId: unknown) => {
+    const sid = requireString(sessionId, 'sessionId');
+    const db = getDbClient().drizzle;
 
-      const [sessionRow] = await db
-        .select({ clearedAt: sessions.clearedAt })
-        .from(sessions)
-        .where(eq(sessions.id, sid))
-        .limit(1);
-      const rows = await db
-        .select({
-          clientId: messages.clientId,
-          agentMeta: messages.agentMeta,
-          createdAt: messages.createdAt,
-          rewindAt: messages.rewindAt,
-        })
-        .from(messages)
-        .where(and(eq(messages.sessionId, sid), eq(messages.role, 'assistant')));
-      const summarized = summarizeEstimatedSessionValueRows(
-        rows,
-        sessionRow?.clearedAt ?? null,
-        presentation,
-        showSdkEstimate,
-      );
-      return {
-        projectionVersion: ESTIMATED_SESSION_VALUE_PROJECTION_VERSION,
-        totalValueMoney: summarized.totalValueMoney,
-        ...(summarized.totalValueUsd != null ? { totalValueUsd: summarized.totalValueUsd } : {}),
-        entries: summarized.entries,
-      };
-    },
-  );
+    const [sessionRow] = await db
+      .select({ clearedAt: sessions.clearedAt })
+      .from(sessions)
+      .where(eq(sessions.id, sid))
+      .limit(1);
+    const clearedAtMs = sessionRow?.clearedAt ?? null;
 
-  /**
-   * Sidebar cost field: one query for many sessions instead of one full-history
-   * scan per SessionItem/SessionCard. Returns compact per-session totals only.
-   */
-  ipcMain.handle(
-    'local-db:messages:estimatedSessionValueBatch',
-    async (event, body: unknown) => {
-      if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
-      const payload = requireObject(body, 'payload');
-      const sessionIds = parseEstimatedSessionValueBatchIds(payload.sessionIds);
-      if (sessionIds.length === 0) return {};
-      const { presentation, showSdkEstimate } = parseEstimatedSessionValuePresentation(
-        payload.presentation,
-        payload.showSdkEstimate,
+    const visibleConds = clearedAtMs === null ? [] : [gt(messages.createdAt, clearedAtMs)];
+    const rows = await db
+      .select({
+        clientId: messages.clientId,
+        agentMeta: messages.agentMeta,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, sid),
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+          ...visibleConds,
+        ),
       );
-      const presentationBySession = parseEstimatedSessionValuePresentationMap(
-        payload.presentations,
-        presentation,
-      );
-      const db = getDbClient().drizzle;
-      const sessionRows = (
-        await Promise.all(
-          chunkArray(sessionIds, SQLITE_IN_CHUNK_SIZE).map((chunk) =>
-            db
-              .select({ id: sessions.id, clearedAt: sessions.clearedAt })
-              .from(sessions)
-              .where(inArray(sessions.id, chunk)),
-          ),
-        )
-      ).flat();
-      const messageRows = (
-        await Promise.all(
-          chunkArray(sessionIds, SQLITE_IN_CHUNK_SIZE).map((chunk) =>
-            db
-              .select({
-                sessionId: messages.sessionId,
-                clientId: messages.clientId,
-                agentMeta: messages.agentMeta,
-                createdAt: messages.createdAt,
-                rewindAt: messages.rewindAt,
-              })
-              .from(messages)
-              .where(and(eq(messages.role, 'assistant'), inArray(messages.sessionId, chunk))),
-          ),
-        )
-      ).flat();
-      const clearedAtBySession = new Map<string, number | null>(
-        sessionRows.map((row) => [row.id, row.clearedAt ?? null]),
-      );
-      return summarizeEstimatedSessionValuesBySession(
-        messageRows,
-        clearedAtBySession,
-        sessionIds,
-        presentationBySession,
-        showSdkEstimate,
-      );
-    },
-  );
+    const entries = extractEstimatedSessionValueEntries(rows);
+    const totalValueMoney = addCompatibleRegionalMoney(entries.map((entry) => entry.money));
+    const hasCompleteUsdProjection = entries.every((entry) => typeof entry.costUsd === 'number');
+    return {
+      totalValueMoney,
+      ...(hasCompleteUsdProjection
+        ? {
+            totalValueUsd: entries.reduce((sum, item) => sum + (item.costUsd ?? 0), 0),
+          }
+        : {}),
+      entries,
+    };
+  });
 
   ipcMain.handle('local-db:messages:create', async (_e, sessionId: unknown, body: unknown) => {
     const sid = requireString(sessionId, 'sessionId');
@@ -722,6 +621,10 @@ export function registerMessageIpc(): void {
     async (_e, sessionId: unknown, clientId: unknown) => {
       const sid = requireString(sessionId, 'sessionId');
       const cid = requireString(clientId, 'clientId');
+      // 动态 import:messagePersistBroadcaster 已静态依赖本模块 createMessage,
+      // 静态反向 import 会成环。落库前点关闭/重试时先等同一 persistId 写完。
+      const { whenTurnErrorPersisted } = await import('../../messagePersistBroadcaster.js');
+      await whenTurnErrorPersisted(sid, cid);
       const msg = await dismissErrorMessage(sid, cid);
       if (!msg) throwIpcError('NOT_FOUND', 'Error message 不存在');
       return msg;
@@ -802,12 +705,7 @@ export function broadcastMessageRow(
   msg: Message,
   ownerScope?: DataOwnerBroadcastScope | null,
 ): void {
-  const [projectedMessage] = projectLegacyMessageBilling([msg]);
-  broadcastOwnedPayload(
-    'local-db:messages:created',
-    { sessionId, message: projectedMessage ?? msg },
-    ownerScope,
-  );
+  broadcastOwnedPayload('local-db:messages:created', { sessionId, message: msg }, ownerScope);
 }
 
 export interface MessageDeletedPayload {
@@ -1074,10 +972,18 @@ export async function commitMessageDeletion(
   // 口径要动得连 maker-shared/sessionList 的 messageCountLabel 一起改。
   let preview: string | null = null;
   try {
-    preview = await latestVisiblePreview(sessionId);
+    const latest = await latestVisiblePreviewRow(sessionId);
+    preview = extractMessagePreview(latest?.content, latest?.role);
+    await persistSessionListPreview(
+      sessionId,
+      preview,
+      latest?.role ?? null,
+      latest?.createdAt,
+      latest?.clientId,
+    );
   } catch (error) {
-    // 删除已经原子提交；投影查询失败不能把成功操作伪装成失败。广播保守空值，
-    // 后续 sessions:list / reseed 会按 DB 真相收敛。
+    // 删除已经原子提交；message.delete 事务已把 list_preview / role / count 置 NULL，
+    // 投影刷新失败不能把成功操作伪装成失败。广播保守空值，list 回落子查询。
     log.warn('message delete session projection refresh failed', {
       sessionId,
       deletedClientIds: clientIds,
@@ -1226,15 +1132,11 @@ export async function rewindPersistedUserMessageAfterClear(
   if (!row) return;
 
   const rewoundAt = Date.now();
-  const updated = await dbClient.exec(
-    `UPDATE messages
-        SET rewind_at = ?
-      WHERE session_id = ?
-        AND client_id = ?
-        AND role = 'user'
-        AND rewind_at IS NULL`,
-    [rewoundAt, sessionId, clientId],
-  );
+  const updated = await dbClient.tx('message.rewindUserAfterClear', {
+    sessionId,
+    clientId,
+    rewoundAt,
+  });
   if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
   if (updated.changes === 0) return;
 
@@ -1398,12 +1300,14 @@ export async function updateMessageContent(
   content: unknown,
 ): Promise<Message | null> {
   const ownerScope = captureOwnerBroadcastScope();
-  const db = getDbClient().drizzle;
+  const dbClient = getDbClient();
+  const db = dbClient.drizzle;
   const serialized = safeStringify(content);
-  await db
-    .update(messages)
-    .set({ content: serialized })
-    .where(and(eq(messages.sessionId, sessionId), eq(messages.clientId, clientId)));
+  await dbClient.tx('message.updateContent', {
+    sessionId,
+    clientId,
+    content: serialized,
+  });
   // 窄回读:刻意不选 content——tool_result 全文可达 MB 级,整行回读会把大字段
   // 经 DB worker 的 postMessage 结构化克隆再送回主进程一次。content 就是本次
   // 写入值,用 serialized 回填;行不存在(clientId 未落库)仍以回读判 null。
@@ -1578,35 +1482,20 @@ export async function createMessage(
       : (body.createdAt ?? now);
   const insertRow = messageCreateToRow(id, sessionId, body, visibleCreatedAt);
   try {
-    if (guarded) {
-      // Keep the session compare and message insert in one SQLite statement.
-      // A separate SELECT would allow /clear to win between the check and the
-      // INSERT on the DB worker.
-      const inserted = await dbClient.exec(
-        `INSERT INTO messages (
-           id, client_id, session_id, role, content, tool_use_id,
-           agent_meta, agent_kind, created_at
-         )
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-           FROM sessions AS s
-          WHERE s.id = ?
-            AND COALESCE(s.cleared_at, -1) = COALESCE(?, -1)
-         ON CONFLICT(session_id, client_id) DO NOTHING`,
-        [
-          insertRow.id,
-          insertRow.clientId,
-          insertRow.sessionId,
-          insertRow.role,
-          insertRow.content,
-          insertRow.toolUseId,
-          insertRow.agentMeta,
-          insertRow.agentKind,
-          insertRow.createdAt,
-          sessionId,
-          expected,
-        ],
-      );
-      if (inserted.changes === 0) {
+    const inserted = await dbClient.tx('message.insert', {
+      id: insertRow.id,
+      clientId: insertRow.clientId,
+      sessionId,
+      role: insertRow.role,
+      content: insertRow.content,
+      toolUseId: insertRow.toolUseId ?? null,
+      agentMeta: insertRow.agentMeta ?? null,
+      agentKind: insertRow.agentKind ?? null,
+      createdAt: insertRow.createdAt,
+      guarded,
+      expectedClearBoundaryMs: guarded ? (expected ?? null) : undefined,
+    });
+    if (guarded && inserted.changes === 0) {
         const [existingAfterGuard] = await db
           .select()
           .from(messages)
@@ -1636,9 +1525,6 @@ export async function createMessage(
         }
         throw new Error('Message insert skipped without a clear-boundary change');
       }
-    } else {
-      await db.insert(messages).values(insertRow);
-    }
   } catch (err) {
     const after = await db
       .select()
@@ -1764,231 +1650,8 @@ export async function updateAgentMeta(
     .where(and(eq(messages.sessionId, sessionId), eq(messages.clientId, clientId)));
 }
 
-export const ESTIMATED_SESSION_VALUE_BATCH_LIMIT = 256;
-
-export interface EstimatedSessionValueRow {
-  clientId: string;
-  agentMeta: string | null;
-  createdAt: number;
-  rewindAt: number | null;
-}
-
-export interface EstimatedSessionValueSummary {
-  projectionVersion: number;
-  estimatedValueMoney: RegionalMoney | null;
-  excludedActualMoney: RegionalMoney | null;
-  totalValueUsd?: number;
-}
-
-export const ESTIMATED_SESSION_VALUE_PROJECTION_VERSION = 1;
-
-function parseEstimatedSessionValuePresentation(
-  presentationValue: unknown,
-  showSdkEstimateValue: unknown,
-): { presentation: SdkCostPresentation; showSdkEstimate: boolean } {
-  const presentation: SdkCostPresentation =
-    optionalEnum(
-      presentationValue,
-      ['regular', 'hidden', 'estimate'] as const,
-      'custom provider cost presentation',
-    ) ?? 'regular';
-  if (showSdkEstimateValue !== undefined && typeof showSdkEstimateValue !== 'boolean') {
-    throwIpcError('INVALID_PARAMS', 'showSdkEstimate must be a boolean');
-  }
-  const showSdkEstimate =
-    typeof showSdkEstimateValue === 'boolean' ? showSdkEstimateValue : presentation === 'estimate';
-  return { presentation, showSdkEstimate };
-}
-
-function parseEstimatedSessionValueBatchIds(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) {
-    throwIpcError('INVALID_PARAMS', 'sessionIds must be an array');
-  }
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    const id = requireString(item, 'sessionId');
-    if (seen.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-    if (ids.length >= ESTIMATED_SESSION_VALUE_BATCH_LIMIT) break;
-  }
-  return ids;
-}
-
-function parseEstimatedSessionValuePresentationMap(
-  value: unknown,
-  fallback: SdkCostPresentation,
-): Map<string, SdkCostPresentation> {
-  const map = new Map<string, SdkCostPresentation>();
-  if (value === undefined) return map;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throwIpcError('INVALID_PARAMS', 'presentations must be an object');
-  }
-  for (const [sessionId, presentationValue] of Object.entries(value as Record<string, unknown>)) {
-    map.set(
-      sessionId,
-      optionalEnum(
-        presentationValue,
-        ['regular', 'hidden', 'estimate'] as const,
-        'custom provider cost presentation',
-      ) ?? fallback,
-    );
-  }
-  return map;
-}
-
-export function summarizeEstimatedSessionValueRows(
-  rows: readonly EstimatedSessionValueRow[],
-  clearedAtMs: number | null,
-  presentation: SdkCostPresentation = 'regular',
-  showSdkEstimate: boolean = presentation === 'estimate',
-): {
-  totalValueMoney: RegionalMoney | null;
-  excludedActualMoney: RegionalMoney | null;
-  totalValueUsd?: number;
-  entries: EstimatedSessionValueEntry[];
-} {
-  const visibleRows = rows.filter(
-    (row) => row.rewindAt === null && (clearedAtMs === null || row.createdAt > clearedAtMs),
-  );
-  const visibleEntries = extractEstimatedSessionValueEntries(
-    visibleRows,
-    presentation,
-    showSdkEstimate,
-  );
-  const lifetimeEntries = extractEstimatedSessionValueEntries(rows, presentation, showSdkEstimate);
-  const entries = mergeEstimatedSessionValueEntriesWithLifetimeExclusions(
-    visibleEntries,
-    lifetimeEntries,
-  );
-  const estimatedEntries = entries.flatMap((entry) => (entry.money ? [entry.money] : []));
-  const excludedEntries = entries.flatMap((entry) =>
-    entry.excludedActualMoney ? [entry.excludedActualMoney] : [],
-  );
-  const totalValueMoney = addCompatibleRegionalMoney(estimatedEntries);
-  const excludedActualMoney = addCompatibleRegionalMoney(excludedEntries);
-  const hasCompleteUsdProjection = entries.every(
-    (entry) => !entry.money || typeof entry.costUsd === 'number',
-  );
-  return {
-    totalValueMoney,
-    excludedActualMoney,
-    ...(hasCompleteUsdProjection
-      ? { totalValueUsd: entries.reduce((sum, item) => sum + (item.costUsd ?? 0), 0) }
-      : {}),
-    entries,
-  };
-}
-
-export function summarizeEstimatedSessionValuesBySession(
-  rows: ReadonlyArray<EstimatedSessionValueRow & { sessionId: string }>,
-  clearedAtBySession: ReadonlyMap<string, number | null>,
-  sessionIds: readonly string[],
-  presentationBySession: ReadonlyMap<string, SdkCostPresentation>,
-  showSdkEstimate: boolean,
-): Record<string, EstimatedSessionValueSummary> {
-  const grouped = new Map<string, EstimatedSessionValueRow[]>();
-  for (const sessionId of sessionIds) grouped.set(sessionId, []);
-  for (const row of rows) {
-    const list = grouped.get(row.sessionId);
-    if (list) list.push(row);
-  }
-  const result: Record<string, EstimatedSessionValueSummary> = {};
-  for (const [sessionId, sessionRows] of grouped) {
-    const presentation = presentationBySession.get(sessionId) ?? 'regular';
-    const summarized = summarizeEstimatedSessionValueRows(
-      sessionRows,
-      clearedAtBySession.get(sessionId) ?? null,
-      presentation,
-      showSdkEstimate,
-    );
-    result[sessionId] = {
-      projectionVersion: ESTIMATED_SESSION_VALUE_PROJECTION_VERSION,
-      estimatedValueMoney: summarized.totalValueMoney,
-      excludedActualMoney: summarized.excludedActualMoney,
-      ...(summarized.totalValueUsd != null ? { totalValueUsd: summarized.totalValueUsd } : {}),
-    };
-  }
-  return result;
-}
-
-function historicalCustomProviderFlagFromMeta(
-  meta: AgentMeta,
-  hasPerTurnCost?: boolean,
-): boolean | undefined {
-  const details = normalizeTurnUsageDetails(meta.turnUsageDetails);
-  return inferLegacyCustomProviderCostFlag({
-    turnCostIsEstimate: meta.turnCostIsEstimate,
-    turnCostIsCustomProvider: meta.turnCostIsCustomProvider,
-    turnCostProviderId: meta.turnCostProviderId,
-    hasPerTurnCost,
-    modelCandidates: [
-      meta.model,
-      details?.model,
-      ...(details?.models ?? []),
-      ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
-    ],
-  });
-}
-
-/**
- * Read-only history projection for the transcript renderer.
- *
- * Older assistant rows predate the immutable per-turn billing fields.  Do not
- * classify those rows from the session's current provider: a session may have
- * switched providers since the row was written.  Use the same versioned
- * bundled Gateway evidence as the session-value projection instead, and mark
- * unknown/ambiguous rows as custom so the renderer fails closed.  The returned
- * objects are fresh clones; this never writes the derived attribution back to
- * SQLite.
- */
-export function projectLegacyMessageBilling(history: Message[]): Message[] {
-  let projected: Message[] | null = null;
-  for (let index = 0; index < history.length; index++) {
-    const message = history[index];
-    if (message.role !== 'assistant') continue;
-    const meta = message.agentMeta;
-    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
-    if (typeof meta.turnCostIsCustomProvider === 'boolean') continue;
-    if (meta.turnCostIsEstimate === true) continue;
-    const money = normalizeRegionalMoney(meta.turnCost);
-    const hasLegacyActualCost =
-      (money?.kind === 'actual-cost' && money.amount > 0) ||
-      (typeof meta.turnCostUsd === 'number' &&
-        Number.isFinite(meta.turnCostUsd) &&
-        meta.turnCostUsd > 0);
-    const userMoney = normalizeRegionalMoney(meta.userTurnCost);
-    const hasLegacyActualUserCost = userMoney
-      ? userMoney.kind === 'actual-cost' && userMoney.amount > 0
-      : meta.userTurnCostIsEstimate !== true &&
-        typeof meta.userTurnCostUsd === 'number' &&
-        Number.isFinite(meta.userTurnCostUsd) &&
-        meta.userTurnCostUsd > 0;
-    if (!hasLegacyActualCost && !hasLegacyActualUserCost) continue;
-    // Reuse the same immutable model evidence as the session-value projection.  Unknown or
-    // multi-model rows fail closed as custom-provider SDK cost. A cost-free closing segment with
-    // only the user-round total also fails closed because its model cannot classify prior segments.
-    // The session's current Provider is deliberately never consulted here.
-    const turnCostIsCustomProvider =
-      historicalCustomProviderFlagFromMeta(meta, hasLegacyActualCost) ?? true;
-    projected ??= history.slice();
-    projected[index] = {
-      ...message,
-      agentMeta: {
-        ...meta,
-        turnCostIsCustomProvider,
-      },
-    };
-  }
-  return projected ?? history;
-}
-
 export function extractEstimatedSessionValueEntries(
-  rows: ReadonlyArray<{ clientId: string; agentMeta: string | null }>,
-  presentation: SdkCostPresentation = 'regular',
-  showSdkEstimate: boolean = presentation === 'estimate',
+  rows: Array<{ clientId: string; agentMeta: string | null }>,
 ): EstimatedSessionValueEntry[] {
   const entries: EstimatedSessionValueEntry[] = [];
   for (const row of rows) {
@@ -2002,121 +1665,48 @@ export function extractEstimatedSessionValueEntries(
     } catch {
       continue;
     }
-    if (!meta) continue;
+    if (meta?.turnCostIsEstimate !== true) continue;
     const structured = normalizeRegionalMoney(meta.turnCost);
-    const legacyCostUsd =
-      typeof meta.turnCostUsd === 'number' &&
-      Number.isFinite(meta.turnCostUsd) &&
-      meta.turnCostUsd > 0
-        ? meta.turnCostUsd
-        : null;
-    const rawMoney =
-      structured && structured.amount > 0
-        ? structured
-        : legacyCostUsd != null
-          ? meta.turnCostIsEstimate === true
-            ? usdMoney(legacyCostUsd, 'value-estimate', 'legacy-usd')
-            : usdMoney(legacyCostUsd)
+    if (structured && structured.amount > 0) {
+      const recomputed =
+        structured.currency === 'USD'
+          ? resolveStaleCodexSubscriptionValueEstimate(
+              structured.amount,
+              normalizeTurnUsageDetails(meta.turnUsageDetails),
+              meta.model,
+            )
           : null;
-    if (!rawMoney) continue;
-
-    const turnUsageDetails = normalizeTurnUsageDetails(meta.turnUsageDetails);
-    const historicalProviderFlag = historicalCustomProviderFlagFromMeta(meta);
-    const entryProviderFlag = resolveCustomProviderCostFlag(
-      meta.turnCostIsCustomProvider ?? historicalProviderFlag,
-      meta.turnCostProviderId,
+      const money = asValueEstimateMoney({
+        ...structured,
+        amount: recomputed ?? structured.amount,
+      });
+      entries.push({
+        clientId: row.clientId,
+        money,
+        ...(money.currency === 'USD' ? { costUsd: money.amount } : {}),
+      });
+      continue;
+    }
+    if (
+      typeof meta.turnCostUsd !== 'number' ||
+      !Number.isFinite(meta.turnCostUsd) ||
+      meta.turnCostUsd <= 0
+    ) {
+      continue;
+    }
+    const recomputed = resolveStaleCodexSubscriptionValueEstimate(
+      meta.turnCostUsd,
+      normalizeTurnUsageDetails(meta.turnUsageDetails),
+      meta.model,
     );
-    const fallbackPresentation =
-      meta.turnCostIsCustomProvider === undefined &&
-      (meta.turnCostProviderId !== undefined || historicalProviderFlag !== undefined)
-        ? resolveTurnSdkCostPresentation({
-            money: rawMoney,
-            isCustomProviderCost: entryProviderFlag,
-            fallback: presentation,
-            showSdkEstimate,
-          })
-        : presentation;
-    const turnPresentation = resolveTurnSdkCostPresentation({
-      money: rawMoney,
-      isCustomProviderCost: meta.turnCostIsCustomProvider ?? historicalProviderFlag,
-      fallback: fallbackPresentation,
-      showSdkEstimate,
-    });
-    const projected = projectSdkCostMoneyWithBreakdown(
-      rawMoney,
-      turnUsageDetails?.perModelCost?.map((entry) => entry.money),
-      turnPresentation,
-    );
-    const excludedActualMoney =
-      rawMoney.kind === 'actual-cost' &&
-      meta.turnCostIsEstimate !== true &&
-      turnPresentation !== 'regular'
-        ? rawMoney
-        : null;
-    const canExposeProjectedEstimate =
-      Boolean(projected && projected.amount > 0) &&
-      (projected?.kind === 'value-estimate' || meta.turnCostIsEstimate === true);
-    if (!canExposeProjectedEstimate && !excludedActualMoney) continue;
-
-    const estimateMoney = canExposeProjectedEstimate
-      ? projected!.kind === 'value-estimate'
-        ? projected!
-        : asValueEstimateMoney(projected!)
-      : null;
-    const recomputed =
-      estimateMoney?.currency === 'USD' &&
-      estimateMoney.estimateReasons?.includes('sdk-estimate') !== true
-        ? resolveStaleCodexSubscriptionValueEstimate(
-            estimateMoney.amount,
-            turnUsageDetails,
-            meta.model,
-          )
-        : null;
-    const money = estimateMoney
-      ? {
-          ...estimateMoney,
-          amount: recomputed ?? estimateMoney.amount,
-        }
-      : null;
+    const costUsd = recomputed ?? meta.turnCostUsd;
     entries.push({
       clientId: row.clientId,
-      ...(money ? { money } : {}),
-      ...(money?.currency === 'USD' ? { costUsd: money.amount } : {}),
-      ...(excludedActualMoney ? { excludedActualMoney } : {}),
-      ...(typeof meta.turnCostIsCustomProvider === 'boolean'
-        ? { turnCostIsCustomProvider: meta.turnCostIsCustomProvider }
-        : historicalProviderFlag !== undefined
-          ? { turnCostIsCustomProvider: entryProviderFlag }
-          : {}),
-      ...(typeof meta.turnCostProviderId === 'string' || meta.turnCostProviderId === null
-        ? { turnCostProviderId: meta.turnCostProviderId }
-        : {}),
-      ...(turnUsageDetails?.perModelCost?.length ? { turnUsageDetails } : {}),
+      money: usdMoney(costUsd, 'value-estimate', 'legacy-usd'),
+      costUsd,
     });
   }
   return entries;
-}
-
-/**
- * Visible value estimates follow the transcript boundary, while exclusions for
- * legacy custom-provider SDK amounts follow the lifetime session ledger.  Merge
- * the latter back without making cleared or rewound estimates visible again.
- */
-export function mergeEstimatedSessionValueEntriesWithLifetimeExclusions(
-  visibleEntries: readonly EstimatedSessionValueEntry[],
-  lifetimeEntries: readonly EstimatedSessionValueEntry[],
-): EstimatedSessionValueEntry[] {
-  const merged = new Map(
-    visibleEntries.map((entry) => [entry.clientId, { ...entry }] as const),
-  );
-  for (const entry of lifetimeEntries) {
-    if (!entry.excludedActualMoney) continue;
-    merged.set(entry.clientId, {
-      ...(merged.get(entry.clientId) ?? { clientId: entry.clientId }),
-      excludedActualMoney: entry.excludedActualMoney,
-    });
-  }
-  return [...merged.values()];
 }
 
 /**

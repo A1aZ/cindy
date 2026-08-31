@@ -103,8 +103,7 @@ const SCHEDULER_DDL = [
       total_cost_usd REAL,
       total_cost_amount REAL NOT NULL DEFAULT 0,
       total_cost_currency TEXT,
-      total_cost_is_approximate INTEGER NOT NULL DEFAULT 0,
-      provider_id TEXT
+      total_cost_is_approximate INTEGER NOT NULL DEFAULT 0
     )
   `,
   `
@@ -179,8 +178,6 @@ const SCHEDULER_DDL = [
       estimated_value_usd REAL NOT NULL DEFAULT 0,
       cost_amount REAL NOT NULL DEFAULT 0,
       estimated_value_amount REAL NOT NULL DEFAULT 0,
-      sdk_estimated_value_amount REAL NOT NULL DEFAULT 0,
-      cost_provider_attribution_version INTEGER NOT NULL DEFAULT 1,
       cost_currency TEXT,
       cost_is_approximate INTEGER NOT NULL DEFAULT 0,
       cost_attribution TEXT NOT NULL DEFAULT 'legacy',
@@ -191,6 +188,72 @@ const SCHEDULER_DDL = [
     )
   `,
   'CREATE INDEX idx_schedule_runs_schedule ON schedule_runs(schedule_id, fired_at)',
+  `
+    CREATE TABLE schedule_session_latest_runs (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      run_id TEXT NOT NULL UNIQUE REFERENCES schedule_runs(id) ON DELETE CASCADE,
+      fired_at INTEGER NOT NULL
+    )
+  `,
+  `
+    CREATE TRIGGER schedule_session_latest_run_insert
+    AFTER INSERT ON schedule_runs
+    WHEN NEW.session_id IS NOT NULL
+    BEGIN
+      INSERT INTO schedule_session_latest_runs (session_id, run_id, fired_at)
+      VALUES (NEW.session_id, NEW.id, NEW.fired_at)
+      ON CONFLICT(session_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        fired_at = excluded.fired_at
+      WHERE excluded.fired_at > schedule_session_latest_runs.fired_at
+        OR (excluded.fired_at = schedule_session_latest_runs.fired_at
+          AND excluded.run_id > schedule_session_latest_runs.run_id);
+    END
+  `,
+  `
+    CREATE TRIGGER schedule_session_latest_run_delete
+    AFTER DELETE ON schedule_runs
+    WHEN OLD.session_id IS NOT NULL
+    BEGIN
+      DELETE FROM schedule_session_latest_runs
+      WHERE session_id = OLD.session_id AND run_id = OLD.id;
+      INSERT INTO schedule_session_latest_runs (session_id, run_id, fired_at)
+      SELECT OLD.session_id, id, fired_at
+      FROM schedule_runs
+      WHERE session_id = OLD.session_id
+      ORDER BY fired_at DESC, id DESC
+      LIMIT 1
+      ON CONFLICT(session_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        fired_at = excluded.fired_at;
+    END
+  `,
+  `
+    CREATE TRIGGER schedule_session_latest_run_update
+    AFTER UPDATE OF session_id, fired_at ON schedule_runs
+    BEGIN
+      DELETE FROM schedule_session_latest_runs
+      WHERE session_id = OLD.session_id AND run_id = OLD.id;
+      INSERT INTO schedule_session_latest_runs (session_id, run_id, fired_at)
+      SELECT OLD.session_id, id, fired_at
+      FROM schedule_runs
+      WHERE OLD.session_id IS NOT NULL AND session_id = OLD.session_id
+      ORDER BY fired_at DESC, id DESC
+      LIMIT 1
+      ON CONFLICT(session_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        fired_at = excluded.fired_at;
+      INSERT INTO schedule_session_latest_runs (session_id, run_id, fired_at)
+      SELECT NEW.session_id, NEW.id, NEW.fired_at
+      WHERE NEW.session_id IS NOT NULL
+      ON CONFLICT(session_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        fired_at = excluded.fired_at
+      WHERE excluded.fired_at > schedule_session_latest_runs.fired_at
+        OR (excluded.fired_at = schedule_session_latest_runs.fired_at
+          AND excluded.run_id > schedule_session_latest_runs.run_id);
+    END
+  `,
 ];
 
 function createStorageHarness() {
@@ -282,6 +345,140 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
+  it('returns one latest session mapping plus bounded running and unread rows', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({ id: 'sch-sidebar-index' });
+    try {
+      harness.db.run(sql`
+        INSERT INTO sessions (id, title, source, workspace_kind, created_at, updated_at)
+        VALUES ('sess-sidebar-index', 'Persistent schedule session', 'desktop', 'dialogue', 1, 1)
+      `);
+      await harness.storage.insert(schedule);
+      await harness.storage.insertRun({
+        id: 'run-old-read',
+        scheduleId: schedule.id,
+        sessionId: 'sess-sidebar-index',
+        firedAt: 10,
+        finishedAt: 11,
+        status: 'success',
+        readAt: 11,
+      });
+      await harness.storage.insertRun({
+        id: 'run-old-running',
+        scheduleId: schedule.id,
+        sessionId: 'sess-sidebar-index',
+        firedAt: 12,
+        status: 'running',
+      });
+      await harness.storage.insertRun({
+        id: 'run-old-unread',
+        scheduleId: schedule.id,
+        sessionId: 'sess-sidebar-index',
+        firedAt: 15,
+        finishedAt: 16,
+        status: 'failed',
+      });
+      await harness.storage.insertRun({
+        id: 'run-latest-read',
+        scheduleId: schedule.id,
+        sessionId: 'sess-sidebar-index',
+        firedAt: 20,
+        finishedAt: 21,
+        status: 'success',
+        readAt: 21,
+      });
+
+      const initial = new Map(
+        (await harness.storage.listSidebarIndexRuns()).map((run) => [run.runId, run]),
+      );
+      expect([...initial.keys()]).toEqual([
+        'run-old-unread',
+        'run-old-running',
+        'run-latest-read',
+      ]);
+      expect(initial.get('run-latest-read')?.sessionId).toBe('sess-sidebar-index');
+      expect(initial.get('run-old-unread')?.sessionId).toBe('sess-sidebar-index');
+      expect(initial.get('run-old-running')?.sessionId).toBeUndefined();
+
+      await harness.storage.deleteRun('run-latest-read');
+      const afterDelete = new Map(
+        (await harness.storage.listSidebarIndexRuns()).map((run) => [run.runId, run]),
+      );
+      expect(afterDelete.get('run-old-unread')?.sessionId).toBe('sess-sidebar-index');
+
+      await harness.storage.updateRun('run-old-running', { firedAt: 30 });
+      const afterUpdate = new Map(
+        (await harness.storage.listSidebarIndexRuns()).map((run) => [run.runId, run]),
+      );
+      expect(afterUpdate.get('run-old-running')?.sessionId).toBe('sess-sidebar-index');
+      expect(afterUpdate.get('run-old-unread')?.sessionId).toBe('sess-sidebar-index');
+      expect([...afterUpdate.keys()]).toEqual(['run-old-unread', 'run-old-running']);
+
+      harness.db.run(sql`DELETE FROM sessions WHERE id = 'sess-sidebar-index'`);
+      await expect(harness.db.select().from(schema.scheduleSessionLatestRuns)).resolves.toEqual([]);
+      expect(
+        (await harness.storage.listSidebarIndexRuns()).every((run) => run.sessionId === undefined),
+      ).toBe(true);
+    } finally {
+      harness.close();
+    }
+  });
+
+  it('keeps renamed legacy aliases from the latest-session projection', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({
+      id: 'sch-renamed-legacy',
+      name: 'new automation name',
+      workingDir: '/repo',
+    });
+    try {
+      harness.db.run(sql`
+        INSERT INTO sessions (
+          id, title, source, workspace_kind, working_dir, created_at, updated_at
+        ) VALUES
+          (
+            'sess-renamed-anchor', '[Schedule] old automation name', 'scheduler',
+            'project', '/repo', 1, 1
+          ),
+          (
+            'sess-renamed-orphan', '[Schedule] old automation name', 'scheduler',
+            'project', '/repo', 2, 2
+          )
+      `);
+      await harness.storage.insert(schedule);
+      enableLegacySessionFallback(harness, schedule.id);
+      await harness.storage.insertRun({
+        id: 'run-renamed-anchor',
+        scheduleId: schedule.id,
+        sessionId: 'sess-renamed-anchor',
+        firedAt: 10,
+        finishedAt: 11,
+        status: 'success',
+        readAt: 11,
+      });
+
+      const runs = await harness.storage.listSidebarIndexRuns();
+
+      expect(runs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            runId: 'run-renamed-anchor',
+            scheduleId: schedule.id,
+            sessionId: 'sess-renamed-anchor',
+          }),
+          expect.objectContaining({
+            runId: 'legacy-session:sess-renamed-orphan',
+            scheduleId: schedule.id,
+            sessionId: 'sess-renamed-orphan',
+          }),
+        ]),
+      );
+      expect(runs).toHaveLength(2);
+    } finally {
+      harness.close();
+    }
+  });
+
   it('hydrates exact run cost from persisted assistant runId metadata', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({ id: 'sch-run-cost' });
@@ -303,9 +500,9 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
         INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
         VALUES
           ('run-exact-assistant-1', 'run-exact-assistant-1', 'sess-run-cost', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-run-cost","runId":"run-exact"},"turnCostUsd":0.42,"turnCostIsCustomProvider":false}', 11),
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-run-cost","runId":"run-exact"},"turnCostUsd":0.42,"turnUsageDetails":{"inputTokens":100,"outputTokens":20,"cacheReadTokens":30,"cacheCreateTokens":5}}', 11),
           ('run-exact-assistant-2', 'run-exact-assistant-2', 'sess-run-cost', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-run-cost","runId":"run-exact"},"turnCostUsd":0.29,"turnCostIsEstimate":true}', 12)
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-run-cost","runId":"run-exact"},"turnCostUsd":0.29,"turnCostIsEstimate":true,"turnUsageDetails":{"inputTokens":200,"outputTokens":25,"cacheReadTokens":50,"cacheCreateTokens":0}}', 12)
       `);
 
       await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
@@ -315,163 +512,8 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           estimatedValueUsd: 0,
           costMoney: actualMoneyFromLegacyUsd(0.42),
           estimatedValueMoney: estimatedMoneyFromLegacyUsd(0.29),
+          totalTokens: 430,
           costAttribution: 'exact',
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('combines independent estimates with reclassified legacy SDK spend', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({ id: 'sch-combined-estimate', providerId: 'custom-provider' });
-    try {
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-combined-estimate',
-        scheduleId: schedule.id,
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-        costUsd: 0.42,
-        estimatedValueUsd: 0.18,
-        costAttribution: 'direct',
-      });
-      harness.db.run(sql`
-        UPDATE schedule_runs
-        SET cost_provider_attribution_version = 0
-        WHERE id = 'run-combined-estimate'
-      `);
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-combined-estimate',
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('fails closed legacy run snapshots after the schedule provider changes', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-legacy-run-snapshot',
-      // The historical run may have used a deleted custom Provider. The current Provider is not
-      // immutable evidence for that old snapshot, so a bundled Provider must not reopen it.
-      providerId: 'xd',
-    });
-    try {
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-legacy-snapshot',
-        scheduleId: schedule.id,
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-        costUsd: 0.42,
-        costAttribution: 'legacy',
-      });
-
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-legacy-snapshot',
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-          costAttribution: 'legacy',
-        }),
-      ]);
-      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-        expect.objectContaining({
-          scheduleId: schedule.id,
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.42, 10),
-          }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.42, 10),
-          }),
-          sessionCount: 0,
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('keeps reference estimates while reclassifying SDK and historical custom-provider amounts', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({ id: 'sch-sdk-projection' });
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (id, title, source, workspace_kind, created_at, updated_at, total_cost_usd)
-        VALUES ('sess-sdk-projection', 'SDK projection session', 'desktop', 'dialogue', 1, 1, 0)
-      `);
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-sdk-projection',
-        scheduleId: schedule.id,
-        sessionId: 'sess-sdk-projection',
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-      });
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES
-          ('sdk-historical', 'sdk-historical', 'sess-sdk-projection', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-sdk-projection","runId":"run-sdk-projection"},"turnCost":{"amount":0.42,"currency":"CNY","approximate":false,"kind":"actual-cost"},"turnCostIsCustomProvider":true}', 11),
-          ('sdk-mixed', 'sdk-mixed', 'sess-sdk-projection', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-sdk-projection","runId":"run-sdk-projection"},"turnCost":{"amount":0.61,"currency":"CNY","approximate":true,"kind":"value-estimate","estimateReasons":["reference-price","sdk-estimate"]},"turnCostIsEstimate":true,"turnCostIsCustomProvider":true,"turnUsageDetails":{"inputTokens":1,"outputTokens":0,"cacheReadTokens":0,"cacheCreateTokens":0,"perModelCost":[{"model":"reference-model","money":{"amount":0.19,"currency":"CNY","approximate":true,"kind":"value-estimate","estimateReasons":["reference-price"]}},{"model":"sdk-model","money":{"amount":0.42,"currency":"CNY","approximate":true,"kind":"value-estimate","estimateReasons":["sdk-estimate"]}}]}}', 12)
-      `);
-
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-sdk-projection',
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: {
-            amount: expect.closeTo(1.03, 10),
-            currency: 'CNY',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: expect.arrayContaining(['reference-price', 'sdk-estimate']),
-          },
-          sdkEstimatedValueMoney: {
-            amount: expect.closeTo(0.84, 10),
-            currency: 'CNY',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: ['sdk-estimate'],
-          },
-          costAttribution: 'exact',
-        }),
-      ]);
-
-      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-        expect.objectContaining({
-          scheduleId: schedule.id,
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(1.03, 10),
-            currency: 'CNY',
-          }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.84, 10),
-            currency: 'CNY',
-          }),
-          sessions: [
-            expect.objectContaining({
-              sessionId: 'sess-sdk-projection',
-              totalSdkEstimatedValueMoney: expect.objectContaining({
-                amount: expect.closeTo(0.84, 10),
-                currency: 'CNY',
-              }),
-            }),
-          ],
         }),
       ]);
     } finally {
@@ -508,18 +550,18 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           ('user-a1', 'user-a1', 'sess-shared', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a1"}}', 10),
           ('assistant-a1', 'assistant-a1', 'sess-shared', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a1"},"turnCostUsd":0.1,"turnCostIsCustomProvider":false}', 11),
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a1"},"turnCostUsd":0.1}', 11),
           ('manual-user', 'manual-user', 'sess-shared', 'user', '{}', NULL, 20),
           ('manual-assistant', 'manual-assistant', 'sess-shared', 'assistant', '{}',
             '{"turnCostUsd":0.5}', 21),
           ('user-b1', 'user-b1', 'sess-shared', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-b","runId":"run-b1"}}', 30),
           ('assistant-b1', 'assistant-b1', 'sess-shared', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-b","runId":"run-b1"},"turnCostUsd":0.2,"turnCostIsCustomProvider":false}', 31),
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-b","runId":"run-b1"},"turnCostUsd":0.2}', 31),
           ('user-a2', 'user-a2', 'sess-shared', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a2"}}', 50),
           ('assistant-a2', 'assistant-a2', 'sess-shared', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a2"},"turnCostUsd":0.3,"turnCostIsCustomProvider":false}', 51)
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-a","runId":"run-a2"},"turnCostUsd":0.3}', 51)
       `);
 
       const summaries = new Map(
@@ -847,11 +889,11 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
         VALUES
           ('m1', 'm1', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":123.45}', 1, NULL),
           ('z-user', 'z-user', 'sess-bound', 'user', '{}', '{"origin":{"kind":"scheduler","scheduleId":"sch-cost","scheduleName":"PR followup"}}', 10, NULL),
-          ('a-assistant', 'a-assistant', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.42,"turnCostIsCustomProvider":false}', 10, NULL),
-          ('m4', 'm4', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.08,"turnCostIsCustomProvider":false}', 30, NULL),
+          ('a-assistant', 'a-assistant', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.42}', 10, NULL),
+          ('m4', 'm4', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.08}', 30, NULL),
           ('m4-estimate', 'm4-estimate', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":9.99,"turnCostIsEstimate":true}', 35, NULL),
           ('rewound-user', 'rewound-user', 'sess-bound', 'user', '{}', '{"origin":{"kind":"scheduler","scheduleId":"sch-cost","scheduleName":"PR followup"}}', 36, 60),
-          ('rewound-assistant', 'rewound-assistant', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.25,"turnCostIsCustomProvider":false}', 37, 60),
+          ('rewound-assistant', 'rewound-assistant', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":0.25}', 37, 60),
           ('m5', 'm5', 'sess-bound', 'user', '{}', NULL, 40, NULL),
           ('m6', 'm6', 'sess-bound', 'assistant', '{}', '{"turnCostUsd":44}', 50, NULL)
       `);
@@ -953,7 +995,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           ('api-user', 'api-user', 'sess-api', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-api"}}', 10),
           ('api-assistant', 'api-assistant', 'sess-api', 'assistant', '{}',
-            '{"turnCostUsd":0.42,"turnCostIsCustomProvider":false}', 11)
+            '{"turnCostUsd":0.42}', 11)
       `);
 
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
@@ -1071,435 +1113,6 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
-  it('persists only the SDK part of a mixed direct-only estimate', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({ id: 'sch-direct-sdk-estimate' });
-    const dbClient = { drizzle: harness.db } as unknown as DbClient;
-    try {
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-direct-sdk-estimate',
-        scheduleId: schedule.id,
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-        costAttribution: 'unavailable',
-      });
-      setCurrentDbClient(dbClient, 'test-user');
-
-      await recordScheduleRunCostDirect({
-        runId: 'run-direct-sdk-estimate',
-        money: {
-          amount: 0.61,
-          currency: 'CNY',
-          approximate: true,
-          kind: 'value-estimate',
-          estimateReasons: ['reference-price', 'sdk-estimate'],
-        },
-        turnCostIsCustomProvider: true,
-        turnUsageDetails: {
-          inputTokens: 1,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheCreateTokens: 0,
-          totalTokens: 1,
-          cacheHitRate: 0,
-          perModelCost: [
-            {
-              model: 'reference-model',
-              money: {
-                amount: 0.19,
-                currency: 'CNY',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: ['reference-price'],
-              },
-            },
-            {
-              model: 'sdk-model',
-              money: {
-                amount: 0.42,
-                currency: 'CNY',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: ['sdk-estimate'],
-              },
-            },
-          ],
-        },
-      });
-
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-direct-sdk-estimate',
-          estimatedValueMoney: {
-            amount: expect.closeTo(0.61, 10),
-            currency: 'CNY',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: expect.arrayContaining(['sdk-estimate']),
-          },
-          sdkEstimatedValueMoney: {
-            amount: expect.closeTo(0.42, 10),
-            currency: 'CNY',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: ['sdk-estimate'],
-          },
-          costAttribution: 'direct',
-        }),
-      ]);
-    } finally {
-      clearCurrentDbClient(dbClient);
-      harness.close();
-    }
-  });
-
-  it('reclassifies legacy custom-provider message cost inside a mixed run', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-mixed-custom',
-      providerId: 'custom-provider',
-      targetSessionId: 'sess-mixed-custom',
-    });
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd, provider_id
-        ) VALUES (
-          'sess-mixed-custom', 'Mixed custom session', 'desktop', 'dialogue', 1, 1, 0.6,
-          'custom-provider'
-        )
-      `);
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-mixed-custom',
-        scheduleId: schedule.id,
-        sessionId: 'sess-mixed-custom',
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-        costUsd: 0.6,
-        costAttribution: 'mixed',
-      });
-      harness.db.run(sql`
-        UPDATE schedule_runs
-        SET cost_provider_attribution_version = 0
-        WHERE id = 'run-mixed-custom'
-      `);
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES (
-          'mixed-custom-assistant', 'mixed-custom-assistant', 'sess-mixed-custom', 'assistant', '{}',
-          '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed-custom","runId":"run-mixed-custom"},"turnCostUsd":0.42,"turnCostIsCustomProvider":true}',
-          11
-        )
-      `);
-
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-mixed-custom',
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
-          costAttribution: 'exact',
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('uses classified message ledgers for current mixed snapshots', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-current-mixed-custom',
-      providerId: 'custom-provider',
-      targetSessionId: 'sess-current-mixed-custom',
-    });
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd, provider_id
-        ) VALUES (
-          'sess-current-mixed-custom', 'Current mixed custom session', 'desktop', 'dialogue',
-          1, 1, 0, 'custom-provider'
-        )
-      `);
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-current-mixed-custom',
-        scheduleId: schedule.id,
-        sessionId: 'sess-current-mixed-custom',
-        firedAt: 10,
-        finishedAt: 20,
-        status: 'success',
-        costMoney: {
-          amount: 0.3,
-          currency: 'USD',
-          approximate: false,
-          kind: 'actual-cost',
-        },
-        estimatedValueMoney: {
-          amount: 0.42,
-          currency: 'USD',
-          approximate: true,
-          kind: 'value-estimate',
-          estimateReasons: ['sdk-estimate'],
-        },
-        sdkEstimatedValueMoney: {
-          amount: 0.42,
-          currency: 'USD',
-          approximate: true,
-          kind: 'value-estimate',
-          estimateReasons: ['sdk-estimate'],
-        },
-        costAttribution: 'mixed',
-      });
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES (
-          'current-mixed-custom-assistant', 'current-mixed-custom-assistant',
-          'sess-current-mixed-custom', 'assistant', '{}',
-          '{"origin":{"kind":"scheduler","scheduleId":"sch-current-mixed-custom","runId":"run-current-mixed-custom"},"turnCostUsd":0.42,"turnCostIsCustomProvider":true}',
-          11
-        )
-      `);
-
-      await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
-        expect.objectContaining({
-          id: 'run-current-mixed-custom',
-          costMoney: expect.objectContaining({ amount: expect.closeTo(0.3, 10) }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-          costAttribution: 'exact',
-        }),
-      ]);
-      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-        expect.objectContaining({
-          scheduleId: schedule.id,
-          totalMoney: expect.objectContaining({ amount: expect.closeTo(0.3, 10) }),
-          totalEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.42, 10),
-          }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.42, 10),
-          }),
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('keeps legacy message attribution stable when the Scheduler provider changes', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-legacy-model-attribution',
-      providerId: 'openai',
-      targetSessionId: 'sess-legacy-model-attribution',
-    });
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd, provider_id
-        ) VALUES (
-          'sess-legacy-model-attribution', 'Legacy model attribution', 'desktop', 'dialogue',
-          1, 1, 0, 'openai'
-        )
-      `);
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-legacy-custom-model',
-        scheduleId: schedule.id,
-        sessionId: 'sess-legacy-model-attribution',
-        firedAt: 20,
-        finishedAt: 21,
-        status: 'success',
-        costAttribution: 'unavailable',
-      });
-      await harness.storage.insertRun({
-        id: 'run-legacy-gateway-model',
-        scheduleId: schedule.id,
-        sessionId: 'sess-legacy-model-attribution',
-        firedAt: 10,
-        finishedAt: 11,
-        status: 'success',
-        costAttribution: 'unavailable',
-      });
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES
-          (
-            'legacy-custom-model', 'legacy-custom-model', 'sess-legacy-model-attribution',
-            'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-model-attribution","runId":"run-legacy-custom-model"},"model":"removed-custom-model","turnCost":{"amount":0.42,"currency":"CNY","approximate":false,"kind":"actual-cost"}}',
-            20
-          ),
-          (
-            'legacy-gateway-model', 'legacy-gateway-model', 'sess-legacy-model-attribution',
-            'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-model-attribution","runId":"run-legacy-gateway-model"},"model":"claude-sonnet-4-6","turnCost":{"amount":0.31,"currency":"CNY","approximate":false,"kind":"actual-cost"}}',
-            10
-          )
-      `);
-
-      const expectPerTurnAttribution = async () => {
-        const byId = new Map(
-          (await harness.storage.listRuns(schedule.id)).map((run) => [run.id, run]),
-        );
-        expect(byId.get('run-legacy-custom-model')).toEqual(
-          expect.objectContaining({
-            costMoney: expect.objectContaining({ amount: 0 }),
-            estimatedValueMoney: expect.objectContaining({
-              amount: expect.closeTo(0.42, 10),
-              kind: 'value-estimate',
-              estimateReasons: expect.arrayContaining(['sdk-estimate']),
-            }),
-            sdkEstimatedValueMoney: expect.objectContaining({
-              amount: expect.closeTo(0.42, 10),
-            }),
-            costAttribution: 'exact',
-          }),
-        );
-        expect(byId.get('run-legacy-gateway-model')).toEqual(
-          expect.objectContaining({
-            costMoney: expect.objectContaining({
-              amount: expect.closeTo(0.31, 10),
-              kind: 'actual-cost',
-            }),
-            estimatedValueMoney: expect.objectContaining({ amount: 0 }),
-            sdkEstimatedValueMoney: undefined,
-            costAttribution: 'exact',
-          }),
-        );
-        await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-          expect.objectContaining({
-            scheduleId: schedule.id,
-            totalMoney: expect.objectContaining({
-              amount: expect.closeTo(0.31, 10),
-              kind: 'actual-cost',
-            }),
-            totalEstimatedValueMoney: expect.objectContaining({
-              amount: expect.closeTo(0.42, 10),
-              kind: 'value-estimate',
-            }),
-            totalSdkEstimatedValueMoney: expect.objectContaining({
-              amount: expect.closeTo(0.42, 10),
-            }),
-          }),
-        ]);
-      };
-
-      await expectPerTurnAttribution();
-
-      await harness.storage.update(schedule.id, { providerId: 'custom-provider' });
-      harness.db.run(sql`
-        UPDATE sessions
-        SET provider_id = 'custom-provider'
-        WHERE id = 'sess-legacy-model-attribution'
-      `);
-
-      await expectPerTurnAttribution();
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('fails closed legacy direct and mixed snapshots after the Scheduler provider changes', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-legacy-direct-snapshot',
-      providerId: 'custom-provider',
-      targetSessionId: 'sess-legacy-direct-snapshot',
-    });
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd, provider_id
-        ) VALUES (
-          'sess-legacy-direct-snapshot', 'Legacy direct snapshot', 'desktop', 'dialogue',
-          1, 1, 0, 'custom-provider'
-        )
-      `);
-      await harness.storage.insert(schedule);
-      await harness.storage.insertRun({
-        id: 'run-legacy-direct-snapshot',
-        scheduleId: schedule.id,
-        sessionId: 'sess-legacy-direct-snapshot',
-        firedAt: 20,
-        finishedAt: 21,
-        status: 'success',
-        costUsd: 0.4,
-        costAttribution: 'direct',
-      });
-      await harness.storage.insertRun({
-        id: 'run-legacy-mixed-snapshot',
-        scheduleId: schedule.id,
-        sessionId: 'sess-legacy-direct-snapshot',
-        firedAt: 10,
-        finishedAt: 11,
-        status: 'success',
-        costUsd: 0.7,
-        costAttribution: 'mixed',
-      });
-      harness.db.run(sql`
-        UPDATE schedule_runs
-        SET cost_provider_attribution_version = 0
-        WHERE id IN ('run-legacy-direct-snapshot', 'run-legacy-mixed-snapshot')
-      `);
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES (
-          'legacy-mixed-snapshot-assistant', 'legacy-mixed-snapshot-assistant',
-          'sess-legacy-direct-snapshot', 'assistant', '{}',
-          '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-direct-snapshot","runId":"run-legacy-mixed-snapshot"},"turnCostUsd":0.2,"turnCostIsCustomProvider":true}',
-          10
-        )
-      `);
-
-      await harness.storage.update(schedule.id, { providerId: 'xd' });
-      harness.db.run(sql`
-        UPDATE sessions
-        SET provider_id = 'xd'
-        WHERE id = 'sess-legacy-direct-snapshot'
-      `);
-
-      const byId = new Map(
-        (await harness.storage.listRuns(schedule.id)).map((run) => [run.id, run]),
-      );
-      expect(byId.get('run-legacy-direct-snapshot')).toEqual(
-        expect.objectContaining({
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.4, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.4, 10) }),
-        }),
-      );
-      expect(byId.get('run-legacy-mixed-snapshot')).toEqual(
-        expect.objectContaining({
-          costMoney: expect.objectContaining({ amount: 0 }),
-          estimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.7, 10) }),
-          sdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.7, 10) }),
-          costAttribution: 'exact',
-        }),
-      );
-      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-        expect.objectContaining({
-          scheduleId: schedule.id,
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(1.1, 10),
-          }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(1.1, 10),
-          }),
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
   it('keeps direct ledger remainder when a run also has message costs', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({ id: 'sch-mixed-ledger', targetSessionId: 'sess-mixed-ledger' });
@@ -1525,7 +1138,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           ('mixed-user', 'mixed-user', 'sess-mixed-ledger', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed-ledger","runId":"run-mixed-ledger"}}', 10),
           ('mixed-assistant', 'mixed-assistant', 'sess-mixed-ledger', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed-ledger","runId":"run-mixed-ledger"},"turnCostUsd":0.42,"turnCostIsCustomProvider":false}', 11)
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed-ledger","runId":"run-mixed-ledger"},"turnCostUsd":0.42}', 11)
       `);
 
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
@@ -1554,10 +1167,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
 
   it('merges direct-only snapshot with a later message ledger update', async () => {
     const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-direct-only-snapshot',
-      targetSessionId: 'sess-direct-only',
-    });
+    const schedule = baseSchedule({ id: 'sch-direct-only-snapshot', targetSessionId: 'sess-direct-only' });
     const dbClient = { drizzle: harness.db } as unknown as DbClient;
     try {
       harness.db.run(sql`
@@ -1590,7 +1200,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
           ('direct-only-user', 'direct-only-user', 'sess-direct-only', 'user', '{}',
             '{"origin":{"kind":"scheduler","scheduleId":"sch-direct-only-snapshot","runId":"run-direct-only-snapshot"}}', 10),
           ('direct-only-assistant', 'direct-only-assistant', 'sess-direct-only', 'assistant', '{}',
-            '{"origin":{"kind":"scheduler","scheduleId":"sch-direct-only-snapshot","runId":"run-direct-only-snapshot"},"turnCostUsd":0.4,"turnCostIsCustomProvider":false}', 11)
+            '{"origin":{"kind":"scheduler","scheduleId":"sch-direct-only-snapshot","runId":"run-direct-only-snapshot"},"turnCostUsd":0.4}', 11)
       `);
 
       await expect(harness.storage.listRuns(schedule.id)).resolves.toEqual([
@@ -1699,197 +1309,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 
-  it('deduplicates a reclassified legacy custom-provider SDK amount from the session total', async () => {
-    const harness = createStorageHarness();
-    const schedule = baseSchedule({
-      id: 'sch-legacy-sdk',
-      name: 'legacy sdk',
-      providerId: 'custom-provider',
-      persistentSession: true,
-      targetSessionId: 'sess-legacy-sdk',
-    });
-
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, created_at, updated_at, total_cost_usd
-        ) VALUES (
-          'sess-legacy-sdk', '[Schedule] legacy sdk', 'scheduler', 'dialogue', 1, 20, 0.42
-        )
-      `);
-      await harness.storage.insert(schedule);
-      enableLegacySessionFallback(harness, schedule.id);
-      harness.db.run(sql`
-        INSERT INTO schedule_runs (id, schedule_id, session_id, fired_at, status)
-        VALUES ('legacy-session:sess-legacy-sdk', ${schedule.id}, 'sess-legacy-sdk', 1, 'success')
-      `);
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES (
-          'legacy-sdk-assistant', 'legacy-sdk-assistant', 'sess-legacy-sdk', 'assistant', '{}',
-          '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-sdk"},"turnCostUsd":0.42,"turnCostIsCustomProvider":true}', 10
-        )
-      `);
-
-      await expect(harness.storage.listCostSummaries()).resolves.toEqual([
-        expect.objectContaining({
-          scheduleId: schedule.id,
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.42, 10) }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.42, 10),
-          }),
-          sessions: [
-            expect.objectContaining({
-              sessionId: 'sess-legacy-sdk',
-              totalMoney: expect.objectContaining({ amount: 0 }),
-              totalEstimatedValueMoney: expect.objectContaining({
-                amount: expect.closeTo(0.42, 10),
-              }),
-              totalSdkEstimatedValueMoney: expect.objectContaining({
-                amount: expect.closeTo(0.42, 10),
-              }),
-            }),
-          ],
-        }),
-      ]);
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('fails closed uncovered legacy session totals without per-turn Provider evidence', async () => {
-    const harness = createStorageHarness();
-    const customSchedule = baseSchedule({
-      id: 'sch-legacy-residual-custom',
-      name: 'legacy residual custom',
-      workingDir: '/repo',
-    });
-    const unknownSchedule = baseSchedule({
-      id: 'sch-legacy-residual-unknown',
-      name: 'legacy residual unknown',
-      workingDir: '/repo',
-    });
-    const builtinSchedule = baseSchedule({
-      id: 'sch-legacy-residual-builtin',
-      name: 'legacy residual builtin',
-      workingDir: '/repo',
-    });
-    const zeroResidualSchedule = baseSchedule({
-      id: 'sch-legacy-residual-zero',
-      name: 'legacy residual zero',
-      workingDir: '/repo',
-    });
-
-    try {
-      harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, working_dir, created_at, updated_at,
-          total_cost_usd, provider_id
-        ) VALUES
-          (
-            'sess-legacy-residual-custom', '[Schedule] legacy residual custom', 'scheduler',
-            'project', '/repo', 1, 20, 1, 'custom-provider'
-          ),
-          (
-            'sess-legacy-residual-unknown', '[Schedule] legacy residual unknown', 'scheduler',
-            'project', '/repo', 1, 20, 0.6, NULL
-          ),
-          (
-            'sess-legacy-residual-builtin', '[Schedule] legacy residual builtin', 'scheduler',
-            -- The current bundled Provider cannot prove which Provider produced the old residual.
-            'project', '/repo', 1, 20, 0.8, 'xd'
-          ),
-          (
-            'sess-legacy-residual-zero', '[Schedule] legacy residual zero', 'scheduler',
-            'project', '/repo', 1, 20, 0.4, 'xd'
-          )
-      `);
-      for (const schedule of [
-        customSchedule,
-        unknownSchedule,
-        builtinSchedule,
-        zeroResidualSchedule,
-      ]) {
-        await harness.storage.insert(schedule);
-        enableLegacySessionFallback(harness, schedule.id);
-      }
-      harness.db.run(sql`
-        INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
-        VALUES (
-          'legacy-residual-custom-message', 'legacy-residual-custom-message',
-          'sess-legacy-residual-custom', 'assistant', '{}',
-          '{"origin":{"kind":"scheduler","scheduleId":"sch-legacy-residual-custom"},"turnCostUsd":0.4,"turnCostIsCustomProvider":true}',
-          10
-        ),
-        (
-          'legacy-residual-zero-message', 'legacy-residual-zero-message',
-          'sess-legacy-residual-zero', 'assistant', '{}', '{"turnCostUsd":0.4}', 10
-        )
-      `);
-
-      const summaries = new Map(
-        (await harness.storage.listCostSummaries()).map((summary) => [summary.scheduleId, summary]),
-      );
-      expect(summaries.get(customSchedule.id)).toEqual(
-        expect.objectContaining({
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(1, 10) }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(1, 10) }),
-          sessions: [
-            expect.objectContaining({
-              sessionId: 'sess-legacy-residual-custom',
-              totalMoney: expect.objectContaining({ amount: 0 }),
-              totalEstimatedValueMoney: expect.objectContaining({
-                amount: expect.closeTo(1, 10),
-              }),
-              totalSdkEstimatedValueMoney: expect.objectContaining({
-                amount: expect.closeTo(1, 10),
-              }),
-            }),
-          ],
-        }),
-      );
-      expect(summaries.get(unknownSchedule.id)).toEqual(
-        expect.objectContaining({
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({ amount: expect.closeTo(0.6, 10) }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.6, 10),
-          }),
-        }),
-      );
-      expect(summaries.get(zeroResidualSchedule.id)).toEqual(
-        expect.objectContaining({
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({ amount: 0 }),
-          sessionCount: 1,
-          sessions: [
-            expect.objectContaining({
-              sessionId: 'sess-legacy-residual-zero',
-              totalMoney: expect.objectContaining({ amount: 0 }),
-              totalEstimatedValueMoney: expect.objectContaining({ amount: 0 }),
-            }),
-          ],
-        }),
-      );
-      expect(summaries.get(builtinSchedule.id)).toEqual(
-        expect.objectContaining({
-          totalMoney: expect.objectContaining({ amount: 0 }),
-          totalEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.8, 10),
-          }),
-          totalSdkEstimatedValueMoney: expect.objectContaining({
-            amount: expect.closeTo(0.8, 10),
-          }),
-        }),
-      );
-    } finally {
-      harness.close();
-    }
-  });
-
-  it('keeps evidenced actual costs while failing closed the uncovered legacy baseline', async () => {
+  it('preserves legacy baseline when a scheduler session later gains turn costs', async () => {
     const harness = createStorageHarness();
     const schedule = baseSchedule({
       id: 'sch-mixed',
@@ -1902,13 +1322,8 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
 
     try {
       harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, working_dir, created_at, updated_at,
-          total_cost_usd, provider_id
-        ) VALUES (
-          'sess-legacy', '[Schedule] legacy task', 'scheduler', 'project', '/repo',
-          1, 60, 4.25, 'xd'
-        )
+        INSERT INTO sessions (id, title, source, workspace_kind, working_dir, created_at, updated_at, total_cost_usd)
+        VALUES ('sess-legacy', '[Schedule] legacy task', 'scheduler', 'project', '/repo', 1, 60, 4.25)
       `);
       await harness.storage.insert(schedule);
       enableLegacySessionFallback(harness, schedule.id);
@@ -1916,9 +1331,8 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
         INSERT INTO messages (id, client_id, session_id, role, content, agent_meta, created_at)
         VALUES
           ('mixed-user', 'mixed-user', 'sess-legacy', 'user', '{}', '{"origin":{"kind":"scheduler","scheduleId":"sch-mixed","scheduleName":"legacy task"}}', 40),
-          ('mixed-assistant', 'mixed-assistant', 'sess-legacy', 'assistant', '{}', '{"model":"claude-sonnet-4-6","turnCostUsd":1.25}', 50),
-          ('estimate-assistant', 'estimate-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCostUsd":0.5,"turnCostIsEstimate":true}', 51),
-          ('structured-assistant', 'structured-assistant', 'sess-legacy', 'assistant', '{}', '{"model":"claude-sonnet-4-6","turnCost":{"amount":5,"currency":"USD","approximate":false,"kind":"actual-cost"}}', 52),
+          ('mixed-assistant', 'mixed-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCostUsd":1.25}', 50),
+          ('structured-assistant', 'structured-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCost":{"amount":5,"currency":"USD","approximate":false,"kind":"actual-cost"}}', 52),
           ('manual-user', 'manual-user', 'sess-legacy', 'user', '{}', NULL, 55),
           ('manual-assistant', 'manual-assistant', 'sess-legacy', 'assistant', '{}', '{"turnCostUsd":2}', 60)
       `);
@@ -1926,44 +1340,24 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
         {
           scheduleId: schedule.id,
-          totalMoney: actualMoneyFromLegacyUsd(1.25 + 5),
-          totalEstimatedValueMoney: {
-            amount: expect.closeTo(1.5, 10),
-            currency: 'USD',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: expect.arrayContaining(['subscription-value', 'sdk-estimate']),
+          totalMoney: {
+            ...actualMoneyFromLegacyUsd(2.25),
+            amount: expect.closeTo(2.25 + 5, 10),
           },
-          totalSdkEstimatedValueMoney: {
-            amount: expect.closeTo(1, 10),
-            currency: 'USD',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: ['sdk-estimate'],
-          },
-          totalCostUsd: expect.closeTo(1.25 + 5, 10),
-          totalEstimatedValueUsd: expect.closeTo(1.5, 10),
+          totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+          totalCostUsd: expect.closeTo(2.25 + 5, 10),
+          totalEstimatedValueUsd: 0,
           sessionCount: 1,
           sessions: [
             {
               sessionId: 'sess-legacy',
-              totalMoney: actualMoneyFromLegacyUsd(1.25 + 5),
-              totalEstimatedValueMoney: {
-                amount: expect.closeTo(1.5, 10),
-                currency: 'USD',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: expect.arrayContaining(['subscription-value', 'sdk-estimate']),
+              totalMoney: {
+                ...actualMoneyFromLegacyUsd(2.25),
+                amount: expect.closeTo(2.25 + 5, 10),
               },
-              totalSdkEstimatedValueMoney: {
-                amount: expect.closeTo(1, 10),
-                currency: 'USD',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: ['sdk-estimate'],
-              },
-              totalCostUsd: expect.closeTo(1.25 + 5, 10),
-              totalEstimatedValueUsd: expect.closeTo(1.5, 10),
+              totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+              totalCostUsd: expect.closeTo(2.25 + 5, 10),
+              totalEstimatedValueUsd: 0,
             },
           ],
         },
@@ -1985,13 +1379,8 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
 
     try {
       harness.db.run(sql`
-        INSERT INTO sessions (
-          id, title, source, workspace_kind, working_dir, created_at, updated_at,
-          total_cost_usd, provider_id
-        ) VALUES (
-          'sess-unlinked', '[Schedule] unlinked legacy', 'scheduler', 'project', '/repo',
-          1, 60, 3.5, 'xd'
-        )
+        INSERT INTO sessions (id, title, source, workspace_kind, working_dir, created_at, updated_at, total_cost_usd)
+        VALUES ('sess-unlinked', '[Schedule] unlinked legacy', 'scheduler', 'project', '/repo', 1, 60, 3.5)
       `);
       await harness.storage.insert(schedule);
       enableLegacySessionFallback(harness, schedule.id);
@@ -2006,44 +1395,18 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
         {
           scheduleId: schedule.id,
-          totalMoney: ZERO_ACTUAL_MONEY,
-          totalEstimatedValueMoney: {
-            amount: expect.closeTo(1.5, 10),
-            currency: 'USD',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: ['sdk-estimate'],
-          },
-          totalSdkEstimatedValueMoney: {
-            amount: expect.closeTo(1.5, 10),
-            currency: 'USD',
-            approximate: true,
-            kind: 'value-estimate',
-            estimateReasons: ['sdk-estimate'],
-          },
-          totalCostUsd: 0,
-          totalEstimatedValueUsd: expect.closeTo(1.5, 10),
+          totalMoney: actualMoneyFromLegacyUsd(1.5),
+          totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+          totalCostUsd: expect.closeTo(1.5, 10),
+          totalEstimatedValueUsd: 0,
           sessionCount: 1,
           sessions: [
             {
               sessionId: 'sess-unlinked',
-              totalMoney: ZERO_ACTUAL_MONEY,
-              totalEstimatedValueMoney: {
-                amount: expect.closeTo(1.5, 10),
-                currency: 'USD',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: ['sdk-estimate'],
-              },
-              totalSdkEstimatedValueMoney: {
-                amount: expect.closeTo(1.5, 10),
-                currency: 'USD',
-                approximate: true,
-                kind: 'value-estimate',
-                estimateReasons: ['sdk-estimate'],
-              },
-              totalCostUsd: 0,
-              totalEstimatedValueUsd: expect.closeTo(1.5, 10),
+              totalMoney: actualMoneyFromLegacyUsd(1.5),
+              totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
+              totalCostUsd: expect.closeTo(1.5, 10),
+              totalEstimatedValueUsd: 0,
             },
           ],
         },

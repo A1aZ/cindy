@@ -1,6 +1,7 @@
 import type { RemoteMessage, RemoteMessageRole } from '@/session/types';
 import type { MobileSystemCardType } from '@/session/systemCard';
 import { contentToPreview } from '@/utils/contentPreview';
+import { i18n } from '@/i18n';
 import { describeAgentAuthError } from '@/device-link/remoteStatus';
 import {
   buildMessageToolResultPairing,
@@ -10,11 +11,16 @@ import {
   type MessageNormalizeToolUse,
   type MessageToolResultPairing,
 } from '@cindy/maker-shared/message-normalize';
+import { collectMobileMarkdownImages } from '@/session/messageMarkdown';
 import {
   normalizeAgentTaskTerminalStatus,
   type AgentTaskTerminalStatus,
 } from '@cindy/maker-shared/agent-task';
 import { isSyntheticTriggerText } from '@cindy/maker-shared/synthetic-trigger';
+import {
+  formatToolResultCompactionBytes,
+  parseToolResultCompactionMarker,
+} from '@cindy/maker-shared/tool-result-compaction';
 import {
   buildPayloadToolDiff,
   extractPayloadToolResultMedia,
@@ -42,9 +48,9 @@ import {
   type RemoteMoney,
 } from '@/session/remoteMoney';
 import {
-  projectMobileMessageBilling,
-  type MobileMessageBillingProjection,
-} from '@/session/sessionBillingProjection';
+  localizeToolLoopError,
+  parseMobileToolLoopErrorDetails,
+} from '@/session/toolLoopErrorI18n';
 
 export type NormalizedRemoteMessageKind =
   | 'user'
@@ -174,18 +180,14 @@ interface ToolUsePayload extends MessageNormalizeToolUse {
   diff?: NormalizedToolDiff;
 }
 
-export function normalizeRemoteMessages(
-  messages: readonly RemoteMessage[],
-  billingProjection?: MobileMessageBillingProjection,
-): NormalizedRemoteMessage[] {
+export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): NormalizedRemoteMessage[] {
   const sorted = sortMessagesByCreatedAt(messages);
-  const projected = billingProjection
-    ? projectMobileMessageBilling(sorted, billingProjection)
-    : sorted;
-  const toolResultPairing = buildMessageToolResultPairing(projected);
+  const toolResultPairing = buildMessageToolResultPairing(sorted, {
+    contentToPreview: toolResultContentToPreview,
+  });
 
   const result: NormalizedRemoteMessage[] = [];
-  for (const message of projected) {
+  for (const message of sorted) {
     if (message.role === 'tool_result') continue;
 
     if (message.role === 'tool_use') {
@@ -251,12 +253,14 @@ export function normalizeRemoteMessages(
 
     // turn 失败终态的持久化行(desktop main 落库):content = { message, reason? },
     // 提取 message 文案按 system 样式展示 —— 不加分支会 fall through 到通用兜底,
-    // body 变成整段生 JSON。agent 未鉴权错误换成带引导的中文提示(describeAgentAuthError),
-    // 其余 reason 的本地化 / 红色错误卡样式留待手机版专项跟进。
+    // body 变成整段生 JSON。稳定的 tool-loop reason/toolLoop 走本地化，agent 未鉴权错误
+    // 换成带引导的中文提示(describeAgentAuthError)，其余未知错误保留原始 message。
     if (message.role === 'error') {
       const c = parseMaybeJsonObject(message.content);
       const rawText = typeof c?.message === 'string' ? c.message : contentToPreview(message.content);
-      const errText = describeAgentAuthError(rawText) ?? rawText;
+      const toolLoop = parseMobileToolLoopErrorDetails(c?.toolLoop);
+      const errText =
+        describeAgentAuthError(rawText) ?? localizeToolLoopError(c?.reason, toolLoop) ?? rawText;
       result.push({
         key: messageNormalizeKey(message),
         source: message,
@@ -381,7 +385,7 @@ export function normalizeRemoteMessages(
     const rawBody = userContent ? userContent.text : contentToPreview(message.content);
     const hookSource = message.role === 'user' ? readHookSource(message, rawBody) : undefined;
     const body = hookSource?.userText ?? rawBody;
-    const turnCost = readTurnCost(message, billingProjection === undefined);
+    const turnCost = readTurnCost(message);
     result.push({
       key: messageNormalizeKey(message),
       source: message,
@@ -419,7 +423,54 @@ export function normalizeRemoteMessages(
     });
   }
 
+  dedupeToolImagesAgainstAssistantMarkdown(result);
   return result;
+}
+
+/**
+ * 与 Desktop 同口径：Agent 正文内联同一 URL 时由正文负责排版；否则保留
+ * tool_result 图片作为可靠兜底。只在同一真实 user turn 内去重。
+ */
+function dedupeToolImagesAgainstAssistantMarkdown(
+  messages: NormalizedRemoteMessage[],
+): void {
+  const dedupeTurn = (lo: number, hi: number): void => {
+    if (hi <= lo) return;
+    const inlineUrls = new Set<string>();
+    for (const message of messages.slice(lo, hi)) {
+      if (message.kind !== 'assistant') continue;
+      for (const image of collectMobileMarkdownImages(message.body)) inlineUrls.add(image.url);
+    }
+    if (inlineUrls.size === 0) return;
+    for (const message of messages.slice(lo, hi)) {
+      if (message.kind !== 'tool' || !message.media?.length) continue;
+      message.media = message.media.filter(
+        (item) => item.kind !== 'image' || !inlineUrls.has(item.url),
+      );
+    }
+  };
+
+  let turnStart = 0;
+  for (let index = 0; index <= messages.length; index += 1) {
+    const message = messages[index];
+    const isBoundary =
+      message?.kind === 'user' &&
+      !message.isSyntheticTrigger &&
+      message.source.agentMeta?.delivery !== 'steer';
+    if (isBoundary && index > turnStart) {
+      dedupeTurn(turnStart, index);
+      turnStart = index;
+    }
+    if (index === messages.length) dedupeTurn(turnStart, index);
+  }
+}
+
+function toolResultContentToPreview(content: unknown): string {
+  const compacted = parseToolResultCompactionMarker(content);
+  if (!compacted) return contentToPreview(content);
+  return i18n.t('message.renderer.toolResultCompacted', {
+    size: formatToolResultCompactionBytes(compacted.originalBytes),
+  });
 }
 
 function toolResultContentFor(
@@ -731,18 +782,9 @@ function projectTurnMoney(
   money: unknown,
   legacyUsd: unknown,
   isEstimateFlag: boolean,
-  isCustomProviderCost: boolean,
-  hideCustomSdkCost: boolean,
 ): Pick<NormalizedRemoteMessage, 'turnMoney' | 'turnCostUsd'> | null {
   const normalized = normalizeRemoteMoney(money);
   if (normalized && normalized.amount > 0) {
-    if (
-      hideCustomSdkCost &&
-      isCustomProviderCost &&
-      (normalized.kind === 'actual-cost' || normalized.estimateReasons?.includes('sdk-estimate'))
-    ) {
-      return null;
-    }
     const isEstimate = isEstimateFlag || normalized.kind === 'value-estimate';
     // NormalizedRemoteMessage is a display projection, not the accounting record. Fold the
     // separate wire flag into turnMoney so visible text and accessibility cannot choose
@@ -757,9 +799,6 @@ function projectTurnMoney(
   }
   const cost = readNumber(legacyUsd);
   if (cost === null || cost <= 0) return null;
-  // Legacy custom-provider SDK amounts were persisted as actual-cost. Keep them out of the
-  // mobile display by default; independently sourced legacy estimates remain visible.
-  if (hideCustomSdkCost && isCustomProviderCost && !isEstimateFlag) return null;
   return {
     turnMoney: {
       amount: cost,
@@ -773,7 +812,6 @@ function projectTurnMoney(
 
 function readTurnCost(
   message: RemoteMessage,
-  hideCustomSdkCost: boolean = true,
 ): Pick<
   NormalizedRemoteMessage,
   'turnMoney' | 'turnCostUsd' | 'turnTotalTokens'
@@ -783,7 +821,6 @@ function readTurnCost(
   const totalTokens = readNumber(readRecord(message.agentMeta?.turnUsageDetails)?.totalTokens);
   const usage: Pick<NormalizedRemoteMessage, 'turnTotalTokens'> =
     totalTokens !== null && totalTokens > 0 ? { turnTotalTokens: totalTokens } : {};
-  const isCustomProviderCost = message.agentMeta?.turnCostIsCustomProvider === true;
   // 整轮累计优先于当前 segment(与桌面 MessageActionBar 的 displayedMoney 同口径):
   // 一次用户请求含多个自动续跑 segment 时,操作行只挂在收尾正文上,而它要承载整轮总额;
   // 收尾 segment 缺报价的轮次更是只有 userTurnCost。两者独立判定,不互为前提
@@ -793,15 +830,11 @@ function readTurnCost(
       message.agentMeta?.userTurnCost,
       message.agentMeta?.userTurnCostUsd,
       message.agentMeta?.userTurnCostIsEstimate === true,
-      isCustomProviderCost,
-      hideCustomSdkCost,
     ) ??
     projectTurnMoney(
       message.agentMeta?.turnCost,
       message.agentMeta?.turnCostUsd,
       message.agentMeta?.turnCostIsEstimate === true,
-      isCustomProviderCost,
-      hideCustomSdkCost,
     );
   return projected ? { ...usage, ...projected } : usage;
 }

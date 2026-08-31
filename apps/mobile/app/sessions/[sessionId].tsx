@@ -184,7 +184,7 @@ import { ModelPickerSheet } from '@/session/ModelPickerSheet';
 import { MobileModelIconMark } from '@/session/MobileProviderMark';
 import { getModel } from '@cindy/model-providers/registry';
 import { clearSessionMirror, makeSessionMirrorAccessors } from '@/session/sessionModelMirror';
-import { rowFastEditable } from '@/session/modelPickerRows';
+import { effortLabelFromRuntime, rowFastEditable } from '@/session/modelPickerRows';
 import {
   buildMobileModelSections,
   isSelectedSourceDisconnected,
@@ -509,7 +509,6 @@ import {
   sessionMetaWriteQueue,
   sessionPendingWrites,
   type RemoteSessionRunStatus,
-  useCustomProviderBillingRevision,
   useRemoteSessions,
   useSessionGoalStatus,
   useSessionInputProjection,
@@ -542,8 +541,13 @@ import {
 import { ChatFilePathContext, type ChatFilePathContextValue, type ChatFilePathTarget } from '@/session/chatFilePathContext';
 import { pathDisplayName } from '@/session/chatPathCandidate';
 import { fetchRemoteAbsFileToUrl } from '@/session/remoteAbsFileFetch';
+import { showActionMenu, usesSystemActionMenu } from '@/platform/chrome';
 import { ChatFileChipMenuSheet } from '@/session/ChatFileChipMenuSheet';
-import type { ChatFileChipMenuActionKey } from '@/session/chatFileChipMenuModel';
+import {
+  chatFileChipMenuRows,
+  chatFileChipMenuTitle,
+  type ChatFileChipMenuActionKey,
+} from '@/session/chatFileChipMenuModel';
 import { mergePathIntoComposerDraft, shareMimeForFileName } from '@/session/fileBrowserActions';
 import { exportRemoteFileToUrl } from '@/session/fileBrowserExport';
 import { normalizeRemoteOpDirEntries, parentRelPath } from '@/session/fileBrowserGrid';
@@ -567,16 +571,6 @@ import {
   summarizeSessionOverview,
   type SessionActionStripActionId,
 } from '@/session/sessionOverview';
-import {
-  billingSessionForRevision,
-  hasAuthoritativeBillingProjection,
-  mobileSessionBillingRevision,
-  projectSessionBilling,
-  resolveMobileSdkCostPresentation,
-  TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION,
-  type MobileMessageBillingProjection,
-  withoutSessionMoney,
-} from '@/session/sessionBillingProjection';
 import {
   buildMobileSystemCardData,
   commandNeedsRemoteSession,
@@ -658,7 +652,7 @@ function buildComposerRuntimeSummary(
   runtime: MobileSessionRuntimeOptions,
 ): ComposerRuntimeSummary {
   const modelLabel = runtime.currentModel?.label ?? session.model;
-  const effortLabel = choiceLabel(runtime.effortOptions, session.effort);
+  const effortLabel = effortLabelFromRuntime(runtime, session.effort);
   return {
     modelSummary: [modelLabel, effortLabel].filter(Boolean).join(' · '),
     permissionLabel: choiceLabel(runtime.permissionOptions, session.permissionMode),
@@ -1837,6 +1831,7 @@ export default function SessionScreen() {
   const loadedRouteFocusKeyRef = useRef<string | null>(null);
   const appliedRouteFocusKeyRef = useRef<string | null>(null);
   const appliedRouteComposerFocusKeyRef = useRef<string | null>(null);
+  const handleChipMenuActionRef = useRef<(key: ChatFileChipMenuActionKey, target: ChatFilePathTarget) => void>(() => {});
   const targetAvailableRef = useRef<boolean | null>(null);
   const targetAvailableDeviceRef = useRef<string | null>(null);
   // 记录已为哪个连接 epoch 触发过 resync;初值 = 首渲染时的 epoch,使首开由 mount effect 单独负责,
@@ -2267,107 +2262,11 @@ export default function SessionScreen() {
     () => composerDisplaySession && composerDisplayRuntimeOptions
       ? buildComposerRuntimeSummary(composerDisplaySession, composerDisplayRuntimeOptions)
       : null,
-    [composerDisplayRuntimeOptions, composerDisplaySession],
+    // effort / 权限标签按 app 语言解析,切换语言时必须重算,否则停留在上一语言。
+    [composerDisplayRuntimeOptions, composerDisplaySession, i18nInstance.language],
   );
   // 被控端供应商目录 → provider-aware 模型分段(与新建会话页同逻辑;0 供应商回退扁平 modelOptions)。
   const composerDeviceProviders = useDeviceProviders(deviceId || undefined);
-  const sessionBillingRevision = useMemo(
-    () => currentSession ? mobileSessionBillingRevision(currentSession, messages) : '',
-    [currentSession, messages],
-  );
-  const sessionBillingProviderRevision = useMemo(
-    () => JSON.stringify(
-      composerDeviceProviders.providers.map((provider) => [provider.id, provider.source]),
-    ),
-    [composerDeviceProviders.providers],
-  );
-
-  const customProviderBillingRevision = useCustomProviderBillingRevision(deviceId);
-  const sessionBillingRequestKey = [
-    deviceId,
-    connectionEpoch,
-    customProviderBillingRevision,
-    sessionBillingRevision,
-    sessionBillingProviderRevision,
-  ].join('\n');
-  const [sessionBillingProjection, setSessionBillingProjection] = useState<{
-    entries: MobileMessageBillingProjection['entries'];
-    presentation: MobileMessageBillingProjection['presentation'];
-    requestKey: string;
-    session: RemoteSession;
-    showSdkEstimate: boolean;
-  } | null>(null);
-
-  useEffect(() => {
-    if (!currentSession || !deviceId) return undefined;
-    let cancelled = false;
-    const sessionSnapshot = currentSession;
-    const requestKey = sessionBillingRequestKey;
-    void (async () => {
-      const showSdkEstimate = await maker.getCustomProviderBillingSettings()
-        .then((settings) => settings.showSdkCostForCustomProviders === true)
-        .catch(() => false);
-      const presentation = resolveMobileSdkCostPresentation(
-        sessionSnapshot.providerId,
-        composerDeviceProviders.providers,
-        showSdkEstimate,
-      );
-      const snapshot = await maker.estimatedSessionValue(
-        sessionSnapshot.id,
-        presentation,
-        showSdkEstimate,
-      );
-      if (cancelled) return;
-      if (!hasAuthoritativeBillingProjection(snapshot)) {
-        setSessionBillingProjection(null);
-        return;
-      }
-      setSessionBillingProjection({
-        entries: snapshot.entries,
-        presentation,
-        requestKey,
-        session: projectSessionBilling(sessionSnapshot, snapshot),
-        showSdkEstimate,
-      });
-    })().catch(() => {
-      // Older hosts and transient remote failures stay token-only. Never reuse a stale
-      // projection because it may have been produced while the SDK estimate opt-in was on.
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    composerDeviceProviders.providers,
-    currentSession,
-    deviceId,
-    maker,
-    sessionBillingRequestKey,
-  ]);
-
-  const billingDisplaySession = useMemo(() => {
-    if (!currentSession) return null;
-    if (sessionBillingProjection?.requestKey !== sessionBillingRequestKey) {
-      return withoutSessionMoney(currentSession);
-    }
-    return sessionBillingProjection.session;
-  }, [
-    currentSession,
-    sessionBillingProjection,
-    sessionBillingRequestKey,
-  ]);
-  const messageBillingProjection = useMemo<MobileMessageBillingProjection>(() => {
-    if (sessionBillingProjection?.requestKey === sessionBillingRequestKey) {
-      return {
-        entries: sessionBillingProjection.entries,
-        presentation: sessionBillingProjection.presentation,
-        showSdkEstimate: sessionBillingProjection.showSdkEstimate,
-      };
-    }
-    return TOKEN_ONLY_MOBILE_MESSAGE_BILLING_PROJECTION;
-  }, [
-    sessionBillingProjection,
-    sessionBillingRequestKey,
-  ]);
   const composerModelSections = useMemo(
     () => currentSession
       ? buildMobileModelSections({
@@ -4685,13 +4584,7 @@ export default function SessionScreen() {
         // remoteSessionRunning(activity 推送 / 活跃快照会先置 true,重连场景渲染先于清理)。
         buildMobileMessageRenderItems(
           messages,
-          {
-            autoResumePending: inputProjection.autoResumePending,
-            billingProjection: messageBillingProjection,
-            isSessionStreaming,
-            renderOrphanTaskUpdates: makerTurnRunning,
-            sessionId,
-          },
+          { autoResumePending: inputProjection.autoResumePending, isSessionStreaming, renderOrphanTaskUpdates: makerTurnRunning, sessionId },
           taskUpdates,
         ),
         forkOrigin,
@@ -4707,7 +4600,7 @@ export default function SessionScreen() {
       const reconciled = reconcileMobileMessageRenderItems(previous, items);
       return reconciled;
     },
-    [errorTailClientId, forkOrigin, inputProjection.autoResumePending, isSessionStreaming, makerTurnRunning, messageBillingProjection, messages, sessionId, taskUpdates],
+    [errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isSessionStreaming, makerTurnRunning, messages, sessionId, taskUpdates],
   );
   // 只在本次 render 真正 commit 后更新 reconcile 基准。写入 useMemo/ref 会让
   // Concurrent Mode 下被丢弃的 render 泄漏成下一轮的 previous,破坏尾行 memo 的稳定性。
@@ -6796,14 +6689,6 @@ export default function SessionScreen() {
         return;
       }
       if (localSystemCommand) {
-        const localCommandSession = localSystemCommand === 'cost'
-          ? billingSessionForRevision(
-              sessionAtSend,
-              messages,
-              billingDisplaySession,
-              sessionBillingRevision,
-            )
-          : sessionAtSend;
         let data: Record<string, unknown>;
         if (localSystemCommand === 'context') {
           setContextLoading(true);
@@ -6817,14 +6702,14 @@ export default function SessionScreen() {
               contextUsage: usage,
               projection: inputProjection,
               remoteCommands: slashCommands,
-              session: localCommandSession,
+              session: sessionAtSend,
             });
           } catch (err) {
             data = buildMobileSystemCardData(localSystemCommand, {
               contextError: formatRemoteError(err),
               projection: inputProjection,
               remoteCommands: slashCommands,
-              session: localCommandSession,
+              session: sessionAtSend,
             });
           } finally {
             setContextLoading(false);
@@ -6833,7 +6718,7 @@ export default function SessionScreen() {
           data = buildMobileSystemCardData(localSystemCommand, {
             projection: inputProjection,
             remoteCommands: slashCommands,
-            session: localCommandSession,
+            session: sessionAtSend,
           });
         }
         remoteSessionStore.appendLocalSystemCard(sessionId, localSystemCommand, data);
@@ -7583,7 +7468,7 @@ export default function SessionScreen() {
     sessionMetadataSyncedForConnection: sessionMetadataSyncedKey === `${sessionId}:${connectionEpoch}`,
     interruptAcked: tailInterruptAcked,
     hiddenErrorClientIds: tailHiddenForBanner,
-  }), [messages, currentSession, inputProjection, isSessionStreaming, tailContinuationInFlight, sessionMetadataSyncedKey, sessionId, connectionEpoch, tailInterruptAcked, tailHiddenForBanner]);
+  }), [connectionEpoch, currentSession, i18nInstance.language, inputProjection, isSessionStreaming, messages, sessionId, sessionMetadataSyncedKey, tailContinuationInFlight, tailHiddenForBanner, tailInterruptAcked]);
 
   // 主按钮(重试 / 继续任务):发隐藏续跑指令(带 [UI_ACTION_TRIGGER] 前缀,消息流
   // 不渲染;排队区显示「继续未完成的任务(系统指令)」遮蔽气泡)。planMode 强制 false:
@@ -8430,7 +8315,21 @@ export default function SessionScreen() {
         }
       },
       onOpenPath: openChatPathTarget,
-      onLongPressPath: setChipMenuTarget,
+      onLongPressPath: (target) => {
+        if (usesSystemActionMenu()) {
+          const rows = chatFileChipMenuRows(target);
+          void showActionMenu({
+            cancelLabel: t('session.common.cancel'),
+            items: rows.map((row) => ({ key: row.key, label: row.label })),
+            title: chatFileChipMenuTitle(target),
+            userInterfaceStyle: mode,
+          }).then((result) => {
+            if (result.kind === 'action') handleChipMenuActionRef.current(result.key, target);
+          });
+          return;
+        }
+        setChipMenuTarget(target);
+      },
     };
   }, [
     connectionEpoch,
@@ -8438,9 +8337,11 @@ export default function SessionScreen() {
     currentSession?.workingDir,
     deviceId,
     maker,
+    mode,
     openChatPathTarget,
     openLink,
     sessionId,
+    t,
   ]);
 
   /** chip 菜单「导出 / 分享」:两段式导出 → 系统分享单(与文件浏览器同链路);
@@ -8544,6 +8445,7 @@ export default function SessionScreen() {
         return;
     }
   }, [applyComposerDocument, applyComposerDraft, deviceId, deviceName, openChatPathTarget, router, sessionId, shareChipFile]);
+  handleChipMenuActionRef.current = handleChipMenuAction;
 
   // 会话菜单元数据操作(重命名 / 置顶 / 归档 / 删除 / 恢复)乐观写:与首页
   // patchHomeSession 同一写序契约——守卫 / 队列 / 在途登记用 app 级单例
@@ -9054,7 +8956,7 @@ export default function SessionScreen() {
             onToggleExtraDirBrowser={toggleExtraDirBrowser}
             onTogglePinned={() => patchSessionMeta({ pinnedAt: currentSession.pinnedAt ? null : new Date().toISOString() })}
             readOnlyReason={collaborationReadOnlyReason}
-            session={billingDisplaySession ?? withoutSessionMoney(currentSession)}
+            session={currentSession}
             visible={settingsOpen}
           />
         ) : null}

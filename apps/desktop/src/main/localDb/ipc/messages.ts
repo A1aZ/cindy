@@ -40,12 +40,19 @@ import {
 import { resolveStaleCodexSubscriptionValueEstimate } from '../../../shared/codexSubscriptionValue.js';
 import { normalizeTurnUsageDetails } from '../../../shared/turnUsageDetails.js';
 import {
+  inferLegacyCustomProviderCostFlag,
+  projectSdkCostMoneyWithBreakdown,
+  resolveCustomProviderCostFlag,
+  resolveTurnSdkCostPresentation,
+} from '../../../shared/customProviderBilling.js';
+import {
   addCompatibleRegionalMoney,
   asValueEstimateMoney,
   legacyUsdMoney,
   normalizeRegionalMoney,
   usdMoney,
   type RegionalMoney,
+  type SdkCostPresentation,
 } from '../../../shared/regionalMoney.js';
 import { capReferenceMessageRows } from './history.js';
 import { maybeUpgradeCodexHistoryOversizedError } from '../codexHistoryOversizedUpgrade';
@@ -199,9 +206,28 @@ function isAutoResumeUserRow(agentMetaJson: string | null): boolean {
 
 export interface EstimatedSessionValueEntry {
   clientId: string;
-  money: RegionalMoney;
+  money?: RegionalMoney;
   costUsd?: number;
+  excludedActualMoney?: RegionalMoney;
+  turnCostIsCustomProvider?: boolean;
+  turnCostProviderId?: string | null;
+  turnUsageDetails?: unknown;
 }
+
+export const ESTIMATED_SESSION_VALUE_BATCH_LIMIT = 256;
+export interface EstimatedSessionValueRow {
+  clientId: string;
+  agentMeta: string | null;
+  createdAt: number;
+  rewindAt: number | null;
+}
+export interface EstimatedSessionValueSummary {
+  projectionVersion: number;
+  estimatedValueMoney: RegionalMoney | null;
+  excludedActualMoney: RegionalMoney | null;
+  totalValueUsd?: number;
+}
+export const ESTIMATED_SESSION_VALUE_PROJECTION_VERSION = 1;
 
 /**
  * The already-recorded cost segments for the visible user round immediately
@@ -528,7 +554,9 @@ export function registerMessageIpc(): void {
         ),
       );
     const entries = extractEstimatedSessionValueEntries(rows);
-    const totalValueMoney = addCompatibleRegionalMoney(entries.map((entry) => entry.money));
+    const totalValueMoney = addCompatibleRegionalMoney(
+      entries.flatMap((entry) => (entry.money ? [entry.money] : [])),
+    );
     const hasCompleteUsdProjection = entries.every((entry) => typeof entry.costUsd === 'number');
     return {
       totalValueMoney,
@@ -1650,8 +1678,156 @@ export async function updateAgentMeta(
     .where(and(eq(messages.sessionId, sessionId), eq(messages.clientId, clientId)));
 }
 
+export function summarizeEstimatedSessionValueRows(
+  rows: readonly EstimatedSessionValueRow[],
+  clearedAtMs: number | null,
+  presentation: SdkCostPresentation = 'regular',
+  showSdkEstimate: boolean = presentation === 'estimate',
+): {
+  totalValueMoney: RegionalMoney | null;
+  excludedActualMoney: RegionalMoney | null;
+  totalValueUsd?: number;
+  entries: EstimatedSessionValueEntry[];
+} {
+  const visibleRows = rows.filter(
+    (row) => row.rewindAt === null && (clearedAtMs === null || row.createdAt > clearedAtMs),
+  );
+  const visibleEntries = extractEstimatedSessionValueEntries(
+    visibleRows,
+    presentation,
+    showSdkEstimate,
+  );
+  const lifetimeEntries = extractEstimatedSessionValueEntries(rows, presentation, showSdkEstimate);
+  const entries = mergeEstimatedSessionValueEntriesWithLifetimeExclusions(
+    visibleEntries,
+    lifetimeEntries,
+  );
+  const estimatedEntries = entries.flatMap((entry) => (entry.money ? [entry.money] : []));
+  const excludedEntries = entries.flatMap((entry) =>
+    entry.excludedActualMoney ? [entry.excludedActualMoney] : [],
+  );
+  const totalValueMoney = addCompatibleRegionalMoney(estimatedEntries);
+  const excludedActualMoney = addCompatibleRegionalMoney(excludedEntries);
+  const hasCompleteUsdProjection = entries.every(
+    (entry) => !entry.money || typeof entry.costUsd === 'number',
+  );
+  return {
+    totalValueMoney,
+    excludedActualMoney,
+    ...(hasCompleteUsdProjection
+      ? { totalValueUsd: entries.reduce((sum, item) => sum + (item.costUsd ?? 0), 0) }
+      : {}),
+    entries,
+  };
+}
+
+export function summarizeEstimatedSessionValuesBySession(
+  rows: ReadonlyArray<EstimatedSessionValueRow & { sessionId: string }>,
+  clearedAtBySession: ReadonlyMap<string, number | null>,
+  sessionIds: readonly string[],
+  presentationBySession: ReadonlyMap<string, SdkCostPresentation>,
+  showSdkEstimate: boolean,
+): Record<string, EstimatedSessionValueSummary> {
+  const grouped = new Map<string, EstimatedSessionValueRow[]>();
+  for (const sessionId of sessionIds) grouped.set(sessionId, []);
+  for (const row of rows) {
+    const list = grouped.get(row.sessionId);
+    if (list) list.push(row);
+  }
+  const result: Record<string, EstimatedSessionValueSummary> = {};
+  for (const [sessionId, sessionRows] of grouped) {
+    const presentation = presentationBySession.get(sessionId) ?? 'regular';
+    const summarized = summarizeEstimatedSessionValueRows(
+      sessionRows,
+      clearedAtBySession.get(sessionId) ?? null,
+      presentation,
+      showSdkEstimate,
+    );
+    result[sessionId] = {
+      projectionVersion: ESTIMATED_SESSION_VALUE_PROJECTION_VERSION,
+      estimatedValueMoney: summarized.totalValueMoney,
+      excludedActualMoney: summarized.excludedActualMoney,
+      ...(summarized.totalValueUsd != null ? { totalValueUsd: summarized.totalValueUsd } : {}),
+    };
+  }
+  return result;
+}
+
+function historicalCustomProviderFlagFromMeta(
+  meta: AgentMeta,
+  hasPerTurnCost?: boolean,
+): boolean | undefined {
+  const details = normalizeTurnUsageDetails(meta.turnUsageDetails);
+  return inferLegacyCustomProviderCostFlag({
+    turnCostIsEstimate: meta.turnCostIsEstimate,
+    turnCostIsCustomProvider: meta.turnCostIsCustomProvider,
+    turnCostProviderId: meta.turnCostProviderId,
+    hasPerTurnCost,
+    modelCandidates: [
+      meta.model,
+      details?.model,
+      ...(details?.models ?? []),
+      ...(details?.perModelCost?.map((entry) => entry.model) ?? []),
+    ],
+  });
+}
+
+/**
+ * Read-only history projection for the transcript renderer.
+ *
+ * Older assistant rows predate the immutable per-turn billing fields.  Do not
+ * classify those rows from the session's current provider: a session may have
+ * switched providers since the row was written.  Use the same versioned
+ * bundled Gateway evidence as the session-value projection instead, and mark
+ * unknown/ambiguous rows as custom so the renderer fails closed.  The returned
+ * objects are fresh clones; this never writes the derived attribution back to
+ * SQLite.
+ */
+export function projectLegacyMessageBilling(history: Message[]): Message[] {
+  let projected: Message[] | null = null;
+  for (let index = 0; index < history.length; index++) {
+    const message = history[index];
+    if (message.role !== 'assistant') continue;
+    const meta = message.agentMeta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    if (typeof meta.turnCostIsCustomProvider === 'boolean') continue;
+    if (meta.turnCostIsEstimate === true) continue;
+    const money = normalizeRegionalMoney(meta.turnCost);
+    const hasLegacyActualCost =
+      (money?.kind === 'actual-cost' && money.amount > 0) ||
+      (typeof meta.turnCostUsd === 'number' &&
+        Number.isFinite(meta.turnCostUsd) &&
+        meta.turnCostUsd > 0);
+    const userMoney = normalizeRegionalMoney(meta.userTurnCost);
+    const hasLegacyActualUserCost = userMoney
+      ? userMoney.kind === 'actual-cost' && userMoney.amount > 0
+      : meta.userTurnCostIsEstimate !== true &&
+        typeof meta.userTurnCostUsd === 'number' &&
+        Number.isFinite(meta.userTurnCostUsd) &&
+        meta.userTurnCostUsd > 0;
+    if (!hasLegacyActualCost && !hasLegacyActualUserCost) continue;
+    // Reuse the same immutable model evidence as the session-value projection.  Unknown or
+    // multi-model rows fail closed as custom-provider SDK cost. A cost-free closing segment with
+    // only the user-round total also fails closed because its model cannot classify prior segments.
+    // The session's current Provider is deliberately never consulted here.
+    const turnCostIsCustomProvider =
+      historicalCustomProviderFlagFromMeta(meta, hasLegacyActualCost) ?? true;
+    projected ??= history.slice();
+    projected[index] = {
+      ...message,
+      agentMeta: {
+        ...meta,
+        turnCostIsCustomProvider,
+      },
+    };
+  }
+  return projected ?? history;
+}
+
 export function extractEstimatedSessionValueEntries(
-  rows: Array<{ clientId: string; agentMeta: string | null }>,
+  rows: ReadonlyArray<{ clientId: string; agentMeta: string | null }>,
+  presentation: SdkCostPresentation = 'regular',
+  showSdkEstimate: boolean = presentation === 'estimate',
 ): EstimatedSessionValueEntry[] {
   const entries: EstimatedSessionValueEntry[] = [];
   for (const row of rows) {
@@ -1665,48 +1841,121 @@ export function extractEstimatedSessionValueEntries(
     } catch {
       continue;
     }
-    if (meta?.turnCostIsEstimate !== true) continue;
+    if (!meta) continue;
     const structured = normalizeRegionalMoney(meta.turnCost);
-    if (structured && structured.amount > 0) {
-      const recomputed =
-        structured.currency === 'USD'
-          ? resolveStaleCodexSubscriptionValueEstimate(
-              structured.amount,
-              normalizeTurnUsageDetails(meta.turnUsageDetails),
-              meta.model,
-            )
+    const legacyCostUsd =
+      typeof meta.turnCostUsd === 'number' &&
+      Number.isFinite(meta.turnCostUsd) &&
+      meta.turnCostUsd > 0
+        ? meta.turnCostUsd
+        : null;
+    const rawMoney =
+      structured && structured.amount > 0
+        ? structured
+        : legacyCostUsd != null
+          ? meta.turnCostIsEstimate === true
+            ? usdMoney(legacyCostUsd, 'value-estimate', 'legacy-usd')
+            : usdMoney(legacyCostUsd)
           : null;
-      const money = asValueEstimateMoney({
-        ...structured,
-        amount: recomputed ?? structured.amount,
-      });
-      entries.push({
-        clientId: row.clientId,
-        money,
-        ...(money.currency === 'USD' ? { costUsd: money.amount } : {}),
-      });
-      continue;
-    }
-    if (
-      typeof meta.turnCostUsd !== 'number' ||
-      !Number.isFinite(meta.turnCostUsd) ||
-      meta.turnCostUsd <= 0
-    ) {
-      continue;
-    }
-    const recomputed = resolveStaleCodexSubscriptionValueEstimate(
-      meta.turnCostUsd,
-      normalizeTurnUsageDetails(meta.turnUsageDetails),
-      meta.model,
+    if (!rawMoney) continue;
+
+    const turnUsageDetails = normalizeTurnUsageDetails(meta.turnUsageDetails);
+    const historicalProviderFlag = historicalCustomProviderFlagFromMeta(meta);
+    const entryProviderFlag = resolveCustomProviderCostFlag(
+      meta.turnCostIsCustomProvider ?? historicalProviderFlag,
+      meta.turnCostProviderId,
     );
-    const costUsd = recomputed ?? meta.turnCostUsd;
+    const fallbackPresentation =
+      meta.turnCostIsCustomProvider === undefined &&
+      (meta.turnCostProviderId !== undefined || historicalProviderFlag !== undefined)
+        ? resolveTurnSdkCostPresentation({
+            money: rawMoney,
+            isCustomProviderCost: entryProviderFlag,
+            fallback: presentation,
+            showSdkEstimate,
+          })
+        : presentation;
+    const turnPresentation = resolveTurnSdkCostPresentation({
+      money: rawMoney,
+      isCustomProviderCost: meta.turnCostIsCustomProvider ?? historicalProviderFlag,
+      fallback: fallbackPresentation,
+      showSdkEstimate,
+    });
+    const projected = projectSdkCostMoneyWithBreakdown(
+      rawMoney,
+      turnUsageDetails?.perModelCost?.map((entry) => entry.money),
+      turnPresentation,
+    );
+    const excludedActualMoney =
+      rawMoney.kind === 'actual-cost' &&
+      meta.turnCostIsEstimate !== true &&
+      turnPresentation !== 'regular'
+        ? rawMoney
+        : null;
+    const canExposeProjectedEstimate =
+      Boolean(projected && projected.amount > 0) &&
+      (projected?.kind === 'value-estimate' || meta.turnCostIsEstimate === true);
+    if (!canExposeProjectedEstimate && !excludedActualMoney) continue;
+
+    const estimateMoney = canExposeProjectedEstimate
+      ? projected!.kind === 'value-estimate'
+        ? projected!
+        : asValueEstimateMoney(projected!)
+      : null;
+    const recomputed =
+      estimateMoney?.currency === 'USD' &&
+      estimateMoney.estimateReasons?.includes('sdk-estimate') !== true
+        ? resolveStaleCodexSubscriptionValueEstimate(
+            estimateMoney.amount,
+            turnUsageDetails,
+            meta.model,
+          )
+        : null;
+    const money = estimateMoney
+      ? {
+          ...estimateMoney,
+          amount: recomputed ?? estimateMoney.amount,
+        }
+      : null;
     entries.push({
       clientId: row.clientId,
-      money: usdMoney(costUsd, 'value-estimate', 'legacy-usd'),
-      costUsd,
+      ...(money ? { money } : {}),
+      ...(money?.currency === 'USD' ? { costUsd: money.amount } : {}),
+      ...(excludedActualMoney ? { excludedActualMoney } : {}),
+      ...(typeof meta.turnCostIsCustomProvider === 'boolean'
+        ? { turnCostIsCustomProvider: meta.turnCostIsCustomProvider }
+        : historicalProviderFlag !== undefined
+          ? { turnCostIsCustomProvider: entryProviderFlag }
+          : {}),
+      ...(typeof meta.turnCostProviderId === 'string' || meta.turnCostProviderId === null
+        ? { turnCostProviderId: meta.turnCostProviderId }
+        : {}),
+      ...(turnUsageDetails?.perModelCost?.length ? { turnUsageDetails } : {}),
     });
   }
   return entries;
+}
+
+/**
+ * Visible value estimates follow the transcript boundary, while exclusions for
+ * legacy custom-provider SDK amounts follow the lifetime session ledger.  Merge
+ * the latter back without making cleared or rewound estimates visible again.
+ */
+export function mergeEstimatedSessionValueEntriesWithLifetimeExclusions(
+  visibleEntries: readonly EstimatedSessionValueEntry[],
+  lifetimeEntries: readonly EstimatedSessionValueEntry[],
+): EstimatedSessionValueEntry[] {
+  const merged = new Map(
+    visibleEntries.map((entry) => [entry.clientId, { ...entry }] as const),
+  );
+  for (const entry of lifetimeEntries) {
+    if (!entry.excludedActualMoney) continue;
+    merged.set(entry.clientId, {
+      ...(merged.get(entry.clientId) ?? { clientId: entry.clientId }),
+      excludedActualMoney: entry.excludedActualMoney,
+    });
+  }
+  return [...merged.values()];
 }
 
 /**

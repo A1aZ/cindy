@@ -6218,6 +6218,7 @@ interface ElectronAPI {
      * renderer 侧由 features/scheduler/lib 重新 narrow 成强类型）。
      */
     schedule: {
+      listCostSummaries: () => Promise<unknown[]>;
       list: (filter?: { status?: 'active' | 'paused' | 'expired' }) => Promise<unknown[]>;
       listTemplates: () => Promise<unknown[]>;
       createFromTemplate: (params: {

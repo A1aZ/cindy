@@ -6825,8 +6825,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // schedules 表。`Schedule` / `ScheduleRun` / `CreateScheduleInput` 等 wire 形态
     // 与 `@cindy/maker-scheduler` types.ts 完全同形，preload 不在这里重声明。
     schedule: {
-      listCostSummaries: (): Promise<unknown[]> =>
-        ipcRenderer.invoke('maker:schedule:list-cost-summaries'),
       list: (filter?: { status?: 'active' | 'paused' | 'expired' }): Promise<unknown[]> =>
         ipcRenderer.invoke('maker:schedule:list', filter),
       listTemplates: (): Promise<unknown[]> => ipcRenderer.invoke('maker:schedule:list-templates'),

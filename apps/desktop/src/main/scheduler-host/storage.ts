@@ -21,7 +21,13 @@ import { broadcastSessionPatched } from '../localDb/ipc/sessions.js';
 import type { Schedule, ScheduleRun, ScheduleStorage, ListFilter } from '@cindy/maker-scheduler';
 
 import * as schema from '../localDb/schema';
-import { messages, schedules, scheduleRuns, sessions } from '../localDb/schema';
+import {
+  messages,
+  schedules,
+  scheduleRuns,
+  scheduleSessionLatestRuns,
+  sessions,
+} from '../localDb/schema';
 import {
   scheduleToCamel,
   scheduleCreateToRow,
@@ -186,6 +192,8 @@ interface LegacyScheduleSessionAlias {
 const LEGACY_SCHEDULE_TITLE_PREFIX = '[Schedule] ';
 const LEGACY_SESSION_RUN_ID_PREFIX = 'legacy-session:';
 const CURRENT_COST_PROVIDER_ATTRIBUTION_VERSION = 1;
+const unreadTerminalRunWhere = () =>
+  sql`${scheduleRuns.readAt} IS NULL AND ${scheduleRuns.status} IN ('success', 'failed', 'aborted', 'interrupted')`;
 
 const UNREAD_TERMINAL_RUN_STATUSES: ScheduleRun['status'][] = [
   'success',
@@ -815,32 +823,46 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
    */
   async listSidebarIndexRuns(): Promise<ScheduleSidebarIndexRun[]> {
     const db = this.getDb();
-    const rows = await db
-      .select({
-        runId: scheduleRuns.id,
-        scheduleId: schedules.id,
-        scheduleName: schedules.name,
-        scheduleStatus: schedules.status,
-        scheduleSource: schedules.source,
-        nextFireAt: schedules.nextFireAt,
-        workingDir: schedules.workingDir,
-        projectConfigId: schedules.projectConfigId,
-        sessionId: scheduleRuns.sessionId,
-        status: scheduleRuns.status,
-        readAt: scheduleRuns.readAt,
-        firedAt: scheduleRuns.firedAt,
-      })
-      .from(scheduleRuns)
-      .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
-      .where(
-        or(
-          isNotNull(scheduleRuns.sessionId),
-          and(
-            isNull(scheduleRuns.readAt),
-            inArray(scheduleRuns.status, UNREAD_TERMINAL_RUN_STATUSES),
-          ),
-        ),
-      );
+    const projection = {
+      runId: scheduleRuns.id,
+      scheduleId: schedules.id,
+      scheduleName: schedules.name,
+      scheduleStatus: schedules.status,
+      scheduleSource: schedules.source,
+      nextFireAt: schedules.nextFireAt,
+      workingDir: schedules.workingDir,
+      projectConfigId: schedules.projectConfigId,
+      sessionId: scheduleRuns.sessionId,
+      status: scheduleRuns.status,
+      readAt: scheduleRuns.readAt,
+      firedAt: scheduleRuns.firedAt,
+    };
+    const [latestSessionRows, unreadRows, runningRows] = await Promise.all([
+      db
+        .select(projection)
+        .from(scheduleSessionLatestRuns)
+        .innerJoin(scheduleRuns, eq(scheduleSessionLatestRuns.runId, scheduleRuns.id))
+        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
+        .where(isNotNull(scheduleRuns.sessionId)),
+      db
+        .select(projection)
+        .from(scheduleRuns)
+        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
+        .where(unreadTerminalRunWhere()),
+      db
+        .select(projection)
+        .from(scheduleRuns)
+        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
+        .where(eq(scheduleRuns.status, 'running')),
+    ]);
+    const latestRunIds = new Set(latestSessionRows.map((row) => row.runId));
+    const rows = [
+      ...unreadRows.filter((row) => !latestRunIds.has(row.runId)),
+      ...runningRows
+        .filter((row) => !latestRunIds.has(row.runId))
+        .map((row) => ({ ...row, sessionId: null })),
+      ...latestSessionRows,
+    ];
 
     const indexedRuns = rows.map((row) => ({
       runId: row.runId,
@@ -861,16 +883,19 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       indexedRuns.map((run) => run.sessionId).filter((id): id is string => Boolean(id)),
     );
     const scheduleByLegacyKey = await this.listSchedulesByLegacyKey(db);
-    const legacySessions = await db
-      .select({
-        id: sessions.id,
-        title: sessions.title,
-        workspaceKind: sessions.workspaceKind,
-        workingDir: sessions.workingDir,
-        updatedAt: sessions.updatedAt,
-      })
-      .from(sessions)
-      .where(legacyTitleWhere());
+    const legacySessions =
+      scheduleByLegacyKey.size === 0
+        ? []
+        : await db
+            .select({
+              id: sessions.id,
+              title: sessions.title,
+              workspaceKind: sessions.workspaceKind,
+              workingDir: sessions.workingDir,
+              updatedAt: sessions.updatedAt,
+            })
+            .from(sessions)
+            .where(legacyTitleWhere());
     const legacyRuns: ScheduleSidebarIndexRun[] = [];
 
     for (const session of legacySessions) {
@@ -1690,14 +1715,15 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         sessionTitle: sessions.title,
         sessionWorkspaceKind: sessions.workspaceKind,
         sessionWorkingDir: sessions.workingDir,
-        firedAt: scheduleRuns.firedAt,
+        firedAt: scheduleSessionLatestRuns.firedAt,
         updatedAt: schedules.updatedAt,
       })
-      .from(scheduleRuns)
+      .from(scheduleSessionLatestRuns)
+      .innerJoin(scheduleRuns, eq(scheduleSessionLatestRuns.runId, scheduleRuns.id))
       .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
-      .innerJoin(sessions, eq(scheduleRuns.sessionId, sessions.id))
+      .innerJoin(sessions, eq(scheduleSessionLatestRuns.sessionId, sessions.id))
       .where(legacyTitleWhere())
-      .orderBy(desc(scheduleRuns.firedAt), desc(schedules.updatedAt));
+      .orderBy(desc(scheduleSessionLatestRuns.firedAt), desc(schedules.updatedAt));
 
     const linkedKeys = new Set<string>();
     for (const row of linkedLegacyRows) {

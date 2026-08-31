@@ -20,7 +20,7 @@ import {
   safeStringify,
   extractMessagePreview,
 } from '../mapper';
-import { throwIpcError, requireString } from '../../utils/ipcValidate';
+import { optionalEnum, throwIpcError, requireObject, requireString } from '../../utils/ipcValidate';
 import * as broadcastTap from '../../device-link/broadcast-tap';
 import { createLogger } from '../../logger';
 import { collectCindyMediaHashes, commitMessageMediaRefs } from '../../cindy-media/chatAttachments';
@@ -31,6 +31,7 @@ import {
 import { importExternalCodexMessagesForSession } from '../../maker-host/codex-local-sessions';
 import { importExternalClaudeCodeMessagesForSession } from '../../maker-host/claude-local-sessions';
 import { isDeviceLinkInvoke } from '../../device-link/invoke-context';
+import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { onMessageCreated as onChatMessageCreatedForEmbedding } from '../../embedders/chat-history-embedder';
 import { recomputePrRefsForSession, recordPrRefsForMessage } from '../../git-context/prRefsStore';
 import {
@@ -63,7 +64,13 @@ const log = createLogger('localDb/messages');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const MESSAGE_DELETION_USER_BOUNDARY_PAGE_SIZE = 32;
+const SQLITE_IN_CHUNK_SIZE = 500;
 const messageRowid = sql<number>`rowid`;
+function chunkArray<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
 /**
  * Skip silent-stop autoResume user rows without letting one bad historical
  * agent_meta blob fail the whole page query. SQLite may evaluate
@@ -228,6 +235,58 @@ export interface EstimatedSessionValueSummary {
   totalValueUsd?: number;
 }
 export const ESTIMATED_SESSION_VALUE_PROJECTION_VERSION = 1;
+
+function parseEstimatedSessionValuePresentation(
+  presentationValue: unknown,
+  showSdkEstimateValue: unknown,
+): { presentation: SdkCostPresentation; showSdkEstimate: boolean } {
+  const presentation: SdkCostPresentation = optionalEnum(
+    presentationValue,
+    ['regular', 'hidden', 'estimate'] as const,
+    'custom provider cost presentation',
+  ) ?? 'regular';
+  if (showSdkEstimateValue !== undefined && typeof showSdkEstimateValue !== 'boolean') {
+    throwIpcError('INVALID_PARAMS', 'showSdkEstimate must be a boolean');
+  }
+  return {
+    presentation,
+    showSdkEstimate: typeof showSdkEstimateValue === 'boolean' ? showSdkEstimateValue : presentation === 'estimate',
+  };
+}
+
+function parseEstimatedSessionValueBatchIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throwIpcError('INVALID_PARAMS', 'sessionIds must be an array');
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = requireString(item, 'sessionId');
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= ESTIMATED_SESSION_VALUE_BATCH_LIMIT) break;
+  }
+  return ids;
+}
+
+function parseEstimatedSessionValuePresentationMap(
+  value: unknown,
+  fallback: SdkCostPresentation,
+): Map<string, SdkCostPresentation> {
+  const map = new Map<string, SdkCostPresentation>();
+  if (value === undefined) return map;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throwIpcError('INVALID_PARAMS', 'presentations must be an object');
+  }
+  for (const [sessionId, presentationValue] of Object.entries(value as Record<string, unknown>)) {
+    map.set(sessionId, optionalEnum(
+      presentationValue,
+      ['regular', 'hidden', 'estimate'] as const,
+      'custom provider cost presentation',
+    ) ?? fallback);
+  }
+  return map;
+}
 
 /**
  * The already-recorded cost segments for the visible user round immediately
@@ -527,8 +586,10 @@ export function registerMessageIpc(): void {
     },
   );
 
-  ipcMain.handle('local-db:messages:estimatedSessionValue', async (_e, sessionId: unknown) => {
+  ipcMain.handle('local-db:messages:estimatedSessionValue', async (event, sessionId: unknown, presentationValue?: unknown, showSdkEstimateValue?: unknown) => {
+    if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
     const sid = requireString(sessionId, 'sessionId');
+    const { presentation, showSdkEstimate } = parseEstimatedSessionValuePresentation(presentationValue, showSdkEstimateValue);
     const db = getDbClient().drizzle;
 
     const [sessionRow] = await db
@@ -536,37 +597,41 @@ export function registerMessageIpc(): void {
       .from(sessions)
       .where(eq(sessions.id, sid))
       .limit(1);
-    const clearedAtMs = sessionRow?.clearedAt ?? null;
-
-    const visibleConds = clearedAtMs === null ? [] : [gt(messages.createdAt, clearedAtMs)];
     const rows = await db
       .select({
         clientId: messages.clientId,
         agentMeta: messages.agentMeta,
+        createdAt: messages.createdAt,
+        rewindAt: messages.rewindAt,
       })
       .from(messages)
       .where(
         and(
           eq(messages.sessionId, sid),
           eq(messages.role, 'assistant'),
-          isNull(messages.rewindAt),
-          ...visibleConds,
         ),
       );
-    const entries = extractEstimatedSessionValueEntries(rows);
-    const totalValueMoney = addCompatibleRegionalMoney(
-      entries.flatMap((entry) => (entry.money ? [entry.money] : [])),
-    );
-    const hasCompleteUsdProjection = entries.every((entry) => typeof entry.costUsd === 'number');
+    const summarized = summarizeEstimatedSessionValueRows(rows, sessionRow?.clearedAt ?? null, presentation, showSdkEstimate);
     return {
-      totalValueMoney,
-      ...(hasCompleteUsdProjection
-        ? {
-            totalValueUsd: entries.reduce((sum, item) => sum + (item.costUsd ?? 0), 0),
-          }
-        : {}),
-      entries,
+      projectionVersion: ESTIMATED_SESSION_VALUE_PROJECTION_VERSION,
+      totalValueMoney: summarized.totalValueMoney,
+      ...(summarized.totalValueUsd != null ? { totalValueUsd: summarized.totalValueUsd } : {}),
+      entries: summarized.entries,
     };
+  });
+
+  ipcMain.handle('local-db:messages:estimatedSessionValueBatch', async (event, body: unknown) => {
+    if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
+    const payload = requireObject(body, 'payload');
+    const sessionIds = parseEstimatedSessionValueBatchIds(payload.sessionIds);
+    if (sessionIds.length === 0) return {};
+    const { presentation, showSdkEstimate } = parseEstimatedSessionValuePresentation(payload.presentation, payload.showSdkEstimate);
+    const presentationBySession = parseEstimatedSessionValuePresentationMap(payload.presentations, presentation);
+    const db = getDbClient().drizzle;
+    const sessionRows = (await Promise.all(chunkArray(sessionIds, SQLITE_IN_CHUNK_SIZE).map((chunk) => db.select({ id: sessions.id, clearedAt: sessions.clearedAt }).from(sessions).where(inArray(sessions.id, chunk))))).flat();
+    const messageRows = (await Promise.all(chunkArray(sessionIds, SQLITE_IN_CHUNK_SIZE).map((chunk) => db.select({ sessionId: messages.sessionId, clientId: messages.clientId, agentMeta: messages.agentMeta, createdAt: messages.createdAt, rewindAt: messages.rewindAt }).from(messages).where(and(eq(messages.role, 'assistant'), inArray(messages.sessionId, chunk)))))).flat();
+    const clearedAtBySession = new Map<string, number | null>(sessionRows.map((row) => [row.id, row.clearedAt ?? null]));
+    return summarizeEstimatedSessionValuesBySession(messageRows, clearedAtBySession, sessionIds, presentationBySession, showSdkEstimate);
   });
 
   ipcMain.handle('local-db:messages:create', async (_e, sessionId: unknown, body: unknown) => {
@@ -2060,7 +2125,8 @@ export async function broadcastMessageAgentMetaUpdate(
     .limit(1);
   if (!row) return false;
   if (!isOwnerBroadcastScopeCurrent(ownerScope)) return false;
-  broadcastMessageRow(sessionId, messageToCamel(row), ownerScope);
+  const message = messageToCamel(row);
+  broadcastMessageRow(sessionId, projectLegacyMessageBilling([message])[0] ?? message, ownerScope);
   return true;
 }
 

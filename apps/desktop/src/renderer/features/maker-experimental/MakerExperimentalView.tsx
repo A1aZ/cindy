@@ -329,7 +329,7 @@ export function MakerExperimentalView(): ReactElement {
           ) : (
             m.events.map((e) => (
               <div key={e.id} style={{ marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid var(--border-default)' }}>
-                <div style={{ color: 'var(--warning-accent)' }}>
+                <div style={{ color: 'var(--text-secondary)' }}>
                   #{e.id} <strong>{e.event.type}</strong> <span style={{ color: 'var(--text-tertiary)' }}>({e.event.source})</span>
                 </div>
                 <pre style={{ margin: '4px 0 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>

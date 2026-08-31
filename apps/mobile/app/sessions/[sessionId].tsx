@@ -454,6 +454,7 @@ import {
   hasOlderMessagesByServerCount,
   listMessagesWithPayloadRetry,
   oldestMessageCursor,
+  projectLoadedMessageWindow,
   shouldRefreshLatestMessageWindowOnReopen,
   shouldKeepOlderMessagesAffordance,
 } from '@/session/messagePaging';
@@ -4623,7 +4624,7 @@ export default function SessionScreen() {
         // (含本地 sending / canStopQueue,发送→status 间隙会闪现残留),也不用
         // remoteSessionRunning(activity 推送 / 活跃快照会先置 true,重连场景渲染先于清理)。
         buildMobileMessageRenderItems(
-          messages,
+          projectLoadedMessageWindow(messages),
           { autoResumePending: inputProjection.autoResumePending, isSessionStreaming, renderOrphanTaskUpdates: makerTurnRunning, sessionId },
           taskUpdates,
         ),
@@ -9346,6 +9347,7 @@ export default function SessionScreen() {
                     items={messageListItems}
                     pendingSend={pendingSendActions}
                     loadingEarlier={loadingEarlier}
+                    loadEarlierProgressKey={oldestMessageCursor(messages)}
                     onCopyMessageLink={copyMessageLink}
                     onAddMessageToComposer={canUseComposer ? addMessageToComposer : undefined}
                     onDeleteMessage={collaborationReadOnlyReason ? undefined : deleteMessage}

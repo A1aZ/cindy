@@ -487,7 +487,10 @@ export function shouldAutoLoadEarlier(input: MobileAutoLoadEarlierDecisionInput)
   ) return false;
   if (!input.actionVisible || input.actionDisabled) return false;
   if (!input.nearStart) return false;
-  if (input.atEnd && input.userScrolledForOlder) return false;
+  // A short window can be both atStart and atEnd. After an explicit upward drag, allow it to
+  // request the previous page; only suppress user-driven prefetch when a longer list is still
+  // pinned at the latest edge without also being at the history edge.
+  if (input.atEnd && input.userScrolledForOlder && !input.atStart) return false;
   if (!input.firstItemKey) return false;
   return input.lastAttemptedFirstItemKey !== input.firstItemKey;
 }

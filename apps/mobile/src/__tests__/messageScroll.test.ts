@@ -300,9 +300,17 @@ describe('shouldAutoLoadEarlier', () => {
     })).toBe(false);
   });
 
-  it('keeps user-driven history prefetch disabled while pinned at the end', () => {
-    // 短会话整窗都在近顶阈值内:nearStart 与贴底可同时成立,贴底跟流优先。
-    expect(shouldAutoLoadEarlier({ ...eligible, atEnd: true })).toBe(false);
+  it('keeps user-driven history prefetch disabled while only pinned at the end', () => {
+    expect(shouldAutoLoadEarlier({ ...eligible, atEnd: true, atStart: false })).toBe(false);
+  });
+
+  it('loads history after an explicit drag when a short window is both at-start and at-end', () => {
+    expect(shouldAutoLoadEarlier({
+      ...eligible,
+      atEnd: true,
+      atStart: true,
+      userScrolledForOlder: true,
+    })).toBe(true);
   });
 
   it('allows bounded cold-fill while a short initial window is both near-start and at-end', () => {

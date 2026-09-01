@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function source(path: string): string {
-  return readFileSync(resolve(process.cwd(), path), 'utf8');
+  return readFileSync(resolve(process.cwd(), path), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('inactive session list subscriptions', () => {

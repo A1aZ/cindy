@@ -304,8 +304,6 @@ import {
 import type { ContinuationInFlightProjectionCapability } from '@/session/types';
 import {
   projectMobileWorkActivities,
-  projectRecentMobileWorkActivities,
-  type MobileProjectedThinkingActivity,
   type MobileProjectedToolActivity,
 } from '@/session/workActivityProjection';
 import { logUnhandledRenderItem } from '@/session/assertNever';
@@ -407,8 +405,6 @@ const ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS: MobileMarkdownTextRunGroupin
   maxTextRunUtf16Length: ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH,
   maxTextRunInlineFragments: ANDROID_SELECTABLE_TEXT_RUN_MAX_INLINE_FRAGMENTS,
 };
-/** Running work groups expose only the same latest-five activity window as desktop. */
-const MAX_LIVE_WORK_ACTIVITIES = 5;
 // LegendList 预渲距离(px,视口外每侧):约 1 屏,挂载集小 → 滚动 mount 帧压进一帧内(见 listperf 实测)。
 const MOBILE_MESSAGE_DRAW_DISTANCE = 800;
 const FOLDABLE_HEADER_HIT_SLOP = { bottom: 10, left: 4, right: 4, top: 10 };
@@ -3942,17 +3938,12 @@ function WorkGroupCard({
   const contentLayout = useMemo(() => buildMessageContentLayout({
     screenWidth: actions.screenWidth,
   }), [actions.screenWidth]);
-  const liveActivities = useMemo(
-    () => projectRecentMobileWorkActivities(item.children, isStreaming, MAX_LIVE_WORK_ACTIVITIES),
-    [isStreaming, item.children],
-  );
   const activityProjection = useMemo(
     () => (expanded || !isStreaming
       ? projectMobileWorkActivities(item.children, isStreaming)
       : null),
     [expanded, isStreaming, item.children],
   );
-  const isLivePreviewVisible = isStreaming && !expanded && liveActivities.length > 0;
   const startedAtIso = item.startedAtMs !== undefined
     ? new Date(item.startedAtMs).toISOString()
     : undefined;
@@ -3975,30 +3966,11 @@ function WorkGroupCard({
     explorationSummary,
   ].filter(Boolean).join(' · ');
   const onToggle = toggleExpanded;
-  const livePreview = isLivePreviewVisible ? (
-    <Rail layout={layout}>
-      <View style={styles.workActivityStack}>
-        {liveActivities.map((activity) => (
-          activity.kind === 'tool'
-            ? (
-                <WorkToolActivityRow
-                  key={activity.key}
-                  actions={actions}
-                  activity={activity}
-                  contentLayout={contentLayout}
-                />
-              )
-            : <WorkThinkingPreviewRow key={activity.key} activity={activity} />
-        ))}
-      </View>
-    </Rail>
-  ) : undefined;
   return (
     <FoldablePanel
       chevronPosition={header.chevronPosition}
       chevronSize={header.chevronSize}
       controlledExpanded={expanded}
-      collapsedBody={livePreview}
       onControlledToggle={onToggle}
       title={title}
       subtitle={header.subtitle ?? undefined}
@@ -4012,30 +3984,32 @@ function WorkGroupCard({
       testID="message.workGroupToggle"
       variant={header.variant}
     >
-      <Rail layout={layout}>
-        <View style={styles.workGroupStack}>
-          {item.children.map((child) => {
-            if (child.type === 'thinking') {
-              return <ExpandedWorkThinkingRow key={child.key} item={child} />;
-            }
-            if (child.type === 'tool_group') {
-              return (
-                <View key={child.key} style={styles.workActivityStack}>
-                  {(activityProjection?.toolActivitiesByChildKey.get(child.key) ?? []).map((activity) => (
-                    <WorkToolActivityRow
-                      key={activity.key}
-                      actions={actions}
-                      activity={activity}
-                      contentLayout={contentLayout}
-                    />
-                  ))}
-                </View>
-              );
-            }
-            return <RenderItemView key={child.key} item={child} actions={actions} />;
-          })}
-        </View>
-      </Rail>
+      {expanded ? (
+        <Rail layout={layout}>
+          <View style={styles.workGroupStack}>
+            {item.children.map((child) => {
+              if (child.type === 'thinking') {
+                return <ExpandedWorkThinkingRow key={child.key} item={child} />;
+              }
+              if (child.type === 'tool_group') {
+                return (
+                  <View key={child.key} style={styles.workActivityStack}>
+                    {(activityProjection?.toolActivitiesByChildKey.get(child.key) ?? []).map((activity) => (
+                      <WorkToolActivityRow
+                        key={activity.key}
+                        actions={actions}
+                        activity={activity}
+                        contentLayout={contentLayout}
+                      />
+                    ))}
+                  </View>
+                );
+              }
+              return <RenderItemView key={child.key} item={child} actions={actions} />;
+            })}
+          </View>
+        </Rail>
+      ) : null}
     </FoldablePanel>
   );
 }
@@ -4065,28 +4039,6 @@ function WorkToolActivityRow({
       rowKey={activity.key}
       tool={tool}
     />
-  );
-}
-
-function WorkThinkingPreviewRow({
-  activity,
-}: {
-  activity: MobileProjectedThinkingActivity;
-}) {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(makeStyles);
-  return (
-    <View
-      style={styles.workThinkingRow}
-      testID="message.workThinkingPreview"
-    >
-      <View style={stylesStatic.workActivityIconSlot}>
-        <Sparkles color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
-      </View>
-      <Text numberOfLines={1} style={[styles.workActivityText, styles.italicText, styles.workThinkingText]}>
-        <ThinkingInlineText content={activity.content} />
-      </Text>
-    </View>
   );
 }
 
@@ -4207,7 +4159,6 @@ function FoldablePanel({
   title,
   subtitle,
   children,
-  collapsedBody,
   controlledExpanded,
   defaultExpanded = false,
   layout,
@@ -4229,9 +4180,7 @@ function FoldablePanel({
   title: string;
   subtitle?: string;
   children: ReactNode;
-  /** Optional running preview rendered while the full body remains collapsed. */
-  collapsedBody?: ReactNode;
-  /** Controlled mode used by work groups with a preview state separate from expansion. */
+  /** Controlled mode used by work groups. */
   controlledExpanded?: boolean;
   /** 仅无 blockId 的本地 state 路径生效;blockId 存在时由共享记忆决定(默认折叠)。 */
   defaultExpanded?: boolean;
@@ -4313,18 +4262,6 @@ function FoldablePanel({
             },
         ]}>
           {children}
-        </View>
-      ) : collapsedBody ? (
-        <View style={[
-          styles.foldBody,
-          variant === 'plain'
-            ? styles.foldBodyPlain
-            : {
-              paddingBottom: layout.foldBodyPaddingBottom,
-              paddingHorizontal: layout.foldBodyPaddingHorizontal,
-            },
-        ]}>
-          {collapsedBody}
         </View>
       ) : null}
     </View>

@@ -5521,18 +5521,10 @@ export class PiAgent extends BaseAgent {
         }
         throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
       }
-      // pi 已确认 → 清掉 pending 标记放行派发。写失败时**不**抛错:模型切换本身确实成功了,
-      // 谎报失败会让上层与 UI 状态和 pi 真实状态背离。代价是这个会话的子代理一直被 pending
-      // 挡住(可见的降级、拒绝时有明确文案),而它是安全方向 —— 绝不会把委派发到错误 endpoint。
-      if (
-        subagentRoutingEnabled
-        && !(await writeSubagentRuntimeFile({ model: wireModel, provider }))
-      ) {
-        deps.logger.error(
-          'pi: model switch confirmed but the subagent routing snapshot stayed pending; ' +
-            'subagent delegation stays disabled for this session (fail-closed)',
-        );
-      }
+      // Keep the subagent snapshot pending until any settings reload has rebuilt and
+      // re-verified the Pi runtime. switch_session recreates AgentSession from the
+      // original CLI options, so clearing pending here would briefly allow children
+      // to use the target route while the parent may have fallen back to the old one.
       mutableModel = model;
       mutableWireModel = wireModel;
       mutablePiProviderId = provider;
@@ -5550,17 +5542,27 @@ export class PiAgent extends BaseAgent {
       // 换模型 / 换路由可能正好修掉了审阅器不可用的原因;换完又不可用值得再提醒一次。
       autoReviewUnavailableNotice.reset();
       autoReviewConfirmUndeliveredNotice.reset();
-      const previousWindow = ctx.contextWindow;
       const data = (resp.data ?? {}) as { contextWindow?: number };
-      const nextWindow =
+      const setModelReportedWindow =
         typeof data.contextWindow === 'number' && data.contextWindow > 0
           ? data.contextWindow
-          : (this.deps.resolvePiRuntimeModelDescriptor?.(mutableProviderId ?? null, model)?.contextWindow
-            ?? this.capabilities.availableModels.find((candidate) => candidate.id === model)?.contextWindow
-            ?? ctx.contextWindow);
+          : null;
+      const nextWindow =
+        setModelReportedWindow ??
+        this.deps.resolvePiRuntimeModelDescriptor?.(mutableProviderId ?? null, model)
+          ?.contextWindow ??
+        this.capabilities.availableModels.find((candidate) => candidate.id === model)
+          ?.contextWindow ??
+        ctx.contextWindow;
       if (nextWindow > 0) ctx.contextWindow = nextWindow;
-      if (nextWindow > 0 && nextWindow !== previousWindow) {
+      // Always reload and read get_state after set_model. The catalog and even the
+      // set_model response can disagree with the materialized runtime window; callers
+      // must not decide whether to destroy native context until this verification ends.
+      {
         try {
+          if (!Number.isFinite(nextWindow) || nextWindow <= 0) {
+            throw new Error('pi: model switch returned no verifiable context window');
+          }
           await this.writePiRuntimeSettings(configHome, {
             fileOps,
             contextWindow: nextWindow,
@@ -5579,6 +5581,70 @@ export class PiAgent extends BaseAgent {
               `pi: failed to reload settings after context window change: ${reloaded.error ?? 'unknown'}`,
             );
           }
+          // Pi rebuilds switch_session from the process' original --provider/--model
+          // options. Re-apply the requested route, then read it back before exposing
+          // the parent or its subagents as switched.
+          const reapplied = await proc.request({
+            type: 'set_model',
+            provider,
+            modelId: wireModel,
+          });
+          if (!reapplied.success) {
+            throw new Error(
+              `pi: failed to re-apply model after settings reload: ${reapplied.error ?? 'unknown'}`,
+            );
+          }
+          const verified = await proc.request({ type: 'get_state' });
+          if (!verified.success) {
+            throw new Error(
+              `pi: failed to verify model after settings reload: ${verified.error ?? 'unknown'}`,
+            );
+          }
+          const verifiedModel = (verified.data as {
+            model?: { provider?: unknown; id?: unknown; contextWindow?: unknown } | null;
+          } | undefined)?.model;
+          if (verifiedModel?.provider !== provider || verifiedModel.id !== wireModel) {
+            throw new Error(
+              `pi: settings reload restored an unexpected model (expected ${provider}/${wireModel}, ` +
+                `got ${String(verifiedModel?.provider)}/${String(verifiedModel?.id)})`,
+            );
+          }
+          const verifiedWindow = verifiedModel.contextWindow;
+          if (
+            typeof verifiedWindow !== 'number' ||
+            !Number.isFinite(verifiedWindow) ||
+            verifiedWindow <= 0
+          ) {
+            throw new Error('pi: settings reload returned an invalid context window');
+          }
+          if (verifiedWindow !== nextWindow) {
+            await this.writePiRuntimeSettings(configHome, {
+              fileOps,
+              contextWindow: verifiedWindow,
+              piCompactionPct: sessionPiAutoCompactPct,
+            });
+            const recalibrated = await proc.request({ type: 'switch_session', sessionPath: sdkSessionId });
+            if (!recalibrated.success) {
+              throw new Error(`pi: failed to reload recalibrated settings: ${recalibrated.error ?? 'unknown'}`);
+            }
+            const recalibratedModel = await proc.request({ type: 'set_model', provider, modelId: wireModel });
+            if (!recalibratedModel.success) {
+              throw new Error(`pi: failed to re-apply model after settings recalibration: ${recalibratedModel.error ?? 'unknown'}`);
+            }
+            const reverified = await proc.request({ type: 'get_state' });
+            const reverifiedModel = (reverified.data as {
+              model?: { provider?: unknown; id?: unknown; contextWindow?: unknown } | null;
+            } | undefined)?.model;
+            if (
+              !reverified.success ||
+              reverifiedModel?.provider !== provider ||
+              reverifiedModel.id !== wireModel ||
+              reverifiedModel.contextWindow !== verifiedWindow
+            ) {
+              throw new Error('pi: recalibrated settings did not match the verified runtime window');
+            }
+          }
+          ctx.contextWindow = verifiedWindow;
         } catch (err) {
           this.deps.logger.error('pi: compaction settings reload unconfirmed after model switch', {
             message: err instanceof Error ? err.message : String(err),
@@ -5595,6 +5661,18 @@ export class PiAgent extends BaseAgent {
             'pi: 模型切换后未能重载压缩阈值，已终止本任务以免继续按旧 reserveTokens 压缩。请重新打开任务。',
           );
         }
+      }
+      // The parent route and target-window settings are now confirmed. Clear the
+      // pending marker last; failure keeps subagent delegation disabled but does
+      // not misreport the parent switch itself.
+      if (
+        subagentRoutingEnabled &&
+        !(await writeSubagentRuntimeFile({ model: wireModel, provider }))
+      ) {
+        deps.logger.error(
+          'pi: model switch confirmed but the subagent routing snapshot stayed pending; ' +
+            'subagent delegation stays disabled for this session (fail-closed)',
+        );
       }
     };
 

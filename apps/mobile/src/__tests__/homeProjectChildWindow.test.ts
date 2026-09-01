@@ -1,11 +1,107 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildHomeProjectChildOffsets,
   findHomeProjectChildIndex,
+  resolveHomeProjectChildAnchor,
   resolveHomeProjectChildWindow,
+  shouldWindowHomeProjectChildren,
 } from '@/session/homeProjectChildWindow';
 
 describe('home project child window', () => {
+  it('marks a large expanded group eligible for windowing before layout tracking is ready', () => {
+    const offsets = buildHomeProjectChildOffsets(Array.from({ length: 200 }, () => 78));
+
+    expect(shouldWindowHomeProjectChildren({
+      collapsed: false,
+      itemCount: 200,
+      scrollTrackingAvailable: true,
+      threshold: 20,
+    })).toBe(true);
+
+    const initialRange = resolveHomeProjectChildWindow({
+      anchor: 0,
+      childOffsets: offsets,
+      overscan: 4,
+      windowSize: 15,
+    });
+    expect(initialRange.start).toBe(0);
+    expect(initialRange.end).toBeLessThan(200);
+    expect(initialRange.trailingSpacerHeight).toBeGreaterThan(0);
+  });
+
+  it('keeps off-screen child content unmounted and anchors it once visible', () => {
+    const childOffsets = buildHomeProjectChildOffsets(Array.from({ length: 112 }, () => 78));
+
+    expect(resolveHomeProjectChildAnchor({
+      childOffsets,
+      projectHeaderHeight: 56,
+      projectTop: 780,
+      shift: 4,
+      viewportHeight: 800,
+      viewportTop: 0,
+    })).toBe(-1);
+    expect(resolveHomeProjectChildAnchor({
+      childOffsets,
+      projectHeaderHeight: 56,
+      projectTop: 200,
+      shift: 4,
+      viewportHeight: 800,
+      viewportTop: 500,
+    })).toBe(0);
+    expect(resolveHomeProjectChildAnchor({
+      childOffsets,
+      projectHeaderHeight: 56,
+      projectTop: 200,
+      shift: 4,
+      viewportHeight: 800,
+      viewportTop: 900,
+    })).toBe(8);
+  });
+
+  it('does not measure or window ordinary previews and collapsed groups', () => {
+    expect(shouldWindowHomeProjectChildren({
+      collapsed: false,
+      itemCount: 20,
+      scrollTrackingAvailable: true,
+      threshold: 20,
+    })).toBe(false);
+    expect(shouldWindowHomeProjectChildren({
+      collapsed: true,
+      itemCount: 200,
+      scrollTrackingAvailable: true,
+      threshold: 20,
+    })).toBe(false);
+  });
+
+  it('keeps layout readiness out of the first-render window gate', () => {
+    const source = readFileSync(resolve(process.cwd(), 'app/devices/index.tsx'), 'utf8');
+    const setupStart = source.indexOf('const windowingEnabled = shouldWindowHomeProjectChildren({');
+    const setupEnd = source.indexOf('const scrollY = homeScrollY;', setupStart);
+    const setup = source.slice(setupStart, setupEnd);
+
+    expect(setupStart).toBeGreaterThan(-1);
+    expect(setup).not.toContain('projectLayoutReady');
+    expect(source).toContain('function HomeProjectWindowAnchorTracker({');
+    expect(source).toContain('if (!projectLayoutReady.value) return -1;');
+    expect(source).toContain('return resolveHomeProjectChildAnchor({');
+    expect(source).toContain('const [windowAnchor, setWindowAnchor] = useState(-1);');
+    expect(source).toContain('trailingSpacerHeight: childContentHeight');
+    expect(source).toContain('{windowingEnabled && scrollY ? (');
+    expect(source).toContain('const renderedSessions = windowingEnabled ? visibleSessions.slice');
+    expect(source).toContain('if (!windowingEnabled) return;');
+  });
+
+  it('bounds the outer home list window instead of retaining every flat row', () => {
+    const source = readFileSync(resolve(process.cwd(), 'app/devices/index.tsx'), 'utf8');
+
+    expect(source).toContain('initialNumToRender={HOME_LIST_INITIAL_RENDER_COUNT}');
+    expect(source).toContain('maxToRenderPerBatch={HOME_LIST_RENDER_BATCH_SIZE}');
+    expect(source).toContain('updateCellsBatchingPeriod={32}');
+    expect(source).toContain('windowSize={HOME_LIST_WINDOW_SIZE}');
+  });
+
   it('locates mixed-height rows without changing their total occupied height', () => {
     const offsets = buildHomeProjectChildOffsets([60, 78, 60, 78, 60, 78]);
 

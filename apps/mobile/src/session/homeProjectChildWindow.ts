@@ -5,6 +5,17 @@ export interface HomeProjectChildWindowRange {
   trailingSpacerHeight: number;
 }
 
+export function shouldWindowHomeProjectChildren(input: {
+  collapsed: boolean;
+  itemCount: number;
+  scrollTrackingAvailable: boolean;
+  threshold: number;
+}): boolean {
+  return input.scrollTrackingAvailable
+    && !input.collapsed
+    && input.itemCount > Math.max(0, Math.floor(input.threshold));
+}
+
 /**
  * Builds stable child offsets for a project block. Keeping the full height in
  * spacers lets the outer SectionList preserve exactly the same layout while
@@ -36,6 +47,34 @@ export function findHomeProjectChildIndex(
     else high = middle;
   }
   return low;
+}
+
+/**
+ * Keeps a large nested group as a spacer until its child area intersects the
+ * viewport. This prevents an off-screen folder header from eagerly mounting a
+ * complete child window during a grouping-mode switch.
+ */
+export function resolveHomeProjectChildAnchor(input: {
+  childOffsets: readonly number[];
+  projectHeaderHeight: number;
+  projectTop: number;
+  shift: number;
+  viewportHeight: number;
+  viewportTop: number;
+}): number {
+  'worklet';
+  const childContentHeight = Math.max(0, input.childOffsets[input.childOffsets.length - 1] ?? 0);
+  const childTop = input.projectTop + Math.max(0, input.projectHeaderHeight);
+  const childBottom = childTop + childContentHeight;
+  const viewportTop = Math.max(0, input.viewportTop);
+  const viewportBottom = viewportTop + Math.max(0, input.viewportHeight);
+  if (childContentHeight === 0 || childTop >= viewportBottom || childBottom <= viewportTop) {
+    return -1;
+  }
+  const shift = Math.max(1, Math.floor(input.shift));
+  const relativeY = Math.max(0, viewportTop - childTop);
+  const visibleIndex = findHomeProjectChildIndex(input.childOffsets, relativeY);
+  return Math.floor(visibleIndex / shift) * shift;
 }
 
 export function resolveHomeProjectChildWindow(input: {

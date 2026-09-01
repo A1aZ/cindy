@@ -392,7 +392,10 @@ const MOBILE_PROGRAMMATIC_SCROLL_SETTLE_MS = 1000;
 const MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS = 1400;
 /** Cold-open history fill is useful, but bounded so a short/duplicate host page cannot drain history forever. */
 const MAX_INITIAL_HISTORY_AUTOFILL_PAGES = 3;
-const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 140;
+// Keep the initial pool large enough for short message/work-group rows. An
+// overestimate forces on-demand container growth during a fast fling, which is
+// both a mount spike and a DEV LogBox update in the middle of Fabric commits.
+const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 100;
 /** Manual prepend anchoring retries layout positions for at most ~3 seconds, even under resize churn. */
 const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES = 180;
 const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS = 3000;
@@ -659,7 +662,7 @@ export function MessageRenderer({
   syncingWhileEmpty,
   testID,
   devExposeList,
-  devRecycleItems = true,
+  devRecycleItems = false,
 }: {
   bottomOverlayHeight?: number;
   /** 顶部 chrome(绝对定位半透明工具栏)实测高度:内容顶部按此让位,详见 mobileMessageListTopPadding。 */
@@ -2441,10 +2444,11 @@ export function MessageRenderer({
     ),
     [pendingSend?.selectedClientId, shareSelectionActive],
   );
-  // Production and regular DEV screens use native cell recycling after every
-  // identity-bound local state below was made recycling-aware. listperf passes
-  // this DEV-only override explicitly so its on/off control remains available.
-  const recycleItems = __DEV__ ? devRecycleItems === true : true;
+  // Keep production and regular DEV screens on keyed remounts. With Fabric,
+  // recycling an Android container across heterogeneous message trees can race
+  // native detach/attach batches and try to mount a child that still belongs to
+  // the previous row. listperf keeps the DEV-only override for explicit A/Bs.
+  const recycleItems = __DEV__ ? devRecycleItems === true : false;
 
   return (
     // chat-text-quote:Provider 恒挂载(值可为 null),避免启用态翻转时整棵消息树

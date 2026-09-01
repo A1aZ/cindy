@@ -136,8 +136,9 @@ import {
 } from '@/session/homeListPriority';
 import {
   buildHomeProjectChildOffsets,
-  findHomeProjectChildIndex,
+  resolveHomeProjectChildAnchor,
   resolveHomeProjectChildWindow,
+  shouldWindowHomeProjectChildren,
 } from '@/session/homeProjectChildWindow';
 import {
   projectDropIndexFromY,
@@ -162,7 +163,14 @@ import {
   UNAVAILABLE_PROJECT_ORDER_SNAPSHOT,
   type SyncedProjectOrderSnapshot,
 } from '@cindy/maker-shared/project-order-sync';
-import { buildHomeSections, homeRowBefore, isFolderHomeRow, type HomeRow, type HomeSection } from '@/session/homeSections';
+import {
+  buildHomeSections,
+  homeRowsShareRenderData,
+  homeRowBefore,
+  isFolderHomeRow,
+  type HomeRow,
+  type HomeSection,
+} from '@/session/homeSections';
 import {
   readHomeViewPreferences,
   saveHomeViewPreferences,
@@ -237,6 +245,9 @@ const PROJECT_CHILD_WINDOW_THRESHOLD = 20;
 const PROJECT_CHILD_WINDOW_SIZE = 15;
 const PROJECT_CHILD_WINDOW_OVERSCAN = 4;
 const PROJECT_CHILD_WINDOW_SHIFT = 4;
+const HOME_LIST_INITIAL_RENDER_COUNT = 12;
+const HOME_LIST_RENDER_BATCH_SIZE = 12;
+const HOME_LIST_WINDOW_SIZE = 5;
 const HOME_PROJECT_HEADER_HEIGHT = 56;
 const HOME_AUTOMATION_VIEW_ALL_ROW_HEIGHT = 54;
 const HOME_SESSION_ROW_HEIGHT = 78;
@@ -2300,6 +2311,7 @@ function HomeScreenContent() {
       projectDragging={projectDrag?.key === (item.kind === 'project' ? item.project.key : '')}
       projectHeaderRefs={projectHeaderRefs}
       homeScrollY={homeScrollY}
+      viewportHeight={screenHeight}
       onTogglePin={toggleSessionPinned}
       prevIsBlock={isBlockHomeRow(homeRowBefore(sections, section.key, index))}
       projectCollapsed={isFolderHomeRow(item) && collapsedProjectKeys.includes(item.project.key)}
@@ -2331,6 +2343,7 @@ function HomeScreenContent() {
     toggleProject,
     toggleSessionPinned,
     homeScrollY,
+    screenHeight,
   ]);
 
   // 底部边到边:列表填满到物理屏底(内容滚到 home indicator 下方),用 inset 兜底而非靠 SafeAreaView 留白带。
@@ -2563,6 +2576,10 @@ function HomeScreenContent() {
         sections={sections}
         style={styles.homeList}
         keyExtractor={(item) => item.key}
+        initialNumToRender={HOME_LIST_INITIAL_RENDER_COUNT}
+        maxToRenderPerBatch={HOME_LIST_RENDER_BATCH_SIZE}
+        updateCellsBatchingPeriod={32}
+        windowSize={HOME_LIST_WINDOW_SIZE}
         refreshControl={
           <RefreshControl
             progressViewOffset={chromeHeight}
@@ -3322,6 +3339,44 @@ function ProjectDragOverlay({
   );
 }
 
+function HomeProjectWindowAnchorTracker({
+  childOffsets,
+  onAnchorChange,
+  projectHeaderHeight,
+  projectLayoutReady,
+  projectTop,
+  scrollY,
+  viewportHeight,
+}: {
+  childOffsets: readonly number[];
+  onAnchorChange(anchor: number): void;
+  projectHeaderHeight: SharedValue<number>;
+  projectLayoutReady: SharedValue<boolean>;
+  projectTop: SharedValue<number>;
+  scrollY: SharedValue<number>;
+  viewportHeight: number;
+}) {
+  useAnimatedReaction(
+    () => {
+      if (!projectLayoutReady.value) return -1;
+      return resolveHomeProjectChildAnchor({
+        childOffsets,
+        projectHeaderHeight: projectHeaderHeight.value,
+        projectTop: projectTop.value,
+        shift: PROJECT_CHILD_WINDOW_SHIFT,
+        viewportHeight,
+        viewportTop: scrollY.value,
+      });
+    },
+    (next, previous) => {
+      if (next === previous) return;
+      runOnJS(onAnchorChange)(next);
+    },
+    [childOffsets, onAnchorChange, projectHeaderHeight, projectLayoutReady, projectTop, scrollY, viewportHeight],
+  );
+  return null;
+}
+
 function ProjectRow({
   collapsed,
   dragging = false,
@@ -3338,6 +3393,7 @@ function ProjectRow({
   onToggleAutomationGroup,
   project,
   homeScrollY,
+  viewportHeight,
   showAll = false,
   suppressTopBorder = false,
   swipe,
@@ -3357,6 +3413,7 @@ function ProjectRow({
   onToggleAutomationGroup(key: string): void;
   project: MobileHomeProjectGroup;
   homeScrollY?: SharedValue<number>;
+  viewportHeight: number;
   /** 对话组「查看全部」在原地展开,不跳设备详情。 */
   showAll?: boolean;
   /** 前一行也是块(项目组 / 自动化组)时不画顶线:前块底线已是这根分割线。 */
@@ -3386,8 +3443,8 @@ function ProjectRow({
   const projectTop = useSharedValue(0);
   const projectHeaderHeight = useSharedValue(HOME_PROJECT_HEADER_HEIGHT);
   const projectRef = useRef<View>(null);
-  const [windowAnchor, setWindowAnchor] = useState(0);
-  const [projectLayoutReady, setProjectLayoutReady] = useState(false);
+  const [windowAnchor, setWindowAnchor] = useState(-1);
+  const projectLayoutReady = useSharedValue(false);
   const estimatedChildHeights = useMemo(() => {
     const expandedKeys = new Set(expandedAutomationGroups);
     return visibleSessions.map((item) => estimateHomeProjectChildHeight(item, expandedKeys));
@@ -3396,35 +3453,33 @@ function ProjectRow({
     () => buildHomeProjectChildOffsets(estimatedChildHeights),
     [estimatedChildHeights],
   );
-  // Keep the common five-row preview unchanged. Large expanded groups use
-  // prefix-sum windowing for both 60/78px rows and expanded automation groups,
-  // so mixed content never falls back to mounting the whole project.
-  const windowingEligible = !!homeScrollY
-    && !collapsed
-    && projectLayoutReady
-    && visibleSessions.length > PROJECT_CHILD_WINDOW_THRESHOLD;
+  // Keep the common five-row preview unchanged. A large expanded group keeps
+  // its complete estimated height as a spacer until native layout establishes
+  // that its child area intersects the viewport. This avoids mounting an
+  // off-screen child window just because the folder header entered the outer
+  // SectionList render window.
+  const windowingEnabled = shouldWindowHomeProjectChildren({
+    collapsed,
+    itemCount: visibleSessions.length,
+    scrollTrackingAvailable: !!homeScrollY,
+    threshold: PROJECT_CHILD_WINDOW_THRESHOLD,
+  });
   const scrollY = homeScrollY;
-  useAnimatedReaction(
-    () => {
-      if (!windowingEligible) return -1;
-      const relativeY = Math.max(0, scrollY!.value - projectTop.value - projectHeaderHeight.value);
-      const visibleIndex = findHomeProjectChildIndex(estimatedChildOffsets, relativeY);
-      return Math.floor(visibleIndex / PROJECT_CHILD_WINDOW_SHIFT)
-        * PROJECT_CHILD_WINDOW_SHIFT;
-    },
-    (next, previous) => {
-      if (next < 0 || next === previous) return;
-      runOnJS(setWindowAnchor)(next);
-    },
-    [estimatedChildOffsets, projectHeaderHeight, scrollY, windowingEligible],
-  );
-  const childWindow = windowingEligible
-    ? resolveHomeProjectChildWindow({
+  const childContentHeight = estimatedChildOffsets[estimatedChildOffsets.length - 1] ?? 0;
+  const childWindow = windowingEnabled
+    ? windowAnchor >= 0
+      ? resolveHomeProjectChildWindow({
         anchor: windowAnchor,
         childOffsets: estimatedChildOffsets,
         overscan: PROJECT_CHILD_WINDOW_OVERSCAN,
         windowSize: PROJECT_CHILD_WINDOW_SIZE,
       })
+      : {
+          end: 0,
+          leadingSpacerHeight: 0,
+          start: 0,
+          trailingSpacerHeight: childContentHeight,
+        }
     : {
         end: visibleSessions.length,
         leadingSpacerHeight: 0,
@@ -3433,7 +3488,7 @@ function ProjectRow({
       };
   const windowStart = childWindow.start;
   const windowEnd = childWindow.end;
-  const renderedSessions = windowingEligible ? visibleSessions.slice(windowStart, windowEnd) : visibleSessions;
+  const renderedSessions = windowingEnabled ? visibleSessions.slice(windowStart, windowEnd) : visibleSessions;
   const leadingSpacerHeight = childWindow.leadingSpacerHeight;
   const trailingSpacerHeight = childWindow.trailingSpacerHeight;
   const groupTestID = kind === 'dialogue' ? 'home.dialogueGroup' : 'home.projectGroup';
@@ -3506,23 +3561,36 @@ function ProjectRow({
   return (
     <View
       onLayout={(event) => {
+        if (!windowingEnabled) return;
+        projectLayoutReady.value = false;
         const fallbackY = event.nativeEvent.layout.y;
         projectRef.current?.measureInWindow((_x, screenY) => {
           projectTop.value = screenY + (homeScrollY?.value ?? 0);
-          setProjectLayoutReady(true);
+          projectLayoutReady.value = true;
         });
         // A native measure can be unavailable in shallow/unit renderers. Keep
         // the local layout as a safe fallback; the real device measurement
         // above is used whenever the row is mounted in a ScrollView.
         if (!projectRef.current) {
           projectTop.value = fallbackY;
-          setProjectLayoutReady(true);
+          projectLayoutReady.value = true;
         }
       }}
       ref={projectRef}
       style={[styles.projectGroup, suppressTopBorder && styles.projectGroupNoTop]}
       testID={groupTestID}
     >
+      {windowingEnabled && scrollY ? (
+        <HomeProjectWindowAnchorTracker
+          childOffsets={estimatedChildOffsets}
+          onAnchorChange={setWindowAnchor}
+          projectHeaderHeight={projectHeaderHeight}
+          projectLayoutReady={projectLayoutReady}
+          projectTop={projectTop}
+          scrollY={scrollY}
+          viewportHeight={viewportHeight}
+        />
+      ) : null}
       {dragGesture ? <GestureDetector gesture={dragGesture}>{header}</GestureDetector> : header}
 
       {collapsed ? null : (
@@ -3540,7 +3608,7 @@ function ProjectRow({
             // slots while windowing; the row receives new data without paying
             // the native mount/unmount cost. Preserve identity keys outside the
             // windowed path, and remount a slot when its outer shell changes.
-            const reactKey = windowingEligible
+            const reactKey = windowingEnabled
               ? `${project.key}:window:${renderedIndex}:${swipeable ? 'swipe' : 'plain'}`
               : itemKey;
             const row = (
@@ -3613,7 +3681,22 @@ function ProjectRow({
  * useMemo 单例。给本组件新增函数 prop 时必须复审闭包稳定性。projectCollapsed /
  * prevIsBlock 等邻接派生位由 renderItem 计算成标量传入,天然参与比较。
  */
-const HomeListRow = memo(HomeListRowInner, dataPropsEqual);
+const HomeListRow = memo(HomeListRowInner, homeListRowPropsEqual);
+
+function homeListRowPropsEqual(
+  previous: Readonly<Record<string, unknown>>,
+  next: Readonly<Record<string, unknown>>,
+): boolean {
+  const previousItem = previous.item as HomeRow;
+  const nextItem = next.item as HomeRow;
+  if (!homeRowsShareRenderData(previousItem, nextItem)) {
+    return dataPropsEqual(previous, next);
+  }
+  // dataPropsEqual retains the existing semantics for every other prop. Point
+  // the previous row at the already-proven-equivalent next item so the
+  // generic comparator takes its Object.is path instead of JSON.stringify.
+  return dataPropsEqual({ ...previous, item: nextItem }, next);
+}
 
 function HomeListRowInner({
   expandedAutomationGroups,
@@ -3637,6 +3720,7 @@ function HomeListRowInner({
   projectDragging,
   projectHeaderRefs,
   homeScrollY,
+  viewportHeight,
   registry,
   showAllDialogue,
   swipe,
@@ -3663,6 +3747,7 @@ function HomeListRowInner({
   projectDragging: boolean;
   projectHeaderRefs: MutableRefObject<Map<string, View>>;
   homeScrollY?: SharedValue<number>;
+  viewportHeight: number;
   registry: ReturnType<typeof createSwipeRowRegistry>;
   showAllDialogue: boolean;
   swipe: SessionSwipeControls;
@@ -3685,6 +3770,7 @@ function HomeListRowInner({
         onToggleAutomationGroup={onToggleAutomationGroup}
         project={item.project}
         homeScrollY={homeScrollY}
+        viewportHeight={viewportHeight}
         showAll={item.kind === 'dialogue' && showAllDialogue}
         suppressTopBorder={prevIsBlock}
         swipe={swipe}

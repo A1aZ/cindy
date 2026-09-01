@@ -54,10 +54,10 @@ describe('mobile message list container', () => {
     expect(historyRestoreSetup).toContain('if (historyAnchorVerifyFrameRef.current !== null) return;');
     expect(historyRestoreSetup).not.toContain('cancelAnimationFrame(historyAnchorVerifyFrameRef.current)');
     expect(source).toContain('useLayoutEffect(() => {');
-    // 普通 Release/DEV 详情页都开启 native cell 回收；listperf 仍可显式做 on/off A/B。
-    // item type 分池 + recycling-aware state 防止菜单/展开态/媒体状态串到另一条消息。
-    expect(source).toContain('devRecycleItems = true,');
-    expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
+    // 普通 Release/DEV 详情页使用 keyed remount，避免 Fabric 在异构消息树之间回收容器时
+    // 重挂仍属于旧父节点的原生 child；listperf 仍可显式做 on/off A/B。
+    expect(source).toContain('devRecycleItems = false,');
+    expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : false;');
     expect(perfHarness).toContain("const recycle = params.recycle !== '0';");
     expect(listSource).toContain('recycleItems={recycleItems}');
     expect(listSource).toContain('getItemType={mobileMessageListItemType}');

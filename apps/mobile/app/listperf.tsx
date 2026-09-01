@@ -9,6 +9,7 @@
  *   - media: 1=含 mermaid/math(WebView),0=纯文本(隔离 WebView 成本),默认 1
  *   - auto:  1=进入后自动做一次「底→顶」匀速滚动扫描并测帧,默认 0
  *   - vel:   滚动速度 px/帧(模拟 fling),默认 45
+ *   - recycle: 0=关闭 cell 回收做 A/B,默认 1
  */
 import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -35,7 +36,7 @@ export default function ListPerfHarness() {
   const turns = Math.max(1, Math.min(2000, Number(params.turns) || 300));
   const media = params.media !== '0';
   const auto = params.auto === '1';
-  const recycle = params.recycle === '1';
+  const recycle = params.recycle !== '0';
   const pxPerFrame = Math.max(5, Math.min(200, Number(params.vel) || 45));
 
   const items = useMemo(() => buildListPerfRenderItems(turns, { media }), [turns, media]);

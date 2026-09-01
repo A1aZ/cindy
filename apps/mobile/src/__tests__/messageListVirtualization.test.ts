@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 describe('mobile message list container', () => {
   it('uses LegendList virtualization with app-owned history anchoring', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
+    const perfHarness = readFileSync(resolve(process.cwd(), 'app/listperf.tsx'), 'utf8');
 
     // 已完全迁出 FlatList:不再出现 FlatList 容器,也不再有其虚拟化专有 prop。
     expect(source).not.toContain('<FlatList');
@@ -57,6 +58,7 @@ describe('mobile message list container', () => {
     // item type 分池 + recycling-aware state 防止菜单/展开态/媒体状态串到另一条消息。
     expect(source).toContain('devRecycleItems = true,');
     expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
+    expect(perfHarness).toContain("const recycle = params.recycle !== '0';");
     expect(listSource).toContain('recycleItems={recycleItems}');
     expect(listSource).toContain('getItemType={mobileMessageListItemType}');
     expect(source).toContain('useRecyclingState');

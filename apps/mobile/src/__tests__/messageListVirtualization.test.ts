@@ -16,7 +16,9 @@ describe('mobile message list container', () => {
 
     const listStart = source.search(/<LegendList\s/);
     expect(listStart).toBeGreaterThan(-1);
-    const listSource = source.slice(listStart, source.indexOf('onViewableItemsChanged', listStart));
+    const listEnd = source.indexOf('      />', listStart);
+    expect(listEnd).toBeGreaterThan(listStart);
+    const listSource = source.slice(listStart, listEnd);
 
     // 估高 + 小预渲窗口:挂载集小、mount 帧压进一帧(不可退回大挂载树)。
     expect(listSource).toContain('estimatedItemSize={MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE}');
@@ -39,7 +41,11 @@ describe('mobile message list container', () => {
     expect(listSource).toContain('? false');
     expect(listSource).toContain(': { data: true, size: true }}');
     expect(source).toContain('captureMobileHistoryAnchor(');
-    expect(source).toContain('resolveMobileHistoryAnchorOffset(anchor, listState)');
+    expect(source).toContain('resolveMobileMessageHistoryAnchorOffset(');
+    expect(source).toContain('getCurrentHistoryTopOffsetAdjustment()');
+    expect(source).toContain('onMetricsChange={handleListMetricsChange}');
+    expect(source).toContain('mobileMessageHistoryAnchorIdentity(item as MobileMessageRenderItem)');
+    expect(source).toContain('mobileMessageHistoryRowKeyByIdentity(');
     expect(source).toContain('scheduleHistoryAnchorRestore(transaction.generation)');
     const historyRestoreStart = source.indexOf('const scheduleHistoryAnchorRestore = useCallback');
     const historyRestoreStep = source.indexOf('const step = (', historyRestoreStart);
@@ -47,12 +53,26 @@ describe('mobile message list container', () => {
     expect(historyRestoreSetup).toContain('if (historyAnchorVerifyFrameRef.current !== null) return;');
     expect(historyRestoreSetup).not.toContain('cancelAnimationFrame(historyAnchorVerifyFrameRef.current)');
     expect(source).toContain('useLayoutEffect(() => {');
-    // Release 开启 native cell 回收；DEV 仍保留 listperf 的 on/off 单变量开关。
+    // 普通 Release/DEV 详情页都开启 native cell 回收；listperf 仍可显式做 on/off A/B。
     // item type 分池 + recycling-aware state 防止菜单/展开态/媒体状态串到另一条消息。
+    expect(source).toContain('devRecycleItems = true,');
     expect(source).toContain('const recycleItems = __DEV__ ? devRecycleItems === true : true;');
     expect(listSource).toContain('recycleItems={recycleItems}');
     expect(listSource).toContain('getItemType={mobileMessageListItemType}');
     expect(source).toContain('useRecyclingState');
+    // 可见性必须由 cell 自己订阅。把可见 key 集合放进 React Context 会在每个
+    // onViewableItemsChanged 回调里广播给所有已挂载长消息，快滑时造成整窗重渲染、GC 和白屏。
+    expect(source).not.toContain('MessageListVisibleKeysContext');
+    expect(source).not.toContain('visibleMessageKeys');
+    expect(source).toContain("const MESSAGE_LIST_VIEWABILITY_CONFIG_ID = 'message-heavy-content';");
+    expect(source).toContain('id: MESSAGE_LIST_VIEWABILITY_CONFIG_ID');
+    expect(source).toContain('useViewability<MobileMessageRenderItem>(');
+    expect(source).toContain('MESSAGE_LIST_VIEWABILITY_CONFIG_ID,');
+    expect(source).toContain('const [isViewable, setIsViewable] = useRecyclingState(false);');
+    expect(source).toContain('if (token.key !== itemKeyRef.current) return;');
+    expect(source).toContain('maxTextRunInlineFragments: ANDROID_SELECTABLE_TEXT_RUN_MAX_INLINE_FRAGMENTS');
+    expect(listSource).toContain('onFirstVisibleItemChanged={handleFirstVisibleItemChangedRef.current}');
+    expect(listSource).not.toContain('onViewableItemsChanged=');
     // 上滑加载:LegendList 近顶阈值触发自动预取(替代手搓的滚动 metric 判定)。
     expect(listSource).toContain('onStartReached={handleStartReached}');
     // 自动预取必须是电平判定(shouldAutoLoadEarlier + 多时机重评估),不许退回只吃 onStartReached
@@ -73,7 +93,8 @@ describe('mobile message list container', () => {
     expect(source).toContain('onTouchCancel={handleHistoryTouchCancel}');
     expect(listSource).not.toContain('onTouchMove={handleHistoryTouchMove}');
     expect(source).toContain('if (readingOlderRef.current || queuedLoadEarlierRef.current) return;');
-    expect(source).toContain('const firstItemKey = loadEarlierProgressKey ?? itemKeys[0] ?? null;');
+    expect(source).toContain('const firstItemKey = itemKeys[0] ?? null;');
+    expect(source).toContain('const historyProgressKey = loadEarlierProgressKey ?? firstItemKey;');
     expect(source).toContain('initialHistoryAutofillRemainingRef.current -= 1');
     // 所有 prepend 在请求、新页提交和锚点恢复期间抑制贴底。Promise settlement 强制
     // 一次 render，layout effect 确认新 cursor 已提交后才允许释放；generation 隔离旧请求。
@@ -81,12 +102,19 @@ describe('mobile message list container', () => {
     expect(source).toContain('readingOlderRef.current = true');
     expect(source).toContain('void Promise.resolve(result).then(');
     expect(source).toContain('transaction.promiseSettled = true');
-    expect(source).toContain('transaction.startProgressKey !== firstItemKey');
+    expect(source).toContain('transaction.startProgressKey !== historyProgressKey');
     expect(source).toContain('transaction.pageCommitted = true');
     expect(source).toContain('transaction.anchorStable = true');
     expect(source).toContain('loadingEarlierRef.current || !transaction.promiseSettled');
     expect(source).toContain('setLoadEarlierEvaluationVersion((version) => version + 1);');
     expect(source).toContain('[attemptAutoLoadEarlier, loadEarlierEvaluationVersion]');
+    // 若一页只扩进顶部折叠的 Worked for，事务保位不能改变 main 的连续分页语义：
+    // 锚点稳定后绕过一次 near-start 复判继续拉，直到出现可见顶层历史或到头。
+    expect(source).toContain('mobileMessageHistoryOnlyExpandedFirstWorkGroup(');
+    expect(source).toContain('regroupedHistoryContinuationRef.current = transaction.continueAfterRegroup');
+    expect(source).toContain('const continueAfterRegroup = userScrolledForOlder');
+    expect(source).toContain('if (continueAfterRegroup) {');
+    expect(source).not.toContain('message.historyLoadConfirmation');
     expect(source).toContain('MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES');
     expect(source).toContain('MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS');
     expect(source).toContain('Date.now() < currentTransaction.verifyDeadlineAt');

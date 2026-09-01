@@ -1,5 +1,7 @@
 export interface MobileHistoryAnchor {
   key: string;
+  /** Stable child identity used when a prepend changes an aggregate row's outer key. */
+  identityKey?: string;
   /** Item top relative to the viewport top before older rows are prepended. */
   viewportOffset: number;
   /** Nearby rows captured at the same time, used if a live render group replaces the primary key. */
@@ -8,6 +10,8 @@ export interface MobileHistoryAnchor {
 
 export interface MobileHistoryAnchorCandidate {
   key: string;
+  /** Stable child identity used when a prepend changes an aggregate row's outer key. */
+  identityKey?: string;
   viewportOffset: number;
 }
 
@@ -16,17 +20,79 @@ export interface MobileHistoryAnchorCaptureState<ItemT> {
   positionAtIndex(index: number): number | undefined;
   scroll: number;
   start: number;
+  /** Header, content padding, and align-at-end spacer before the data coordinate space. */
+  topOffsetAdjustment?: number;
 }
 
 export interface MobileHistoryAnchorResolveState {
   positionByKey(key: string): number | undefined;
+  /** Resolve a captured child identity to its current top-level row key. */
+  keyByIdentity?(identityKey: string): string | undefined;
   /** LegendList can briefly omit a key from its position cache while committing a prepend. */
   data?: readonly { key: string }[];
   positionAtIndex?(index: number): number | undefined;
+  /** Header, content padding, and align-at-end spacer before the data coordinate space. */
+  topOffsetAdjustment?: number;
+}
+
+export interface MobileHistoryTopOffsetState {
+  contentLength: number;
+  data: readonly unknown[];
+  positionAtIndex(index: number): number | undefined;
+  scrollLength: number;
+  sizeAtIndex(index: number): number | undefined;
 }
 
 const MAX_MOBILE_HISTORY_ANCHOR_CANDIDATES = 8;
 const MAX_MOBILE_HISTORY_ANCHOR_POSITION_PROBES = 24;
+const MOBILE_HISTORY_SHORT_LIST_TOLERANCE = 2;
+
+/**
+ * Translate LegendList's data-relative item positions into its raw ScrollView coordinates.
+ *
+ * LegendList does not expose its align-at-end spacer through `getState()`. For an under-one-screen
+ * list every row is measured, so the leading space can be recovered from the content length and
+ * the measured end of the final row. Overflowing lists have no align spacer and use the explicit
+ * header + content-padding baseline instead.
+ */
+export function mobileHistoryTopOffsetAdjustment(
+  state: MobileHistoryTopOffsetState,
+  input: {
+    baseTopOffset: number;
+    bottomPadding: number;
+    footerSize: number;
+  },
+): number {
+  const baseTopOffset = Number.isFinite(input.baseTopOffset)
+    ? Math.max(0, input.baseTopOffset)
+    : 0;
+  if (
+    state.data.length === 0
+    || !Number.isFinite(state.contentLength)
+    || !Number.isFinite(state.scrollLength)
+    || state.contentLength > state.scrollLength + MOBILE_HISTORY_SHORT_LIST_TOLERANCE
+  ) {
+    return baseTopOffset;
+  }
+
+  const lastIndex = state.data.length - 1;
+  const lastPosition = state.positionAtIndex(lastIndex);
+  const lastSize = state.sizeAtIndex(lastIndex);
+  if (!Number.isFinite(lastPosition) || !Number.isFinite(lastSize)) return baseTopOffset;
+
+  const footerSize = Number.isFinite(input.footerSize) ? Math.max(0, input.footerSize) : 0;
+  const bottomPadding = Number.isFinite(input.bottomPadding)
+    ? Math.max(0, input.bottomPadding)
+    : 0;
+  const measuredLeadingSpace = state.contentLength
+    - footerSize
+    - bottomPadding
+    - (lastPosition as number)
+    - (lastSize as number);
+  return Number.isFinite(measuredLeadingSpace)
+    ? Math.max(baseTopOffset, measuredLeadingSpace)
+    : baseTopOffset;
+}
 
 function findClosestMobileHistoryAnchorIndex<ItemT>(
   state: MobileHistoryAnchorCaptureState<ItemT>,
@@ -45,12 +111,13 @@ function findClosestMobileHistoryAnchorIndex<ItemT>(
     const index = Math.floor((lower + upper) / 2);
     const position = state.positionAtIndex(index);
     if (!Number.isFinite(position)) break;
-    const distance = Math.abs((position as number) - state.scroll);
+    const dataScroll = state.scroll - (state.topOffsetAdjustment ?? 0);
+    const distance = Math.abs((position as number) - dataScroll);
     if (distance < closestDistance) {
       closestDistance = distance;
       closestIndex = index;
     }
-    if ((position as number) < state.scroll) lower = index + 1;
+    if ((position as number) < dataScroll) lower = index + 1;
     else upper = index - 1;
   }
   return closestIndex;
@@ -66,8 +133,12 @@ function findClosestMobileHistoryAnchorIndex<ItemT>(
 export function captureMobileHistoryAnchor<ItemT>(
   state: MobileHistoryAnchorCaptureState<ItemT>,
   keyOf: (item: ItemT) => string,
+  identityOf?: (item: ItemT) => string | undefined,
 ): MobileHistoryAnchor | null {
   if (!Number.isFinite(state.scroll)) return null;
+  const topOffsetAdjustment = Number.isFinite(state.topOffsetAdjustment)
+    ? state.topOffsetAdjustment as number
+    : 0;
 
   const closestIndex = findClosestMobileHistoryAnchorIndex(state);
   if (closestIndex === null) return null;
@@ -93,9 +164,11 @@ export function captureMobileHistoryAnchor<ItemT>(
       const position = state.positionAtIndex(index);
       if (!key || seenKeys.has(key) || !Number.isFinite(position)) continue;
       seenKeys.add(key);
+      const identityKey = identityOf?.(state.data[index]);
       candidates.push({
         key,
-        viewportOffset: (position as number) - state.scroll,
+        ...(identityKey && identityKey !== key ? { identityKey } : {}),
+        viewportOffset: (position as number) + topOffsetAdjustment - state.scroll,
       });
       if (
         candidates.length >= MAX_MOBILE_HISTORY_ANCHOR_CANDIDATES
@@ -127,17 +200,41 @@ export function resolveMobileHistoryAnchorOffset(
 ): number | null {
   const candidates: readonly MobileHistoryAnchorCandidate[] = [anchor, ...(anchor.fallbacks ?? [])];
   for (const candidate of candidates) {
-    let position = state.positionByKey(candidate.key);
+    let currentKey = candidate.key;
+    let position = state.positionByKey(currentKey);
     if (
       !Number.isFinite(position)
       && state.data
       && state.positionAtIndex
     ) {
-      const index = state.data.findIndex((item) => item.key === candidate.key);
+      const index = state.data.findIndex((item) => item.key === currentKey);
       if (index >= 0) position = state.positionAtIndex(index);
     }
+    // Most prepends preserve the outer row key. Only scan aggregate children after both of
+    // LegendList's direct-key paths miss, keeping the per-frame settle verifier O(1) normally.
+    if (!Number.isFinite(position) && candidate.identityKey && state.keyByIdentity) {
+      const replacementKey = state.keyByIdentity(candidate.identityKey);
+      if (replacementKey) {
+        currentKey = replacementKey;
+        position = state.positionByKey(currentKey);
+        if (
+          !Number.isFinite(position)
+          && state.data
+          && state.positionAtIndex
+        ) {
+          const index = state.data.findIndex((item) => item.key === currentKey);
+          if (index >= 0) position = state.positionAtIndex(index);
+        }
+      }
+    }
     if (Number.isFinite(position)) {
-      return Math.max(0, (position as number) - candidate.viewportOffset);
+      const topOffsetAdjustment = Number.isFinite(state.topOffsetAdjustment)
+        ? state.topOffsetAdjustment as number
+        : 0;
+      return Math.max(
+        0,
+        (position as number) + topOffsetAdjustment - candidate.viewportOffset,
+      );
     }
   }
   return null;

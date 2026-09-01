@@ -653,6 +653,8 @@ export interface MobileMarkdownTextRunGroupingOptions {
   maxTextRunBlocks?: number;
   /** Same guard by rendered inline text length, measured in JS UTF-16 units. */
   maxTextRunUtf16Length?: number;
+  /** Same guard by the number of inline fragments rendered as nested native text spans. */
+  maxTextRunInlineFragments?: number;
 }
 
 const MOBILE_MARKDOWN_TEXT_RUN_BLOCK_SEPARATOR_UTF16_LENGTH = 2;
@@ -665,8 +667,10 @@ export function groupMobileMarkdownSelectableBlocks(
   const groups: MobileMarkdownBlockGroup[] = [];
   let run: MobileMarkdownTextRunBlock[] = [];
   let runTextLength = 0;
+  let runInlineFragmentCount = 0;
   const maxTextRunBlocks = normalizePositiveLimit(options?.maxTextRunBlocks);
   const maxTextRunUtf16Length = normalizePositiveLimit(options?.maxTextRunUtf16Length);
+  const maxTextRunInlineFragments = normalizePositiveLimit(options?.maxTextRunInlineFragments);
   const flushRun = () => {
     if (run.length === 0) return;
     groups.push({
@@ -677,11 +681,17 @@ export function groupMobileMarkdownSelectableBlocks(
     });
     run = [];
     runTextLength = 0;
+    runInlineFragmentCount = 0;
   };
   for (const block of blocks) {
     if (isTextRunBlock(block)) {
-      for (const chunk of splitOversizedTextRunBlock(block, maxTextRunUtf16Length)) {
+      for (const chunk of splitOversizedTextRunBlock(
+        block,
+        maxTextRunUtf16Length,
+        maxTextRunInlineFragments,
+      )) {
         const blockTextLength = mobileMarkdownTextRunBlockLength(chunk);
+        const blockInlineFragmentCount = chunk.inlines.length;
         const separatorLength = run.length > 0 && !chunk.textRunContinuation
           ? MOBILE_MARKDOWN_TEXT_RUN_BLOCK_SEPARATOR_UTF16_LENGTH
           : 0;
@@ -690,6 +700,7 @@ export function groupMobileMarkdownSelectableBlocks(
           && (
             run.length >= maxTextRunBlocks
             || runTextLength + separatorLength + blockTextLength > maxTextRunUtf16Length
+            || runInlineFragmentCount + blockInlineFragmentCount > maxTextRunInlineFragments
           )
         ) {
           flushRun();
@@ -699,6 +710,7 @@ export function groupMobileMarkdownSelectableBlocks(
           : 0;
         run.push(chunk);
         runTextLength += pushedSeparatorLength + blockTextLength;
+        runInlineFragmentCount += blockInlineFragmentCount;
       }
     } else {
       flushRun();
@@ -751,10 +763,13 @@ export function mobileMarkdownImageAltChipText(alt: string): string {
 function splitOversizedTextRunBlock(
   block: MobileMarkdownTextRunBlock,
   maxTextRunUtf16Length: number,
+  maxTextRunInlineFragments: number,
 ): MobileMarkdownTextRunBlock[] {
   if (
-    !Number.isFinite(maxTextRunUtf16Length)
-    || mobileMarkdownTextRunBlockLength(block) <= maxTextRunUtf16Length
+    (!Number.isFinite(maxTextRunUtf16Length)
+      || mobileMarkdownTextRunBlockLength(block) <= maxTextRunUtf16Length)
+    && (!Number.isFinite(maxTextRunInlineFragments)
+      || block.inlines.length <= maxTextRunInlineFragments)
   ) {
     return [block];
   }
@@ -778,7 +793,12 @@ function splitOversizedTextRunBlock(
   ) => {
     let start = 0;
     while (start < text.length) {
-      if (currentTextLength >= currentLimit()) flushCurrent();
+      if (
+        currentTextLength >= currentLimit()
+        || current.length >= maxTextRunInlineFragments
+      ) {
+        flushCurrent();
+      }
       const capacity = currentLimit() - currentTextLength;
       if (
         currentTextLength > 0
@@ -798,12 +818,23 @@ function splitOversizedTextRunBlock(
   for (const inline of block.inlines) {
     if (inline.type === 'image') {
       const inlineLength = mobileMarkdownInlineTextLength(inline);
-      if (current.length > 0 && currentTextLength + inlineLength > currentLimit()) {
+      if (
+        current.length > 0
+        && (
+          currentTextLength + inlineLength > currentLimit()
+          || current.length >= maxTextRunInlineFragments
+        )
+      ) {
         flushCurrent();
       }
       current.push(inline);
       currentTextLength += inlineLength;
-      if (currentTextLength >= currentLimit()) flushCurrent();
+      if (
+        currentTextLength >= currentLimit()
+        || current.length >= maxTextRunInlineFragments
+      ) {
+        flushCurrent();
+      }
       continue;
     }
 

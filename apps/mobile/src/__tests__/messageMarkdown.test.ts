@@ -1611,6 +1611,43 @@ describe('groupMobileMarkdownSelectableBlocks', () => {
     expect(groups.map((group) => (group.type === 'text_run' ? group.blocks.length : 0))).toEqual([1, 1, 2]);
   });
 
+  it('can bound one native text run by inline fragment count', () => {
+    const blocks = [{
+      type: 'paragraph' as const,
+      key: 'paragraph:0',
+      inlines: Array.from({ length: 7 }, (_, index) => ({
+        type: 'strong' as const,
+        text: String(index),
+      })),
+    }];
+    const groups = groupMobileMarkdownSelectableBlocks(blocks, {
+      maxTextRunInlineFragments: 3,
+    });
+    const chunks = groups.flatMap((group) => (group.type === 'text_run' ? group.blocks : []));
+
+    expect(groups.map((group) => group.type)).toEqual(['text_run', 'text_run', 'text_run']);
+    expect(chunks.map((block) => block.inlines.length)).toEqual([3, 3, 1]);
+    expect(chunks.map((block) => block.textRunContinuation === true)).toEqual([false, true, true]);
+    expect(chunks.flatMap((block) => block.inlines).map((inline) => (
+      inline.type === 'image' ? inline.alt : inline.text
+    )).join('')).toBe('0123456');
+  });
+
+  it('counts inline fragments across adjacent text blocks', () => {
+    const blocks = Array.from({ length: 5 }, (_, index) => ({
+      type: 'paragraph' as const,
+      key: `paragraph:${index}`,
+      inlines: [{ type: 'text' as const, text: String(index) }],
+    }));
+    const groups = groupMobileMarkdownSelectableBlocks(blocks, {
+      maxTextRunInlineFragments: 2,
+    });
+
+    expect(groups.map((group) => (
+      group.type === 'text_run' ? group.blocks.length : 0
+    ))).toEqual([2, 2, 1]);
+  });
+
   it('counts rendered block separators when bounding text runs by text length', () => {
     const blocks = parseMobileMarkdown(['aaaa', '', 'bbbb'].join('\n'));
     const groups = groupMobileMarkdownSelectableBlocks(blocks, { maxTextRunUtf16Length: 8 });
@@ -1693,6 +1730,7 @@ describe('groupMobileMarkdownSelectableBlocks', () => {
     const groups = groupMobileMarkdownSelectableBlocks(blocks, {
       maxTextRunBlocks: 0.5,
       maxTextRunUtf16Length: 0.5,
+      maxTextRunInlineFragments: 0.5,
     });
     expect(groups).toHaveLength(1);
     expect(groups[0].type).toBe('text_run');

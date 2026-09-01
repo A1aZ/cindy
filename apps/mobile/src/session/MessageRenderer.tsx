@@ -54,10 +54,16 @@ import {
   type StyleProp,
   type TextStyle,
   type ViewStyle,
-  type ViewToken,
 } from 'react-native';
 import { UITextView } from 'react-native-uitextview';
-import { LegendList, useRecyclingState, type LegendListRef } from '@legendapp/list/react-native';
+import {
+  LegendList,
+  useRecyclingState,
+  useViewability,
+  type LegendListMetrics,
+  type LegendListRef,
+  type ViewToken as LegendListViewToken,
+} from '@legendapp/list/react-native';
 import { tokenizeCode, type CodeTokenKind } from '@/session/codeHighlight';
 import { buildComposerTouchLayout } from '@/session/composerTouchLayout';
 import { useFoldableExpandedState } from '@/session/expandedBlockMemory';
@@ -331,9 +337,16 @@ import {
 import {
   captureMobileHistoryAnchor,
   isMobileHistoryAnchorSettled,
+  mobileHistoryTopOffsetAdjustment,
   resolveMobileHistoryAnchorOffset,
   type MobileHistoryAnchor,
+  type MobileHistoryAnchorResolveState,
 } from '@/session/messageHistoryAnchor';
+import {
+  mobileMessageHistoryAnchorIdentity,
+  mobileMessageHistoryOnlyExpandedFirstWorkGroup,
+  mobileMessageHistoryRowKeyByIdentity,
+} from '@/session/messageHistoryAnchorIdentity';
 import { ImageLightbox, type ImageLightboxAnnotationConfig } from '@/session/ImageLightbox';
 import {
   MermaidDiagramWebView,
@@ -358,11 +371,11 @@ import { mobileToolRowWording } from '@/i18n/toolWording';
 const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };
 const MESSAGE_CONTROL_TOUCH_SIZE = 44;
 const MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD = 5;
+const MESSAGE_LIST_VIEWABILITY_CONFIG_ID = 'message-heavy-content';
 
 // Heavy Markdown blocks inherit the visibility of their outer list cell. Nested
 // work/sub-agent cards should not create a second visibility window of their own.
 const MessageHeavyContentVisibilityContext = createContext(true);
-const MessageListVisibleKeysContext = createContext<ReadonlySet<string> | null>(null);
 
 /** 分享模式吸顶 check 与行内 check 共用 44px 触达高度。 */
 const SHARE_STICKY_CHECK_HEIGHT = 44;
@@ -388,9 +401,11 @@ const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS = 3000;
 const MOBILE_HISTORY_ANCHOR_STABLE_FRAMES = 2;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS = 12;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH = 1800;
+const ANDROID_SELECTABLE_TEXT_RUN_MAX_INLINE_FRAGMENTS = 20;
 const ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS: MobileMarkdownTextRunGroupingOptions = {
   maxTextRunBlocks: ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS,
   maxTextRunUtf16Length: ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH,
+  maxTextRunInlineFragments: ANDROID_SELECTABLE_TEXT_RUN_MAX_INLINE_FRAGMENTS,
 };
 /** Running work groups expose only the same latest-five activity window as desktop. */
 const MAX_LIVE_WORK_ACTIVITIES = 5;
@@ -402,13 +417,33 @@ function mobileMessageListItemType(item: MobileMessageRenderItem): MobileMessage
   return item.type;
 }
 
+function resolveMobileMessageHistoryAnchorOffset(
+  anchor: MobileHistoryAnchor,
+  state: MobileHistoryAnchorResolveState,
+  topOffsetAdjustment: number,
+): number | null {
+  return resolveMobileHistoryAnchorOffset(anchor, {
+    ...state,
+    topOffsetAdjustment,
+    keyByIdentity: state.data
+      ? (identityKey) => mobileMessageHistoryRowKeyByIdentity(
+        state.data as readonly MobileMessageRenderItem[],
+        identityKey,
+      )
+      : undefined,
+  });
+}
+
 interface MobileHistoryPrependTransaction {
   anchor: MobileHistoryAnchor | null;
   anchorStable: boolean;
+  continueAfterRegroup: boolean;
   generation: number;
   pageCommitted: boolean;
   promiseSettled: boolean;
+  startItems: readonly MobileMessageRenderItem[];
   startProgressKey: string | null;
+  userInitiated: boolean;
   userControlledAfterCommit: boolean;
   verifyDeadlineAt: number;
 }
@@ -627,7 +662,7 @@ export function MessageRenderer({
   syncingWhileEmpty,
   testID,
   devExposeList,
-  devRecycleItems = false,
+  devRecycleItems = true,
 }: {
   bottomOverlayHeight?: number;
   /** 顶部 chrome(绝对定位半透明工具栏)实测高度:内容顶部按此让位,详见 mobileMessageListTopPadding。 */
@@ -645,7 +680,7 @@ export function MessageRenderer({
   /** 空列表且本次打开的首同步未完成:渲染「正在同步」占位(延迟显形防闪)而非「暂无消息」。 */
   syncingWhileEmpty?: boolean;
   testID?: string;
-  /** DEV-only A/B switch; production always enables verified row recycling. */
+  /** DEV-only A/B override for listperf; regular screens match production and recycle rows. */
   devRecycleItems?: boolean;
   /** 全屏图片查看器的分享回调(由会话屏落地本地文件后唤起系统分享单)。 */
   onShareImage?: (
@@ -679,6 +714,9 @@ export function MessageRenderer({
   const focusedItemKeyRef = useRef(focusedItemKey);
   focusedItemKeyRef.current = focusedItemKey;
   const listRef = useRef<LegendListRef>(null);
+  const listMetricsRef = useRef<LegendListMetrics>({ footerSize: 0, headerSize: 0 });
+  const listTopPaddingRef = useRef(0);
+  const listBottomPaddingRef = useRef(0);
   const shareableMessageViewsRef = useRef(new Map<string, View>());
   const windowDimensions = useWindowDimensions();
   const viewportLayout = useMemo(() => buildMobileReadableViewportLayout({
@@ -780,9 +818,9 @@ export function MessageRenderer({
   // Without a render tick, a user who remains at the top can stall after one page because the
   // page commit effect ran while readingOlderRef was still true.
   const [loadEarlierEvaluationVersion, setLoadEarlierEvaluationVersion] = useState(0);
-  const [visibleMessageKeys, setVisibleMessageKeys] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  // Main immediately requests another page when a prepend only expands the first collapsed
+  // `Worked for` row. The app-owned anchor transaction settles first, then consumes this one-shot.
+  const regroupedHistoryContinuationRef = useRef(false);
   // 会话切换(scrollResetKey)的 ref 复位必须在渲染期同步完成,不能只靠下方的 reset effect:
   // effect 在 paint 后异步执行,而重挂的新列表(key={scrollResetKey})的首批 scroll /
   // onStartReached 回调、以及先于 reset effect 定义的 eligibility effect,都可能带着上个会话的
@@ -791,6 +829,7 @@ export function MessageRenderer({
   const prevScrollResetKeyRef = useRef(scrollResetKey);
   if (prevScrollResetKeyRef.current !== scrollResetKey) {
     prevScrollResetKeyRef.current = scrollResetKey;
+    listMetricsRef.current = { footerSize: 0, headerSize: 0 };
     nearBottomRef.current = true;
     isDraggingRef.current = false;
     isMomentumScrollingRef.current = false;
@@ -804,6 +843,7 @@ export function MessageRenderer({
     readingOlderRequestGenerationRef.current += 1;
     historyPrependTransactionRef.current = null;
     queuedLoadEarlierRef.current = false;
+    regroupedHistoryContinuationRef.current = false;
     if (historyPrependNativeMvcpDisabled) setHistoryPrependNativeMvcpDisabled(false);
     if (queuedLoadEarlierFlushFrameRef.current !== null) {
       cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
@@ -927,15 +967,29 @@ export function MessageRenderer({
     void listRef.current?.scrollToIndex({ animated: true, index, viewPosition });
   }, [markProgrammaticScroll]);
 
+  const getCurrentHistoryTopOffsetAdjustment = useCallback(() => {
+    const listState = listRef.current?.getState();
+    if (!listState) return listTopPaddingRef.current + listMetricsRef.current.headerSize;
+    return mobileHistoryTopOffsetAdjustment(listState, {
+      baseTopOffset: listTopPaddingRef.current + listMetricsRef.current.headerSize,
+      bottomPadding: listBottomPaddingRef.current,
+      footerSize: listMetricsRef.current.footerSize,
+    });
+  }, []);
+
   const captureCurrentHistoryAnchor = useCallback((): MobileHistoryAnchor | null => {
     const listState = listRef.current?.getState();
     return listState
       ? captureMobileHistoryAnchor(
-        listState,
+        {
+          ...listState,
+          topOffsetAdjustment: getCurrentHistoryTopOffsetAdjustment(),
+        },
         (item) => (item as MobileMessageRenderItem).key,
+        (item) => mobileMessageHistoryAnchorIdentity(item as MobileMessageRenderItem),
       )
       : null;
-  }, []);
+  }, [getCurrentHistoryTopOffsetAdjustment]);
 
   const finishHistoryPrependTransaction = useCallback((generation: number) => {
     const transaction = historyPrependTransactionRef.current;
@@ -944,6 +998,9 @@ export function MessageRenderer({
       cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
       historyAnchorVerifyFrameRef.current = null;
     }
+    regroupedHistoryContinuationRef.current = transaction.continueAfterRegroup
+      && transaction.userInitiated
+      && !transaction.userControlledAfterCommit;
     historyPrependTransactionRef.current = null;
     readingOlderRef.current = false;
     setHistoryPrependNativeMvcpDisabled(false);
@@ -978,6 +1035,7 @@ export function MessageRenderer({
     readingOlderRef.current = false;
     historyPrependTransactionRef.current = null;
     queuedLoadEarlierRef.current = false;
+    regroupedHistoryContinuationRef.current = false;
     setHistoryPrependNativeMvcpDisabled(false);
     if (queuedLoadEarlierFlushFrameRef.current !== null) {
       cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
@@ -1021,7 +1079,11 @@ export function MessageRenderer({
       const anchor = currentTransaction.anchor;
       const listState = listRef.current?.getState();
       const targetOffset = anchor && listState
-        ? resolveMobileHistoryAnchorOffset(anchor, listState)
+        ? resolveMobileMessageHistoryAnchorOffset(
+          anchor,
+          listState,
+          getCurrentHistoryTopOffsetAdjustment(),
+        )
         : null;
 
       if (targetOffset !== null && listState) {
@@ -1077,7 +1139,11 @@ export function MessageRenderer({
           ) return;
           const finalState = listRef.current?.getState();
           const finalTarget = finalTransaction.anchor && finalState
-            ? resolveMobileHistoryAnchorOffset(finalTransaction.anchor, finalState)
+            ? resolveMobileMessageHistoryAnchorOffset(
+              finalTransaction.anchor,
+              finalState,
+              getCurrentHistoryTopOffsetAdjustment(),
+            )
             : null;
           if (finalTarget !== null) scrollToOffsetProgrammatically(finalTarget, false);
           historyAnchorVerifyFrameRef.current = requestAnimationFrame(() => {
@@ -1108,6 +1174,7 @@ export function MessageRenderer({
     // ScrollView offset still belongs to the pre-prepend data.
     step(0, 0, null);
   }, [
+    getCurrentHistoryTopOffsetAdjustment,
     markMobileMvcpSettle,
     maybeFinishHistoryPrependTransaction,
     scrollToOffsetProgrammatically,
@@ -1122,7 +1189,11 @@ export function MessageRenderer({
     ) return;
     const listState = listRef.current?.getState();
     const targetOffset = transaction.anchor && listState
-      ? resolveMobileHistoryAnchorOffset(transaction.anchor, listState)
+      ? resolveMobileMessageHistoryAnchorOffset(
+        transaction.anchor,
+        listState,
+        getCurrentHistoryTopOffsetAdjustment(),
+      )
       : null;
     if (
       targetOffset !== null
@@ -1131,7 +1202,7 @@ export function MessageRenderer({
     ) {
       scrollToOffsetProgrammatically(targetOffset, false);
     }
-  }, [scrollToOffsetProgrammatically]);
+  }, [getCurrentHistoryTopOffsetAdjustment, scrollToOffsetProgrammatically]);
 
   // 贴底跟随的落底校验/补滚环:两条手动补滚路径——「跳到最新」(followLatestRequestKey)
   // 与 handleContentSize 的贴底追赶——都只发一次命令式 scrollToEnd,不校验是否真的到达内容
@@ -1222,6 +1293,8 @@ export function MessageRenderer({
   // LegendList 虚拟化/回收。不能用业务尾窗代替完整数据，否则短尾窗未撑满首屏时
   // Android 无法产生有效滚动，运行中任务会重现“上半屏空白且历史不可拖动”。
   const listData = useMemo(() => [...items], [items]);
+  const listDataRef = useRef(listData);
+  listDataRef.current = listData;
   const prevListLengthRef = useRef(listData.length);
   if (prevListLengthRef.current !== listData.length) {
     if (
@@ -1240,15 +1313,23 @@ export function MessageRenderer({
     () => mobileMessageListKeysSignature(itemKeys),
     [itemKeys],
   );
-  const firstItemKey = loadEarlierProgressKey ?? itemKeys[0] ?? null;
+  // Keep main's rendered-row progress signal for near-start auto paging. The host cursor remains
+  // the stronger transaction commit signal because local synthetic rows can sit before host data.
+  const firstItemKey = itemKeys[0] ?? null;
+  const historyProgressKey = loadEarlierProgressKey ?? firstItemKey;
   // A successful history page changes the oldest host cursor. Restore the captured visible row
   // in a layout effect: LegendList has accepted the new data, but React Native has not painted the
   // shifted absolute positions yet. This is the atomic point missing from Android native MVCP.
   useLayoutEffect(() => {
     const transaction = historyPrependTransactionRef.current;
     if (!transaction) return;
-    if (transaction.startProgressKey !== firstItemKey) {
+    if (transaction.startProgressKey !== historyProgressKey) {
       transaction.pageCommitted = true;
+      transaction.continueAfterRegroup = transaction.userInitiated
+        && mobileMessageHistoryOnlyExpandedFirstWorkGroup(
+          transaction.startItems,
+          listDataRef.current,
+        );
       scheduleHistoryAnchorRestore(transaction.generation);
       maybeFinishHistoryPrependTransaction(transaction.generation);
       return;
@@ -1260,7 +1341,7 @@ export function MessageRenderer({
       maybeFinishHistoryPrependTransaction(transaction.generation);
     }
   }, [
-    firstItemKey,
+    historyProgressKey,
     itemKeysSignature,
     loadEarlierEvaluationVersion,
     loadingEarlier,
@@ -1314,6 +1395,8 @@ export function MessageRenderer({
   }, [galleryImages, payload]);
   const bottomPadding = mobileMessageListBottomPadding(bottomOverlayHeight);
   const topPadding = mobileMessageListTopPadding(topOverlayHeight);
+  listBottomPaddingRef.current = bottomPadding;
+  listTopPaddingRef.current = topPadding;
   const previousUserButtonTop = topPadding > 0 ? topPadding : null;
   // 上一次 topPadding,供顶部 chrome 高度变化时补偿 scroll offset(见下方 effect)。
   const prevTopPaddingRef = useRef(topPadding);
@@ -1419,6 +1502,7 @@ export function MessageRenderer({
     ? `${focusedRequestKey ?? 'default'}:${focusedItemKey}`
     : null;
   const viewabilityConfigRef = useRef({
+    id: MESSAGE_LIST_VIEWABILITY_CONFIG_ID,
     itemVisiblePercentThreshold: MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD,
   });
   const shareSelectionActiveRef = useRef(shareSelectionActive);
@@ -1489,26 +1573,10 @@ export function MessageRenderer({
   useEffect(() => () => {
     if (stickyCheckTimerRef.current) clearTimeout(stickyCheckTimerRef.current);
   }, []);
-  const handleViewableItemsChangedRef = useRef((info: {
-    viewableItems: ViewToken<MobileMessageRenderItem>[];
+  const handleFirstVisibleItemChangedRef = useRef((info: {
+    index: number;
   }) => {
-    let nextIndex: number | null = null;
-    const nextVisibleMessageKeys = new Set<string>();
-    for (const token of info.viewableItems) {
-      if (typeof token.index !== 'number') continue;
-      nextIndex = nextIndex === null ? token.index : Math.min(nextIndex, token.index);
-      if (token.isViewable && token.item?.key) nextVisibleMessageKeys.add(token.item.key);
-    }
-    if (nextIndex !== null) setFirstVisibleIndex(nextIndex);
-    setVisibleMessageKeys((previous) => {
-      if (
-        previous.size === nextVisibleMessageKeys.size
-        && [...previous].every((key) => nextVisibleMessageKeys.has(key))
-      ) {
-        return previous;
-      }
-      return nextVisibleMessageKeys;
-    });
+    setFirstVisibleIndex((previous) => previous === info.index ? previous : info.index);
   });
   const readActuallyVisibleShareableMessageIds = useCallback(async (
     viewport: ShareableMessageViewport,
@@ -1629,17 +1697,24 @@ export function MessageRenderer({
     const listState = listRef.current?.getState();
     const anchor = listState
       ? captureMobileHistoryAnchor(
-        listState,
+        {
+          ...listState,
+          topOffsetAdjustment: getCurrentHistoryTopOffsetAdjustment(),
+        },
         (item) => (item as MobileMessageRenderItem).key,
+        (item) => mobileMessageHistoryAnchorIdentity(item as MobileMessageRenderItem),
       )
       : null;
     historyPrependTransactionRef.current = {
       anchor,
       anchorStable: false,
+      continueAfterRegroup: false,
       generation,
       pageCommitted: false,
       promiseSettled: false,
-      startProgressKey: firstItemKey,
+      startItems: listDataRef.current,
+      startProgressKey: historyProgressKey,
+      userInitiated: userScrollForOlderRef.current,
       userControlledAfterCommit: false,
       verifyDeadlineAt: 0,
     };
@@ -1669,7 +1744,7 @@ export function MessageRenderer({
     } catch {
       markRequestSettled();
     }
-  }, [firstItemKey, onLoadEarlier]);
+  }, [getCurrentHistoryTopOffsetAdjustment, historyProgressKey, onLoadEarlier]);
 
   const flushQueuedLoadEarlier = useCallback(() => {
     if (
@@ -1730,8 +1805,24 @@ export function MessageRenderer({
     const initialAutoFillAllowed = listRevealed
       && !userScrolledForOlder
       && initialHistoryAutofillRemainingRef.current > 0;
-    if (!userScrolledForOlder && !initialAutoFillAllowed) return;
+    const continueAfterRegroup = userScrolledForOlder
+      && regroupedHistoryContinuationRef.current;
+    if (!userScrolledForOlder && !initialAutoFillAllowed && !continueAfterRegroup) return;
     if (firstItemKey !== null && lastAutoLoadEarlierKeyRef.current === firstItemKey) return;
+    if (continueAfterRegroup) {
+      if (!loadEarlierAction.visible) {
+        regroupedHistoryContinuationRef.current = false;
+        return;
+      }
+      // A merged page did make host-cursor progress but added no visible top-level history. Do not
+      // reapply the near-start gate after app-owned anchor restoration moved the viewport; main
+      // immediately continues from the changed first rendered row in the same situation.
+      if (loadEarlierAction.disabled || firstItemKey === null) return;
+      regroupedHistoryContinuationRef.current = false;
+      lastAutoLoadEarlierKeyRef.current = firstItemKey;
+      requestLoadEarlier();
+      return;
+    }
     const listState = listRef.current?.getState();
     if (!listState) return;
     // LegendList's edge bookkeeping can lag behind the native ScrollView during recycling,
@@ -1945,6 +2036,22 @@ export function MessageRenderer({
     scrollMetricsRef.current = { ...scrollMetricsRef.current, viewportHeight };
   }, []);
 
+  const handleListMetricsChange = useCallback((metrics: LegendListMetrics) => {
+    listMetricsRef.current = metrics;
+    if (!readingOlderRef.current) return;
+    const transaction = historyPrependTransactionRef.current;
+    if (!transaction) return;
+    if (transaction.pageCommitted) {
+      scheduleHistoryAnchorRestore(transaction.generation);
+    } else if (
+      !isDraggingRef.current
+      && !isMomentumScrollingRef.current
+      && historyTouchStartYRef.current === null
+    ) {
+      restoreHistoryAnchorOnce(transaction.generation);
+    }
+  }, [restoreHistoryAnchorOnce, scheduleHistoryAnchorRestore]);
+
   // 记录 contentHeight 供近底判定 fallback + DEV harness 就绪判定;并承担**唯一的贴底跟随**:
   // 内容长高(流式增长、大块一帧撑高、冷开测量结算)时,用户本就贴底(nearBottomRef,与
   // 「跳到底部」浮标同源)则无论这次长多少都跟到底(仿 filo onContentSizeChange → scrollToEnd);
@@ -2138,7 +2245,6 @@ export function MessageRenderer({
     setIsAwayFromBottom(false);
     setFirstVisibleIndex(0);
     setHasNewMessages(false);
-    setVisibleMessageKeys(new Set());
   }, [scrollResetKey]);
   // 卸载时清掉在飞的定时器/rAF(闭包引用 listRef,卸载后触发是无害 no-op,
   // 但不留悬挂句柄)。
@@ -2235,10 +2341,9 @@ export function MessageRenderer({
   const renderMessageItem = useCallback(({ item }: { item: MobileMessageRenderItem }) => {
     if (__DEV__) recordMobileMessageRenderItem();
     return (
-      <RenderItemView
+      <RenderListItemView
         actions={actions}
         focused={item.key === focusedItemKey}
-        isListItem
         item={item}
       />
     );
@@ -2253,9 +2358,9 @@ export function MessageRenderer({
     ),
     [pendingSend?.selectedClientId, shareSelectionActive],
   );
-  // Production uses native cell recycling after every identity-bound local
-  // state below was made recycling-aware. DEV stays opt-in so listperf can
-  // continue running the on/off control with one bundle.
+  // Production and regular DEV screens use native cell recycling after every
+  // identity-bound local state below was made recycling-aware. listperf passes
+  // this DEV-only override explicitly so its on/off control remains available.
   const recycleItems = __DEV__ ? devRecycleItems === true : true;
 
   return (
@@ -2269,7 +2374,6 @@ export function MessageRenderer({
       onTouchEnd={handleHistoryTouchEnd}
       onTouchCancel={handleHistoryTouchCancel}
     >
-      <MessageListVisibleKeysContext.Provider value={visibleMessageKeys}>
       <Animated.View style={[styles.messageList, { opacity: initialRevealOpacity }]}>
       <LegendList
         // 与 main 一致：每个任务用完整历史重挂；首次命令式落底在 opacity 遮罩下完成。
@@ -2318,6 +2422,7 @@ export function MessageRenderer({
         }
         ListFooterComponent={queueFooter ? <>{queueFooter}</> : null}
         onLayout={handleListLayout}
+        onMetricsChange={handleListMetricsChange}
         onContentSizeChange={handleContentSize}
         onScroll={handleScroll}
         onScrollBeginDrag={handleScrollBeginDrag}
@@ -2331,10 +2436,9 @@ export function MessageRenderer({
         style={styles.messageList}
         testID={testID ?? 'message.list'}
         viewabilityConfig={viewabilityConfigRef.current}
-        onViewableItemsChanged={handleViewableItemsChangedRef.current}
+        onFirstVisibleItemChanged={handleFirstVisibleItemChangedRef.current}
       />
       </Animated.View>
-      </MessageListVisibleKeysContext.Provider>
       {previousUserTarget && previousUserButtonTop !== null ? (
         <MessageListActionButton
           accessibilityLabel={t('message.renderer.previousQuestionJump', { preview: previousUserTarget.preview || t('message.renderer.noPreview') })}
@@ -2406,19 +2510,12 @@ const RenderItemView = memo(function RenderItemView({
   item,
   actions,
   focused = false,
-  isListItem = false,
 }: {
   item: MobileMessageRenderItem | MobileWorkChildItem;
   actions: MessageActions & { firstUserMessageClientId?: string };
   focused?: boolean;
-  isListItem?: boolean;
 }) {
   const styles = useThemedStyles(makeStyles);
-  const inheritedHeavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
-  const visibleKeys = useContext(MessageListVisibleKeysContext);
-  const heavyContentVisible = isListItem
-    ? focused || visibleKeys === null || visibleKeys.has(item.key)
-    : inheritedHeavyContentVisible;
   // 「user 行渲染系统卡」形态(silent-stop 自动续跑 agentMeta.autoResume):渲染层
   // 降级为 kind='system' 再进 MessageBubble——presentation 的 isUserAligned 判定是
   // `align==='user' || kind==='user'`,保持 user kind 会右对齐成用户气泡并挂上
@@ -2508,10 +2605,36 @@ const RenderItemView = memo(function RenderItemView({
       break;
   }
   return (
+    <View style={focused ? styles.focusedItem : undefined} testID={focused ? 'message.focusedItem' : undefined}>
+      {node}
+    </View>
+  );
+});
+
+const RenderListItemView = memo(function RenderListItemView({
+  item,
+  actions,
+  focused,
+}: {
+  item: MobileMessageRenderItem;
+  actions: MessageActions & { firstUserMessageClientId?: string };
+  focused: boolean;
+}) {
+  const [isViewable, setIsViewable] = useRecyclingState(false);
+  const itemKeyRef = useRef(item.key);
+  itemKeyRef.current = item.key;
+  const handleViewabilityChange = useCallback((token: LegendListViewToken<MobileMessageRenderItem>) => {
+    if (token.key !== itemKeyRef.current) return;
+    setIsViewable((previous) => previous === token.isViewable ? previous : token.isViewable);
+  }, [setIsViewable]);
+  useViewability<MobileMessageRenderItem>(
+    handleViewabilityChange,
+    MESSAGE_LIST_VIEWABILITY_CONFIG_ID,
+  );
+  const heavyContentVisible = focused || isViewable;
+  return (
     <MessageHeavyContentVisibilityContext.Provider value={heavyContentVisible}>
-      <View style={focused ? styles.focusedItem : undefined} testID={focused ? 'message.focusedItem' : undefined}>
-        {node}
-      </View>
+      <RenderItemView actions={actions} focused={focused} item={item} />
     </MessageHeavyContentVisibilityContext.Provider>
   );
 });
@@ -4567,6 +4690,40 @@ function OrcaCollabCard({ card, screenWidth }: { card: OrcaCollabCardModel; scre
   );
 }
 
+const ViewabilityGatedMermaidDiagram = memo(function ViewabilityGatedMermaidDiagram({
+  source,
+  testID,
+}: {
+  source: string;
+  testID?: string;
+}) {
+  const heavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
+  return (
+    <MermaidDiagramWebView
+      active={heavyContentVisible}
+      source={source}
+      testID={testID}
+    />
+  );
+});
+
+const ViewabilityGatedMathFormula = memo(function ViewabilityGatedMathFormula({
+  source,
+  testID,
+}: {
+  source: string;
+  testID?: string;
+}) {
+  const heavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
+  return (
+    <MathFormulaWebView
+      active={heavyContentVisible}
+      source={source}
+      testID={testID}
+    />
+  );
+});
+
 // 消息正文统一走原生 markdown 渲染(流式与完成态同一条路径,完成时无"原生→WebView"的切换跳变)。
 // 文本选择 = 完成态消息的各块 Text 原生 selectable:长按文字就地弹系统选择手柄/Copy 菜单,
 // 不跳转界面;整条复制走操作条按钮。选择按块进行(原生 Text 能力边界,跨段选择做不到)。
@@ -4606,7 +4763,6 @@ function MarkdownBody({
   const { colors } = useTheme();
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
-  const heavyContentVisible = useContext(MessageHeavyContentVisibilityContext);
   const chatFilePathContext = useContext(ChatFilePathContext);
   // iOS UITextView 在 stretch/百分比宽度下会偶发只量出部分高度,LegendList 按这次
   // 偏矮的 onLayout 裁切 agent 回复;点分享会换上确定宽度的容器从而完整显示。
@@ -4712,7 +4868,7 @@ function MarkdownBody({
     ),
     [onOpenSessionLink, openMarkdownImage, sessionLinkTitles, sessionReferenceDetails, streaming, styles],
   );
-  const textRunGroupingOptions = selectable === true && Platform.OS === 'android'
+  const textRunGroupingOptions = Platform.OS === 'android'
     ? ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS
     : undefined;
   // 连续纯文本块合并为 text_run(跨段选择),代码块/表格/mermaid/含直连图块保持独立。
@@ -4801,7 +4957,7 @@ function MarkdownBody({
           // 盖住整块——WebView 会吞掉触摸事件,不盖层拿不到点击)。
           return (
             <View key={block.key} testID="message.mermaidPreviewButton">
-              <MermaidDiagramWebView active={heavyContentVisible} source={block.text} testID="message.mermaidDiagram" />
+              <ViewabilityGatedMermaidDiagram source={block.text} testID="message.mermaidDiagram" />
               {onOpenPayload ? (
                 <Pressable
                   accessibilityLabel={t('message.renderer.openDiagramDetail')}
@@ -4818,8 +4974,7 @@ function MarkdownBody({
           // display 公式:WebView + KaTeX(形态对齐 mermaid 块,无 chip 卡壳——
           // 公式在视觉上是正文的一部分,背景与气泡底色一致)。
           return (
-            <MathFormulaWebView
-              active={heavyContentVisible}
+            <ViewabilityGatedMathFormula
               key={block.key}
               source={block.text}
               testID="message.mathFormula"

@@ -467,11 +467,14 @@ import {
   historyWindowGapKey,
 } from '@/session/historyWindowGap';
 import {
-  buildMobileMessageRenderItems,
   insertMobileForkOriginItem,
   type MobileMessageRenderItem,
 } from '@/session/messageRenderModel';
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
+import {
+  buildMobileStreamingRenderWindow,
+  type MobileStreamingRenderPrefixCache,
+} from '@/session/messageRenderStreamingCache';
 import { shouldSuppressEmptyMessageState } from '@/session/sessionEmptyState';
 import { deferScheduleIndexHydration } from '@/session/scheduleIndexDefer';
 import { markSessionScheduleRunsRead, unreadRunIdFromProjection } from '@/session/scheduleRunRead';
@@ -4616,18 +4619,27 @@ export default function SessionScreen() {
     sessionId: string;
     items: readonly MobileMessageRenderItem[];
   } | null>(null);
+  const streamingRenderPrefixRef = useRef<MobileStreamingRenderPrefixCache | null>(null);
   const renderItems = useMemo(
     () => {
+      const builtWindow = buildMobileStreamingRenderWindow({
+        cacheKey: i18nInstance.language,
+        messages: projectLoadedMessageWindow(messages),
+        options: {
+          autoResumePending: inputProjection.autoResumePending,
+          isSessionStreaming,
+          renderOrphanTaskUpdates: makerTurnRunning,
+          sessionId,
+        },
+        prefixCache: streamingRenderPrefixRef,
+        taskUpdates,
+      });
       let items = insertMobileForkOriginItem(
         // 孤儿 agent_task 兜底用 maker status 驱动的权威 turn 边界 gate,与 store 的
         // turn-start 清理同源闭环——渲染开启时 map 必已清过 stale。不用 isSessionStreaming
         // (含本地 sending / canStopQueue,发送→status 间隙会闪现残留),也不用
         // remoteSessionRunning(activity 推送 / 活跃快照会先置 true,重连场景渲染先于清理)。
-        buildMobileMessageRenderItems(
-          projectLoadedMessageWindow(messages),
-          { autoResumePending: inputProjection.autoResumePending, isSessionStreaming, renderOrphanTaskUpdates: makerTurnRunning, sessionId },
-          taskUpdates,
-        ),
+        builtWindow.items,
         forkOrigin,
       );
       if (errorTailClientId) {
@@ -4643,8 +4655,8 @@ export default function SessionScreen() {
     },
     [errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isSessionStreaming, makerTurnRunning, messages, sessionId, taskUpdates],
   );
-  // 只在本次 render 真正 commit 后更新 reconcile 基准。写入 useMemo/ref 会让
-  // Concurrent Mode 下被丢弃的 render 泄漏成下一轮的 previous,破坏尾行 memo 的稳定性。
+  // Reconciliation must only use committed rows. Unlike the prefix cache above, a speculative
+  // render-item baseline could leak rows from an abandoned render and destabilize tail memoization.
   useLayoutEffect(() => {
     previousRenderItemsRef.current = { sessionId, items: renderItems };
   }, [renderItems, sessionId]);

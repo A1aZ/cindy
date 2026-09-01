@@ -1,4 +1,13 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
 import {
   MAKER_EVENT_BATCH_CHANNEL,
   SESSION_ACTIVITY_CHANNEL,
@@ -5155,8 +5164,52 @@ function readNumber(value: unknown, key: string): number | null {
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
 }
 
+const RemoteSessionStoreSubscriptionEnabledContext = createContext(true);
+const INACTIVE_REMOTE_SESSION_STORE_SUBSCRIBE = () => () => undefined;
+
+/**
+ * Keep a mounted route's remote-session projection stable while it is covered by another screen.
+ * The store itself keeps receiving data; consumers resubscribe and jump to the latest snapshot when
+ * the route regains focus. This preserves native list state without rendering hidden row trees for
+ * every streaming token.
+ */
+export function RemoteSessionStoreSubscriptionGate({
+  children,
+  enabled,
+}: {
+  children: ReactNode;
+  enabled: boolean;
+}) {
+  return createElement(
+    RemoteSessionStoreSubscriptionEnabledContext.Provider,
+    { value: enabled },
+    children,
+  );
+}
+
+function usePausableRemoteSessionStoreSnapshot<T>(
+  identity: unknown,
+  getSnapshot: () => T,
+): T {
+  const enabled = useContext(RemoteSessionStoreSubscriptionEnabledContext);
+  const frozenSnapshotRef = useRef<{ identity: unknown; value: T } | null>(null);
+  const readSnapshot = useCallback(() => {
+    const frozen = frozenSnapshotRef.current;
+    if (enabled || frozen === null || !Object.is(frozen.identity, identity)) {
+      const next = { identity, value: getSnapshot() };
+      frozenSnapshotRef.current = next;
+      return next.value;
+    }
+    return frozen.value;
+  }, [enabled, getSnapshot, identity]);
+  return useSyncExternalStore(
+    enabled ? remoteSessionStore.subscribe : INACTIVE_REMOTE_SESSION_STORE_SUBSCRIBE,
+    readSnapshot,
+  );
+}
+
 export function useRemoteSessions(): RemoteSession[] {
-  return useSyncExternalStore(remoteSessionStore.subscribe, remoteSessionStore.getSessions);
+  return usePausableRemoteSessionStoreSnapshot('sessions', remoteSessionStore.getSessions);
 }
 
 /** Subscribe to one session's message mirror without triggering cache hydration side effects. */
@@ -5273,11 +5326,17 @@ function useSessionMessageCacheSync(
 }
 
 export function useRemoteMessageVersion(): number {
-  return useSyncExternalStore(remoteSessionStore.subscribe, remoteSessionStore.getMessageVersion);
+  return usePausableRemoteSessionStoreSnapshot(
+    'message-version',
+    remoteSessionStore.getMessageVersion,
+  );
 }
 
 export function useRemoteSessionStoreVersion(): number {
-  return useSyncExternalStore(remoteSessionStore.subscribe, remoteSessionStore.getStoreVersion);
+  return usePausableRemoteSessionStoreSnapshot(
+    'store-version',
+    remoteSessionStore.getStoreVersion,
+  );
 }
 
 export function useRemoteNewMakerWorktreePreference(
@@ -5321,8 +5380,8 @@ export function useSessionInputProjection(sessionId: string): InputProjection {
 }
 
 export function useSessionRunning(sessionId: string): boolean {
-  return useSyncExternalStore(
-    remoteSessionStore.subscribe,
+  return usePausableRemoteSessionStoreSnapshot(
+    sessionId,
     () => remoteSessionStore.isSessionRunning(sessionId),
   );
 }

@@ -1,4 +1,4 @@
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useIsFocused } from 'expo-router';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -192,6 +192,7 @@ import {
   type RemoteSessionStatusFilter,
 } from '@/session/sessionList';
 import {
+  RemoteSessionStoreSubscriptionGate,
   remoteSessionStore,
   useRemoteMessageVersion,
   useRemoteSessions,
@@ -323,6 +324,15 @@ class HomeSyncScopeSupersededError extends Error {
 }
 
 export default function HomeScreen() {
+  const screenFocused = useIsFocused();
+  return (
+    <RemoteSessionStoreSubscriptionGate enabled={screenFocused}>
+      <HomeScreenContent />
+    </RemoteSessionStoreSubscriptionGate>
+  );
+}
+
+function HomeScreenContent() {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t, i18n: i18nInstance } = useTranslation();

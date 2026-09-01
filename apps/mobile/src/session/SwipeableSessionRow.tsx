@@ -31,7 +31,6 @@ import Animated, {
   interpolate,
   useAnimatedReaction,
   useAnimatedStyle,
-  useDerivedValue,
   useSharedValue,
   withTiming,
   type SharedValue,
@@ -307,17 +306,21 @@ function RightActionsPanel({
   const { colors } = useTheme();
   const { t } = useTranslation();
   const StatusIcon = archived ? ArchiveRestore : Archive;
-  // armed = 位移越过全滑阈值。独立 SharedValue 只在跨越阈值时写入,避免
-  // useDerivedValue 里对逐帧变化的 translation 直接 withTiming(目标每帧重设,动画走不完)。
-  const armed = useSharedValue(false);
+  // 挂载时同步落初值,只在真正跨越阈值时启动 timing。若每个面板挂载都执行
+  // withTiming(0),大项目从完整首帧切到窗口行时会留下仍在更新已卸载 Fabric tag
+  // 的空动画,最终用 Reanimated 警告栈堵住 Android 主线程。
+  const armedProgress = useSharedValue(0);
   useAnimatedReaction(
     () => -translation.value >= fullSwipeThreshold,
-    (next) => {
-      if (next !== armed.value) armed.value = next;
+    (next, previous) => {
+      if (previous === null) {
+        armedProgress.value = next ? 1 : 0;
+        return;
+      }
+      if (next !== previous) {
+        armedProgress.value = withTiming(next ? 1 : 0, { duration: ARM_ANIMATION_MS });
+      }
     },
-  );
-  const armedProgress = useDerivedValue(
-    () => withTiming(armed.value ? 1 : 0, { duration: ARM_ANIMATION_MS }),
   );
 
   const optionsStyle = useAnimatedStyle(() => {

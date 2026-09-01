@@ -2,8 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   captureMobileHistoryAnchor,
   isMobileHistoryAnchorSettled,
+  mobileHistoryTopOffsetAdjustment,
   resolveMobileHistoryAnchorOffset,
 } from '@/session/messageHistoryAnchor';
+import {
+  mobileMessageHistoryAnchorIdentity,
+  mobileMessageHistoryOnlyExpandedFirstWorkGroup,
+  mobileMessageHistoryRowKeyByIdentity,
+} from '@/session/messageHistoryAnchorIdentity';
+import { buildMobileMessageRenderItems } from '@/session/messageRenderModel';
+import type { RemoteMessage } from '@/session/types';
 
 describe('messageHistoryAnchor', () => {
   it('captures the first visible row in LegendList coordinates', () => {
@@ -80,12 +88,48 @@ describe('messageHistoryAnchor', () => {
   });
 
   it('keeps the same row at the same viewport offset after a prepend', () => {
+    let identityScans = 0;
     const target = resolveMobileHistoryAnchorOffset(
-      { key: 'm80', viewportOffset: -30 },
-      { positionByKey: (key) => key === 'm80' ? 11_300 : undefined },
+      { key: 'm80', identityKey: 'leaf-m80', viewportOffset: -30 },
+      {
+        keyByIdentity: () => {
+          identityScans += 1;
+          return 'm80';
+        },
+        positionByKey: (key) => key === 'm80' ? 11_300 : undefined,
+      },
     );
 
     expect(target).toBe(11_330);
+    expect(identityScans).toBe(0);
+  });
+
+  it('recovers the align-at-end spacer for an under-one-screen list', () => {
+    expect(mobileHistoryTopOffsetAdjustment({
+      contentLength: 720,
+      data: [{ key: 'm1' }, { key: 'm2' }],
+      positionAtIndex: (index) => [0, 120][index],
+      scrollLength: 720,
+      sizeAtIndex: (index) => [96, 168][index],
+    }, {
+      baseTopOffset: 64,
+      bottomPadding: 32,
+      footerSize: 0,
+    })).toBe(400);
+  });
+
+  it('uses the explicit header and padding baseline once content overflows', () => {
+    expect(mobileHistoryTopOffsetAdjustment({
+      contentLength: 1_200,
+      data: [{ key: 'm1' }, { key: 'm2' }],
+      positionAtIndex: (index) => [0, 840][index],
+      scrollLength: 720,
+      sizeAtIndex: (index) => [816, 296][index],
+    }, {
+      baseTopOffset: 64,
+      bottomPadding: 32,
+      footerSize: 0,
+    })).toBe(64);
   });
 
   it('re-resolves the target when older row measurements settle', () => {
@@ -108,6 +152,51 @@ describe('messageHistoryAnchor', () => {
     })).toBe(11_380);
   });
 
+  it('resolves an aggregate row whose outer key changed after same-turn history was prepended', () => {
+    const before = buildMobileMessageRenderItems([
+      toolUse('tool-b', 2),
+      assistantMessage('answer', 3),
+    ]);
+    const after = buildMobileMessageRenderItems([
+      toolUse('tool-a', 1),
+      toolUse('tool-b', 2),
+      assistantMessage('answer', 3),
+    ]);
+    const beforeGroup = before[0];
+    const afterGroup = after[0];
+    expect(beforeGroup.type).toBe('work_group');
+    expect(afterGroup.type).toBe('work_group');
+    expect(after).toHaveLength(before.length);
+    expect(afterGroup.key).not.toBe(beforeGroup.key);
+
+    const identityKey = mobileMessageHistoryAnchorIdentity(beforeGroup);
+    expect(identityKey).toBeTruthy();
+    expect(mobileMessageHistoryRowKeyByIdentity(after, identityKey!)).toBe(afterGroup.key);
+    expect(mobileMessageHistoryOnlyExpandedFirstWorkGroup(before, before)).toBe(false);
+    expect(mobileMessageHistoryOnlyExpandedFirstWorkGroup(before, after)).toBe(true);
+    expect(mobileMessageHistoryOnlyExpandedFirstWorkGroup(before, buildMobileMessageRenderItems([
+      userMessage('earlier-user', 0),
+      toolUse('tool-a', 1),
+      toolUse('tool-b', 2),
+      assistantMessage('answer', 3),
+    ]))).toBe(false);
+    const anchor = captureMobileHistoryAnchor({
+      data: before,
+      positionAtIndex: (index) => [0, 180][index],
+      scroll: 0,
+      start: 0,
+      topOffsetAdjustment: 400,
+    }, (item) => item.key, mobileMessageHistoryAnchorIdentity);
+    expect(anchor?.key).toBe(beforeGroup.key);
+    expect(anchor?.viewportOffset).toBe(400);
+    expect(resolveMobileHistoryAnchorOffset(anchor!, {
+      data: after,
+      keyByIdentity: (identity) => mobileMessageHistoryRowKeyByIdentity(after, identity),
+      positionByKey: (key) => key === afterGroup.key ? 600 : undefined,
+      topOffsetAdjustment: 64,
+    })).toBe(264);
+  });
+
   it('falls back to the current data index while LegendList rebuilds its key cache', () => {
     expect(resolveMobileHistoryAnchorOffset({ key: 'm80', viewportOffset: -30 }, {
       data: [{ key: 'older' }, { key: 'm80' }],
@@ -122,3 +211,46 @@ describe('messageHistoryAnchor', () => {
     expect(isMobileHistoryAnchorSettled(11_329, 11_330, 11_331, 2)).toBe(true);
   });
 });
+
+function toolUse(id: string, seconds: number): RemoteMessage {
+  return {
+    id,
+    clientId: id,
+    sessionId: 's1',
+    role: 'tool_use',
+    content: {
+      toolUseId: id,
+      toolName: 'Read',
+      input: { file_path: `/${id}.ts` },
+    },
+    toolUseId: id,
+    agentMeta: null,
+    createdAt: `2026-01-01T00:00:0${seconds}.000Z`,
+  };
+}
+
+function assistantMessage(id: string, seconds: number): RemoteMessage {
+  return {
+    id,
+    clientId: id,
+    sessionId: 's1',
+    role: 'assistant',
+    content: 'done',
+    toolUseId: null,
+    agentMeta: null,
+    createdAt: `2026-01-01T00:00:0${seconds}.000Z`,
+  };
+}
+
+function userMessage(id: string, seconds: number): RemoteMessage {
+  return {
+    id,
+    clientId: id,
+    sessionId: 's1',
+    role: 'user',
+    content: id,
+    toolUseId: null,
+    agentMeta: null,
+    createdAt: `2026-01-01T00:00:0${seconds}.000Z`,
+  };
+}

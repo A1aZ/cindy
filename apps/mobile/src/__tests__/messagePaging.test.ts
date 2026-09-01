@@ -172,6 +172,18 @@ describe('messagePaging', () => {
       const rows = [compact('only', '2026-01-01T00:00:01.000Z')];
       expect(projectLoadedMessageWindow(rows)).toBe(rows);
     });
+
+    it('collapses an adjacent Compact-only wall when no host cursor is loaded', () => {
+      const rows = [
+        compact('first', '2026-01-01T00:00:01.000Z'),
+        compact('second', '2026-01-01T00:00:02.000Z'),
+        compact('latest', '2026-01-01T00:00:03.000Z'),
+      ];
+
+      expect(projectLoadedMessageWindow(rows).map((row) => row.id)).toEqual([
+        'mobile-system-compact:latest',
+      ]);
+    });
   });
 
   it('keeps the load-earlier affordance only when the remote page is full', () => {

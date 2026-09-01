@@ -124,10 +124,14 @@ export function buildMobileStreamingRenderWindow(
   const canReusePrefix = previousPrefix?.mode === 'history'
     && previousPrefix.sessionId === sessionId
     && previousPrefix.cacheKey === cacheKey
+    && sameTaskUpdateDependencies(previousPrefix.taskUpdateDependencies, taskUpdates)
     && sameMessagePrefixReferences(previousPrefix.messages, messages, activeTurnStart);
   const prefixMessages = canReusePrefix
     ? previousPrefix.messages
     : messages.slice(0, activeTurnStart);
+  const prefixTaskUpdateDependencies = canReusePrefix
+    ? previousPrefix.taskUpdateDependencies ?? []
+    : collectTaskUpdateDependencies(prefixMessages, taskUpdates);
   const prefixItems = canReusePrefix
     ? previousPrefix.items
     : buildMobileMessageRenderItems(prefixMessages, {
@@ -135,14 +139,21 @@ export function buildMobileStreamingRenderWindow(
       autoResumePending: null,
       isSessionStreaming: false,
       renderOrphanTaskUpdates: false,
-    });
+    }, taskUpdates);
   const prefix = canReusePrefix
     ? previousPrefix
-    : { cacheKey, items: prefixItems, messages: prefixMessages, mode: 'history' as const, sessionId };
+    : {
+        cacheKey,
+        items: prefixItems,
+        messages: prefixMessages,
+        mode: 'history' as const,
+        sessionId,
+        taskUpdateDependencies: prefixTaskUpdateDependencies,
+      };
   const activeItems = buildMobileMessageRenderItems(
     messages.slice(activeTurnStart),
     options,
-    taskUpdates,
+    omitTaskUpdatesConsumedByPrefix(taskUpdates, prefixTaskUpdateDependencies),
   );
   const result = {
     items: [...prefixItems, ...activeItems],
@@ -310,6 +321,22 @@ function sameTaskUpdateDependencySnapshots(
       && dependency.toolUseId === candidate.toolUseId
       && dependency.update === candidate.update;
   });
+}
+
+function omitTaskUpdatesConsumedByPrefix(
+  taskUpdates: ReadonlyMap<string, AgentTaskUpdate> | undefined,
+  dependencies: readonly MobileStreamingTaskUpdateDependency[],
+): ReadonlyMap<string, AgentTaskUpdate> | undefined {
+  if (!taskUpdates || taskUpdates.size === 0) return taskUpdates;
+  const consumedUpdates = new Set(
+    dependencies
+      .map((dependency) => dependency.update)
+      .filter((update): update is AgentTaskUpdate => update !== undefined),
+  );
+  if (consumedUpdates.size === 0) return taskUpdates;
+  return new Map(
+    [...taskUpdates].filter(([, update]) => !consumedUpdates.has(update)),
+  );
 }
 
 function findLastStableAssistantBoundaryIndex(messages: readonly RemoteMessage[]): number {

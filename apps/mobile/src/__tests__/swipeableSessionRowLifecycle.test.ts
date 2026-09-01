@@ -31,4 +31,9 @@ describe('SwipeableSessionRow native animation lifecycle', () => {
     expect(source).toContain('<View style={styles.pinShell}>');
     expect(source).toContain('<View style={styles.rightShell}>');
   });
+
+  it('keeps the two right-side action buttons evenly spaced', () => {
+    expect(source).toMatch(/optionsButton:\s*\{[\s\S]*?right: BUTTON_GAP \* 2 \+ BUTTON_SIZE,/);
+    expect(source).toMatch(/archiveButton:\s*\{[\s\S]*?right: BUTTON_GAP,/);
+  });
 });

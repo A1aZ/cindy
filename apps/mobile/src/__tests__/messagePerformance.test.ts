@@ -205,6 +205,110 @@ describe('message render performance', () => {
     expect(next.items.slice(0, first.prefix!.items.length)).toEqual(first.prefix!.items);
   });
 
+  it('invalidates a historical prefix only when one of its task updates changes', () => {
+    const prefixTask = message({
+      id: 'historical-prefix-task',
+      role: 'tool_use',
+      toolUseId: 'historical-prefix-task',
+      content: {
+        toolUseId: 'historical-prefix-task',
+        toolName: 'collab:spawn',
+        input: { task: 'Review the historical prefix' },
+      },
+      createdAt: timestamp(1),
+    });
+    const stableAssistant = message({
+      id: 'historical-prefix-assistant',
+      role: 'assistant',
+      content: 'The review has started.',
+      createdAt: timestamp(2),
+    });
+    const activeUser = message({
+      id: 'historical-prefix-active-user',
+      role: 'user',
+      content: 'Continue',
+      createdAt: timestamp(3),
+    });
+    const activeAssistant = message({
+      id: 'historical-prefix-active-assistant',
+      role: 'assistant',
+      content: 'Partial',
+      agentMeta: { isStreaming: true },
+      createdAt: timestamp(4),
+    });
+    const prefixUpdate: AgentTaskUpdate = {
+      provider: 'codex',
+      taskId: 'historical-prefix-task',
+      status: 'running',
+    };
+    const prefixCache: {
+      current: ReturnType<typeof buildMobileStreamingRenderWindow>['prefix'];
+    } = { current: null };
+    const options = {
+      isSessionStreaming: true,
+      renderOrphanTaskUpdates: true,
+      sessionId: 's1',
+    } as const;
+    const messages = [prefixTask, stableAssistant, activeUser, activeAssistant];
+    const firstUpdates = new Map<string, AgentTaskUpdate>([
+      ['historical-prefix-task', prefixUpdate],
+    ]);
+    const first = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages,
+      options,
+      prefixCache,
+      taskUpdates: firstUpdates,
+    });
+
+    expect(first.prefix?.mode).toBe('history');
+    expect(first.items.filter((item) => item.type === 'agent_task')).toMatchObject([
+      { key: 'task-historical-prefix-task', update: prefixUpdate },
+    ]);
+
+    const unrelatedUpdate: AgentTaskUpdate = {
+      provider: 'codex',
+      taskId: 'active-orphan-task',
+      status: 'running',
+    };
+    const unrelatedUpdates = new Map<string, AgentTaskUpdate>([
+      ['historical-prefix-task', prefixUpdate],
+      ['active-orphan-task', unrelatedUpdate],
+    ]);
+    const unrelated = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages,
+      options,
+      prefixCache,
+      taskUpdates: unrelatedUpdates,
+    });
+
+    expect(unrelated.prefix).toBe(first.prefix);
+    expect(unrelated.items.filter((item) => item.type === 'agent_task')).toMatchObject([
+      { key: 'task-historical-prefix-task', update: prefixUpdate },
+      { key: 'task-update-active-orphan-task', update: unrelatedUpdate },
+    ]);
+
+    const changedPrefixUpdate = { ...prefixUpdate, title: 'Updated historical task' };
+    const changedUpdates = new Map<string, AgentTaskUpdate>([
+      ['historical-prefix-task', changedPrefixUpdate],
+      ['active-orphan-task', unrelatedUpdate],
+    ]);
+    const changed = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages,
+      options,
+      prefixCache,
+      taskUpdates: changedUpdates,
+    });
+
+    expect(changed.prefix).not.toBe(first.prefix);
+    expect(changed.items.filter((item) => item.type === 'agent_task')).toMatchObject([
+      { key: 'task-historical-prefix-task', update: changedPrefixUpdate },
+      { key: 'task-update-active-orphan-task', update: unrelatedUpdate },
+    ]);
+  });
+
   it('publishes a reusable prefix before a streaming render commits', () => {
     const history = createLargeDesktopMessageFixture(20);
     const activeUser = message({

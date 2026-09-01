@@ -541,6 +541,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     marginTop: -BUTTON_SIZE / 2,
     overflow: 'hidden',
     position: 'absolute',
+    right: BUTTON_GAP * 2 + BUTTON_SIZE,
     top: '50%',
     width: BUTTON_SIZE,
   },

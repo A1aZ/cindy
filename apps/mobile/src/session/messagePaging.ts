@@ -46,7 +46,20 @@ export function projectLoadedMessageWindow(
     if (firstHostIndex < 0) firstHostIndex = index;
     lastHostIndex = index;
   }
-  if (firstHostIndex < 0) return messages;
+  if (firstHostIndex < 0) {
+    let changed = false;
+    const projected: RemoteMessage[] = [];
+    for (const message of messages) {
+      const previous = projected.at(-1);
+      if (isLocalCompactCard(message) && previous && isLocalCompactCard(previous)) {
+        projected[projected.length - 1] = message;
+        changed = true;
+        continue;
+      }
+      projected.push(message);
+    }
+    return changed ? projected : messages;
+  }
 
   let latestDetachedTailCompactIndex = -1;
   for (let index = lastHostIndex + 1; index < messages.length; index += 1) {

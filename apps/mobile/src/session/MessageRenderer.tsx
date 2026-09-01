@@ -397,6 +397,7 @@ const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 140;
 const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_FRAMES = 180;
 const MOBILE_HISTORY_ANCHOR_VERIFY_MAX_MS = 3000;
 const MOBILE_HISTORY_ANCHOR_STABLE_FRAMES = 2;
+const MOBILE_SCROLL_HISTORY_EVALUATION_INTERVAL_MS = 64;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS = 12;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH = 1800;
 const ANDROID_SELECTABLE_TEXT_RUN_MAX_INLINE_FRAGMENTS = 20;
@@ -710,6 +711,7 @@ export function MessageRenderer({
   const focusedItemKeyRef = useRef(focusedItemKey);
   focusedItemKeyRef.current = focusedItemKey;
   const listRef = useRef<LegendListRef>(null);
+  const firstVisibleIndexRef = useRef(0);
   const listMetricsRef = useRef<LegendListMetrics>({ footerSize: 0, headerSize: 0 });
   const listTopPaddingRef = useRef(0);
   const listBottomPaddingRef = useRef(0);
@@ -744,6 +746,10 @@ export function MessageRenderer({
   // 上一次自动 load-earlier 触发时的首项 key:相同 = 上次尝试无进展(失败 / 拉回重复页),
   // 不再自动重试,防止对着打不出进展的 host 无限拉取。用户重新拖动 / 切会话时清除。
   const lastAutoLoadEarlierKeyRef = useRef<string | null>(null);
+  const lastScrollHistoryEvaluationAtRef = useRef(0);
+  const pendingScrollHistoryMetricsRef = useRef<MessageScrollMetrics | null>(null);
+  const scrollHistoryEvaluationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptAutoLoadEarlierRef = useRef<(nativeMetrics?: MessageScrollMetrics) => void>(() => {});
   // 正在读「加载更早」拉回来的历史:抑制 handleContentSize 的大块撑高贴底,否则短会话(内容仍近底)
   // load-earlier 的 prepend 撑高会被误当成底部增长 → scrollToEnd 把用户从刚加载的历史拽回最新(review P1)。
   // 用户重新拖动 / 主动跳底 / 切会话时解除。
@@ -835,6 +841,12 @@ export function MessageRenderer({
     historyTouchTriggeredRef.current = false;
     initialHistoryAutofillRemainingRef.current = MAX_INITIAL_HISTORY_AUTOFILL_PAGES;
     lastAutoLoadEarlierKeyRef.current = null;
+    lastScrollHistoryEvaluationAtRef.current = 0;
+    pendingScrollHistoryMetricsRef.current = null;
+    if (scrollHistoryEvaluationTimerRef.current !== null) {
+      clearTimeout(scrollHistoryEvaluationTimerRef.current);
+      scrollHistoryEvaluationTimerRef.current = null;
+    }
     readingOlderRef.current = false;
     readingOlderRequestGenerationRef.current += 1;
     historyPrependTransactionRef.current = null;
@@ -859,6 +871,7 @@ export function MessageRenderer({
       programmaticScrollTimerRef.current = null;
     }
     previousItemKeysRef.current = [];
+    firstVisibleIndexRef.current = 0;
     scrollMetricsRef.current = { contentHeight: 0, offsetY: 0, viewportHeight: 0 };
     followEndPinStateRef.current = createMobileFollowEndPinState();
     initialAnchorDoneRef.current = false;
@@ -885,9 +898,23 @@ export function MessageRenderer({
     setListRevealed(false);
   }
   const lastAppliedFocusKeyRef = useRef<string | null>(null);
-  const [hasNewMessages, setHasNewMessages] = useState(false);
-  const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
-  const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
+  const [hasNewMessages, setHasNewMessagesState] = useState(false);
+  const hasNewMessagesRef = useRef(false);
+  const setHasNewMessages = useCallback((next: boolean) => {
+    if (hasNewMessagesRef.current === next) return;
+    hasNewMessagesRef.current = next;
+    setHasNewMessagesState(next);
+  }, []);
+  const [isAwayFromBottom, setIsAwayFromBottomState] = useState(false);
+  const isAwayFromBottomRef = useRef(false);
+  const setIsAwayFromBottom = useCallback((next: boolean) => {
+    if (isAwayFromBottomRef.current === next) return;
+    isAwayFromBottomRef.current = next;
+    setIsAwayFromBottomState(next);
+  }, []);
+  const [previousUserTarget, setPreviousUserTarget] = useState<
+    ReturnType<typeof previousUserMessageJumpTarget>
+  >(null);
   const [payload, setPayload] = useState<MessagePayload | null>(null);
   const payloadRef = useRef(payload);
   payloadRef.current = payload;
@@ -1352,29 +1379,32 @@ export function MessageRenderer({
   // hydrate / 新注册后 gallery 需要重建,否则点开气泡本地图时 initialUrl 对不上图集条目。
   const sentThumbsVersion = useSentAttachmentThumbsVersion();
   const chatFilePathContext = useContext(ChatFilePathContext);
+  const imageLightboxOpen = payload?.kind === 'media' && payload.media.kind === 'image';
   const galleryImages = useMemo(
-    () => collectMobileMessageGalleryImages(
-      listData,
-      chatFilePathContext?.workdir,
-      chatFilePathContext?.remoteHostId,
-      chatFilePathContext?.sessionId,
-    ),
+    () => (imageLightboxOpen
+      ? collectMobileMessageGalleryImages(
+          listData,
+          chatFilePathContext?.workdir,
+          chatFilePathContext?.remoteHostId,
+          chatFilePathContext?.sessionId,
+        )
+      : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sentThumbsVersion 是 collect 内部读的全局 store 的失效信号
     [
       chatFilePathContext?.remoteHostId,
       chatFilePathContext?.sessionId,
       chatFilePathContext?.workdir,
+      imageLightboxOpen,
       listData,
       sentThumbsVersion,
     ],
   );
-  // 稳定 lightbox images 的引用:galleryImages 在流式回复期间每 token 重建
-  // (item 对象全新但语义未变),若直接透传,查看器的取件 effect / FlatList /
-  // LightboxPage memo 每帧全部失效。语义相同(key/url/previewable 逐项一致)
-  // 时复用上一份数组,查看器打开期间对流式更新完全免疫。
+  // 只在图片查看器打开时扫描完整历史；关闭态不能让每个流式 token 都递归遍历
+  // message / work group / subagent 树。查看器打开期间若语义相同，则继续复用图集引用，
+  // 避免取件 effect / FlatList / LightboxPage memo 每帧全部失效。
   const lightboxImagesRef = useRef<readonly MobileMessageGalleryImage[] | null>(null);
   const lightboxImages = useMemo(() => {
-    if (!(payload?.kind === 'media' && payload.media.kind === 'image')) return null;
+    if (!(payload?.kind === 'media' && payload.media.kind === 'image') || !galleryImages) return null;
     const next = lightboxImagesForPayload(galleryImages, payload);
     const prev = lightboxImagesRef.current;
     if (prev && prev.length === next.length && prev.every((p, i) => {
@@ -1388,7 +1418,7 @@ export function MessageRenderer({
     }
     lightboxImagesRef.current = next;
     return next;
-  }, [galleryImages, payload]);
+  }, [galleryImages, imageLightboxOpen, payload]);
   const bottomPadding = mobileMessageListBottomPadding(bottomOverlayHeight);
   const topPadding = mobileMessageListTopPadding(topOverlayHeight);
   listBottomPaddingRef.current = bottomPadding;
@@ -1485,14 +1515,6 @@ export function MessageRenderer({
       : null),
     [onQuoteSelection, selectionQuoteEnabled],
   );
-  const previousUserTarget = useMemo(
-    () => (
-      isAwayFromBottom
-        ? previousUserMessageJumpTarget(listData, firstVisibleIndex)
-        : null
-    ),
-    [firstVisibleIndex, isAwayFromBottom, listData],
-  );
   const showJumpToLatest = isAwayFromBottom && !hasNewMessages;
   const focusRunKey = focusedItemKey
     ? `${focusedRequestKey ?? 'default'}:${focusedItemKey}`
@@ -1569,10 +1591,22 @@ export function MessageRenderer({
   useEffect(() => () => {
     if (stickyCheckTimerRef.current) clearTimeout(stickyCheckTimerRef.current);
   }, []);
+  const refreshPreviousUserTarget = useCallback(() => {
+    const next = nearBottomRef.current
+      ? null
+      : previousUserMessageJumpTarget(listDataRef.current, firstVisibleIndexRef.current);
+    setPreviousUserTarget((previous) => (
+      previous?.itemKey === next?.itemKey
+      && previous?.index === next?.index
+      && previous?.preview === next?.preview
+        ? previous
+        : next
+    ));
+  }, []);
   const handleFirstVisibleItemChangedRef = useRef((info: {
     index: number;
   }) => {
-    setFirstVisibleIndex((previous) => previous === info.index ? previous : info.index);
+    firstVisibleIndexRef.current = info.index;
   });
   const readActuallyVisibleShareableMessageIds = useCallback(async (
     viewport: ShareableMessageViewport,
@@ -1628,12 +1662,17 @@ export function MessageRenderer({
     }
     setIsAwayFromBottom(false);
     setHasNewMessages(false);
+    setPreviousUserTarget(null);
     scrollToEndProgrammatically(true);
     runStickToLatestVerify();
   }, [cancelHistoryPrependTransaction, runStickToLatestVerify, scrollToEndProgrammatically]);
 
   const jumpToPreviousUserMessage = useCallback(() => {
-    if (!previousUserTarget) return;
+    const target = previousUserMessageJumpTarget(
+      listDataRef.current,
+      firstVisibleIndexRef.current,
+    );
+    if (!target) return;
     // 上跳导航与拖动同为真实「上翻意图」:落点若在近顶区,自动加载更早应当接得上,
     // 不要求用户额外再拖一下。与拖动开始同语义,一并作废上次无进展的去重记录,
     // 否则上次失败/重复页后跳进近顶区仍会被去重短路(review P1)。
@@ -1641,8 +1680,8 @@ export function MessageRenderer({
     lastAutoLoadEarlierKeyRef.current = null;
     nearBottomRef.current = false;
     setIsAwayFromBottom(true);
-    scrollToIndexProgrammatically(previousUserTarget.index, 0.12);
-  }, [previousUserTarget, scrollToIndexProgrammatically]);
+    scrollToIndexProgrammatically(target.index, 0.12);
+  }, [scrollToIndexProgrammatically]);
 
   // 「跳到最新」请求(会话外部触发,含发送消息后的跟随):命令式滚到底,随后跑一轮有界
   // 校验/补滚(runStickToLatestVerify)——单发的 scrollToEnd 落地一刻的 metrics 可能仍陈旧,
@@ -1819,6 +1858,47 @@ export function MessageRenderer({
       requestLoadEarlier();
       return;
     }
+    if (
+      nativeMetrics
+      && nativeMetrics.offsetY <= MOBILE_ANCHOR_VERIFY_TOLERANCE
+      && scrollHistoryEvaluationTimerRef.current !== null
+    ) {
+      pendingScrollHistoryMetricsRef.current = null;
+      clearTimeout(scrollHistoryEvaluationTimerRef.current);
+      scrollHistoryEvaluationTimerRef.current = null;
+    }
+    if (
+      nativeMetrics
+      && nativeMetrics.offsetY > MOBILE_ANCHOR_VERIFY_TOLERANCE
+    ) {
+      const now = Date.now();
+      if (
+        now - lastScrollHistoryEvaluationAtRef.current
+        < MOBILE_SCROLL_HISTORY_EVALUATION_INTERVAL_MS
+      ) {
+        // 保留最后一帧再补一次尾调用：否则快滑恰好停在近顶区时，最后一次判定可能
+        // 被节流吞掉，用户必须再拖一下才能继续分页。
+        pendingScrollHistoryMetricsRef.current = nativeMetrics;
+        if (scrollHistoryEvaluationTimerRef.current === null) {
+          const remainingMs = MOBILE_SCROLL_HISTORY_EVALUATION_INTERVAL_MS
+            - (now - lastScrollHistoryEvaluationAtRef.current);
+          scrollHistoryEvaluationTimerRef.current = setTimeout(() => {
+            scrollHistoryEvaluationTimerRef.current = null;
+            const pendingMetrics = pendingScrollHistoryMetricsRef.current;
+            pendingScrollHistoryMetricsRef.current = null;
+            lastScrollHistoryEvaluationAtRef.current = 0;
+            attemptAutoLoadEarlierRef.current(pendingMetrics ?? undefined);
+          }, remainingMs);
+        }
+        return;
+      }
+      pendingScrollHistoryMetricsRef.current = null;
+      if (scrollHistoryEvaluationTimerRef.current !== null) {
+        clearTimeout(scrollHistoryEvaluationTimerRef.current);
+        scrollHistoryEvaluationTimerRef.current = null;
+      }
+      lastScrollHistoryEvaluationAtRef.current = now;
+    }
     const listState = listRef.current?.getState();
     if (!listState) return;
     // LegendList's edge bookkeeping can lag behind the native ScrollView during recycling,
@@ -1851,6 +1931,7 @@ export function MessageRenderer({
     onLoadEarlier,
     requestLoadEarlier,
   ]);
+  attemptAutoLoadEarlierRef.current = attemptAutoLoadEarlier;
 
   // 近底/跟随态迁移 + 「跳到底部」浮标与新消息红点;metrics 也供 DEV harness 读取。
   // 「解除跟随」的主路径是拖动意图(shouldUnpinMobileFollowOnDrag):拖动中相对起点
@@ -1917,7 +1998,10 @@ export function MessageRenderer({
         userScrollForOlderRef.current = false;
       }
       setIsAwayFromBottom(!nearBottom);
-      if (nearBottom) setHasNewMessages(false);
+      if (nearBottom) {
+        setHasNewMessages(false);
+        setPreviousUserTarget(null);
+      }
     }
     // 拖动进近顶区时 onStartReached 边沿可能早已被消费(见 attemptAutoLoadEarlier 注释),
     // 滚动事件兜底重评估;前置短路让稳态滚动只付 1~2 次 ref 比较的成本。
@@ -2002,9 +2086,10 @@ export function MessageRenderer({
   const handleScrollEndDrag = useCallback(() => {
     isDraggingRef.current = false;
     dragStartOffsetYRef.current = null;
+    refreshPreviousUserTarget();
     // Wait one frame so Android can report whether this drag transitioned into momentum.
     scheduleQueuedLoadEarlierFlush();
-  }, [scheduleQueuedLoadEarlierFlush]);
+  }, [refreshPreviousUserTarget, scheduleQueuedLoadEarlierFlush]);
 
   const handleMomentumScrollBegin = useCallback(() => {
     isMomentumScrollingRef.current = true;
@@ -2012,8 +2097,9 @@ export function MessageRenderer({
 
   const handleMomentumScrollEnd = useCallback(() => {
     isMomentumScrollingRef.current = false;
+    refreshPreviousUserTarget();
     scheduleQueuedLoadEarlierFlush();
-  }, [scheduleQueuedLoadEarlierFlush]);
+  }, [refreshPreviousUserTarget, scheduleQueuedLoadEarlierFlush]);
 
   const handleStartReached = useCallback(() => {
     attemptAutoLoadEarlier();
@@ -2239,7 +2325,7 @@ export function MessageRenderer({
       followEndPinRecoveryTimerRef.current = null;
     }
     setIsAwayFromBottom(false);
-    setFirstVisibleIndex(0);
+    setPreviousUserTarget(null);
     setHasNewMessages(false);
   }, [scrollResetKey]);
   // 卸载时清掉在飞的定时器/rAF(闭包引用 listRef,卸载后触发是无害 no-op,
@@ -2257,6 +2343,7 @@ export function MessageRenderer({
     if (queuedLoadEarlierFlushFrameRef.current !== null) cancelAnimationFrame(queuedLoadEarlierFlushFrameRef.current);
     if (historyAnchorVerifyFrameRef.current !== null) cancelAnimationFrame(historyAnchorVerifyFrameRef.current);
     if (followVerifyTimerRef.current !== null) clearTimeout(followVerifyTimerRef.current);
+    if (scrollHistoryEvaluationTimerRef.current !== null) clearTimeout(scrollHistoryEvaluationTimerRef.current);
     initialRevealAnimationRef.current?.stop();
   }, [clearProgrammaticScroll]);
 
@@ -2435,7 +2522,7 @@ export function MessageRenderer({
         onFirstVisibleItemChanged={handleFirstVisibleItemChangedRef.current}
       />
       </Animated.View>
-      {previousUserTarget && previousUserButtonTop !== null ? (
+      {isAwayFromBottom && previousUserTarget && previousUserButtonTop !== null ? (
         <MessageListActionButton
           accessibilityLabel={t('message.renderer.previousQuestionJump', { preview: previousUserTarget.preview || t('message.renderer.noPreview') })}
           onPress={jumpToPreviousUserMessage}
@@ -3410,15 +3497,15 @@ function copyActionLabel(state: CopyMessageStatus | 'idle' | 'copying'): string 
 }
 
 /**
- * 流式思考的实时时长(对齐桌面 ThinkingCard 的 500ms tick):active 时每 500ms
- * 刷新一次自 sinceIso 起的耗时;非 active 或时间戳无效时返回 null(标题回退静态文案)。
+ * 流式思考的实时时长：界面只显示到秒，active 时每秒刷新一次自 sinceIso 起的耗时；
+ * 非 active 或时间戳无效时返回 null(标题回退静态文案)。
  */
 function useLiveElapsedMs(active: boolean, sinceIso: string | undefined): number | null {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
     setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 500);
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [active]);
   if (!active || !sinceIso) return null;
@@ -3935,16 +4022,16 @@ function WorkGroupCard({
     screenWidth: actions.screenWidth,
     summaryCount: header.summaryCount,
   }), [actions.screenWidth, header.summaryCount]);
-  const contentLayout = useMemo(() => buildMessageContentLayout({
-    screenWidth: actions.screenWidth,
-  }), [actions.screenWidth]);
+  const contentLayout = useMemo(() => (expanded
+    ? buildMessageContentLayout({ screenWidth: actions.screenWidth })
+    : null), [actions.screenWidth, expanded]);
   const activityProjection = useMemo(
-    () => (expanded || !isStreaming
+    () => (expanded
       ? projectMobileWorkActivities(item.children, isStreaming)
       : null),
     [expanded, isStreaming, item.children],
   );
-  const startedAtIso = item.startedAtMs !== undefined
+  const startedAtIso = isStreaming && item.startedAtMs !== undefined
     ? new Date(item.startedAtMs).toISOString()
     : undefined;
   const elapsedMs = useLiveElapsedMs(isStreaming, startedAtIso);
@@ -3999,7 +4086,7 @@ function WorkGroupCard({
                         key={activity.key}
                         actions={actions}
                         activity={activity}
-                        contentLayout={contentLayout}
+                        contentLayout={contentLayout!}
                       />
                     ))}
                   </View>

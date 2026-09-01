@@ -142,6 +142,9 @@ describe('mobile message actions desktop-first surface', () => {
     expect(workGroupSource).toContain('summaryCount: header.summaryCount');
     expect(workGroupSource).toContain('<RenderItemView key={child.key} item={child} actions={actions} />');
     expect(workGroupSource).not.toContain('projectRecentMobileWorkActivities');
+    expect(workGroupSource).toContain('() => (expanded');
+    expect(workGroupSource).not.toContain('expanded || !isStreaming');
+    expect(workGroupSource).toContain('const contentLayout = useMemo(() => (expanded');
     expect(expandedBodyStart).toBeGreaterThan(-1);
     expect(childrenMapStart).toBeGreaterThan(expandedBodyStart);
     expect(workGroupSource).toContain('<ExpandedWorkThinkingRow key={child.key} item={child} />');
@@ -367,8 +370,9 @@ describe('mobile message actions desktop-first surface', () => {
     expect(foldableSource).toContain('useFoldableExpandedState(blockId, defaultExpanded)');
     expect(thinkingSource).toContain('blockId={item.key}');
     expect(renderItemSource).toContain('<ToolGroupCard item={item} actions={actions} />');
-    // 思考卡接收会话流式信号,用于流式实时时长(对齐桌面 500ms tick)。
+    // 思考卡接收会话流式信号；界面只显示到秒，不需要半秒级刷新。
     expect(renderItemSource).toContain('isSessionStreaming={actions.isSessionStreaming === true}');
+    expect(source).toContain('setInterval(() => setNow(Date.now()), 1_000)');
   });
 
   it('does not render user or assistant role labels inside message bubbles', () => {

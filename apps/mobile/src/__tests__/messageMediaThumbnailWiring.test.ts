@@ -91,6 +91,9 @@ describe('mobile message media thumbnail wiring', () => {
     expect(rendererSource).toContain("payload?.kind === 'media' && payload.media.kind === 'image'");
     expect(rendererSource).toContain('<ImageLightbox');
     expect(rendererSource).toContain('lightboxImagesForPayload(galleryImages, payload)');
+    expect(rendererSource).toContain("const imageLightboxOpen = payload?.kind === 'media' && payload.media.kind === 'image';");
+    expect(rendererSource).toContain('() => (imageLightboxOpen');
+    expect(rendererSource).toContain(': null),');
     // 旧的内嵌缩放查看器与图库箭头已退役
     expect(rendererSource).not.toContain('ZoomablePayloadImage');
     expect(rendererSource).not.toContain('message.imageZoomInButton');

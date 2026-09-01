@@ -80,6 +80,13 @@ describe('mobile message list container', () => {
     // 自动预取必须是电平判定(shouldAutoLoadEarlier + 多时机重评估),不许退回只吃 onStartReached
     // 边沿——边沿被业务 guard 吞掉后条件再就绪也等不到下一个边沿(顶部停留永不加载的回归)。
     expect(source).toContain('shouldAutoLoadEarlier({');
+    expect(source).toContain('MOBILE_SCROLL_HISTORY_EVALUATION_INTERVAL_MS = 64');
+    expect(source).toContain('now - lastScrollHistoryEvaluationAtRef.current');
+    expect(source).toContain('nativeMetrics.offsetY > MOBILE_ANCHOR_VERIFY_TOLERANCE');
+    expect(source).toContain('pendingScrollHistoryMetricsRef.current = nativeMetrics;');
+    expect(source).toContain('attemptAutoLoadEarlierRef.current(pendingMetrics ?? undefined);');
+    expect(source).toContain('if (hasNewMessagesRef.current === next) return;');
+    expect(source).toContain('if (isAwayFromBottomRef.current === next) return;');
     // 冷开只在列表同时贴住 start/end(首屏未填满)时有限补页。
     expect(source).toContain('MAX_INITIAL_HISTORY_AUTOFILL_PAGES');
     expect(source).toContain('const initialAutoFillAllowed = listRevealed');
@@ -199,7 +206,10 @@ describe('mobile message list container', () => {
 
     expect(source).toContain('key={scrollResetKey}');
     expect(source).not.toContain('tailWindowAnchor');
-    expect(source).toContain('previousUserMessageJumpTarget(listData, firstVisibleIndex)');
+    expect(source).toContain('previousUserMessageJumpTarget(listDataRef.current, firstVisibleIndexRef.current)');
+    expect(source).toContain('firstVisibleIndexRef.current = info.index;');
+    expect(source).not.toContain('setFirstVisibleIndex');
+    expect(source).toContain('refreshPreviousUserTarget();');
     // 首次校正仍会命令式落底，但 opacity 揭示必须立即交给 UI-thread native driver；
     // 复杂消息占满 JS 时不能把 300ms 隐藏窗拖成长达数秒的白屏。
     expect(source).not.toContain('onLoad={handleListLoad}');
@@ -225,6 +235,10 @@ describe('mobile message list container', () => {
 
   it('resets identity-bound row state before a recycled cell displays another item', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/session/MessageRenderer.tsx'), 'utf8');
+    const expandedStateSource = readFileSync(
+      resolve(process.cwd(), 'src/session/expandedBlockMemory.ts'),
+      'utf8',
+    );
     const bubbleStart = source.indexOf('function MessageBubble');
     const bubbleEnd = source.indexOf('function copyActionLabel', bubbleStart);
     const bubbleSource = source.slice(bubbleStart, bubbleEnd);
@@ -236,6 +250,7 @@ describe('mobile message list container', () => {
     expect(source).toContain('const [contentWidth, setContentWidth] = useRecyclingState(0);');
     expect(source).toContain('const [resolveState, setResolveState] = useRecyclingState<MediaThumbnailResolveState>');
     expect(source).toContain('const [recycledLocalExpanded, setRecycledLocalExpanded] = useRecyclingState(defaultExpanded);');
+    expect(expandedStateSource).toContain('blockId ? store.subscribe(listener) : () => {}');
   });
 
   it('clears stale history intent before verifying an explicit follow-latest request', () => {

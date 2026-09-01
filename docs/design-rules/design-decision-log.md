@@ -441,7 +441,7 @@
   违反 DESIGN.md 第 10 节 token 规则;路由生产包按 URL 可达,Light 主题下不可读。
   处理:全量改成语义 token(text-primary / text-secondary / text-tertiary /
   surface-elevated / border-default / accent-cta-bg / accent-pure-cta-fg /
-  error-flat / warning-accent / destructive / surface-chip / surface-chip-alt),
+  error-flat / surface-chip / surface-chip-alt),
   双模式由 token 体系自动覆盖;新增源契约守卫 `makerExperimentalThemeContract.test.ts`
   锁「零裸色 + token 已注册 + light/dark 双槽位」。
   合并范围(与 PR 3 同一「renderer 硬编码颜色清理」):CCAgentSessionView handoff pill

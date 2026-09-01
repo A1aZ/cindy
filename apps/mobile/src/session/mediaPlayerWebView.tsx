@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type ComponentRef } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
 import { AppState, View, type StyleProp, type ViewStyle } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import {
@@ -8,6 +8,7 @@ import {
   type MobileMediaPlayerKind,
   type MobileMediaPlayerStatus,
 } from '@/session/mediaPlayerWebViewHtml';
+import { createMediaPlayerWebViewLifecycle } from '@/session/mediaPlayerWebViewLifecycle';
 import { registerMobileMessageWebView } from '@/session/mobileMessageWebViewMetrics';
 import { useTheme } from '@/theme';
 
@@ -30,7 +31,9 @@ export function RemoteMediaPlayerWebView({
 }) {
   const { colors } = useTheme();
   const webViewRef = useRef<ComponentRef<typeof WebView>>(null);
+  const lifecycleRef = useRef(createMediaPlayerWebViewLifecycle());
   const mountedRef = useRef(true);
+  const [reloadGeneration, setReloadGeneration] = useState(0);
   useEffect(() => registerMobileMessageWebView('media'), []);
   const pausePlayback = useCallback(() => {
     webViewRef.current?.postMessage(buildMediaPlayerWebViewCommand('pause'));
@@ -42,7 +45,14 @@ export function RemoteMediaPlayerWebView({
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
-      if (state !== 'active') stopPlaybackAndLoading();
+      if (state !== 'active') {
+        lifecycleRef.current.onBackground();
+        stopPlaybackAndLoading();
+        return;
+      }
+      if (lifecycleRef.current.consumeReloadOnActive()) {
+        setReloadGeneration(generation => generation + 1);
+      }
     });
     return () => {
       subscription.remove();
@@ -54,9 +64,12 @@ export function RemoteMediaPlayerWebView({
     return stopPlaybackAndLoading;
   }, [kind, stopPlaybackAndLoading, url]);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    stopPlaybackAndLoading();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopPlaybackAndLoading();
+    };
   }, [stopPlaybackAndLoading]);
 
   const handleMessage = useCallback((event: WebViewMessageEvent) => {
@@ -68,10 +81,13 @@ export function RemoteMediaPlayerWebView({
   return (
     <View style={style} testID={testID}>
       <WebView
+        key={reloadGeneration}
         ref={webViewRef}
         allowsInlineMediaPlayback
         javaScriptEnabled
         mediaPlaybackRequiresUserAction={false}
+        onLoadEnd={lifecycleRef.current.onLoadEnd}
+        onLoadStart={lifecycleRef.current.onLoadStart}
         onMessage={handleMessage}
         originWhitelist={['*']}
         scrollEnabled={false}

@@ -69,6 +69,8 @@ describe('message WebView visibility wiring', () => {
     expect(mermaid).toContain('}, [active, source]);');
     expect(media).toContain('stopPlaybackAndLoading');
     expect(media).toContain('webViewRef.current?.stopLoading();');
+    expect(media).toContain('lifecycleRef.current.consumeReloadOnActive()');
+    expect(media).toContain('key={reloadGeneration}');
     expect(media).toContain('if (!mountedRef.current) return;');
     expect(composer).toContain('if (disposedRef.current) return;');
   });

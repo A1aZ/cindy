@@ -868,8 +868,8 @@ const CAPABILITIES: Capabilities = {
       message: 'setMemory 影响下次 startSession; 当前 live session 需 close 重起才生效',
     },
   },
-  // SDK 原生 additionalDirectories 字段, buildQuery turn-by-turn 装配 → 改完下一 turn
-  // 立即生效, 真正的 hot-reload 体验。
+  // SDK additionalDirectories 在 Query 创建时冻结。setExtraDirs 只改 closure;
+  // 代际不一致时下一次 send 走 rewind 同款 resume+fork 重建,不用 fresh:true。
   extraDirs: { supported: true },
   writableDirs: { supported: true },
 };
@@ -2488,6 +2488,12 @@ export class ClaudeCodeAgent extends BaseAgent {
     let mutableExtraDirs: string[] = Array.isArray(opts.extraDirs) ? [...opts.extraDirs] : [];
     let mutableWritableDirs: string[] = Array.isArray(opts.writableDirs) ? [...opts.writableDirs] : [];
     let autoReviewDirectoryGeneration = 0;
+    let activeQueryDirectoryGeneration = autoReviewDirectoryGeneration;
+    let extraDirsRebuildAttempted = false;
+    // 拷贝进工作目录只允许作 Claude resume 不吃新 additionalDirectories 时的临时缺口。
+    // 默认关闭;启用条件:extraDirsRebuildAttempted 且下一 Query 代际仍落后。落地后
+    // library extraDirs 重建成功即删副本,不得把拷贝写成架构。
+    const extraDirsCopyFallbackEnabled = false;
     let activeQueryHasDirectoryGrants = mutableExtraDirs.length > 0 || mutableWritableDirs.length > 0;
 
     // ── Usage tracker (Stage 2 B') ──────────────────────────────────────────
@@ -3548,6 +3554,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 计划模式开启时 SDK 跑 plan; 读 mutable 值让 rewind/fork 重建拿到当前档而非创建时快照。
       const additionalDirectories = [...new Set([...mutableExtraDirs, ...mutableWritableDirs])];
       activeQueryHasDirectoryGrants = additionalDirectories.length > 0;
+      activeQueryDirectoryGeneration = autoReviewDirectoryGeneration;
+      extraDirsRebuildAttempted = false;
       const sdkStartPermissionMode = extra?.permissionMode ?? effectiveSdkPermissionMode();
       sdkInPlanMode = sdkStartPermissionMode === 'plan';
       const query = sdkQuery({
@@ -5467,6 +5475,21 @@ export class ClaudeCodeAgent extends BaseAgent {
         while (idleResumeRebuildGate) {
           await idleResumeRebuildGate;
         }
+        if (
+          activeQueryDirectoryGeneration !== autoReviewDirectoryGeneration
+          && !pendingRewindTo
+          && !activeBridgeRewindResumeAt
+          && sdkSessionId
+        ) {
+          pendingRewindTo = sdkSessionId;
+          extraDirsRebuildAttempted = true;
+        } else if (
+          extraDirsCopyFallbackEnabled
+          && extraDirsRebuildAttempted
+          && activeQueryDirectoryGeneration !== autoReviewDirectoryGeneration
+        ) {
+          log.warn('Claude extraDirs copy fallback is gated off; resume+fork rebuild remains the only path');
+        }
         if (sendOpts?.signal?.aborted) {
           throw new Error('Claude send cancelled before acceptance');
         }
@@ -5608,9 +5631,11 @@ export class ClaudeCodeAgent extends BaseAgent {
           if (!resumeAt) {
             throw new Error('Claude rewind rebuild missing resume target');
           }
+          const directoryGrantRebuild = pendingRewindTo === sdkSessionId;
           log.debug('send ▶ pendingRewindTo detected — rebuilding sdkQuery with 三件套', {
-            resumeSessionAt: resumeAt,
+            resumeSessionAt: directoryGrantRebuild ? undefined : resumeAt,
             resumeSdkSid: sdkSessionId,
+            directoryGrantRebuild,
           });
           // 关键: 重建 abortController + inputQueue。老的两个在 q.close() 时已经污染
           // (controller 进 aborted 状态, queue 的 generator 还在等 waiter), 复用会让
@@ -5639,8 +5664,18 @@ export class ClaudeCodeAgent extends BaseAgent {
           // 不能再读包含 arm 态的 effectiveSdkPermissionMode()。否则 rewind 窗口里用户 arm
           // 了下一 turn 的 plan,但当前排队行显式 planMode:false 时,新 Query 会先以 plan
           // 起跑且 replay 看不到 diff,导致普通 turn 误跑成 plan turn (Codex review 3535801840)。
+          // extraDirs 中途授权复用这条重建,但不把 session id 当 resumeSessionAt。
+          // rewind 已在 commitRewindFiles 关过旧 q;directory grant 这条补 close。
+          if (directoryGrantRebuild) {
+            rewindTransitionQueries.add(q);
+            try {
+              q.close();
+            } catch (e) {
+              log.warn('rewind rebuild: q.close threw', { error: String(e) });
+            }
+          }
           q = await buildQuery({
-            resumeSessionAt: resumeAt,
+            ...(directoryGrantRebuild ? {} : { resumeSessionAt: resumeAt }),
             forkSession: true,
             permissionMode: snapSdkPermissionMode,
           });
@@ -6643,6 +6678,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         log.debug('setExtraDirs', { from: mutableExtraDirs.length, to: newDirs.length });
         mutableExtraDirs = [...newDirs];
         autoReviewDirectoryGeneration++;
+        extraDirsRebuildAttempted = false;
       },
 
       async setWritableDirs(newDirs: string[]) {

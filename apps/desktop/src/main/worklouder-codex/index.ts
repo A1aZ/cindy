@@ -1,13 +1,20 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { BrowserWindow, ipcMain, shell, utilityProcess } from 'electron';
+import { app, BrowserWindow, ipcMain, powerMonitor, shell, utilityProcess } from 'electron';
 
 import { createLogger } from '../logger.js';
 import { getDeepLinkMainWindow, openMainWindowSession, sendMainWindowMessage } from '../deepLink.js';
 import { createLayoutPreviewLease, layoutPreviewOwnerFromEvent } from '../input-devices/previewLease.js';
 import { registerInputDevice } from '../input-devices/registry.js';
 import { isSecondaryAppWindow } from '../secondary-windows.js';
+import {
+  CODEX_MICRO_GUARD_GET_STATE_CHANNEL,
+  CODEX_MICRO_GUARD_RECOVER_CHANNEL,
+  CODEX_MICRO_GUARD_SET_ENABLED_CHANNEL,
+  CODEX_MICRO_GUARD_STATE_CHANGED_CHANNEL,
+  type CodexMicroGuardState,
+} from '../../shared/codexMicroGuard.js';
 import {
   WORKLOUDER_CODEX_ACTION_CHANNEL,
   WORKLOUDER_CODEX_DEVICE,
@@ -34,6 +41,8 @@ import {
 } from './WorkLouderCodexHostClient.js';
 import { WorkLouderCodexLightingController } from './WorkLouderCodexLightingController.js';
 import { createWorkLouderCodexSettingsIpc } from './settingsIpc.js';
+import { CodexMicroGuardService } from './CodexMicroGuardService.js';
+import { createCodexMicroGuardIpc } from './codexMicroGuardIpc.js';
 import { createWorkLouderCodexActiveWindowRouter } from './actionWindow.js';
 import { createWorkLouderCodexSystemFrontmostInput } from './systemFrontmostInput.js';
 import {
@@ -115,6 +124,7 @@ const hostClient = new WorkLouderCodexHostClient({
   fork: forkWorkLouderHost,
   log,
 });
+const codexMicroGuardService = new CodexMicroGuardService();
 
 /**
  * Tasks as the sidebar currently shows them, published by the renderer.
@@ -172,6 +182,7 @@ const layoutPreviewLease = createLayoutPreviewLease((active) => {
 
 let settingsIpcRegistered = false;
 let inputDeviceRegistered = false;
+let permissionSettingsRetryPending = false;
 
 /** Register this board as one input-device adapter, not as the host keyboard layer. */
 export function registerWorkLouderCodexInputDevice(): void {
@@ -197,7 +208,12 @@ export function registerWorkLouderCodexInputDevice(): void {
       rendererTaskCatalogScope = null;
       workLouderCodexLightingController.suspendTaskSlots();
     },
-    dispose: () => workLouderCodexLightingController.dispose(),
+    dispose: async () => {
+      await Promise.all([
+        workLouderCodexLightingController.dispose(),
+        codexMicroGuardService.dispose(),
+      ]);
+    },
   });
 }
 
@@ -206,8 +222,20 @@ export function registerWorkLouderCodexSettingsIpc(): void {
   if (settingsIpcRegistered) return;
   settingsIpcRegistered = true;
 
+  // macOS can report the same HID denial while the screen is locked. The
+  // client keeps that failure circuit-broken until unlock, then makes one
+  // bounded recovery attempt instead of relying on the settings poller to
+  // recreate the host every two seconds.
+  powerMonitor.on('unlock-screen', () => hostClient.retryPermission());
+  app.on('browser-window-focus', () => {
+    if (!permissionSettingsRetryPending) return;
+    permissionSettingsRetryPending = false;
+    hostClient.retryPermission();
+  });
+
   workLouderCodexLightingController.applySettings(readWorkLouderCodexSettings());
   workLouderCodexLightingController.start();
+  void codexMicroGuardService.initialize();
   const handlers = createWorkLouderCodexSettingsIpc({
     assertTrustedSender: (event) => assertTrustedAppRendererEvent(event as never),
     getState: () => workLouderCodexLightingController.getState(),
@@ -216,9 +244,15 @@ export function registerWorkLouderCodexSettingsIpc(): void {
     applySettings: (settings) => workLouderCodexLightingController.applySettings(settings),
     openInputMonitoringSettings: async () => {
       if (process.platform !== 'darwin') return;
-      await shell.openExternal(
-        'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
-      );
+      permissionSettingsRetryPending = true;
+      try {
+        await shell.openExternal(
+          'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
+        );
+      } catch (error) {
+        permissionSettingsRetryPending = false;
+        throw error;
+      }
     },
     probeDevice: () => hostClient.probe(),
     publishTasks: (tasks) => {
@@ -248,6 +282,19 @@ export function registerWorkLouderCodexSettingsIpc(): void {
   ipcMain.handle(WORKLOUDER_CODEX_SET_LAYOUT_PREVIEW_CHANNEL, (event, active: unknown) =>
     handlers.setLayoutPreviewActive(event, active),
   );
+
+  const guardHandlers = createCodexMicroGuardIpc({
+    assertTrustedSender: (event) => assertTrustedAppRendererEvent(event as never),
+    getState: () => codexMicroGuardService.getState(),
+    setEnabled: (enabled) => codexMicroGuardService.setEnabled(enabled),
+    recover: () => codexMicroGuardService.recover(),
+  });
+  ipcMain.handle(CODEX_MICRO_GUARD_GET_STATE_CHANNEL, (event) => guardHandlers.get(event));
+  ipcMain.handle(CODEX_MICRO_GUARD_SET_ENABLED_CHANNEL, (event, enabled: unknown) =>
+    guardHandlers.setEnabled(event, enabled),
+  );
+  ipcMain.handle(CODEX_MICRO_GUARD_RECOVER_CHANNEL, (event) => guardHandlers.recover(event));
+  codexMicroGuardService.subscribe((state) => broadcastGuardState(state));
 
   workLouderCodexLightingController.subscribeState((state) => {
     broadcastState(state);
@@ -300,6 +347,13 @@ function broadcastState(state: WorkLouderCodexState): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!isTrustedAppRendererWindow(window)) continue;
     window.webContents.send(WORKLOUDER_CODEX_STATE_CHANGED_CHANNEL, state);
+  }
+}
+
+function broadcastGuardState(state: CodexMicroGuardState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!isTrustedAppRendererWindow(window)) continue;
+    window.webContents.send(CODEX_MICRO_GUARD_STATE_CHANGED_CHANNEL, state);
   }
 }
 

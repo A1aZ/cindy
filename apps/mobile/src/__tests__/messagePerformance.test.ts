@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { buildMobileMessageRenderItems, type MobileMessageRenderItem } from '@/session/messageRenderModel';
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
 import { buildMobileStreamingRenderWindow } from '@/session/messageRenderStreamingCache';
+import { countMobileRenderItemDiffs } from '@/session/messagePresentation';
 import type { RemoteMessage } from '@/session/types';
 
 const BASE_TIME = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -169,6 +170,8 @@ describe('message render performance', () => {
 
   it('reuses the normalized historical prefix while only the active turn streams', () => {
     const messages = createLargeDesktopMessageFixture(20);
+    const messageStructureToken = {};
+    const messageStructureChangedIndexes = new Set([messages.length + 1]);
     const activeUser = message({
       id: 'active-user',
       role: 'user',
@@ -185,6 +188,8 @@ describe('message render performance', () => {
     const first = buildMobileStreamingRenderWindow({
       cacheKey: 'en',
       messages: [...messages, activeUser, activeAssistant],
+      messageStructureChangedIndexes,
+      messageStructureToken,
       options: { isSessionStreaming: true, sessionId: 's1' },
     });
     expect(first.prefix).not.toBeNull();
@@ -196,13 +201,157 @@ describe('message render performance', () => {
         activeUser,
         { ...activeAssistant, content: 'Partial update' },
       ],
+      messageStructureChangedIndexes,
+      messageStructureToken,
       options: { isSessionStreaming: true, sessionId: 's1' },
       previousPrefix: first.prefix,
     });
 
     expect(next.prefix).toBe(first.prefix);
     expect(next.prefix?.items).toBe(first.prefix?.items);
+    expect(next.stablePrefixItemCount).toBe(first.prefix?.items.length);
+    expect(next.diffCount).toBe(countMobileRenderItemDiffs(next.items));
     expect(next.items.slice(0, first.prefix!.items.length)).toEqual(first.prefix!.items);
+  });
+
+  it('does not read a 2000-message historical prefix again for a trusted text delta', () => {
+    const history = createLargeDesktopMessageFixture(1_000);
+    const activeUser = message({
+      id: 'active-user',
+      role: 'user',
+      content: 'Continue',
+      createdAt: timestamp(2_001),
+    });
+    const activeAssistant = message({
+      id: 'active-assistant',
+      role: 'assistant',
+      content: 'Partial',
+      agentMeta: { isStreaming: true },
+      createdAt: timestamp(2_002),
+    });
+    const messageStructureToken = {};
+    const messageStructureChangedIndexes = new Set([history.length + 1]);
+    const first = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: [...history, activeUser, activeAssistant],
+      messageStructureChangedIndexes,
+      messageStructureToken,
+      options: { isSessionStreaming: true, sessionId: 's1' },
+    });
+    let historicalReads = 0;
+    const nextMessages = new Proxy(
+      [...history, activeUser, { ...activeAssistant, content: 'Partial update' }],
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) {
+            const index = Number(property);
+            if (index < history.length) historicalReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    const next = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: nextMessages,
+      messageStructureChangedIndexes,
+      messageStructureToken,
+      options: { isSessionStreaming: true, sessionId: 's1' },
+      previousPrefix: first.prefix,
+    });
+
+    expect(historicalReads).toBe(0);
+    expect(next.stablePrefixItemCount).toBe(first.prefix?.items.length);
+  });
+
+  it('falls back to reference validation when no structure token is supplied', () => {
+    const historicalAssistant = message({
+      id: 'historical-assistant',
+      role: 'assistant',
+      content: 'Original history',
+      createdAt: timestamp(1),
+    });
+    const activeUser = message({
+      id: 'active-user-without-token',
+      role: 'user',
+      content: 'Continue',
+      createdAt: timestamp(2),
+    });
+    const activeAssistant = message({
+      id: 'active-assistant-without-token',
+      role: 'assistant',
+      content: 'Partial',
+      agentMeta: { isStreaming: true },
+      createdAt: timestamp(3),
+    });
+    const options = { isSessionStreaming: true, sessionId: 's1' } as const;
+    const first = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: [historicalAssistant, activeUser, activeAssistant],
+      options,
+    });
+    const changedMessages = [
+      { ...historicalAssistant, content: 'Corrected history' },
+      activeUser,
+      activeAssistant,
+    ];
+    const changed = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: changedMessages,
+      options,
+      previousPrefix: first.prefix,
+    });
+
+    expect(changed.prefix).not.toBe(first.prefix);
+    expect(changed.items).toEqual(buildMobileMessageRenderItems(changedMessages, options));
+  });
+
+  it('invalidates a historical prefix changed under the same structure token', () => {
+    const historicalAssistant = message({
+      id: 'historical-assistant-with-token',
+      role: 'assistant',
+      content: 'Original history',
+      createdAt: timestamp(1),
+    });
+    const activeUser = message({
+      id: 'active-user-with-history-change',
+      role: 'user',
+      content: 'Continue',
+      createdAt: timestamp(2),
+    });
+    const activeAssistant = message({
+      id: 'active-assistant-with-history-change',
+      role: 'assistant',
+      content: 'Partial',
+      agentMeta: { isStreaming: true },
+      createdAt: timestamp(3),
+    });
+    const messageStructureToken = {};
+    const options = { isSessionStreaming: true, sessionId: 's1' } as const;
+    const first = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: [historicalAssistant, activeUser, activeAssistant],
+      messageStructureChangedIndexes: new Set([2]),
+      messageStructureToken,
+      options,
+    });
+    const changedMessages = [
+      { ...historicalAssistant, content: 'Corrected history' },
+      activeUser,
+      activeAssistant,
+    ];
+    const changed = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: changedMessages,
+      messageStructureChangedIndexes: new Set([0, 2]),
+      messageStructureToken,
+      options,
+      previousPrefix: first.prefix,
+    });
+
+    expect(changed.prefix).not.toBe(first.prefix);
+    expect(changed.items).toEqual(buildMobileMessageRenderItems(changedMessages, options));
   });
 
   it('invalidates a historical prefix only when one of its task updates changes', () => {
@@ -417,6 +566,65 @@ describe('message render performance', () => {
 
     expect(retry.prefix).toBe(first.prefix);
     expect(retry.items).toEqual(buildMobileMessageRenderItems(updatedMessages, options));
+  });
+
+  it('does not rescan a retained 2000-message prefix to rediscover a truncated-turn boundary', () => {
+    const history = Array.from({ length: 2_000 }, (_, index) => message({
+      id: `retained-assistant-${index}`,
+      role: 'assistant',
+      content: `Completed ${index}`,
+      createdAt: timestamp(index),
+    }));
+    const activeThinking = message({
+      id: 'retained-active-thinking',
+      role: 'thinking',
+      content: { kind: 'thinking', text: 'Continuing', isStreaming: true },
+      createdAt: timestamp(2_001),
+    });
+    const activeAssistant = message({
+      id: 'retained-active-assistant',
+      role: 'assistant',
+      content: 'Partial',
+      agentMeta: { isStreaming: true },
+      createdAt: timestamp(2_002),
+    });
+    const messageStructureToken = {};
+    const changedIndexes = new Set([2_001]);
+    const options = { isSessionStreaming: true, sessionId: 's1' } as const;
+    const first = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: [...history, activeThinking, activeAssistant],
+      messageStructureChangedIndexes: changedIndexes,
+      messageStructureToken,
+      options,
+    });
+    expect(first.prefix?.mode).toBe('truncated-turn');
+
+    let historicalReads = 0;
+    const nextMessages = new Proxy(
+      [...history, activeThinking, { ...activeAssistant, content: 'Partial update' }],
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) {
+            const index = Number(property);
+            if (index < history.length - 1) historicalReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    const next = buildMobileStreamingRenderWindow({
+      cacheKey: 'en',
+      messages: nextMessages,
+      messageStructureChangedIndexes: changedIndexes,
+      messageStructureToken,
+      options,
+      previousPrefix: first.prefix,
+    });
+
+    expect(historicalReads).toBe(0);
+    expect(next.prefix).toBe(first.prefix);
+    expect(next.stablePrefixItemCount).toBe(first.prefix?.items.length);
   });
 
   it('advances the reusable prefix into a long visible active turn', () => {

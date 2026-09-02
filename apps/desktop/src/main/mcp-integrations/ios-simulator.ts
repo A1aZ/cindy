@@ -93,6 +93,7 @@ import type {
   IOSSimulatorPublicRouteReasonCode,
   IOSSimulatorPublicRouteState,
   IOSSimulatorPublicRouteStatus,
+  IOSSimulatorRendererToolName,
   IOSSimulatorSessionStatus,
 } from '../../shared/iosSimulatorIpc.js';
 import type {
@@ -433,6 +434,8 @@ export async function reconcileOrphanedIOSSimulatorArtifactCopies(
   return complete;
 }
 
+type IOSSimulatorHostToolName = IOSSimulatorMcpToolName | IOSSimulatorRendererToolName;
+
 interface IOSSimulatorSessionSnapshot {
   id: string;
   workDir: string;
@@ -577,7 +580,7 @@ export interface IOSSimulatorHost {
   /** Synchronously retire media/input owned by one exact revoked renderer grant. */
   revokeRendererViewer(sessionId: string, viewerWebContentsId: number): number;
   callTool(
-    name: IOSSimulatorMcpToolName,
+    name: IOSSimulatorHostToolName,
     args: Record<string, unknown>,
     context?: IOSSimulatorMcpCallContext,
   ): Promise<IOSSimulatorHostResult>;
@@ -1658,6 +1661,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       pendingTeardowns: current.pendingTeardowns + 1,
     });
     blockedBuildInstances.add(instanceId);
+    viewerVisibilityIntents.delete(instanceId);
     releaseViewerTouches(instanceId);
   }
   function finishInstanceTeardown(instanceId: string): void {
@@ -2435,30 +2439,34 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     }
   }
 
-  async function releaseInstanceRuntime(instance: IOSSimulatorInstance): Promise<boolean> {
-    beginInstanceTeardown(instance.instanceId);
-    try {
-      await cancelBuild(instance.instanceId);
-      clearInstanceRuntimeProjection(instance.instanceId);
-      let cleanupSucceeded = true;
-      await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
+  async function cleanupInstanceRuntimeResources(instance: IOSSimulatorInstance): Promise<boolean> {
+    await cancelBuild(instance.instanceId);
+    clearInstanceRuntimeProjection(instance.instanceId);
+    let cleanupSucceeded = true;
+    await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
+      cleanupSucceeded = false;
+      logger.warn('iOS Simulator ownership cleanup could not discard recording', {
+        instanceId: instance.instanceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    if (driverManager) {
+      await driverManager.stop(instance.instanceId).catch((error) => {
         cleanupSucceeded = false;
-        logger.warn('iOS Simulator ownership cleanup could not discard recording', {
+        logger.warn('iOS Simulator ownership cleanup could not stop driver runtime', {
           instanceId: instance.instanceId,
           error: error instanceof Error ? error.message : String(error),
         });
       });
-      if (driverManager) {
-        await driverManager.stop(instance.instanceId).catch((error) => {
-          cleanupSucceeded = false;
-          logger.warn('iOS Simulator ownership cleanup could not stop driver runtime', {
-            instanceId: instance.instanceId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-        if (!(await cleanupOrphanedDriverRuntime(instance))) cleanupSucceeded = false;
-      }
-      return cleanupSucceeded;
+      if (!(await cleanupOrphanedDriverRuntime(instance))) cleanupSucceeded = false;
+    }
+    return cleanupSucceeded;
+  }
+
+  async function releaseInstanceRuntime(instance: IOSSimulatorInstance): Promise<boolean> {
+    beginInstanceTeardown(instance.instanceId);
+    try {
+      return await cleanupInstanceRuntimeResources(instance);
     } finally {
       finishInstanceTeardown(instance.instanceId);
     }
@@ -4482,9 +4490,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             return viewerRouteRefreshResult(instance);
           }
           try {
+            const viewerRecoveryAdmission = captureInstanceOperationAdmission(
+              instance.instanceId,
+              'viewer recovery',
+            );
             running = await resourceScheduler.runStart(
               instance.instanceId,
               async (commitRunning) => {
+                assertInstanceOperationAdmission(
+                  instance.instanceId,
+                  viewerRecoveryAdmission,
+                  'viewer recovery',
+                );
                 assertCurrentViewerVisibilityIntent(
                   instance.instanceId,
                   viewerWebContentsId,
@@ -4495,6 +4512,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 commitRunning();
                 actor.markHealth(resolved.sessionId, instance.instanceId, 'recovering', null);
                 const started = await ensureDriver(instance, environment);
+                assertInstanceOperationAdmission(
+                  instance.instanceId,
+                  viewerRecoveryAdmission,
+                  'viewer recovery',
+                );
                 assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
                 return started;
               },
@@ -5191,6 +5213,47 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 ...instanceData(stopped),
                 ...(mediaCleanupWarning ? { mediaCleanupWarning } : {}),
               },
+            };
+          } finally {
+            finishInstanceTeardown(route.instanceId);
+          }
+        }
+        if (name === 'delete_instance') {
+          const route = readMutationRoute(sessionId, args);
+          const instance = actor.getOwned(sessionId, route.instanceId);
+          requireControlGrant(instance, context);
+          actor.assertRoute(route);
+          if (instance.creationProvenance !== 'cindy') {
+            throw new IOSSimulatorInstanceError(
+              'SIMULATOR_DELETE_FORBIDDEN',
+              'Only simulators created by Cindy can be deleted.',
+            );
+          }
+          // Keep activation blocked from the first resource cleanup through
+          // exact shutdown, CoreSimulator deletion, and ownership release.
+          beginInstanceTeardown(route.instanceId);
+          try {
+            const cleanupSucceeded = await cleanupInstanceRuntimeResources(instance);
+            if (!cleanupSucceeded) {
+              throw new IOSSimulatorInstanceError(
+                'DEVICE_BUSY',
+                'The simulator runtime could not be fully released. Try deleting it again.',
+                true,
+              );
+            }
+            const stopped = await actor.stop(route);
+            resourceScheduler.markStopped(route.instanceId);
+            publishRouteStatusForInstance(stopped, null);
+            const deleted = await actor.delete({
+              sessionId: stopped.sessionId,
+              instanceId: stopped.instanceId,
+              generation: stopped.generation,
+              leaseId: stopped.lease.id,
+            });
+            clearRemovedInstanceProjection(route.instanceId);
+            return {
+              ok: true,
+              data: instanceData(deleted),
             };
           } finally {
             finishInstanceTeardown(route.instanceId);
@@ -7356,7 +7419,7 @@ export function getIOSSimulatorPluginStatus(
 }
 
 export function callIOSSimulatorHostTool(
-  name: IOSSimulatorMcpToolName,
+  name: IOSSimulatorRendererToolName,
   args: Record<string, unknown>,
   sessionId: string,
 ): Promise<IOSSimulatorHostResult> {

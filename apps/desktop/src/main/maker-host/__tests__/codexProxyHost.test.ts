@@ -4426,8 +4426,10 @@ describe('codex proxy host', () => {
         ],
         tool_choice: { type: 'function', name: 'exec' },
         input: [
+          // `ctc_1` becomes `fc_1`: a Responses upstream validates an item's id prefix against
+          // its type, so flipping the dialect without flipping the prefix is rejected with 400.
           expect.objectContaining({
-            type: 'function_call', id: 'ctc_1', status: 'completed', name: 'exec',
+            type: 'function_call', id: 'fc_1', status: 'completed', name: 'exec',
             arguments: '{"input":"text(\\"old\\")"}',
           }),
           { type: 'function_call_output', call_id: 'old_call', output: 'old result' },

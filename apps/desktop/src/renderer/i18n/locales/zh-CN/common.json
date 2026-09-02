@@ -10099,10 +10099,16 @@
       "search": "搜索技能",
       "clearSearch": "清除技能搜索",
       "noSearchResults": "没有找到匹配的技能",
-      "browseTitle": "浏览 Skill Hub",
-      "browseDesc": "发现并安装更多技能",
-      "recommended": "推荐安装",
-      "recommendedEmpty": "暂无推荐",
+      "catalogFiltersAria": "SkillHub 分类",
+      "catalogFilter": {
+        "public": "公开",
+        "organization": "组织",
+        "mine": "我的管理"
+      },
+      "catalogMore": "更多",
+      "loadMore": "加载更多",
+      "loadingMore": "加载中…",
+      "catalogEmpty": "当前分类暂无技能",
       "local": "本地技能",
       "localEmpty": "还没有本地技能",
       "installed": "已安装",
@@ -10284,7 +10290,6 @@
       "sortDownloads": "下载量",
       "sortLatest": "最近更新",
       "sortCreated": "最新发布",
-      "chipAvailable": "可获取",
       "chipAll": "全部",
       "chipMine": "我的管理",
       "ownerGroupPersonal": "个人",
@@ -10298,7 +10303,7 @@
       "installError": "未知错误"
     },
     "marketCard": {
-      "visibilityPublic": "XD.Inc",
+      "visibilityPublic": "公开",
       "visibilityDept": "团队",
       "visibilityPrivate": "个人",
       "timeLabel": "发布时间",
@@ -10323,6 +10328,7 @@
       }
     },
     "publishedStatus": {
+      "waitingReview": "等待审核",
       "machineReviewing": "机审中",
       "manualReviewing": "人工复核中",
       "rejected": "审核未通过"
@@ -10334,7 +10340,7 @@
       "emptyHint": "这个云端 Skill 没有返回可预览文件"
     },
     "marketDetail": {
-      "visibilityPublic": "XD.Inc 可见",
+      "visibilityPublic": "所有用户可见",
       "visibilityPrivate": "个人可见",
       "visibilityDept": "团队可见",
       "files": "文件",
@@ -10345,6 +10351,7 @@
       "forbidden": "没有权限操作这个 Skill",
       "notFound": "这个 Skill 已不存在，请返回列表刷新",
       "managementApiUnavailable": "Hub 管理接口暂未就绪，请稍后再试",
+      "invalidVisibility": "当前组织暂不支持该可见范围，请选择公开发布",
       "default": "操作失败，请稍后重试"
     },
     "installPicker": {
@@ -10389,11 +10396,11 @@
       "descriptionPlaceholder": "简要描述该 Skill 的用途",
       "visibilityLabel": "可见性",
       "visibilityPublicTitle": "公开",
-      "visibilityPublicDesc": "全公司可见 · 默认",
+      "visibilityPublicDesc": "所有用户可见 · 默认",
       "versionLabel": "版本号",
       "versionFormatHint": "格式：x.y.z (例如 1.0.1)",
       "categoryLabel": "分类",
-      "categoryAuto": "自动",
+      "categoryAuto": "不添加标签",
       "categoryPlaceholder": "请选择分类",
       "categoryLoading": "正在加载分类…",
       "categoryLoadFailed": "分类加载失败，请重试",
@@ -10517,6 +10524,14 @@
         "title": "已取消",
         "message": ""
       },
+      "SKILL_HUB_READ_ONLY": {
+        "title": "当前组织仅支持浏览",
+        "message": "当前组织的技能目录暂不支持发布或管理"
+      },
+      "INVALID_VISIBILITY": {
+        "title": "可见范围不可用",
+        "message": "请选择当前发布身份支持的可见范围"
+      },
       "INTERNAL": {
         "title": "服务器错误",
         "message": "发布失败，请稍后重试"
@@ -10530,8 +10545,12 @@
       "dismiss": "知道了",
       "passedTitle": "安全扫描通过",
       "passedDesc": "该版本已通过所有安全检查，现已发布到市场。",
+      "pendingTitle": "已提交，等待平台审核",
+      "pendingDesc": "安全扫描已经完成，平台审核通过后会自动发布到公开市场。",
       "failedTitle": "安全扫描未通过",
       "failedDesc": "该版本因安全扫描不达标被标记为 {{status}}，暂时无法在市场中被其他用户安装。请修复以下问题后重新发布。",
+      "processingFailedTitle": "发布处理失败",
+      "processingFailedDesc": "该版本已上传，但服务器在处理发布时发生内部错误。这不是安全检查拒绝，请稍后重新发布。",
       "copyReviewResult": "复制审核结果",
       "copiedReviewResult": "已复制",
       "copyReviewResultFailed": "复制失败",
@@ -10544,12 +10563,14 @@
         "passed": "已通过",
         "failed": "未通过",
         "warning": "有风险",
+        "waitingReview": "等待审核",
         "reviewing": "审核中",
         "unavailable": "暂不可用"
       },
       "gateLabel": {
         "llmReview": "LLM 审核",
-        "securityScan": "安全扫描"
+        "securityScan": "安全扫描",
+        "publicationProcessing": "发布处理"
       }
     },
     "diffPanel": {
@@ -10601,7 +10622,7 @@
       "title": "管理可见性",
       "tierLabel": "可见性",
       "tierPublic": "公开",
-      "tierPublicDesc": "全公司可见",
+      "tierPublicDesc": "所有用户可见",
       "tierTeam": "给团队使用",
       "tierTeamDesc": "指定团队可见",
       "tierPrivate": "仅自己使用",
@@ -10609,13 +10630,18 @@
       "save": "保存",
       "saving": "保存中…",
       "saved": "管理可见性已保存",
+      "submitReview": "提交审核",
+      "waitingReview": "等待审核",
+      "publicReviewSubmitted": "已提交当前版本的公开审核",
+      "publicReviewPending": "当前版本正在等待公开审核，审核通过后会进入公开市场。",
+      "publicReviewRejected": "公开审核未通过：{{reason}}",
       "impactPrivate": "保存后，仅你可见。",
       "impactPrivateLeavingMarket": "保存后会从公开市场下架，并转为自己可见；已通过审核的版本会保留审核通过状态。",
       "impactPrivateTeam": "保存后转为自己可见；团队将看不到这个 Skill，也无法管理。",
       "impactPrivateTeamLeavingMarket": "保存后会从公开市场下架，并转为自己可见；团队将看不到这个 Skill，也无法管理。已通过审核的版本会保留审核通过状态。",
       "impactTeam": "保存后，选中的团队或部门可以看到并下载。",
       "impactTeamLeavingMarket": "保存后会从公开市场下架，只有选中的团队或部门可以看到并下载；已通过审核的版本会保留审核通过状态。",
-      "impactPublic": "保存后进入公开市场；若当前已审核通过，会立即对外可见，审核状态会保留。"
+      "impactPublic": "提交当前版本的公开审核；审核通过后进入公开市场，无需发布新版本。"
     },
     "marketEdit": {
       "saved": "市场展示信息已保存",

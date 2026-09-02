@@ -3161,6 +3161,7 @@ interface ElectronAPI {
         | string[]
         | {
             slugs?: string[];
+            skills?: Array<{ slug: string; catalogScope?: 'market' | 'team' }>;
           },
     ) => Promise<{
       success: boolean;
@@ -3177,6 +3178,7 @@ interface ElectronAPI {
       limit?: number;
       sort?: 'trending' | 'downloads' | 'updated_at' | 'created_at';
       q?: string;
+      scope?: 'all' | 'market' | 'team';
       mine?: boolean;
       /** Legacy: Hub-side available filtering switch. Current renderer keeps this false and filters locally. */
       available?: boolean;
@@ -3188,13 +3190,17 @@ interface ElectronAPI {
       error?: string;
       items?: Array<{
         name: string;
+        /** Skill 图标 URL；旧服务响应可能缺失。 */
+        icon?: string;
         displayName: string;
         description: string;
         authorId: string;
         authorName: string;
+        publisherName?: string;
         /** 飞书登录时拉到的头像 URL,可能为 null。 */
         authorAvatarUrl: string | null;
         isMine: boolean;
+        canManage: boolean;
         latestVersion: string;
         visibility: 'PUBLIC' | 'DEPARTMENT_SCOPED';
         publishedVisibility?: 'private' | 'shared' | 'public';
@@ -3205,23 +3211,31 @@ interface ElectronAPI {
           version: string;
           status?: string;
         };
+        visibilityReview?: {
+          requestedVisibility: 'public';
+          status: 'pending' | 'rejected';
+          reason?: string;
+        };
         visibleDeptIds: string[];
         categories?: string[];
+        tags?: Array<{ slug: string; name: string; source?: 'author' | 'platform' }>;
+        githubUrl?: string | null;
         publishedAt: string;
         downloads: number;
         /** 跨设备识别：null = pre-feature 历史版本 */
         latestPublishedFromDeviceId: string | null;
+        catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
       }>;
       nextCursor?: string | null;
     }>;
-    info: (name: string) => Promise<{
+    info: (name: string, catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope) => Promise<{
       success: boolean;
       error?: string;
       info?: SkillhubInfoResult;
       deleted?: boolean;
       errorCode?: string;
     }>;
-    getPublishedFiles: (params: { name: string; version?: string }) => Promise<{
+    getPublishedFiles: (params: { name: string; version?: string; catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope }) => Promise<{
       success: boolean;
       slug?: string;
       version?: string;
@@ -3229,13 +3243,13 @@ interface ElectronAPI {
       error?: string;
       errorCode?: string;
     }>;
-    readPublishedFile: (params: { name: string; path: string; version?: string }) => Promise<{
+    readPublishedFile: (params: { name: string; path: string; version?: string; catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope }) => Promise<{
       success: boolean;
       file?: { path: string; size: number; language: string; truncated: boolean; content: string };
       error?: string;
       errorCode?: string;
     }>;
-    listPublishedVersions: (name: string) => Promise<{
+    listPublishedVersions: (name: string, catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope) => Promise<{
       success: boolean;
       versions?: unknown[];
       error?: string;
@@ -3247,7 +3261,7 @@ interface ElectronAPI {
         displayName?: string;
         summary?: string;
         description?: string;
-        categories?: string[];
+        tags?: string[];
         visibility?: 'private' | 'shared' | 'public';
         /** 归属统一参数:团队 slug / od- 部门 id;null = 收回到个人 */
         teamSlug?: string | null;
@@ -3264,7 +3278,12 @@ interface ElectronAPI {
       visibility: 'private' | 'shared' | 'public';
       teamSlug?: string;
       visibleSlugs?: string[];
-    }) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
+    }) => Promise<{
+      success: boolean;
+      result?: { slug: string; visibility: 'private' | 'shared' | 'public'; requestedVisibility?: 'public'; reviewStatus?: 'pending' };
+      error?: string;
+      errorCode?: string;
+    }>;
     getPublishedVisibility: (name: string) => Promise<{
       success: boolean;
       sharedTeams?: Array<{ id: number; slug: string; name: string }>;
@@ -3325,7 +3344,7 @@ interface ElectronAPI {
       myTotalCount?: number;
       error?: string;
     }>;
-    getScanStatus: (params: { slug: string; version?: string }) => Promise<{
+    getScanStatus: (params: { slug: string; version?: string; catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope }) => Promise<{
       success: boolean;
       status: string;
       gates?: Array<{ name: string; status: string; issues?: unknown[] }>;
@@ -3362,6 +3381,7 @@ interface ElectronAPI {
     install: (params: {
       name: string;
       version?: string;
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
       force?: boolean;
       /** 完整安装目标路径。不传 → global scope 默认路径。*/
       installPath?: string;
@@ -6386,6 +6406,7 @@ interface StoredInstall {
   origin?: 'installed' | 'published' | 'learned' | 'imported';
   /** 是否由产品自动同步流程安装。用于区分普通市场安装与用户可 opt-out 的自动同步安装。 */
   autoSynced?: boolean;
+  catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
   /** /learn 蒸馏产物的溯源(仅 origin='learned')。personal=true ⇒ publish 拦截。 */
   provenance?: import('../shared/learnTypes').LearnProvenance;
 }
@@ -6579,14 +6600,17 @@ interface SkillUsageDiagnosisContext {
 /* ── SkillHub v0.2.1 publish types ── */
 
 type SkillhubSyncResult =
-  | { name: string; exists: false }
+  | { name: string; catalogScope?: 'market' | 'team'; exists: false }
   | {
       name: string;
+      catalogScope?: 'market' | 'team';
       exists: true;
       isMine: boolean;
+      canManage: boolean;
       /** server 权威 authorId,用于本地 registry 回填及离线归属判定。 */
       authorId?: string;
       authorName?: string;
+      publisherName?: string;
       latestVersion: string;
       folderHash: string;
       visibility: 'PUBLIC' | 'DEPARTMENT_SCOPED';
@@ -6603,11 +6627,14 @@ type SkillhubSyncResult =
 
 interface SkillhubInfoResult {
   name: string;
+  icon?: string | null;
   displayName: string;
   description: string;
   authorId: string;
   authorName: string;
+  publisherName?: string;
   isMine: boolean;
+  canManage: boolean;
   latestVersion: string;
   folderHash: string;
   visibility: 'PUBLIC' | 'DEPARTMENT_SCOPED';
@@ -6619,9 +6646,16 @@ interface SkillhubInfoResult {
     version: string;
     status?: string;
   };
+  visibilityReview?: {
+    requestedVisibility: 'public';
+    status: 'pending' | 'rejected';
+    reason?: string;
+  };
   visibleDeptIds: string[];
   visibleDeptNames?: string[];
   categories?: string[];
+  tags?: Array<{ slug: string; name: string; source?: 'author' | 'platform' }>;
+  githubUrl?: string | null;
   changelog?: string;
   publishedAt: string;
   downloads: number;
@@ -6629,6 +6663,7 @@ interface SkillhubInfoResult {
   currentUserDeptNames?: string[];
   /** 跨设备识别：null = pre-feature 历史版本 */
   latestPublishedFromDeviceId: string | null;
+  catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
 }
 
 interface SkillhubPublishParams {
@@ -6639,8 +6674,7 @@ interface SkillhubPublishParams {
   displayName?: string;
   summary?: string;
   description?: string;
-  categoryMode?: 'auto' | 'manual';
-  categories?: string[];
+  tags?: string[];
   visibility?: 'PUBLIC' | 'DEPARTMENT_SCOPED' | 'PRIVATE';
   visibleSlugs?: string[];
   /** 发布者为部门时的部门归属(od- 开头的飞书部门 ID,Hub 端自动转部门团队) */
@@ -6665,6 +6699,8 @@ type SkillhubPublishErrorCode =
   | 'OSS_OBJECT_NOT_FOUND'
   | 'API_KEY_MISSING'
   | 'CANCELLED'
+  | 'SKILL_HUB_READ_ONLY'
+  | 'INVALID_VISIBILITY'
   | 'INTERNAL';
 
 type SkillhubPublishProgressEvent =

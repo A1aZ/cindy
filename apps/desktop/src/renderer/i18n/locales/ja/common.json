@@ -10099,10 +10099,16 @@
       "search": "スキルを検索",
       "clearSearch": "スキル検索をクリア",
       "noSearchResults": "一致するスキルが見つかりません",
-      "browseTitle": "Skill Hub を見る",
-      "browseDesc": "もっと多くのスキルを見つけてインストール",
-      "recommended": "おすすめ",
-      "recommendedEmpty": "現在おすすめはありません",
+      "catalogFiltersAria": "SkillHub カテゴリ",
+      "catalogFilter": {
+        "public": "公開",
+        "organization": "組織",
+        "mine": "管理対象"
+      },
+      "catalogMore": "もっと見る",
+      "loadMore": "さらに読み込む",
+      "loadingMore": "読み込み中…",
+      "catalogEmpty": "このカテゴリにはスキルがありません",
       "local": "ローカルスキル",
       "localEmpty": "ローカルスキルはまだありません",
       "installed": "インストール済み",
@@ -10284,7 +10290,6 @@
       "sortDownloads": "ダウンロード数",
       "sortLatest": "最近の更新",
       "sortCreated": "最新公開",
-      "chipAvailable": "取得可能",
       "chipAll": "すべて",
       "chipMine": "管理対象",
       "ownerGroupPersonal": "個人",
@@ -10298,7 +10303,7 @@
       "installError": "不明なエラー"
     },
     "marketCard": {
-      "visibilityPublic": "XD.Inc",
+      "visibilityPublic": "公開",
       "visibilityDept": "チーム",
       "visibilityPrivate": "個人",
       "timeLabel": "公開日時",
@@ -10323,6 +10328,7 @@
       }
     },
     "publishedStatus": {
+      "waitingReview": "審査待ち",
       "machineReviewing": "機械審査中",
       "manualReviewing": "人手確認中",
       "rejected": "審査不通過"
@@ -10334,7 +10340,7 @@
       "emptyHint": "このクラウド Skill からプレビュー可能なファイルが返されませんでした"
     },
     "marketDetail": {
-      "visibilityPublic": "XD.Inc に公開",
+      "visibilityPublic": "すべてのユーザーに公開",
       "visibilityPrivate": "個人のみ",
       "visibilityDept": "チームに公開",
       "files": "ファイル",
@@ -10345,6 +10351,7 @@
       "forbidden": "この Skill を操作する権限がありません",
       "notFound": "この Skill は存在しません。リストに戻って更新してください",
       "managementApiUnavailable": "Hub 管理 API はまだ利用できません。しばらくしてから再試行してください",
+      "invalidVisibility": "この組織ではその公開範囲を利用できません。公開を選択してください",
       "default": "操作に失敗しました。しばらくしてから再試行してください"
     },
     "installPicker": {
@@ -10389,11 +10396,11 @@
       "descriptionPlaceholder": "この skill の用途を簡潔に",
       "visibilityLabel": "可視性",
       "visibilityPublicTitle": "公開",
-      "visibilityPublicDesc": "全社に公開 · デフォルト",
+      "visibilityPublicDesc": "すべてのユーザーに公開 · デフォルト",
       "versionLabel": "バージョン",
       "versionFormatHint": "形式：x.y.z（例：1.0.1）",
       "categoryLabel": "カテゴリ",
-      "categoryAuto": "自動",
+      "categoryAuto": "タグなし",
       "categoryPlaceholder": "カテゴリを選択",
       "categoryLoading": "カテゴリを読み込み中…",
       "categoryLoadFailed": "カテゴリの読み込みに失敗しました。再試行してください",
@@ -10517,6 +10524,14 @@
         "title": "キャンセル済み",
         "message": ""
       },
+      "SKILL_HUB_READ_ONLY": {
+        "title": "組織カタログは読み取り専用です",
+        "message": "この組織カタログでは公開や管理を利用できません"
+      },
+      "INVALID_VISIBILITY": {
+        "title": "公開範囲を利用できません",
+        "message": "現在の公開者が利用できる公開範囲を選択してください"
+      },
       "INTERNAL": {
         "title": "サーバーエラー",
         "message": "公開失敗、後ほど再試行してください"
@@ -10530,8 +10545,12 @@
       "dismiss": "了解",
       "passedTitle": "セキュリティスキャン通過",
       "passedDesc": "このバージョンはすべてのセキュリティチェックに合格し、マーケットに公開されました。",
+      "pendingTitle": "送信済み、プラットフォーム審査待ち",
+      "pendingDesc": "セキュリティスキャンは完了しました。プラットフォームの承認後、公開マーケットに自動公開されます。",
       "failedTitle": "セキュリティスキャン不合格",
       "failedDesc": "このバージョンはセキュリティスキャンの問題により {{status}} としてマークされ、他のユーザーはインストールできません。以下の問題を修正して再公開してください。",
+      "processingFailedTitle": "公開処理に失敗しました",
+      "processingFailedDesc": "このバージョンはアップロードされましたが、サーバーの公開処理中に内部エラーが発生しました。セキュリティチェックによる拒否ではありません。時間をおいて再公開してください。",
       "copyReviewResult": "審査結果をコピー",
       "copiedReviewResult": "コピー済み",
       "copyReviewResultFailed": "コピーに失敗しました",
@@ -10544,12 +10563,14 @@
         "passed": "通過",
         "failed": "不合格",
         "warning": "要確認",
+        "waitingReview": "審査待ち",
         "reviewing": "審査中",
         "unavailable": "利用不可"
       },
       "gateLabel": {
         "llmReview": "LLM 審査",
-        "securityScan": "セキュリティスキャン"
+        "securityScan": "セキュリティスキャン",
+        "publicationProcessing": "公開処理"
       }
     },
     "diffPanel": {
@@ -10601,7 +10622,7 @@
       "title": "公開設定を管理",
       "tierLabel": "可視性",
       "tierPublic": "公開",
-      "tierPublicDesc": "全社に公開",
+      "tierPublicDesc": "すべてのユーザーに公開",
       "tierTeam": "チーム",
       "tierTeamDesc": "指定したチームに公開",
       "tierPrivate": "自分のみ",
@@ -10609,13 +10630,18 @@
       "save": "保存",
       "saving": "保存中…",
       "saved": "公開設定を保存しました",
+      "submitReview": "審査に提出",
+      "waitingReview": "審査待ち",
+      "publicReviewSubmitted": "現在のバージョンを公開審査に提出しました",
+      "publicReviewPending": "現在のバージョンは公開審査待ちです。承認後に公開マーケットへ掲載されます。",
+      "publicReviewRejected": "公開審査で却下されました：{{reason}}",
       "impactPrivate": "保存後はこの Skill を閲覧できるのは自分のみになります。",
       "impactPrivateLeavingMarket": "保存すると公開マーケットから取り下げられ、自分のみ閲覧可になります。審査済みバージョンの承認状態は保持されます。",
       "impactPrivateTeam": "保存後は自分のみ閲覧可になり、チームはこの Skill を閲覧・管理できなくなります。",
       "impactPrivateTeamLeavingMarket": "保存すると公開マーケットから取り下げられ、自分のみ閲覧可になります。チームはこの Skill を閲覧・管理できなくなります。審査済みバージョンの承認状態は保持されます。",
       "impactTeam": "保存後は選択したチーム・部署が閲覧・ダウンロードできます。",
       "impactTeamLeavingMarket": "保存すると公開マーケットから取り下げられ、選択したチーム・部署のみが閲覧・ダウンロードできます。審査済みバージョンの承認状態は保持されます。",
-      "impactPublic": "保存すると公開マーケットに公開されます。すでに審査済みの場合は即座に公開され、審査状態は保持されます。"
+      "impactPublic": "現在のバージョンを公開審査に提出します。承認後に公開マーケットへ掲載され、新しいバージョンの公開は不要です。"
     },
     "marketEdit": {
       "saved": "マーケット表示情報を保存しました",

@@ -10099,10 +10099,16 @@
       "search": "搜尋技能",
       "clearSearch": "清除技能搜尋",
       "noSearchResults": "沒有找到匹配的技能",
-      "browseTitle": "瀏覽 Skill Hub",
-      "browseDesc": "發現並安裝更多技能",
-      "recommended": "推薦安裝",
-      "recommendedEmpty": "暫無推薦",
+      "catalogFiltersAria": "SkillHub 分類",
+      "catalogFilter": {
+        "public": "公開",
+        "organization": "組織",
+        "mine": "我的管理"
+      },
+      "catalogMore": "更多",
+      "loadMore": "載入更多",
+      "loadingMore": "載入中…",
+      "catalogEmpty": "目前分類暫無技能",
       "local": "本地技能",
       "localEmpty": "還沒有本地技能",
       "installed": "已安裝",
@@ -10284,7 +10290,6 @@
       "sortDownloads": "下載量",
       "sortLatest": "最近更新",
       "sortCreated": "最新發布",
-      "chipAvailable": "可獲取",
       "chipAll": "全部",
       "chipMine": "我的管理",
       "ownerGroupPersonal": "個人",
@@ -10298,7 +10303,7 @@
       "installError": "未知錯誤"
     },
     "marketCard": {
-      "visibilityPublic": "XD.Inc",
+      "visibilityPublic": "公開",
       "visibilityDept": "團隊",
       "visibilityPrivate": "個人",
       "timeLabel": "釋出時間",
@@ -10323,6 +10328,7 @@
       }
     },
     "publishedStatus": {
+      "waitingReview": "等待審核",
       "machineReviewing": "機審中",
       "manualReviewing": "人工複核中",
       "rejected": "稽核未通過"
@@ -10334,7 +10340,7 @@
       "emptyHint": "這個雲端 Skill 沒有返回可預覽檔案"
     },
     "marketDetail": {
-      "visibilityPublic": "XD.Inc 可見",
+      "visibilityPublic": "所有使用者可見",
       "visibilityPrivate": "個人可見",
       "visibilityDept": "團隊可見",
       "files": "檔案",
@@ -10345,6 +10351,7 @@
       "forbidden": "沒有權限操作這個 Skill",
       "notFound": "這個 Skill 已不存在，請返回列表重新整理",
       "managementApiUnavailable": "Hub 管理介面暫未就緒，請稍後再試",
+      "invalidVisibility": "目前組織暫不支援此可見範圍，請選擇公開發佈",
       "default": "操作失敗，請稍後重試"
     },
     "installPicker": {
@@ -10389,11 +10396,11 @@
       "descriptionPlaceholder": "簡要描述該 Skill 的用途",
       "visibilityLabel": "可見性",
       "visibilityPublicTitle": "公開",
-      "visibilityPublicDesc": "全公司可見 · 預設",
+      "visibilityPublicDesc": "所有使用者可見 · 預設",
       "versionLabel": "版本號",
       "versionFormatHint": "格式：x.y.z (例如 1.0.1)",
       "categoryLabel": "分類",
-      "categoryAuto": "自動",
+      "categoryAuto": "不新增標籤",
       "categoryPlaceholder": "請選擇分類",
       "categoryLoading": "正在載入分類…",
       "categoryLoadFailed": "分類載入失敗，請重試",
@@ -10517,6 +10524,14 @@
         "title": "已取消",
         "message": ""
       },
+      "SKILL_HUB_READ_ONLY": {
+        "title": "目前組織僅支援瀏覽",
+        "message": "目前組織的技能目錄暫不支援發佈或管理"
+      },
+      "INVALID_VISIBILITY": {
+        "title": "可見範圍不可用",
+        "message": "請選擇目前發佈身分支援的可見範圍"
+      },
       "INTERNAL": {
         "title": "伺服器錯誤",
         "message": "釋出失敗，請稍後重試"
@@ -10530,8 +10545,12 @@
       "dismiss": "知道了",
       "passedTitle": "安全掃描通過",
       "passedDesc": "該版本已通過所有安全檢查，現已釋出到市場。",
+      "pendingTitle": "已提交，等待平台審核",
+      "pendingDesc": "安全掃描已完成，平台審核通過後會自動釋出到公開市場。",
       "failedTitle": "安全掃描未通過",
       "failedDesc": "該版本因安全掃描不達標被標記為 {{status}}，暫時無法在市場中被其他使用者安裝。請修復以下問題後重新發布。",
+      "processingFailedTitle": "發布處理失敗",
+      "processingFailedDesc": "該版本已上傳，但伺服器處理發布時發生內部錯誤。這不是安全檢查拒絕，請稍後重新發布。",
       "copyReviewResult": "複製稽核結果",
       "copiedReviewResult": "已複製",
       "copyReviewResultFailed": "複製失敗",
@@ -10544,12 +10563,14 @@
         "passed": "已通過",
         "failed": "未通過",
         "warning": "有風險",
+        "waitingReview": "等待審核",
         "reviewing": "稽核中",
         "unavailable": "暫不可用"
       },
       "gateLabel": {
         "llmReview": "LLM 稽核",
-        "securityScan": "安全掃描"
+        "securityScan": "安全掃描",
+        "publicationProcessing": "發布處理"
       }
     },
     "diffPanel": {
@@ -10601,7 +10622,7 @@
       "title": "管理可見性",
       "tierLabel": "可見性",
       "tierPublic": "公開",
-      "tierPublicDesc": "全公司可見",
+      "tierPublicDesc": "所有使用者可見",
       "tierTeam": "給團隊使用",
       "tierTeamDesc": "指定團隊可見",
       "tierPrivate": "僅自己使用",
@@ -10609,13 +10630,18 @@
       "save": "儲存",
       "saving": "儲存中…",
       "saved": "管理可見性已儲存",
+      "submitReview": "提交稽核",
+      "waitingReview": "等待稽核",
+      "publicReviewSubmitted": "已提交目前版本的公開稽核",
+      "publicReviewPending": "目前版本正在等待公開稽核，通過後會進入公開市場。",
+      "publicReviewRejected": "公開稽核未通過：{{reason}}",
       "impactPrivate": "儲存後，僅你可見。",
       "impactPrivateLeavingMarket": "儲存後會從公開市場下架，並轉為自己可見；已通過稽核的版本會保留稽核通過狀態。",
       "impactPrivateTeam": "儲存後轉為自己可見；團隊將看不到這個 Skill，也無法管理。",
       "impactPrivateTeamLeavingMarket": "儲存後會從公開市場下架，並轉為自己可見；團隊將看不到這個 Skill，也無法管理。已通過稽核的版本會保留稽核通過狀態。",
       "impactTeam": "儲存後，選中的團隊或部門可以看到並下載。",
       "impactTeamLeavingMarket": "儲存後會從公開市場下架，只有選中的團隊或部門可以看到並下載；已通過稽核的版本會保留稽核通過狀態。",
-      "impactPublic": "儲存後進入公開市場；若當前已稽核通過，會立即對外可見，稽核狀態會保留。"
+      "impactPublic": "提交目前版本的公開稽核；稽核通過後進入公開市場，無需發布新版本。"
     },
     "marketEdit": {
       "saved": "市場展示資訊已儲存",

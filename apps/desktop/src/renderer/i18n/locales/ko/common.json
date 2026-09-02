@@ -10099,10 +10099,16 @@
       "search": "스킬 검색",
       "clearSearch": "스킬 검색 지우기",
       "noSearchResults": "일치하는 스킬을 찾을 수 없습니다",
-      "browseTitle": "Skill Hub 둘러보기",
-      "browseDesc": "더 많은 스킬을 찾아 설치하세요",
-      "recommended": "추천",
-      "recommendedEmpty": "현재 추천 항목이 없습니다",
+      "catalogFiltersAria": "SkillHub 카테고리",
+      "catalogFilter": {
+        "public": "공개",
+        "organization": "조직",
+        "mine": "관리 대상"
+      },
+      "catalogMore": "더 보기",
+      "loadMore": "더 불러오기",
+      "loadingMore": "불러오는 중…",
+      "catalogEmpty": "이 카테고리에 스킬이 없습니다",
       "local": "로컬 스킬",
       "localEmpty": "아직 로컬 스킬이 없습니다",
       "installed": "설치됨",
@@ -10284,7 +10290,6 @@
       "sortDownloads": "다운로드 수",
       "sortLatest": "최근 업데이트",
       "sortCreated": "최신 게시",
-      "chipAvailable": "이용 가능",
       "chipAll": "전체",
       "chipMine": "관리 대상",
       "ownerGroupPersonal": "개인",
@@ -10298,7 +10303,7 @@
       "installError": "알 수 없는 오류"
     },
     "marketCard": {
-      "visibilityPublic": "XD.Inc",
+      "visibilityPublic": "공개",
       "visibilityDept": "팀",
       "visibilityPrivate": "개인",
       "timeLabel": "게시 시간",
@@ -10323,6 +10328,7 @@
       }
     },
     "publishedStatus": {
+      "waitingReview": "심사 대기",
       "machineReviewing": "기계 심사 중",
       "manualReviewing": "수동 검토 중",
       "rejected": "심사 미통과"
@@ -10334,7 +10340,7 @@
       "emptyHint": "이 클라우드 Skill 에서 미리 볼 수 있는 파일을 반환하지 않았습니다"
     },
     "marketDetail": {
-      "visibilityPublic": "XD.Inc 에 공개",
+      "visibilityPublic": "모든 사용자에게 공개",
       "visibilityPrivate": "개인 공개",
       "visibilityDept": "팀 공개",
       "files": "파일",
@@ -10345,6 +10351,7 @@
       "forbidden": "이 Skill 을 조작할 권한이 없습니다",
       "notFound": "이 Skill 은 더 이상 존재하지 않습니다. 목록으로 돌아가 새로고침하세요",
       "managementApiUnavailable": "Hub 관리 API 가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요",
+      "invalidVisibility": "이 조직에서는 해당 공개 범위를 지원하지 않습니다. 공개를 선택하세요",
       "default": "작업에 실패했습니다. 잠시 후 다시 시도하세요"
     },
     "installPicker": {
@@ -10389,11 +10396,11 @@
       "descriptionPlaceholder": "이 skill 의 용도를 간단히 설명",
       "visibilityLabel": "가시성",
       "visibilityPublicTitle": "공개",
-      "visibilityPublicDesc": "회사 전체 공개 · 기본값",
+      "visibilityPublicDesc": "모든 사용자에게 공개 · 기본값",
       "versionLabel": "버전",
       "versionFormatHint": "형식: x.y.z (예: 1.0.1)",
       "categoryLabel": "분류",
-      "categoryAuto": "자동",
+      "categoryAuto": "태그 없음",
       "categoryPlaceholder": "분류 선택",
       "categoryLoading": "분류 불러오는 중…",
       "categoryLoadFailed": "분류를 불러오지 못했습니다. 다시 시도하세요",
@@ -10517,6 +10524,14 @@
         "title": "취소됨",
         "message": ""
       },
+      "SKILL_HUB_READ_ONLY": {
+        "title": "조직 카탈로그는 읽기 전용입니다",
+        "message": "이 조직 카탈로그에서는 게시 및 관리 기능을 사용할 수 없습니다"
+      },
+      "INVALID_VISIBILITY": {
+        "title": "공개 범위를 사용할 수 없습니다",
+        "message": "현재 게시자에게 허용된 공개 범위를 선택하세요"
+      },
       "INTERNAL": {
         "title": "서버 오류",
         "message": "게시 실패, 잠시 후 재시도하세요"
@@ -10530,8 +10545,12 @@
       "dismiss": "확인",
       "passedTitle": "보안 스캔 통과",
       "passedDesc": "이 버전은 모든 보안 검사를 통과하여 마켓에 게시되었습니다.",
+      "pendingTitle": "제출 완료, 플랫폼 심사 대기 중",
+      "pendingDesc": "보안 스캔이 완료되었습니다. 플랫폼 승인 후 공개 마켓에 자동으로 게시됩니다.",
       "failedTitle": "보안 스캔 실패",
       "failedDesc": "이 버전은 보안 스캔 문제로 인해 {{status}}으로 표시되어 다른 사용자가 설치할 수 없습니다. 아래 문제를 수정한 후 다시 게시하세요.",
+      "processingFailedTitle": "게시 처리 실패",
+      "processingFailedDesc": "이 버전은 업로드되었지만 서버가 게시 처리 중 내부 오류를 만났습니다. 보안 검사에서 거부된 것이 아니므로 잠시 후 다시 게시하세요.",
       "copyReviewResult": "심사 결과 복사",
       "copiedReviewResult": "복사됨",
       "copyReviewResultFailed": "복사 실패",
@@ -10544,12 +10563,14 @@
         "passed": "통과",
         "failed": "미통과",
         "warning": "확인 필요",
+        "waitingReview": "심사 대기",
         "reviewing": "심사 중",
         "unavailable": "사용 불가"
       },
       "gateLabel": {
         "llmReview": "LLM 심사",
-        "securityScan": "보안 스캔"
+        "securityScan": "보안 스캔",
+        "publicationProcessing": "게시 처리"
       }
     },
     "diffPanel": {
@@ -10601,7 +10622,7 @@
       "title": "공개 설정 관리",
       "tierLabel": "가시성",
       "tierPublic": "공개",
-      "tierPublicDesc": "회사 전체 공개",
+      "tierPublicDesc": "모든 사용자에게 공개",
       "tierTeam": "팀",
       "tierTeamDesc": "지정한 팀에 공개",
       "tierPrivate": "나만 사용",
@@ -10609,13 +10630,18 @@
       "save": "저장",
       "saving": "저장 중…",
       "saved": "공개 설정이 저장되었습니다",
+      "submitReview": "심사 제출",
+      "waitingReview": "심사 대기 중",
+      "publicReviewSubmitted": "현재 버전을 공개 심사에 제출했습니다",
+      "publicReviewPending": "현재 버전이 공개 심사를 기다리고 있으며 승인 후 공개 마켓에 표시됩니다.",
+      "publicReviewRejected": "공개 심사가 거부되었습니다: {{reason}}",
       "impactPrivate": "저장 후에는 본인만 이 Skill을 볼 수 있습니다.",
       "impactPrivateLeavingMarket": "저장하면 공개 마켓에서 내려가고 본인만 볼 수 있게 됩니다. 심사를 통과한 버전의 승인 상태는 유지됩니다.",
       "impactPrivateTeam": "저장 후 본인만 볼 수 있게 되며, 팀은 이 Skill을 보거나 관리할 수 없습니다.",
       "impactPrivateTeamLeavingMarket": "저장하면 공개 마켓에서 내려가고 본인만 볼 수 있게 됩니다. 팀은 이 Skill을 보거나 관리할 수 없습니다. 심사를 통과한 버전의 승인 상태는 유지됩니다.",
       "impactTeam": "저장 후 선택한 팀과 부서가 보고 다운로드할 수 있습니다.",
       "impactTeamLeavingMarket": "저장하면 공개 마켓에서 내려가고 선택한 팀과 부서만 보고 다운로드할 수 있습니다. 심사를 통과한 버전의 승인 상태는 유지됩니다.",
-      "impactPublic": "저장하면 공개 마켓에 공개됩니다. 이미 심사를 통과한 경우 즉시 공개되며 심사 상태는 유지됩니다."
+      "impactPublic": "현재 버전을 공개 심사에 제출합니다. 승인 후 공개 마켓에 표시되며 새 버전을 게시할 필요가 없습니다."
     },
     "marketEdit": {
       "saved": "마켓 표시 정보가 저장되었습니다",

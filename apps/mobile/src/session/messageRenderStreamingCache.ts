@@ -64,6 +64,29 @@ export interface MobileStreamingRenderWindowResult {
 }
 
 /**
+ * Only a prefix that participated in the previous committed render can safely skip reconciliation.
+ * A concurrently abandoned render may publish a newer speculative prefix into the cache; its rows
+ * still need to be compared with the last committed rows before React can reuse them.
+ */
+export function committedMobileStreamingPrefixItemCount(
+  renderWindow: MobileStreamingRenderWindowResult,
+  committedPrefix: MobileStreamingRenderPrefixCache | null | undefined,
+): number {
+  return renderWindow.prefix !== null && renderWindow.prefix === committedPrefix
+    ? renderWindow.stablePrefixItemCount
+    : 0;
+}
+
+/** Keep a newly committed cache prefix on the exact row objects React received. */
+export function commitMobileStreamingPrefixItems(
+  prefix: MobileStreamingRenderPrefixCache,
+  committedItems: readonly MobileMessageRenderItem[],
+): void {
+  if (prefix.items.length > committedItems.length) return;
+  prefix.items = committedItems.slice(0, prefix.items.length);
+}
+
+/**
  * Rebuild only the active turn while a session streams.
  *
  * The loaded history is immutable during ordinary text deltas. Normalizing and grouping that
@@ -324,6 +347,9 @@ function buildTruncatedActiveTurnWindow(
   });
   const prefix = previousPrefix?.mode === 'truncated-turn'
     && builtPrefix !== null
+    && previousPrefix.cacheKey === cacheKey
+    && previousPrefix.messageStructureToken === messageStructureToken
+    && previousPrefix.sessionId === sessionId
     && builtPrefix.boundaryMessage === previousPrefix.boundaryMessage
     && sameTaskUpdateDependencySnapshots(
       builtPrefix.taskUpdateDependencies,

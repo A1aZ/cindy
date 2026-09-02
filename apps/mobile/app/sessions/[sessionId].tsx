@@ -474,6 +474,8 @@ import {
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
 import {
   buildMobileStreamingRenderWindow,
+  commitMobileStreamingPrefixItems,
+  committedMobileStreamingPrefixItemCount,
   type MobileStreamingRenderPrefixCache,
 } from '@/session/messageRenderStreamingCache';
 import { shouldSuppressEmptyMessageState } from '@/session/sessionEmptyState';
@@ -4647,6 +4649,7 @@ export default function SessionScreen() {
   const previousRenderItemsRef = useRef<{
     sessionId: string;
     items: readonly MobileMessageRenderItem[];
+    prefix: MobileStreamingRenderPrefixCache | null;
   } | null>(null);
   const streamingRenderPrefixRef = useRef<MobileStreamingRenderPrefixCache | null>(null);
   const renderWindow = useMemo(
@@ -4678,12 +4681,19 @@ export default function SessionScreen() {
           (item) => !(item.type === 'message' && item.message.source.clientId === errorTailClientId),
         );
       }
-      const previous = previousRenderItemsRef.current?.sessionId === sessionId
-        ? previousRenderItemsRef.current.items
-        : [];
+      const previousRenderState = previousRenderItemsRef.current?.sessionId === sessionId
+        ? previousRenderItemsRef.current
+        : null;
+      const previous = previousRenderState?.items ?? [];
+      const committedPrefix = forkOrigin || errorTailClientId
+        ? null
+        : builtWindow.prefix;
       const stablePrefixItemCount = forkOrigin || errorTailClientId
         ? 0
-        : builtWindow.stablePrefixItemCount;
+        : committedMobileStreamingPrefixItemCount(
+            builtWindow,
+            previousRenderState?.prefix,
+          );
       const reconciled = reconcileMobileMessageRenderItems(
         previous,
         items,
@@ -4694,6 +4704,7 @@ export default function SessionScreen() {
           ? countMobileRenderItemDiffs(reconciled)
           : builtWindow.diffCount,
         items: reconciled,
+        prefix: committedPrefix,
         stablePrefixItemCount,
       };
     },
@@ -4707,8 +4718,19 @@ export default function SessionScreen() {
   // Reconciliation must only use committed rows. Unlike the prefix cache above, a speculative
   // render-item baseline could leak rows from an abandoned render and destabilize tail memoization.
   useLayoutEffect(() => {
-    previousRenderItemsRef.current = { sessionId, items: renderItems };
-  }, [renderItems, sessionId]);
+    if (
+      renderWindow.prefix
+      && previousRenderItemsRef.current?.prefix !== renderWindow.prefix
+      && streamingRenderPrefixRef.current === renderWindow.prefix
+    ) {
+      commitMobileStreamingPrefixItems(renderWindow.prefix, renderItems);
+    }
+    previousRenderItemsRef.current = {
+      sessionId,
+      items: renderItems,
+      prefix: renderWindow.prefix,
+    };
+  }, [renderItems, renderWindow.prefix, sessionId]);
   // 后台静默刷新:仅在首次加载、还没有任何内容(messages 为空)时显示"正在同步";已有内容
   // (重开已看过的会话,messages 还在内存)时后台对账一律静默,不再弹同步提示打扰用户。
   const showSyncingIndicator = loading && messages.length === 0;

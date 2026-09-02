@@ -2217,22 +2217,18 @@ function isChatGptUpstreamBase(upstreamBase: string | undefined): boolean {
  * 返回 null = 无需改写。透明转发路径(transform 链)与 localHandler 路径共用。
  *
  * - 加密 compaction 仍替换成明文上下文缺失提示。
- * - 多 Agent 历史会在 agent_message.content 里夹带仅原供应商可解的 encrypted_content；
- *   非 ChatGPT 上游会直接拒绝整次请求。只删除这些嵌套密文，保留可读正文与路由元数据；
- *   若消息只剩密文则整条丢弃。
+ * - 多 Agent 历史会在 agent_message.content 里夹带仅兼容上游可解的 encrypted_content；
+ *   ChatGPT 与 Cindy Provider codex/* 原样透传。其它上游只删除这些嵌套密文，保留
+ *   可读正文与路由元数据；若消息只剩密文则整条丢弃。
  * - reasoning.encrypted_content 不属于本故障；继续交给后续供应商兼容层判断，
  *   不在这里扩大删除面。
  */
-function rewriteCrossProviderHistoryItems(
-  body: unknown,
-  opts: { preserveCompaction?: boolean } = {},
-): Record<string, unknown> | null {
+function rewriteCrossProviderHistoryItems(body: unknown): Record<string, unknown> | null {
   if (!isPlainObject(body) || !Array.isArray(body.input)) return null;
   let changed = false;
   const input: unknown[] = [];
   for (const item of body.input) {
     if (
-      opts.preserveCompaction !== true &&
       isPlainObject(item) &&
       (item.type === 'compaction' || item.type === 'context_compaction') &&
       typeof item.encrypted_content === 'string' &&
@@ -2271,10 +2267,8 @@ export function createCrossProviderCompactionCompatTransform(): RequestTransform
       providerId: providerContext.providerId,
       model: providerContext.catalogModel,
     });
-    if (isChatGptUpstreamBase(ctx.upstreamBase)) return null;
-    const replaced = rewriteCrossProviderHistoryItems(body, {
-      preserveCompaction: isCindyCodexRoute,
-    });
+    if (isChatGptUpstreamBase(ctx.upstreamBase) || isCindyCodexRoute) return null;
+    const replaced = rewriteCrossProviderHistoryItems(body);
     if (!replaced) return null;
     log.info('rewrote incompatible Codex history for non-ChatGPT upstream', {
       reqId: ctx.reqId,

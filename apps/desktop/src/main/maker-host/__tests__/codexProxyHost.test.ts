@@ -492,25 +492,39 @@ describe('createCrossProviderCompactionCompatTransform', () => {
     )).toBeNull();
   });
 
-  it('Cindy Provider codex/* 原样透传 compaction，同时清理 agent 消息密文', async () => {
-    const { createCrossProviderCompactionCompatTransform } = await import('../codex-proxy-host.js');
-    const transform = createCrossProviderCompactionCompatTransform();
+  it('Cindy Provider codex/* 原样透传父子 Agent 协作密文', async () => {
+    const host = await freshCodexProxyHost();
+    const { setSessionProvider, clearSessionProvider } = await import('../session-provider-store.js');
+    host.registerComposed('session-cindy-codex-parent', 'thread-cindy-codex-parent', 'PRODUCT_PROMPT');
+    setSessionProvider('session-cindy-codex-parent', 'xd');
+    const parentToChildMessage = {
+      type: 'agent_message',
+      author: 'parent',
+      recipient: 'researcher',
+      content: [{ type: 'encrypted_content', encrypted_content: 'gAAAAA_PARENT_TO_CHILD_TASK' }],
+    };
 
-    const out = transform(
-      { model: 'codex/gpt-5.6-sol', input: [compactionItem, agentMessage, userMessage] },
-      { ...CTX_BASE, upstreamBase: 'https://gateway.example.com/v1' },
-    ) as { input: Array<Record<string, unknown>> };
-
-    expect(out.input).toEqual([
-      compactionItem,
-      {
-        type: 'agent_message',
-        author: 'researcher',
-        recipient: 'parent',
-        content: [{ type: 'input_text', text: 'readable agent result' }],
-      },
-      userMessage,
-    ]);
+    try {
+      const transform = host.createCrossProviderCompactionCompatTransform();
+      expect(transform(
+        {
+          model: 'codex/gpt-5.6-sol',
+          input: [compactionItem, parentToChildMessage, agentMessage, userMessage],
+        },
+        {
+          ...CTX_BASE,
+          upstreamBase: 'https://gateway.example.com/v1',
+          headers: {
+            'thread-id': 'thread-cindy-codex-child',
+            'x-openai-subagent': 'collab_spawn',
+            'x-codex-parent-thread-id': 'thread-cindy-codex-parent',
+          },
+        },
+      )).toBeNull();
+    } finally {
+      host.unregister('session-cindy-codex-parent');
+      clearSessionProvider('session-cindy-codex-parent');
+    }
   });
 
   it('upstreamBase 缺失时不改写(保守方向:宁可维持现状,不误伤 ChatGPT 请求)', async () => {

@@ -219,6 +219,8 @@ import type {
 import type {
   IOSSimulatorAccessRequest,
   IOSSimulatorAccessRequestResult,
+  IOSSimulatorCopyScreenshotRequest,
+  IOSSimulatorCopyScreenshotResult,
   IOSSimulatorSessionStatus,
   IOSSimulatorAgentControlRequest,
   IOSSimulatorFocusRequest,
@@ -7146,6 +7148,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('maker:ios-simulator:retry-native-route', request),
       latestFrame: (request: IOSSimulatorViewerRouteRequest): Promise<IOSSimulatorToolResponse> =>
         ipcRenderer.invoke('maker:ios-simulator:latest-frame', request),
+      copyScreenshot: (
+        request: IOSSimulatorCopyScreenshotRequest,
+      ): Promise<IOSSimulatorCopyScreenshotResult> =>
+        ipcRenderer.invoke('maker:ios-simulator:copy-screenshot', request),
       setStreamProfile: (
         request: IOSSimulatorStreamProfileRequest,
       ): Promise<IOSSimulatorToolResponse> =>

@@ -5,6 +5,7 @@ import type {
   CustomProviderUpdateOptions,
   CustomProviderUpdateResult,
 } from '../shared/customProviderUpdate';
+import { supportsBetaUpdateChannel } from '../shared/updateChannelCapability';
 import {
   isWindowsBackdropMaterial,
   readWindowBackdropMaterialFromArgv,
@@ -942,6 +943,7 @@ type CindyMediaPreferenceKind = {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
+  supportsBetaUpdateChannel: supportsBetaUpdateChannel(process.platform, process.arch),
   windowBackdropMaterial: readWindowBackdropMaterialFromArgv(process.argv),
   onWindowBackdropMaterialChanged: (
     cb: (material: import('../shared/windowBackdrop').WindowsBackdropMaterial) => void,

@@ -32,6 +32,7 @@ import {
   createWindowBackdropMaterialArgument,
   WINDOW_BACKDROP_MATERIAL_CHANGED_CHANNEL,
 } from '../shared/windowBackdrop.js';
+import { isAllowedBillingMailtoRequest } from '../shared/billing.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -5936,13 +5937,18 @@ const registerIpcHandlers = () => {
   // macOS Privacy panes that Settings uses for permission onboarding.
   ipcMain.handle(
     'shell:open-external',
-    async (_event: Electron.IpcMainInvokeEvent, url: string): Promise<{ success: boolean }> => {
+    async (event: Electron.IpcMainInvokeEvent, url: string): Promise<{ success: boolean }> => {
       try {
         const parsed = new URL(url);
         const isWebUrl = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        // Mail links are restricted to the fixed billing inbox. Renderer content may
+        // provide the localized subject/body, but it must not choose a recipient or
+        // use mailto as a general-purpose external scheme.
+        const isBillingMailto =
+          isAllowedBillingMailtoRequest(url, isTrustedAppRendererEvent(event));
         const isAllowedSystemSettingsUrl =
           process.platform === 'darwin' && allowedSystemSettingsUrls.has(url);
-        if (!isWebUrl && !isAllowedSystemSettingsUrl) {
+        if (!isWebUrl && !isBillingMailto && !isAllowedSystemSettingsUrl) {
           return { success: false };
         }
         await shell.openExternal(url);

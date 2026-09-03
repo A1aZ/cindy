@@ -1142,6 +1142,8 @@ type CindyMediaPreferenceKind = {
 
 interface ElectronAPI {
   platform: string;
+  /** 当前 Desktop 构建是否具备 Beta 更新渠道。 */
+  supportsBetaUpdateChannel?: boolean;
   windowBackdropMaterial: import('../shared/windowBackdrop').WindowsBackdropMaterial;
   onWindowBackdropMaterialChanged?: (
     cb: (material: import('../shared/windowBackdrop').WindowsBackdropMaterial) => void,
@@ -1896,6 +1898,10 @@ interface ElectronAPI {
     setWindowsCloseBehavior: (behavior: 'quit' | 'tray') => Promise<'quit' | 'tray'>;
     onWindowsCloseBehaviorRequested: (callback: () => void) => () => void;
     notifyWindowsCloseBehaviorPromptShown: () => void;
+    getLinuxCloseBehavior: () => Promise<'quit' | 'minimize' | null>;
+    setLinuxCloseBehavior: (behavior: 'quit' | 'minimize') => Promise<'quit' | 'minimize'>;
+    onLinuxCloseBehaviorRequested: (callback: () => void) => () => void;
+    notifyLinuxCloseBehaviorPromptShown: () => void;
   };
 
   codexMicroGuard: {

@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
+import type {
+  CustomProviderUpdateOptions,
+  CustomProviderUpdateResult,
+} from '../shared/customProviderUpdate';
 import {
   isWindowsBackdropMaterial,
   readWindowBackdropMaterialFromArgv,
@@ -60,10 +64,11 @@ import {
   WORKLOUDER_CODEX_RESET_SETTINGS_CHANNEL,
   WORKLOUDER_CODEX_SET_SETTINGS_CHANNEL,
   WORKLOUDER_CODEX_STATE_CHANGED_CHANNEL,
+  type WorkLouderAccessoriesState,
   type WorkLouderCodexPreviewInput,
   type WorkLouderCodexRendererAction,
   type WorkLouderCodexSettingsPatch,
-  type WorkLouderCodexState,
+  type WorkLouderModel,
 } from '../shared/workLouderCodex';
 import {
   XBOX_GAMEPAD_GET_STATE_CHANNEL,
@@ -1645,21 +1650,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   workLouderCodex: {
-    getState: (): Promise<WorkLouderCodexState> =>
+    getState: (): Promise<WorkLouderAccessoriesState> =>
       ipcRenderer.invoke(WORKLOUDER_CODEX_GET_STATE_CHANNEL),
-    setSettings: (patch: WorkLouderCodexSettingsPatch): Promise<WorkLouderCodexState> =>
-      ipcRenderer.invoke(WORKLOUDER_CODEX_SET_SETTINGS_CHANNEL, patch),
-    resetSettings: (): Promise<WorkLouderCodexState> =>
-      ipcRenderer.invoke(WORKLOUDER_CODEX_RESET_SETTINGS_CHANNEL),
+    setSettings: (
+      model: WorkLouderModel,
+      patch: WorkLouderCodexSettingsPatch,
+    ): Promise<WorkLouderAccessoriesState> =>
+      ipcRenderer.invoke(WORKLOUDER_CODEX_SET_SETTINGS_CHANNEL, model, patch),
+    resetSettings: (model: WorkLouderModel): Promise<WorkLouderAccessoriesState> =>
+      ipcRenderer.invoke(WORKLOUDER_CODEX_RESET_SETTINGS_CHANNEL, model),
     openInputMonitoringSettings: (): Promise<void> =>
       ipcRenderer.invoke(WORKLOUDER_CODEX_OPEN_INPUT_MONITORING_CHANNEL),
-    probe: (): Promise<WorkLouderCodexState> => ipcRenderer.invoke(WORKLOUDER_CODEX_PROBE_CHANNEL),
+    probe: (): Promise<WorkLouderAccessoriesState> =>
+      ipcRenderer.invoke(WORKLOUDER_CODEX_PROBE_CHANNEL),
     publishTasks: (tasks: WorkLouderCodexPublishedTask[]): Promise<void> =>
       ipcRenderer.invoke(WORKLOUDER_CODEX_PUBLISH_TASKS_CHANNEL, tasks),
-    setLayoutPreviewActive: (active: boolean): Promise<void> =>
-      ipcRenderer.invoke(WORKLOUDER_CODEX_SET_LAYOUT_PREVIEW_CHANNEL, active),
-    onStateChanged: (callback: (state: WorkLouderCodexState) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, state: WorkLouderCodexState): void => {
+    setLayoutPreviewActive: (active: boolean, model?: WorkLouderModel): Promise<void> =>
+      ipcRenderer.invoke(
+        WORKLOUDER_CODEX_SET_LAYOUT_PREVIEW_CHANNEL,
+        model === undefined ? active : { active, model },
+      ),
+    onStateChanged: (callback: (state: WorkLouderAccessoriesState) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: WorkLouderAccessoriesState,
+      ): void => {
         callback(state);
       };
       ipcRenderer.on(WORKLOUDER_CODEX_STATE_CHANGED_CHANNEL, listener);
@@ -2938,6 +2953,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         | string[]
         | {
             slugs?: string[];
+            skills?: Array<{ slug: string; catalogScope?: 'market' | 'team' }>;
           },
     ): Promise<{
       success: boolean;
@@ -2953,6 +2969,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       limit?: number;
       sort?: 'trending' | 'downloads' | 'updated_at' | 'created_at';
       q?: string;
+      scope?: 'all' | 'market' | 'team';
       mine?: boolean;
       available?: boolean;
       category?: string;
@@ -2962,12 +2979,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       success: boolean;
       items?: Array<{
         name: string;
+        /** Skill 图标 URL；旧服务响应可能缺失。 */
+        icon?: string;
         displayName: string;
         description: string;
         authorId: string;
         authorName: string;
+        publisherName?: string;
         authorAvatarUrl: string | null;
         isMine: boolean;
+        canManage: boolean;
         latestVersion: string;
         visibility: 'PUBLIC' | 'DEPARTMENT_SCOPED';
         publishedVisibility?: 'private' | 'shared' | 'public';
@@ -2978,12 +2999,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
           version: string;
           status?: string;
         };
+        visibilityReview?: {
+          requestedVisibility: 'public';
+          status: 'pending' | 'rejected';
+          reason?: string;
+        };
         visibleDeptIds: string[];
         categories?: string[];
+        tags?: Array<{ slug: string; name: string; source?: 'author' | 'platform' }>;
+        githubUrl?: string | null;
         publishedAt: string;
         downloads: number;
         /** 跨设备识别：null = pre-feature 历史版本 */
         latestPublishedFromDeviceId: string | null;
+        catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
       }>;
       nextCursor?: string | null;
       error?: string;
@@ -2992,17 +3021,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 查询单个 skill 市场详情（有 in-flight dedupe 在 renderer 侧）
     info: (
       name: string,
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope,
     ): Promise<{
       success: boolean;
       info?: unknown;
       deleted?: boolean;
       error?: string;
       errorCode?: string;
-    }> => ipcRenderer.invoke('skillhub:info', { name }),
+    }> => ipcRenderer.invoke('skillhub:info', { name, catalogScope }),
 
     getPublishedFiles: (params: {
       name: string;
       version?: string;
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
     }): Promise<{
       success: boolean;
       slug?: string;
@@ -3016,6 +3047,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name: string;
       path: string;
       version?: string;
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
     }): Promise<{
       success: boolean;
       file?: { path: string; size: number; language: string; truncated: boolean; content: string };
@@ -3025,12 +3057,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     listPublishedVersions: (
       name: string,
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope,
     ): Promise<{
       success: boolean;
       versions?: unknown[];
       error?: string;
       errorCode?: string;
-    }> => ipcRenderer.invoke('skillhub:list-published-versions', { name }),
+    }> => ipcRenderer.invoke('skillhub:list-published-versions', { name, catalogScope }),
 
     updatePublished: (params: {
       name: string;
@@ -3038,7 +3071,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         displayName?: string;
         summary?: string;
         description?: string;
-        categories?: string[];
+        tags?: string[];
         visibility?: 'private' | 'shared' | 'public';
         /** 归属统一参数:团队 slug / od- 部门 id;null = 收回到个人 */
         teamSlug?: string | null;
@@ -3059,9 +3092,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setPublishedVisibility: (params: {
       name: string;
       visibility: 'private' | 'shared' | 'public';
+      previousCatalogScope?: 'market' | 'team';
       teamSlug?: string;
       visibleSlugs?: string[];
-    }): Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }> =>
+    }): Promise<{
+      success: boolean;
+      result?: { slug: string; visibility: 'private' | 'shared' | 'public'; requestedVisibility?: 'public'; reviewStatus?: 'pending' };
+      error?: string;
+      errorCode?: string;
+    }> =>
       ipcRenderer.invoke('skillhub:set-published-visibility', params),
 
     // 读取已发布 skill 的可见对象(共享团队 + 可见部门),编辑可见范围弹窗回显用
@@ -3088,6 +3127,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getScanStatus: (params: {
       slug: string;
       version?: string;
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
     }): Promise<{
       success: boolean;
       status: string;
@@ -3193,8 +3233,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       displayName?: string;
       summary?: string;
       description?: string;
-      categoryMode?: 'auto' | 'manual';
-      categories?: string[];
+      tags?: string[];
       visibility?: 'PUBLIC' | 'DEPARTMENT_SCOPED' | 'PRIVATE';
       visibleSlugs?: string[];
       deptTeamSlug?: string;
@@ -3232,6 +3271,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     install: (params: {
       name: string;
       version?: string;
+      catalogScope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
       force?: boolean;
       /** 完整安装目标路径。不传 → global scope 默认路径。 */
       installPath?: string;
@@ -5360,11 +5400,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
       keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
-    ): Promise<{ ok: true }> => ipcRenderer.invoke('maker:provider:custom:create', config, keys),
+      options?: CustomProviderUpdateOptions,
+    ): Promise<CustomProviderUpdateResult> =>
+      ipcRenderer.invoke('maker:provider:custom:create', config, keys, options),
     updateCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
       keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
-    ): Promise<{ ok: true }> => ipcRenderer.invoke('maker:provider:custom:update', config, keys),
+      options?: CustomProviderUpdateOptions,
+    ): Promise<CustomProviderUpdateResult> =>
+      ipcRenderer.invoke('maker:provider:custom:update', config, keys, options),
     deleteCustomProvider: (providerId: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:provider:custom:delete', providerId),
     /** 自定义供应商创建模板（目录 presets 段，纯 UI 模板数据）。 */

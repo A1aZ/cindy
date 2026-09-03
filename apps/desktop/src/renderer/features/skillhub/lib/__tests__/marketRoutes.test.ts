@@ -25,6 +25,11 @@ describe('market route scope', () => {
     expect(localDetailSource).not.toContain('marketManagePath');
   });
 
+  it('reads rejected management versions from the native record', () => {
+    expect(localDetailSource).toContain('listPublishedVersions(entry.name)');
+    expect(localDetailSource).not.toContain('listPublishedVersions(entry.name, entry.registryEntry?.catalogScope)');
+  });
+
   it('keeps Clone wording for acquisition actions', () => {
     const marketCardSource = readFileSync(resolve(skillhubDir, 'components/MarketCard.tsx'), 'utf8');
     expect(marketCardSource).toContain('Clone');
@@ -116,6 +121,7 @@ describe('market management copy and errors', () => {
     expect(editorSource).not.toContain('PublisherPicker');
     expect(editorSource).not.toContain('fields.teamSlug');
     expect(editorSource).toContain('identityPolicy.ownerType');
+    expect(editorSource).toContain('previousCatalogScope,');
   });
 
   it('does not expose an extra published status pill in the market preview panel', () => {

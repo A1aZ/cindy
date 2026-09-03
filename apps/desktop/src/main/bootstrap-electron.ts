@@ -459,6 +459,7 @@ import {
 import {
   assertTrustedAppRendererEvent,
   isTrustedAppRendererEvent,
+  isTrustedCindyRendererWindow,
   isTrustedAppRendererWindow,
 } from './security/trustedAppRenderer.js';
 import { isMainShellWindowUrl } from './cindy-brain/scheduleSlot.js';
@@ -807,6 +808,7 @@ import {
 } from './sessionDragPreviewHtml.js';
 import {
   isGlobalVoiceInputOverlayVisible,
+  isGlobalVoiceInputOverlaySender,
   releaseActiveGlobalVoiceInputShortcut,
   registerGlobalVoiceInputIpc,
 } from './voice-input/global.js';
@@ -6096,7 +6098,18 @@ const registerIpcHandlers = () => {
   // 打开 renderer 提供的任意自定义 scheme / deep link。
   ipcMain.handle('shell:open-chatgpt-app', async (event): Promise<{ success: boolean }> =>
     handleOpenChatGPTApp(event, {
-      assertTrustedSender: assertTrustedAppRendererEvent,
+      assertTrustedSender: (candidate) => {
+        // The cached global overlay is a trusted Cindy renderer but deliberately
+        // not app-content: it needs this fixed, no-argument capability to keep
+        // auth recovery visible without activating the main window.
+        const overlayWindow = BrowserWindow.fromWebContents(candidate.sender);
+        if (
+          isGlobalVoiceInputOverlaySender(candidate.sender) &&
+          candidate.senderFrame === candidate.sender.mainFrame &&
+          isTrustedCindyRendererWindow(overlayWindow)
+        ) return;
+        assertTrustedAppRendererEvent(candidate);
+      },
       openExternal: (url) => shell.openExternal(url),
     }),
   );

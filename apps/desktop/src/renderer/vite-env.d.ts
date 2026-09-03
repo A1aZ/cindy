@@ -1144,6 +1144,24 @@ type CindyMediaPreferenceKind = {
   defaultModel: CindyMediaPreferenceOption | null;
 };
 
+type ElectronLocalDbSessionListOptions = {
+  includePinned?: boolean;
+  fresh?: boolean;
+  usageHistory?: boolean;
+};
+type ElectronLocalDbSessionListRegularOptions = Omit<
+  ElectronLocalDbSessionListOptions,
+  'usageHistory'
+> & {
+  usageHistory?: false | undefined;
+};
+type ElectronLocalDbSessionListUsageOptions = Omit<
+  ElectronLocalDbSessionListOptions,
+  'usageHistory'
+> & {
+  usageHistory: true;
+};
+
 interface ElectronAPI {
   platform: string;
   /** 当前 Desktop 构建是否具备 Beta 更新渠道。 */
@@ -4406,11 +4424,26 @@ interface ElectronAPI {
       ) => () => void;
     };
     sessions: {
-      list: (
-        limit?: number,
-        status?: 'active' | 'archived' | 'all',
-        options?: { includePinned?: boolean; fresh?: boolean },
-      ) => Promise<import('@/lib/ccAgent.types').Session[]>;
+      list: {
+        (
+          limit?: number,
+          status?: 'active' | 'archived' | 'all',
+          options?: ElectronLocalDbSessionListRegularOptions,
+        ): Promise<import('@/lib/ccAgent.types').Session[]>;
+        (
+          limit?: number,
+          status?: 'active' | 'archived' | 'all',
+          options?: ElectronLocalDbSessionListUsageOptions,
+        ): Promise<import('@/lib/ccAgent.types').UsageHistorySession[]>;
+        (
+          limit?: number,
+          status?: 'active' | 'archived' | 'all',
+          options?: ElectronLocalDbSessionListOptions,
+        ): Promise<
+          | import('@/lib/ccAgent.types').Session[]
+          | import('@/lib/ccAgent.types').UsageHistorySession[]
+        >;
+      };
       create: (body?: {
         id?: string;
         workingDir?: string;
@@ -6213,7 +6246,8 @@ interface ElectronAPI {
       ) => () => void;
       /** 用量历史聚合 (首页仪表盘)。wire 形态与 main/usage/usageHistory.ts 的 UsageHistoryPayload 同形。 */
       getHistory: (opts?: {
-        days?: number;
+        days?: number | 'all';
+        modelDays?: number | 'all';
         forceRefresh?: boolean;
       }) => Promise<import('../main/usage/usageHistory').UsageHistoryPayload>;
       onTodaySpendChanged: (

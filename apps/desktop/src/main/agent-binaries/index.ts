@@ -187,6 +187,7 @@ const CONFIG: Record<AgentBinaryKind, AgentBinaryConfig> = {
     devBinDir: 'claude-code-bin',
     vendorTag: 'claude',
     artifactKind: 'gz',
+    preserveLocalVersion: true,
   },
   codex: {
     vendorKey: 'codex',
@@ -197,6 +198,7 @@ const CONFIG: Record<AgentBinaryKind, AgentBinaryConfig> = {
     devBinaryName: path.join('bin', process.platform === 'win32' ? 'codex.exe' : 'codex'),
     vendorTag: 'codex',
     artifactKind: 'gz',
+    preserveLocalVersion: true,
   },
   pi: {
     vendorKey: 'pi',

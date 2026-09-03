@@ -25,7 +25,7 @@ import { useTranslation } from 'react-i18next';
 
 import { i18n } from '@/i18n';
 import { CATEGORY_ALL, type MarketCategory } from '../../../../shared/skillhubCategory';
-import type { SkillhubCatalogScope } from '../../../../shared/skillhubCatalog';
+import { skillhubCatalogKey, type SkillhubCatalogScope } from '../../../../shared/skillhubCatalog';
 import type { HubPublishedVisibility } from '../lib/marketVisibility';
 import { filterAvailableMarketItems } from '../lib/marketDetailViewModel';
 
@@ -179,7 +179,7 @@ export function formatMarketRelativeTime(iso: string, translate: TFunction, nowM
   return translate('skillhub.marketCard.relativeTime.years', { count: year });
 }
 
-interface LocalSkillEntry {
+export interface LocalSkillEntry {
   /** 版本号字符串来自 registryEntry.version；null = 无 registry 记录。 */
   version: string | null;
   absolutePath: string;
@@ -188,13 +188,46 @@ interface LocalSkillEntry {
   hasRegistryEntry: boolean;
 }
 
-interface LocalSkillGroup {
+export interface LocalSkillGroup {
   global?: LocalSkillEntry;
   projects: LocalSkillEntry[];
 }
 
-interface LocalSkillIndex {
-  byName: Map<string, LocalSkillGroup>;
+export interface LocalSkillIndex {
+  /** Registry-backed installs are independent for each remote catalog record. */
+  byCatalogKey: Map<string, LocalSkillGroup>;
+  /** User-authored local folders have no remote scope and only back owned items. */
+  untrackedByName: Map<string, LocalSkillGroup>;
+}
+
+function addLocalEntry(
+  index: Map<string, LocalSkillGroup>,
+  key: string,
+  scope: 'global' | 'project',
+  entry: LocalSkillEntry,
+): void {
+  let group = index.get(key);
+  if (!group) {
+    group = { global: undefined, projects: [] };
+    index.set(key, group);
+  }
+  if (scope === 'global') group.global = entry;
+  else group.projects.push(entry);
+}
+
+export function localGroupForItem(
+  item: { name: string; isMine: boolean; catalogScope?: SkillhubCatalogScope },
+  index: LocalSkillIndex,
+): LocalSkillGroup | undefined {
+  const tracked = index.byCatalogKey.get(skillhubCatalogKey(item.name, item.catalogScope));
+  if (!item.isMine) return tracked;
+  const untracked = index.untrackedByName.get(item.name);
+  if (!tracked) return untracked;
+  if (!untracked) return tracked;
+  return {
+    global: tracked.global ?? untracked.global,
+    projects: [...tracked.projects, ...untracked.projects],
+  };
 }
 
 export function deriveCardState(
@@ -221,7 +254,7 @@ function mapServerToView(
   installingNames: Set<string>,
   translate: TFunction,
 ): MarketSkill {
-  const group = localIndex.byName.get(item.name);
+  const group = localGroupForItem(item, localIndex);
   // 优先用 global entry 作为"主安装"信息（版本、路径）；没有 global 时回落到第一个 project entry。
   const primary = group?.global ?? group?.projects[0];
   // mine：只要本地同名目录存在就算有副本（自己发布的 skill 不写 registry）。
@@ -331,10 +364,12 @@ export function useMarketList(
   // 本地扫描结果用来派生 cardState。useSkillhub 是模块级 store,跨组件共享。
   const { skills: localSkills } = useSkillhub();
 
-  // 折成 name → { global?, projects[] } index。区分安装位置，cardState 只看 global。
+  // Registry-backed installs use catalog+name; untracked local folders are a
+  // separate fallback for owned items only.
   const localIndex: LocalSkillIndex = {
-    byName: (() => {
-      const m = new Map<string, LocalSkillGroup>();
+    ...(() => {
+      const byCatalogKey = new Map<string, LocalSkillGroup>();
+      const untrackedByName = new Map<string, LocalSkillGroup>();
       for (const s of localSkills) {
         if (s.kind !== 'skill') continue;
         const entry: LocalSkillEntry = {
@@ -342,18 +377,13 @@ export function useMarketList(
           absolutePath: s.absolutePath,
           hasRegistryEntry: s.registryEntry !== null,
         };
-        let group = m.get(s.name);
-        if (!group) {
-          group = { global: undefined, projects: [] };
-          m.set(s.name, group);
-        }
-        if (s.scope === 'global') {
-          group.global = entry;
-        } else {
-          group.projects.push(entry);
-        }
+        const index = s.registryEntry ? byCatalogKey : untrackedByName;
+        const key = s.registryEntry
+          ? skillhubCatalogKey(s.name, s.registryEntry.catalogScope)
+          : s.name;
+        addLocalEntry(index, key, s.scope, entry);
       }
-      return m;
+      return { byCatalogKey, untrackedByName };
     })(),
   };
 
@@ -535,17 +565,17 @@ export function useMarketList(
   }, [enabled, sortBy, searchQuery, catalogScope, visibility, categoryFilter, fetchPage, reloadTick]);
 
   // 当本地扫描结果或 installing 集合变化时,只重新派生 cardState/installedVersion,不重发请求。
-  // 依赖键用 (name, version, installing) 序列化字符串，避免对象引用变化导致每次都跑。
+  // Include catalog scope so a same-slug install moving between catalogs remaps immediately.
   const localKey = localSkills
     .filter((s) => s.kind === 'skill')
-    .map((s) => `${s.name}@${s.registryEntry?.version ?? '?'}@${s.registryEntry !== null ? 'R' : '_'}@${s.absolutePath}`)
+    .map((s) => `${s.name}@${s.registryEntry?.catalogScope ?? 'native'}@${s.registryEntry?.version ?? '?'}@${s.registryEntry !== null ? 'R' : '_'}@${s.absolutePath}`)
     .join('|');
   const installingKey = Array.from(installingNames).sort().join(',');
   useEffect(() => {
     setState((prev) => {
       if (prev.items.length === 0) return prev;
       const remapped = prev.items.map((it) => {
-        const group = localIndex.byName.get(it.name);
+        const group = localGroupForItem(it, localIndex);
         const primary = group?.global ?? group?.projects[0];
         const isReallyInstalled = !!primary && (it.isMine || primary.hasRegistryEntry);
         const hasAnyInstall = !!group && (

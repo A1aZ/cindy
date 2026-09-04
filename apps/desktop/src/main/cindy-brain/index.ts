@@ -351,6 +351,7 @@ import {
   readGhostSecret,
   readGhostSecretStrict,
   getProviderSecretStore,
+  readCustomProviderKey,
   readGhostSecretTail,
   removeGhostSecret,
   removeGhostSecrets,
@@ -368,6 +369,8 @@ import {
   isModelDisabledWithUniqueLegacyBasename,
   isProviderDisabled,
   type MediaCapability,
+  xaiApiOfficialRuntimeAgents,
+  XAI_API_CUSTOM_PROVIDER_ID,
 } from '@cindy/model-providers';
 import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
 import { readProviderOrder } from '../maker-host/provider-order-store.js';
@@ -4066,6 +4069,35 @@ function getImageChannelRegistry(): ImageChannelRegistry {
           ...(aspectRatio ? { size: GHOST_ASPECT_TO_GATEWAY_SIZE[aspectRatio] } : {}),
         }),
     });
+    const readXaiApiImageKey = (): string | null => {
+      // 图片凭证只取路由命中官方 api.x.ai 端点的 runtime:代理 runtime 的密钥
+      // 不得发往官方图片端点(避免 401/403 与凭证披露,见 PR #3875 review)。
+      const provider = getActiveCatalog().providers.find(
+        (candidate) => candidate.id === XAI_API_CUSTOM_PROVIDER_ID,
+      );
+      for (const agent of xaiApiOfficialRuntimeAgents(provider)) {
+        const value = readCustomProviderKey(XAI_API_CUSTOM_PROVIDER_ID, agent)?.trim();
+        if (value) return value;
+      }
+      return null;
+    };
+    const hasXaiApiImageKey = (): boolean =>
+      getActiveCatalog().providers.some(
+        (provider) => provider.id === XAI_API_CUSTOM_PROVIDER_ID,
+      ) && readXaiApiImageKey() !== null;
+    registry.register(
+      'xai-api',
+      createXaiImageChannel({
+        hasApiKey: hasXaiApiImageKey,
+        getApiKey: readXaiApiImageKey,
+        hasOAuthLogin: () => false,
+        getCredentialGeneration: () => 0,
+        getOwnerScopeKey: () => activeOwnerScopeKey(),
+        isOwnerBoundaryPending: () => isGhostBoundaryPending(),
+        fetchImplementation: ((url, init) => outboundFetch(url as string, init)) as typeof fetch,
+        beforeDispatch: (model) => assertMediaModelStillEnabled('image', model, 'xai-api'),
+      }),
+    );
     registry.register(
       'xai',
       createXaiImageChannel({

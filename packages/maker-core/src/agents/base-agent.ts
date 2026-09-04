@@ -1362,6 +1362,17 @@ export interface OneShotOptions {
    * 用于 skillReview "用户主动取消发布" 等场景。
    */
   signal?: AbortSignal;
+  /** Provider-native system/developer instructions for this one-shot request. */
+  systemPrompt?: string;
+  /** Additional provider-native output-shape instructions for this request. */
+  responseInstructions?: string;
+  /**
+   * Internal ownership/configuration fence checked immediately before a
+   * provider dispatch. Returning false must fail closed without sending the
+   * one-shot request (for example when the owning workflow was replaced while
+   * the agent host was starting).
+   */
+  beforeDispatch?: () => boolean | Promise<boolean>;
 }
 
 /**

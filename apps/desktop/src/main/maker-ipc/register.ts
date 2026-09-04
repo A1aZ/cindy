@@ -7318,21 +7318,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   // per-session 供应商路由:把 cc loopback proxy 看到的 x-claude-code-session-id(= sdkSessionId)
   // 反解成 xdt sessionId,供其统一路由器查该会话显式选定的供应商。sdkSessionId 唯一,直接匹配活跃会话。
-  // 热路径禁止把 ipcMaker 的 PRECONDITION_FAILED 抛进 proxy:owner boundary 期间抛错会被
-  // 引擎 fail-open 成默认 LiteLLM,provider-oauth 占位 key 原样上游 → 确定性 401。
+  // 查询异常交由 routingTransform 的 fail-closed 边界收口,不能伪装成查无会话后回落网关。
   setClaudeProxyOwnerBoundaryPendingChecker(isAppSessionBoundaryPending);
   setClaudeProxyOwnerScopeKeyReader(activeOwnerScopeKey);
   setClaudeProxySessionIdResolver((sdkSessionId) => {
-    try {
-      if (isAppSessionBoundaryPending()) return null;
-      const s = maker.listActiveSessions().find((x) => x.sdkSessionId === sdkSessionId);
-      return s ? s.id : null;
-    } catch (err) {
-      log.warn('claude proxy session resolver failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
+    if (isAppSessionBoundaryPending()) return null;
+    const s = maker.listActiveSessions().find((x) => x.sdkSessionId === sdkSessionId);
+    return s ? s.id : null;
   });
 
   // 会话移动转录迁移:活跃会话桥(查内存 sdkSessionId + 关闭 handle)。

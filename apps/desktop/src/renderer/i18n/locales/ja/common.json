@@ -7902,6 +7902,7 @@
       "networkHideRaw": "元のエラーを隠す",
       "gatewayProxyTokenInvalid": "Cindy AI の認証情報が無効になりました。「再試行」をクリックしてください。繰り返す場合はサインアウトしてから再ログインしてください",
       "gatewayProxyTokenInvalidNoRetry": "Cindy AI の認証情報が無効になりました。繰り返す場合はサインアウトしてから再ログインしてください",
+      "modelAccessDenied": "接続先のアカウントにはこのモデルへのアクセス権限がありません。別のモデルに切り替えるか、プロバイダーにアクセス権限を確認してください",
       "silentStopContinue": "続行",
       "silentStopContinueTitle": "現在のタスクを続行",
       "piTransportClosed": "リモート Pi の接続が切断されました（SSH チャンネルが閉じました）。リモートのタスクは実行中のままです。再接続すると続行できます。",

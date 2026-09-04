@@ -7908,6 +7908,7 @@
       "networkHideRaw": "Hide raw error",
       "gatewayProxyTokenInvalid": "Cindy AI credentials are no longer valid. Click Retry. If it happens again, sign out and sign back in",
       "gatewayProxyTokenInvalidNoRetry": "Cindy AI credentials are no longer valid. If it happens again, sign out and sign back in",
+      "modelAccessDenied": "The upstream account cannot access this model. Select another model or check its access with the provider",
       "silentStopContinue": "Continue",
       "silentStopContinueTitle": "Continue the current task",
       "piTransportClosed": "Remote Pi connection interrupted (SSH channel closed). The remote task is still running — reconnect to continue.",

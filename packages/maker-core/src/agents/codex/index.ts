@@ -2889,6 +2889,9 @@ export class CodexAgent extends BaseAgent {
   async oneShot(prompt: string, opts?: OneShotOptions): Promise<string> {
     const log = this.deps.logger.child('codex/oneShot');
     const timeoutMs = opts?.timeoutMs ?? 30_000;
+    const developerInstructions = [opts?.systemPrompt, opts?.responseInstructions]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n');
     // OneShotOptions.maxTokens 在 Codex 协议层就没暴露 (protocol.ts ThreadStartParams /
     // TurnStartParams 都没 max_tokens 字段) —— 静默忽略, 但调用方传了就 warn 一下,
     // 避免未来加新 oneShot 场景时 "我设了上限怎么没生效" 的隐性 bug。
@@ -2904,12 +2907,21 @@ export class CodexAgent extends BaseAgent {
       const { host } = await this.getUtilityHost();
       await host.ensureStarted();
 
+      // Host startup can await credential discovery and process readiness. The
+      // caller may have been replaced during that window, so perform the final
+      // ownership/configuration check immediately before the real thread/start
+      // dispatch. A rejected guard must not create a thread for the old owner.
+      if (opts?.beforeDispatch && !(await opts.beforeDispatch())) {
+        throw new OneShotError('network', 'Codex oneShot dispatch guard rejected');
+      }
+
       // 创建临时 thread (跟主 session 共享 server 但 thread state 隔离)
       const startResp = await host.request<ThreadStartResponse>(Method.ThreadStart, {
         cwd: os.tmpdir(),
         model: opts?.model ?? 'gpt-5.4-mini',
         approvalPolicy: 'never',
         sandbox: 'read-only', // kebab-case (v2.rs SandboxMode)
+        ...(developerInstructions ? { developerInstructions } : {}),
       } as ThreadStartParams);
       const threadId = startResp.thread.id;
 
@@ -2958,6 +2970,21 @@ export class CodexAgent extends BaseAgent {
           resolve({ kind: 'error', message: params.error?.message ?? 'unknown codex error' });
         },
       });
+
+      // thread/start 创建了临时 thread 后,到 turn/start 之间仍可能发生 owner 切换。
+      // 再次复核并在拒绝时释放订阅,避免把旧 owner 的 prompt 发进已创建的 thread。
+      if (opts?.beforeDispatch && !(await opts.beforeDispatch())) {
+        const pendingSubscription = subscription;
+        subscription = null;
+        try {
+          await pendingSubscription?.release();
+        } catch (releaseError) {
+          log.warn('oneShot dispatch guard rejected; failed to release temporary thread', {
+            error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+          });
+        }
+        throw new OneShotError('network', 'Codex oneShot dispatch guard rejected before turn/start');
+      }
 
       await host.request(Method.TurnStart, {
         threadId,

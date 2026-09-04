@@ -712,8 +712,15 @@
     {
       "idx": 101,
       "version": "6",
+      "when": 1788431426308,
+      "tag": "0101_repair_cjk_fts_missing_rows",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "6",
       "when": 1788335303374,
-      "tag": "0101_scheduler_billing",
+      "tag": "0102_scheduler_billing",
       "breakpoints": true
     }
   ]

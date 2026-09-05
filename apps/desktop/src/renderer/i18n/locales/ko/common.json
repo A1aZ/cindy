@@ -7188,6 +7188,7 @@
         "discountedVsStandard": "할인 중 · 표준가 대비 {{percent}}% 절약"
       },
       "trigger": {
+        "currentAndNext": "현재: {{current}}\n다음 메시지: {{next}}",
         "placeholder": "모델 선택",
         "aria": "모델 선택. 현재: {{model}}",
         "ariaWithEffort": "모델 선택. 현재: {{model}}, 추론 강도: {{effort}}",
@@ -7230,6 +7231,9 @@
         "fastBadge": "고속"
       },
       "source": {
+        "unavailable": "모델 사용 불가",
+        "reconnect": "다시 연결",
+        "manage": "제공자 관리",
         "railLabel": "소스",
         "connect": "모델 추가",
         "connectCta": "소스 연결 →",
@@ -7246,10 +7250,6 @@
         "railAll": "전체",
         "favoritesGroup": "즐겨찾기",
         "favoritesEmpty": "즐겨찾기가 없습니다 — 모델 행에 마우스를 올리고 ☆를 눌러 저장하세요",
-        "layoutBadge": "스타일 B 사용해 보기",
-        "layoutClassic": "스타일 A로 돌아가기",
-        "layoutTryUnified": "새 선택기 사용해 보기",
-        "layoutOriginal": "이전 버전으로 돌아가기",
         "addFavorite": "즐겨찾기에 저장",
         "customize": "사용자 지정",
         "removeFavorite": "즐겨찾기 해제",

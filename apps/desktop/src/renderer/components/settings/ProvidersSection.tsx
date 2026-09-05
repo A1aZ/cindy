@@ -103,7 +103,7 @@ import { SortableList } from '@/components/sidebar/SortableList';
 import { localCliDisplayName, type LocalCliDetection } from '../../../shared/localCliDetect';
 import { isBuiltinRefreshableProviderId } from '../../../shared/providerModelRefresh';
 import { applyProviderOrder } from '../../../shared/providerOrder';
-import type { CustomProviderConfig, ProviderView } from '@cindy/model-providers';
+import type { AgentKind, CustomProviderConfig, ProviderView } from '@cindy/model-providers';
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -621,6 +621,7 @@ function OpenAiHeader({ provider, onChanged }: { provider?: ProviderView; onChan
       <PillButton
         label={t('settings.providers.button.disconnect')}
         onClick={() => void handleLogout()}
+        disabled={oauthWritesBlocked}
       />
     </div>
   ) : reconnectRequired ? (
@@ -1883,8 +1884,20 @@ export function ProvidersSection() {
   const [wizard, setWizard] = useState<null | { entry?: WizardEntry }>(null);
   // 自定义供应商完整表单(编辑,或从向导「自定义端点」进入新建)。
   const [dialog, setDialog] = useState<
-    null | { mode: 'create' } | { mode: 'edit'; config: CustomProviderConfig }
+    | null
+    | { mode: 'create' }
+    | {
+        mode: 'edit';
+        config: CustomProviderConfig;
+        focusModelId?: string;
+        focusAgent?: AgentKind;
+      }
   >(null);
+  const [focusedModel, setFocusedModel] = useState<{
+    providerId: string;
+    modelId: string;
+    agent?: AgentKind;
+  } | null>(null);
   const addProviderButtonRef = useRef<HTMLButtonElement>(null);
   const [detections, setDetections] = useState<LocalCliDetection[]>([]);
   const [rediscovering, setRediscovering] = useState(false);
@@ -2127,13 +2140,31 @@ export function ProvidersSection() {
     if (loading) return;
     const connect = searchParams.get('connect');
     const wizardFlag = searchParams.get('wizard');
+    const model = searchParams.get('model')?.trim() || null;
+    const agentParam = searchParams.get('agent');
+    const agent =
+      agentParam === 'claude-code' || agentParam === 'codex' || agentParam === 'pi'
+        ? agentParam
+        : undefined;
     if (!connect && !wizardFlag) return;
     // 不用一次性 ref:消费后立即删参(下方 replace)即防重放;组件常驻期间
     // 再次带参导航(如二次深链)仍应生效(review 反馈)。
     if (connect) {
       const target = byId.get(connect);
-      if (listProviders.some((p) => p.id === connect)) {
+      if (target?.source === 'user' && model) {
         setSelectedId(connect);
+        setFocusedModel(null);
+        setDialog({
+          mode: 'edit',
+          config: providerViewToCustomProviderConfig(target),
+          focusModelId: model,
+          ...(agent ? { focusAgent: agent } : {}),
+        });
+      } else if (listProviders.some((p) => p.id === connect)) {
+        setSelectedId(connect);
+        setFocusedModel(
+          model ? { providerId: connect, modelId: model, ...(agent ? { agent } : {}) } : null,
+        );
       } else if (connect === 'xd') {
         // 无账号会话目录不含 xd → 落到登录引导行(不能当 preset 交给向导)。
         setSelectedId(CINDY_SIGNIN_ID);
@@ -2150,6 +2181,8 @@ export function ProvidersSection() {
     const next = new URLSearchParams(searchParams);
     next.delete('connect');
     next.delete('wizard');
+    next.delete('model');
+    next.delete('agent');
     setSearchParams(next, { replace: true });
   }, [loading, searchParams, setSearchParams, byId, listProviders]);
 
@@ -2395,7 +2428,10 @@ export function ProvidersSection() {
                     provider={provider}
                     selected={!cindySigninActive && effectiveSelected?.id === provider.id}
                     reconnectRequired={provider.id === 'openai' && openaiReconnectRequired}
-                    onSelect={() => setSelectedId(provider.id)}
+                    onSelect={() => {
+                      setFocusedModel(null);
+                      setSelectedId(provider.id);
+                    }}
                     position={index + 1}
                     total={listProviders.length}
                     onMove={(delta) => moveProviderWithKeyboard(provider.id, delta)}
@@ -2575,6 +2611,16 @@ export function ProvidersSection() {
                         )}
                         <UnifiedModelList
                           provider={effectiveSelected}
+                          focusModelId={
+                            focusedModel?.providerId === effectiveSelected.id
+                              ? focusedModel.modelId
+                              : undefined
+                          }
+                          focusAgent={
+                            focusedModel?.providerId === effectiveSelected.id
+                              ? focusedModel.agent
+                              : undefined
+                          }
                           emptyMessage={
                             effectiveSelected.id === MANAGED_OLLAMA_PROVIDER_ID
                               ? t('settings.providers.local.emptyInstalled')
@@ -2676,6 +2722,8 @@ export function ProvidersSection() {
       {dialog && (
         <CustomProviderDialog
           initial={dialog.mode === 'edit' ? dialog.config : undefined}
+          focusModelId={dialog.mode === 'edit' ? dialog.focusModelId : undefined}
+          focusAgent={dialog.mode === 'edit' ? dialog.focusAgent : undefined}
           existingIds={providers.map((p) => p.id)}
           returnFocusRef={dialog.mode === 'create' ? addProviderButtonRef : undefined}
           onClose={() => setDialog(null)}

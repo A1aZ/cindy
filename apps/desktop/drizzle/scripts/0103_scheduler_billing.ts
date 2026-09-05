@@ -1,4 +1,4 @@
-﻿import type Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 
 function run(db: Database.Database): void {
   const columns = db

@@ -47,6 +47,7 @@ export type DbTxName =
   | 'wechatPromoteTaskAttachments'
   | 'wechatRefreshOutboxContexts'
   | 'wechatUnbindCleanup'
+  | 'skillUsage.applyMutation'
   | 'session.importShare';
 
 export interface CodexImportMessagesArgs {
@@ -538,6 +539,37 @@ export interface ImDeleteBindingsArgs {
   }>;
 }
 
+export interface ImRotateSessionArgs {
+  previousSessionId: string | null;
+  detachBinding: {
+    channel: string;
+    botContextId: string;
+    userId: string;
+    scopeKey: string;
+    targetSessionId: string;
+  } | null;
+  session: {
+    id: string;
+    title: string;
+    workingDir: string;
+    workspaceKind: 'project' | 'dialogue';
+    model: string;
+    effort: string;
+    permissionMode: string;
+    fastMode: boolean;
+    agentKind: string;
+    source: string;
+    providerId: string | null;
+    imBotContextId: string;
+    imUserId: string;
+  };
+  now: number;
+}
+
+export interface ImRotateSessionResult {
+  previousStatus: 'active' | 'archived' | 'deleted' | null;
+}
+
 export type WechatInboxStatus =
   | 'pending'
   | 'dispatching'
@@ -817,36 +849,43 @@ export interface WechatUnbindCleanupResult {
   filePaths: string[];
 }
 
-export interface ImRotateSessionArgs {
-  previousSessionId: string | null;
-  detachBinding: {
-    channel: string;
-    botContextId: string;
-    userId: string;
-    scopeKey: string;
-    targetSessionId: string;
-  } | null;
-  session: {
-    id: string;
-    title: string;
-    workingDir: string;
-    workspaceKind: 'project' | 'dialogue';
-    model: string;
-    effort: string;
-    permissionMode: string;
-    fastMode: boolean;
-    agentKind: string;
-    providerId: string | null;
-    source: string;
-    imBotContextId: string;
-    imUserId: string;
-  };
-  now: number;
-}
-
-export interface ImRotateSessionResult {
-  previousStatus: 'active' | 'archived' | 'deleted' | null;
-}
+export type SkillUsageApplyMutationArgs =
+  | {
+      kind: 'persist';
+      source: {
+        rawFilePath: string;
+        analyzerVersion: string;
+        agentKind: string;
+        sessionId: string;
+        sdkSessionId: string;
+        mtimeMs: number;
+        sizeBytes: number;
+        scannedAt: number;
+      };
+      exposures: Array<{
+        id: string;
+        rawFilePath: string;
+        rawLineNo: number;
+        sessionId: string;
+        sdkSessionId: string;
+        agentKind: string;
+        skillName: string;
+        skillPath: string | null;
+        skillDocumentHash: string | null;
+        exposureContentHash: string;
+        documentHashSource: string;
+        source: string;
+        toolUseId: string | null;
+        seenAt: number;
+        toolCallCount: number;
+        repeatedToolCallCount: number;
+        toolErrorCount: number;
+        commandCallCount: number;
+        commandFailureCount: number;
+      }>;
+    }
+  | { kind: 'deleteBefore'; analyzerVersion: string; recentSince: number }
+  | { kind: 'promote'; analyzerVersion: string };
 
 export type DbTxArgsByName = {
   'codex.importMessages': CodexImportMessagesArgs;
@@ -897,6 +936,7 @@ export type DbTxArgsByName = {
   wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsArgs;
   wechatRefreshOutboxContexts: WechatRefreshOutboxContextsArgs;
   wechatUnbindCleanup: WechatUnbindCleanupArgs;
+  'skillUsage.applyMutation': SkillUsageApplyMutationArgs;
   'session.importShare': SessionImportShareArgs;
 };
 
@@ -949,5 +989,6 @@ export type DbTxResultByName = {
   wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsResult;
   wechatRefreshOutboxContexts: WechatRefreshOutboxContextsResult;
   wechatUnbindCleanup: WechatUnbindCleanupResult;
+  'skillUsage.applyMutation': undefined;
   'session.importShare': { messageCount: number };
 };

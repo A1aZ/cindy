@@ -521,7 +521,11 @@ function getCodexChipWindows(
   return [
     toCodexChipWindow('primary', snapshot.primary, t, nowMs),
     toCodexChipWindow('secondary', snapshot.secondary, t, nowMs),
-  ].filter((v): v is ChipWindowSegment => Boolean(v));
+  ].filter((v): v is ChipWindowSegment => Boolean(v)).map((window) => ({
+    ...window,
+    // 相同长度的窗口也可能属于不同账号、数据源或模型桶,不能跨额度比较。
+    key: JSON.stringify([window.key, snapshot.accountId ?? null, snapshot.source ?? null, snapshot.limitId ?? null]),
+  }));
 }
 
 function isCodexWindowExhausted(window: RateLimitSnapshot['primary']): boolean {
@@ -715,7 +719,10 @@ function getClaudeChipWindows(
       resetPending: isResetPending(resetsAtMs, nowMs),
     });
   }
-  return windows;
+  return windows.map((window) => ({
+    ...window,
+    key: JSON.stringify([window.key, snapshot.accountFingerprint ?? null]),
+  }));
 }
 
 // 告警判定 (chip 变红的口径 + allowed_warning 为何不染红、为何不用 representativeClaim
@@ -1095,15 +1102,13 @@ function getXaiChipWindows(
   const used = snapshot.creditUsagePercent ?? 0;
   const countdown = formatCompactTimeUntilReset(snapshot.resetsAt ?? undefined, nowMs, t);
   const resetsAtMs = toEpochMs(snapshot.resetsAt ?? undefined);
-  return [
-    {
-      key: 'xai-weekly',
-      label: countdown ?? t('todaySpend.xai.weeklyLabel'),
-      remainingPercent: 100 - clampPercent(used),
-      resetsAtMs,
-      resetPending: isResetPending(resetsAtMs, nowMs),
-    },
-  ];
+  return [{
+    key: JSON.stringify(['xai-weekly', snapshot.accountFingerprint ?? null]),
+    label: countdown ?? t('todaySpend.xai.weeklyLabel'),
+    remainingPercent: 100 - clampPercent(used),
+    resetsAtMs,
+    resetPending: isResetPending(resetsAtMs, nowMs),
+  }];
 }
 
 function renderSegmentedLabel(segments: React.ReactNode[]): React.ReactNode {

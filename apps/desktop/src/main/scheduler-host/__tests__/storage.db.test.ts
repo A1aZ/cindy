@@ -36,6 +36,13 @@ function estimatedMoneyFromLegacyUsd(amountUsd: number) {
   };
 }
 
+function sdkEstimatedMoneyFromLegacyUsd(amountUsd: number) {
+  return {
+    ...estimatedMoneyFromLegacyUsd(amountUsd),
+    estimateReasons: ['sdk-estimate'] as const,
+  };
+}
+
 const ZERO_ACTUAL_MONEY = {
   amount: 0,
   currency: 'USD' as const,
@@ -178,6 +185,8 @@ const SCHEDULER_DDL = [
       estimated_value_usd REAL NOT NULL DEFAULT 0,
       cost_amount REAL NOT NULL DEFAULT 0,
       estimated_value_amount REAL NOT NULL DEFAULT 0,
+      sdk_estimated_value_amount REAL NOT NULL DEFAULT 0,
+      cost_provider_attribution_version INTEGER NOT NULL DEFAULT 1,
       cost_currency TEXT,
       cost_is_approximate INTEGER NOT NULL DEFAULT 0,
       cost_attribution TEXT NOT NULL DEFAULT 'legacy',
@@ -391,11 +400,7 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       const initial = new Map(
         (await harness.storage.listSidebarIndexRuns()).map((run) => [run.runId, run]),
       );
-      expect([...initial.keys()]).toEqual([
-        'run-old-unread',
-        'run-old-running',
-        'run-latest-read',
-      ]);
+      expect([...initial.keys()]).toEqual(['run-old-unread', 'run-old-running', 'run-latest-read']);
       expect(initial.get('run-latest-read')?.sessionId).toBe('sess-sidebar-index');
       expect(initial.get('run-old-unread')?.sessionId).toBe('sess-sidebar-index');
       expect(initial.get('run-old-running')?.sessionId).toBeUndefined();
@@ -419,6 +424,62 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       expect(
         (await harness.storage.listSidebarIndexRuns()).every((run) => run.sessionId === undefined),
       ).toBe(true);
+    } finally {
+      harness.close();
+    }
+  });
+
+  it('retains only the latest read failure per session alongside unread runs and latest ownership', async () => {
+    const harness = createStorageHarness();
+    const schedule = baseSchedule({ id: 'sch-failure-history' });
+    try {
+      harness.db.run(sql`
+        INSERT INTO sessions (id, title, source, workspace_kind, created_at, updated_at)
+        VALUES ('sess-failure-history', 'Failure history', 'desktop', 'dialogue', 1, 1)
+      `);
+      await harness.storage.insert(schedule);
+      await harness.storage.insert(baseSchedule({ id: 'sch-latest-owner' }));
+      for (const [id, status, firedAt, readAt] of [
+        ['old-unread', 'failed', 10, undefined],
+        ['old-read', 'failed', 20, 21],
+        ['latest-failure', 'interrupted', 30, undefined],
+        ['aborted', 'aborted', 40, 41],
+      ] as const) {
+        await harness.storage.insertRun({
+          id,
+          status,
+          firedAt,
+          readAt,
+          scheduleId: schedule.id,
+          sessionId: 'sess-failure-history',
+        });
+      }
+      await harness.storage.insertRun({
+        id: 'latest-success',
+        status: 'success',
+        firedAt: 50,
+        readAt: 51,
+        scheduleId: 'sch-latest-owner',
+        sessionId: 'sess-failure-history',
+      });
+      expect((await harness.storage.listSidebarIndexRuns()).map((run) => run.runId)).toEqual([
+        'old-unread',
+        'latest-failure',
+        'latest-success',
+      ]);
+
+      await harness.storage.updateRun('latest-failure', { readAt: 60 });
+      await harness.storage.updateRun('old-unread', { readAt: 60 });
+      const afterRead = await harness.storage.listSidebarIndexRuns();
+      expect(afterRead.map((run) => run.runId)).toEqual(['latest-failure', 'latest-success']);
+      expect(afterRead[0]).toMatchObject({
+        status: 'interrupted',
+        readAt: 60,
+        sessionId: 'sess-failure-history',
+      });
+      expect(afterRead[1]).toMatchObject({ scheduleId: 'sch-latest-owner' });
+      // 独立重查仍保留失败记录，已读并未删除历史。
+      expect(await harness.storage.listSidebarIndexRuns()).toEqual(afterRead);
     } finally {
       harness.close();
     }
@@ -1167,7 +1228,10 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
 
   it('merges direct-only snapshot with a later message ledger update', async () => {
     const harness = createStorageHarness();
-    const schedule = baseSchedule({ id: 'sch-direct-only-snapshot', targetSessionId: 'sess-direct-only' });
+    const schedule = baseSchedule({
+      id: 'sch-direct-only-snapshot',
+      targetSessionId: 'sess-direct-only',
+    });
     const dbClient = { drizzle: harness.db } as unknown as DbClient;
     try {
       harness.db.run(sql`
@@ -1340,24 +1404,20 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
         {
           scheduleId: schedule.id,
-          totalMoney: {
-            ...actualMoneyFromLegacyUsd(2.25),
-            amount: expect.closeTo(2.25 + 5, 10),
-          },
-          totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
-          totalCostUsd: expect.closeTo(2.25 + 5, 10),
-          totalEstimatedValueUsd: 0,
+          totalMoney: actualMoneyFromLegacyUsd(6.25),
+          totalEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1),
+          totalSdkEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1),
+          totalCostUsd: expect.closeTo(6.25, 10),
+          totalEstimatedValueUsd: 1,
           sessionCount: 1,
           sessions: [
             {
               sessionId: 'sess-legacy',
-              totalMoney: {
-                ...actualMoneyFromLegacyUsd(2.25),
-                amount: expect.closeTo(2.25 + 5, 10),
-              },
-              totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
-              totalCostUsd: expect.closeTo(2.25 + 5, 10),
-              totalEstimatedValueUsd: 0,
+              totalMoney: actualMoneyFromLegacyUsd(6.25),
+              totalEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1),
+              totalSdkEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1),
+              totalCostUsd: expect.closeTo(6.25, 10),
+              totalEstimatedValueUsd: 1,
             },
           ],
         },
@@ -1395,18 +1455,20 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       await expect(harness.storage.listCostSummaries()).resolves.toEqual([
         {
           scheduleId: schedule.id,
-          totalMoney: actualMoneyFromLegacyUsd(1.5),
-          totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
-          totalCostUsd: expect.closeTo(1.5, 10),
-          totalEstimatedValueUsd: 0,
+          totalMoney: ZERO_ACTUAL_MONEY,
+          totalEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1.5),
+          totalSdkEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1.5),
+          totalCostUsd: 0,
+          totalEstimatedValueUsd: 1.5,
           sessionCount: 1,
           sessions: [
             {
               sessionId: 'sess-unlinked',
-              totalMoney: actualMoneyFromLegacyUsd(1.5),
-              totalEstimatedValueMoney: ZERO_ESTIMATED_MONEY,
-              totalCostUsd: expect.closeTo(1.5, 10),
-              totalEstimatedValueUsd: 0,
+              totalMoney: ZERO_ACTUAL_MONEY,
+              totalEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1.5),
+              totalSdkEstimatedValueMoney: sdkEstimatedMoneyFromLegacyUsd(1.5),
+              totalCostUsd: 0,
+              totalEstimatedValueUsd: 1.5,
             },
           ],
         },

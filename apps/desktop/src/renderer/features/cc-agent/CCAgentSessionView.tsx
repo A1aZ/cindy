@@ -95,8 +95,9 @@ import { ErrorBanner } from '@/components/chat/ErrorBanner';
 import {
   ErrorTailErrorBanner,
   InterruptedTurnBanner,
-  UnreadFailedScheduleBanner,
 } from '@/components/chat/InterruptedTurnBanner';
+import { UnreadFailedScheduleBanner } from '@/components/chat/UnreadFailedScheduleBanner';
+import { useReadFailedScheduleRuns } from '@/features/scheduler/hooks/useReadFailedScheduleRuns';
 import { useAutomationScheduleSessionInfo } from './hooks/useAutomationScheduleSessionIndex';
 import { markScheduleRunsReadAndSync } from '../scheduler/lib/scheduleRunReadSync';
 import { useBackgroundBashTasks } from '@/hooks/useBackgroundBashTasks';
@@ -580,7 +581,8 @@ function summarizeRunningWorkflow(taskUpdates: ReadonlyMap<string, AgentTaskUpda
   let latestTs = Number.NEGATIVE_INFINITY;
   const seen = new Set<AgentTaskUpdate>();
   for (const update of taskUpdates.values()) {
-    if (update.taskType !== 'local_workflow' || update.status !== 'running' || seen.has(update)) continue;
+    if (update.taskType !== 'local_workflow' || update.status !== 'running' || seen.has(update))
+      continue;
     seen.add(update);
     const timestamp = Date.parse(update.updatedAt ?? update.createdAt ?? '');
     if ((Number.isFinite(timestamp) ? timestamp : 0) >= latestTs) {
@@ -589,7 +591,9 @@ function summarizeRunningWorkflow(taskUpdates: ReadonlyMap<string, AgentTaskUpda
     }
   }
   if (!workflow) return null;
-  const agents = (workflow.workflowProgress ?? []).filter((entry) => entry.type === 'workflow_agent');
+  const agents = (workflow.workflowProgress ?? []).filter(
+    (entry) => entry.type === 'workflow_agent',
+  );
   if (agents.length === 0) return { done: 0, total: 0 };
   return {
     done: agents.filter((entry) => {
@@ -1737,10 +1741,7 @@ export function CCAgentSessionView({
     return subscribeWorkLouderCodexAction((action) => {
       if (action.type !== 'command') return false;
       if (!sessionId || !ownsHardwareTaskActions) return false;
-      if (
-        action.commandId === 'approval.approve' ||
-        action.commandId === 'composer.submit'
-      ) {
+      if (action.commandId === 'approval.approve' || action.commandId === 'composer.submit') {
         if (pendingPermission) {
           respondToPermission({ behavior: 'allow' });
           return true;
@@ -1751,10 +1752,7 @@ export function CCAgentSessionView({
         }
         return false;
       }
-      if (
-        action.commandId === 'approval.decline' ||
-        action.commandId === 'navigateBack'
-      ) {
+      if (action.commandId === 'approval.decline' || action.commandId === 'navigateBack') {
         if (pendingPermission) {
           respondToPermission({
             behavior: 'deny',
@@ -1940,12 +1938,11 @@ export function CCAgentSessionView({
     () => (isRemoteSession || remoteDeviceId ? null : summarizeRunningWorkflow(taskUpdates)),
     [isRemoteSession, remoteDeviceId, taskUpdates],
   );
-  const composerStatus =
-    runningWorkflow
-      ? runningWorkflow.total > 0
-        ? t('ccAgent.agentStatus.waitingWorkflowProgress', runningWorkflow)
-        : t('ccAgent.agentStatus.waitingWorkflow')
-      : agentStatus.status;
+  const composerStatus = runningWorkflow
+    ? runningWorkflow.total > 0
+      ? t('ccAgent.agentStatus.waitingWorkflowProgress', runningWorkflow)
+      : t('ccAgent.agentStatus.waitingWorkflow')
+    : agentStatus.status;
 
   // error-tail-banner:会话尾部停在未忽略的 role='error' 行 → 输入框上方显示
   // 可操作红条(与 live ErrorBanner 同风格;2026-07-05 产品决策统一——所有尾部
@@ -1958,6 +1955,7 @@ export function CCAgentSessionView({
   const scheduleSessionInfo = useAutomationScheduleSessionInfo(sessionId);
   const unreadFailedScheduleRunIds =
     scheduleSessionInfo?.unreadFailedRunIds ?? EMPTY_UNREAD_FAILED_RUN_IDS;
+  useReadFailedScheduleRuns(unreadFailedScheduleRunIds, viewVisible && historyLoaded);
   const currentUnreadFailedRunId =
     scheduleSessionInfo?.latestUnreadFailedRunId ?? unreadFailedScheduleRunIds[0];
   const markCurrentUnreadFailedScheduleRun = useCallback(async (): Promise<boolean> => {
@@ -1971,9 +1969,6 @@ export function CCAgentSessionView({
     );
     return false;
   }, [currentUnreadFailedRunId, t]);
-  const handleUnreadFailedScheduleDismiss = useCallback(() => {
-    void markCurrentUnreadFailedScheduleRun();
-  }, [markCurrentUnreadFailedScheduleRun]);
   const errorTailMsg = useMemo(() => {
     const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
     return last &&
@@ -2094,8 +2089,9 @@ export function CCAgentSessionView({
       // (main 侧 merge dismissed:true,不丢 sdkError 等原字段)。落库失败会回滚乐观态。
       // 必须**等落库完成**再重算:dismiss 落库无广播,而告警查询是纯 DB 读,
       // 抢在写入前读会仍判定告警存在 —— 横幅已熄灭、红点却卡住。
-      return makerChatStore.dismissErrorTailMessage(sessionId, errorTailMsg.clientId).then(
-        (persisted) => {
+      return makerChatStore
+        .dismissErrorTailMessage(sessionId, errorTailMsg.clientId)
+        .then((persisted) => {
           // device-link 远程会话:dismiss 经隧道写到**被控端** DB,控制端本机库里没有
           // 这个会话的行,派生腿查不到、也从未认领它 —— 必须显式 ack(explicit 清本机
           // 角标 + 隧道回执清被控端未读)。删掉展示型 ack 后这是唯一的清除路径。
@@ -2104,8 +2100,7 @@ export function CCAgentSessionView({
           // 本机会话由下面的重算收敛,不重复 ack。
           if (persisted && remoteDeviceId) ackErrorAlertHandled(sessionId);
           return refreshPendingAlerts();
-        },
-      );
+        });
     });
   }, [errorTailMsg, markCurrentUnreadFailedScheduleRun, remoteDeviceId, sessionId]);
   // interrupted-turn-resume(简化版):「疑似中断」由 session 行的双时间戳驱动
@@ -2924,11 +2919,11 @@ export function CCAgentSessionView({
     [sessionId, session?.writableDirs, refreshServerSession, t],
   );
 
-  const writableDirRemovalQueueRef = useRef<ReturnType<typeof createWritableDirRemovalQueue> | null>(
-    null,
-  );
-  const writableDirRemovalQueue =
-    (writableDirRemovalQueueRef.current ??= createWritableDirRemovalQueue());
+  const writableDirRemovalQueueRef = useRef<ReturnType<
+    typeof createWritableDirRemovalQueue
+  > | null>(null);
+  const writableDirRemovalQueue = (writableDirRemovalQueueRef.current ??=
+    createWritableDirRemovalQueue());
   const handleWritableDirRemove = useCallback(
     async (path: string) => {
       if (!sessionId) return;
@@ -3816,8 +3811,14 @@ export function CCAgentSessionView({
     await refreshServerSession();
     await retryLastError();
   }, [
-    canSwitchToClaudeSubscription, confirmDialog, fastMode, refreshServerSession,
-    retryLastError, session, sessionId, t,
+    canSwitchToClaudeSubscription,
+    confirmDialog,
+    fastMode,
+    refreshServerSession,
+    retryLastError,
+    session,
+    sessionId,
+    t,
   ]);
 
   const handleSilentStopContinue = useCallback(() => {
@@ -4797,7 +4798,7 @@ export function CCAgentSessionView({
 
             {!errorTailMsg &&
               !interruptedFromSession &&
-              unreadFailedScheduleRunIds.length > 0 &&
+              scheduleSessionInfo?.hasFailedRun &&
               !syntheticContinuationPending &&
               !error &&
               !credentialSwitchWait &&
@@ -4805,7 +4806,7 @@ export function CCAgentSessionView({
               !agentStatus.isRunning &&
               sessionId && (
                 <UnreadFailedScheduleBanner
-                  onDismiss={handleUnreadFailedScheduleDismiss}
+                  key={sessionId}
                   style={{ width: inputWidth }}
                   className="py-1"
                 />
@@ -5533,11 +5534,13 @@ function RunningStatusBar({
   // 后台子任务模式的左段文案:上一轮残留的 status(多半是 "Done")在此语义下是
   // 误导信息,整体替换为后台运行提示。仅后台 Bash 时用带数量的专属文案 ——
   // 「模型用量仍在消耗」对不调模型的 bash 任务是错误陈述。
-  const displayStatus = workflowStatus ?? (backgroundTasksRunning
-    ? backgroundBashOnlyCount > 0
-      ? t('chat.backgroundActivity.bashStatus', { count: backgroundBashOnlyCount })
-      : t('chat.backgroundActivity.status')
-    : localizeAgentStatus(status, t));
+  const displayStatus =
+    workflowStatus ??
+    (backgroundTasksRunning
+      ? backgroundBashOnlyCount > 0
+        ? t('chat.backgroundActivity.bashStatus', { count: backgroundBashOnlyCount })
+        : t('chat.backgroundActivity.status')
+      : localizeAgentStatus(status, t));
   // F-COMPACT-1: when SDK is auto-summarizing the conversation, give the
   // status bar a distinct icon so the user can tell "Compacting..." apart
   // from "Thinking..." — both share the shimmer animation by design, but
@@ -5581,7 +5584,15 @@ function RunningStatusBar({
     }
     shimmerPlayingRef.current = true;
     setShimmerCycle((n) => n + 1);
-  }, [visible, suppressContent, reducedMotion, status, tokenUsage, outputTokens, generationDurationMs]);
+  }, [
+    visible,
+    suppressContent,
+    reducedMotion,
+    status,
+    tokenUsage,
+    outputTokens,
+    generationDurationMs,
+  ]);
 
   // Animate the token counter so live mid-turn updates feel like a smoothly-
   // incrementing number. Rate does not use this: locally ticking the
@@ -5810,7 +5821,12 @@ function ContextCapacityRing({
   const dashOffset = circumference - (circumference * pct) / 100;
 
   // Color thresholds per spec
-  const fillColor = pct > 90 ? 'var(--error-flat)' : pct > 70 ? 'var(--warning-fg)' : 'var(--msg-tool-card-chevron)';
+  const fillColor =
+    pct > 90
+      ? 'var(--error-flat)'
+      : pct > 70
+        ? 'var(--warning-fg)'
+        : 'var(--msg-tool-card-chevron)';
 
   const usedTokens = Math.min(contextTokens, contextWindow || Infinity);
   const tooltipText =

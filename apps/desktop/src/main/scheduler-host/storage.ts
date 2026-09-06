@@ -268,6 +268,7 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
   snapshotCostMoney: RegionalMoney | null;
   snapshotEstimatedValueMoney: RegionalMoney | null;
   legacyProjectedActualAmount: number;
+  totalTokens: number;
 } {
   if (!agentMeta) {
     return {
@@ -277,6 +278,7 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
       snapshotCostMoney: null,
       snapshotEstimatedValueMoney: null,
       legacyProjectedActualAmount: 0,
+      totalTokens: 0,
     };
   }
   try {
@@ -305,30 +307,37 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
         snapshotCostMoney: null,
         snapshotEstimatedValueMoney: null,
         legacyProjectedActualAmount: 0,
+        totalTokens: 0,
       };
     }
     const snapshotIsEstimate =
       parsed.turnCostIsEstimate === true || money.kind === 'value-estimate';
     const turnUsageDetails = normalizeTurnUsageDetails(parsed.turnUsageDetails);
+    const modelCandidates = [
+      parsed.model,
+      turnUsageDetails?.model,
+      ...(turnUsageDetails?.models ?? []),
+      ...(turnUsageDetails?.perModelCost?.map((entry) => entry.model) ?? []),
+    ];
+    const hasLegacyProviderEvidence =
+      parsed.turnCostProviderId !== undefined ||
+      modelCandidates.some((model) => typeof model === 'string' && model.trim().length > 0);
     const turnCostIsCustomProvider =
       typeof parsed.turnCostIsCustomProvider === 'boolean'
         ? parsed.turnCostIsCustomProvider
-        : inferLegacyCustomProviderCostFlag({
-            turnCostIsEstimate:
-              typeof parsed.turnCostIsEstimate === 'boolean'
-                ? parsed.turnCostIsEstimate
-                : undefined,
-            turnCostProviderId:
-              typeof parsed.turnCostProviderId === 'string' || parsed.turnCostProviderId === null
-                ? parsed.turnCostProviderId
-                : undefined,
-            modelCandidates: [
-              parsed.model,
-              turnUsageDetails?.model,
-              ...(turnUsageDetails?.models ?? []),
-              ...(turnUsageDetails?.perModelCost?.map((entry) => entry.model) ?? []),
-            ],
-          });
+        : hasLegacyProviderEvidence
+          ? inferLegacyCustomProviderCostFlag({
+              turnCostIsEstimate:
+                typeof parsed.turnCostIsEstimate === 'boolean'
+                  ? parsed.turnCostIsEstimate
+                  : undefined,
+              turnCostProviderId:
+                typeof parsed.turnCostProviderId === 'string' || parsed.turnCostProviderId === null
+                  ? parsed.turnCostProviderId
+                  : undefined,
+              modelCandidates,
+            })
+          : false;
     const sdkEstimatedValueMoney = sdkEstimatedValuePart(
       money,
       turnUsageDetails?.perModelCost?.map((entry) => entry.money),
@@ -352,6 +361,7 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
       snapshotEstimatedValueMoney: snapshotIsEstimate ? asValueEstimateMoney(money) : null,
       legacyProjectedActualAmount:
         !structured && parsed.turnCostIsEstimate !== true ? money.amount : 0,
+      totalTokens: turnUsageDetails?.totalTokens ?? 0,
     };
   } catch {
     return {
@@ -361,6 +371,7 @@ function turnCostFromAgentMeta(agentMeta: string | null): {
       snapshotCostMoney: null,
       snapshotEstimatedValueMoney: null,
       legacyProjectedActualAmount: 0,
+      totalTokens: 0,
     };
   }
 }
@@ -671,6 +682,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         sdkEstimatedValues: RegionalMoney[];
         snapshotCostValues: RegionalMoney[];
         snapshotEstimatedValues: RegionalMoney[];
+        totalTokens: number;
       }
     >();
     for (const row of rows) {
@@ -683,6 +695,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         sdkEstimatedValues: [],
         snapshotCostValues: [],
         snapshotEstimatedValues: [],
+        totalTokens: 0,
       };
       if (cost.costMoney) current.costValues.push(cost.costMoney);
       if (cost.estimatedValueMoney) {
@@ -695,6 +708,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       if (cost.snapshotEstimatedValueMoney) {
         current.snapshotEstimatedValues.push(cost.snapshotEstimatedValueMoney);
       }
+      current.totalTokens += cost.totalTokens;
       ledger.set(origin.runId, current);
     }
 
@@ -744,6 +758,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         ];
         return {
           ...run,
+          ...(persisted.totalTokens > 0 ? { totalTokens: persisted.totalTokens } : {}),
           costMoney:
             addCompatibleRegionalMoney(costValues, run.costMoney?.currency) ?? zeroUsageMoney(),
           estimatedValueMoney:
@@ -780,6 +795,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         );
         return {
           ...run,
+          ...(persisted.totalTokens > 0 ? { totalTokens: persisted.totalTokens } : {}),
           costMoney:
             addCompatibleRegionalMoney(
               [...(snapshot.costMoney ? [snapshot.costMoney] : []), ...persisted.costValues],
@@ -804,9 +820,10 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
           costAttribution: 'exact',
         };
       }
-      return {
-        ...run,
-        costMoney: addCompatibleRegionalMoney(persisted.costValues) ?? zeroUsageMoney(),
+        return {
+          ...run,
+          ...(persisted.totalTokens > 0 ? { totalTokens: persisted.totalTokens } : {}),
+          costMoney: addCompatibleRegionalMoney(persisted.costValues) ?? zeroUsageMoney(),
         estimatedValueMoney:
           addCompatibleRegionalMoney(persisted.estimatedValues) ?? zeroUsageMoney('value-estimate'),
         sdkEstimatedValueMoney:
@@ -818,7 +835,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
 
   /**
    * Sidebar 聚合索引用的轻量 run 列表：
-   * - 所有带 sessionId 的 run 都返回，保证高频 schedule 超过 history limit 后仍能归组。
+   * - 每个 session 返回最新映射，并保留最近一次失败/中断，避免已读失败历史消失。
    * - 额外包含无 sessionId 的未读终态 run，保证自动化任务列表的小红点不被漏掉。
    */
   async listSidebarIndexRuns(): Promise<ScheduleSidebarIndexRun[]> {
@@ -837,7 +854,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       readAt: scheduleRuns.readAt,
       firedAt: scheduleRuns.firedAt,
     };
-    const [latestSessionRows, unreadRows, runningRows] = await Promise.all([
+    const [latestSessionRows, unreadRows, runningRows, latestFailedRows] = await Promise.all([
       db
         .select(projection)
         .from(scheduleSessionLatestRuns)
@@ -854,10 +871,30 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         .from(scheduleRuns)
         .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
         .where(eq(scheduleRuns.status, 'running')),
+      db
+        .select(projection)
+        .from(scheduleSessionLatestRuns)
+        .innerJoin(
+          scheduleRuns,
+          eq(
+            scheduleRuns.id,
+            sql`(
+              SELECT failed.id FROM schedule_runs AS failed
+              WHERE failed.session_id = ${scheduleSessionLatestRuns.sessionId}
+                AND failed.status IN ('failed', 'interrupted')
+              ORDER BY failed.fired_at DESC, failed.id DESC LIMIT 1
+            )`,
+          ),
+        )
+        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id)),
     ]);
     const latestRunIds = new Set(latestSessionRows.map((row) => row.runId));
+    const unreadRunIds = new Set(unreadRows.map((row) => row.runId));
     const rows = [
       ...unreadRows.filter((row) => !latestRunIds.has(row.runId)),
+      ...latestFailedRows.filter(
+        (row) => !latestRunIds.has(row.runId) && !unreadRunIds.has(row.runId),
+      ),
       ...runningRows
         .filter((row) => !latestRunIds.has(row.runId))
         .map((row) => ({ ...row, sessionId: null })),

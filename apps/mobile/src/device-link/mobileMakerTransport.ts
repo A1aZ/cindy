@@ -488,6 +488,7 @@ export interface MobileMakerTransport {
    * 网关配额。老被控端 CHANNEL_NOT_ALLOWED → 调用方隐藏限额区块。
    */
   getAccountUsage(agentKind: MobileAgentKind): Promise<unknown>;
+  getSessionEstimatedValue(sessionId: string): Promise<{ totalValueMoney?: unknown; totalValueUsd?: number }>;
   /** Codex app-server authoritative windows plus banked reset credits and a bound reset offer. */
   getCodexRateLimits(): Promise<MobileCodexRateLimitsResult>;
   /** Consume the desktop-issued offer; retries must pass the same idempotency key. */
@@ -771,6 +772,7 @@ export function createMobileMakerTransport({
     setExtraDirs: (sessionId, dirs) => call('maker:set-extra-dirs', [sessionId, dirs]),
     getModelPricing: () => call('maker:usage:model-pricing'),
     getAccountUsage: (agentKind) => call('maker:usage:account', [agentKind]),
+    getSessionEstimatedValue: (sessionId) => call('local-db:messages:estimatedSessionValue', [sessionId]),
     getCodexRateLimits: () => call('maker:usage:codex-rate-limits'),
     resetCodexRateLimits: (idempotencyKey) => (
       call('maker:usage:codex-rate-limit-reset', [idempotencyKey])

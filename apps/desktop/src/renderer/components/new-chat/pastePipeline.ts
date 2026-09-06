@@ -274,6 +274,9 @@ function segmentPathCandidates(
     segments.push({ kind: 'path', path: trimmed });
     matchedAny = true;
     cursor = m.index + trimmed.length;
+    // 尾分隔符属于目录路径,不应作为非空白文本阻止独立路径识别。
+    // 只消费紧随路径的分隔符,诊断后缀和标点仍保留为文本。
+    cursor += /^[\\/]+/.exec(text.slice(cursor))?.[0].length ?? 0;
     PATH_CANDIDATE_RE.lastIndex = cursor;
   }
   if (!matchedAny) return null;

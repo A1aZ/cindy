@@ -185,6 +185,29 @@ describe('segmentPastedContent — path candidates', () => {
     ]);
   });
 
+  it.each([
+    [WORKDIR, `${WORKDIR}/apps/desktop`, '/'],
+    [WORKDIR, `${WORKDIR}/apps/desktop`, '///'],
+    [WIN_WORKDIR, 'C:\\Code\\XDMaker\\apps', '\\'],
+    [WIN_WORKDIR, 'C:\\Code\\XDMaker\\apps', '\\\\'],
+    [WIN_WORKDIR, 'c:/code/xdmaker/apps', '/'],
+  ])('recognizes standalone directory paths for %s: %s%s', (workingDir, dir, suffix) => {
+    expect(segmentPastedContent(`${dir}${suffix}`, { workingDir })).toEqual([
+      { kind: 'path', path: dir },
+    ]);
+    expect(segmentPastedContent(` \t${dir}${suffix}\r\n`, { workingDir })).toEqual([
+      { kind: 'text', text: ' \t' },
+      { kind: 'path', path: dir },
+      { kind: 'text', text: '\r\n' },
+    ]);
+    expect(segmentPastedContent(`${workingDir}${suffix}`, { workingDir })).toBeNull();
+    expect(segmentPastedContent(`cd ${dir}${suffix}`, { workingDir })).toBeNull();
+  });
+
+  it.each(['/:12', ':12/', '/)', ')/', '/,', ',/'])('keeps directory diagnostic suffix %s literal', (suffix) => {
+    expect(segmentPastedContent(`${WORKDIR}/apps${suffix}`, { workingDir: WORKDIR })).toBeNull();
+  });
+
   it('does not treat the workingDir itself as a path segment', () => {
     expect(segmentPastedContent(`目录是 ${WORKDIR} 本体`, { workingDir: WORKDIR })).toBeNull();
   });

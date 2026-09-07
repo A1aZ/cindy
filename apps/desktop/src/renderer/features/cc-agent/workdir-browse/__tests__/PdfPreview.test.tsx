@@ -29,7 +29,10 @@ import {
   PdfPreview,
 } from '../PdfPreview';
 
-type FakeObserverEntry = Pick<IntersectionObserverEntry, 'target' | 'isIntersecting'>;
+type FakeObserverEntry = Pick<
+  IntersectionObserverEntry,
+  'target' | 'isIntersecting' | 'intersectionRatio'
+>;
 
 class FakeIntersectionObserver {
   static instances: FakeIntersectionObserver[] = [];
@@ -53,9 +56,9 @@ class FakeIntersectionObserver {
     this.targets.clear();
   }
 
-  emit(target: Element, isIntersecting: boolean) {
+  emit(target: Element, isIntersecting: boolean, intersectionRatio = isIntersecting ? 1 : 0) {
     this.callback(
-      [{ target, isIntersecting } as FakeObserverEntry as IntersectionObserverEntry],
+      [{ target, isIntersecting, intersectionRatio } as FakeObserverEntry as IntersectionObserverEntry],
       this as unknown as IntersectionObserver,
     );
   }
@@ -107,6 +110,61 @@ describe('getPdfRenderPixelRatio', () => {
 });
 
 describe('PdfPreview lazy page rendering', () => {
+  it('observes any intersection and restores huge pages after leaving the viewport', async () => {
+    const page = {
+      getViewport: vi.fn(() => ({ width: 15_000, height: 15_000 })),
+      render: vi.fn(() => ({ cancel: vi.fn(), promise: Promise.resolve() })),
+    };
+    const pdf = {
+      numPages: 1,
+      getPage: vi.fn(async () => page),
+      destroy: vi.fn(async () => undefined),
+    };
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(pdf),
+      destroy: vi.fn(async () => undefined),
+    } as never);
+
+    const { container } = render(
+      <PdfPreview workdir="C:/work" relPath="huge.pdf" size={100} mtimeMs={1} />,
+    );
+    await waitFor(() => expect(container.querySelector('[data-pdf-page="1"]')).not.toBeNull());
+    const pageNode = container.querySelector<HTMLElement>('[data-pdf-page="1"]')!;
+    let observer: FakeIntersectionObserver | undefined;
+    await waitFor(() => {
+      observer = FakeIntersectionObserver.instances.find((candidate) =>
+        candidate.targets.has(pageNode),
+      );
+      expect(observer).toBeDefined();
+    });
+    // jsdom does not calculate intersections. Lock the native observer contract:
+    // the visible fraction of a huge page can remain below 1% at every position.
+    expect(observer!.options?.threshold).toBe(0);
+    expect(observer!.options?.root).toBe(pageNode.parentElement?.parentElement);
+
+    for (let cycle = 1; cycle <= 3; cycle += 1) {
+      await act(async () => {
+        observer!.emit(pageNode, true, 0.0028);
+      });
+      await waitFor(() => expect(pageNode.hasAttribute('data-pdf-page-placeholder')).toBe(false));
+      const canvas = pageNode.querySelector('canvas')!;
+      expect(pageNode.style.width).toBe('15000px');
+      expect(pageNode.style.height).toBe('15000px');
+      expect(canvas.width * canvas.height).toBeLessThanOrEqual(PDF_PREVIEW_MAX_CANVAS_PIXELS);
+      expect(canvas.width * canvas.height).toBeGreaterThan(0);
+      expect(page.render).toHaveBeenCalledTimes(cycle);
+
+      await act(async () => {
+        observer!.emit(pageNode, false);
+      });
+      expect(pageNode.querySelector('canvas')).toBeNull();
+      expect(canvas.width).toBe(0);
+      expect(canvas.height).toBe(0);
+      expect(pageNode.style.height).toBe('15000px');
+      expect(pageNode.dataset.pdfPagePlaceholder).toBe('true');
+    }
+  });
+
   it('does not rasterize pages until IntersectionObserver marks them visible', async () => {
     const renderDeferred = makeDeferred<void>();
     const renderTask = { cancel: vi.fn(), promise: renderDeferred.promise };

@@ -375,7 +375,10 @@ export function PdfPreview({ workdir, relPath, size, mtimeMs }: PdfPreviewProps)
       {
         root: scrollContainerRef.current,
         rootMargin: PDF_PAGE_ROOT_MARGIN,
-        threshold: 0.01,
+        // A huge page may never expose 1% of its area, even while filling the
+        // viewport. Observe any intersection, including after its placeholder
+        // expands to the real page size, so it cannot remain blank on screen.
+        threshold: 0,
       },
     );
     host.querySelectorAll<HTMLElement>('[data-pdf-page]').forEach((page) => observer.observe(page));

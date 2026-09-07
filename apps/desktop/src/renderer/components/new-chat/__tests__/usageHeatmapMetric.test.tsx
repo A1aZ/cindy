@@ -204,10 +204,11 @@ describe('UsageHeatmap metric', () => {
 
     const button = getByRole('button', { name: /Aug 21, 2026/ });
     const visual = button.firstElementChild as HTMLElement;
+    expect(button.title).toContain('2026-08-21');
     expect(button.style.width).toBe('12px');
     expect(button.style.height).toBe('12px');
-    expect(visual.style.width).toBe('12px');
-    expect(visual.style.height).toBe('12px');
+    expect(visual.style.width).toBe('calc(12px + var(--usage-mark-grow, 0px))');
+    expect(visual.style.height).toBe('calc(12px + var(--usage-mark-grow, 0px))');
   });
 
   it('今天的日期格不是未来占位，并且可以点击', () => {
@@ -283,7 +284,7 @@ describe('UsageHeatmap metric', () => {
     expect(button.getAttribute('aria-pressed')).toBe('true');
     expect(selectedCell.style.outline).toBe('');
     expect(selectedCell.style.boxShadow).toBe('');
-    expect(button.lastElementChild?.className).toContain('group-aria-pressed:outline-2');
+    expect(button.lastElementChild?.className).toContain('usage-chart-indicator');
     expect(button.lastElementChild?.getAttribute('aria-hidden')).toBe('true');
   });
 });

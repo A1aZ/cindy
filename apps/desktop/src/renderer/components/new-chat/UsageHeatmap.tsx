@@ -294,14 +294,14 @@ export function UsageHeatmap({
                 const title = `${cell.day} · ${usageSummary}`;
                 const accessibleLabel = `${dateFormatter.format(parseDayKey(cell.day))} · ${usageSummary}`;
                 // DESIGN §5: usage-heatmap-day, independent of its interaction wrapper.
-                const visualClassName = 'rounded-[2px]';
+                const visualClassName = 'usage-chart-mark shrink-0 rounded-[2px]';
                 const visualStyle = {
-                  width: CELL_PX,
-                  height: CELL_PX,
+                  width: `calc(${CELL_PX}px + var(--usage-mark-grow, 0px))`,
+                  height: `calc(${CELL_PX}px + var(--usage-mark-grow, 0px))`,
                   backgroundColor:
                     cell.level === 0
                       ? 'var(--surface-chip)'
-                      : `color-mix(in srgb, var(--accent-emphasis) ${LEVEL_MIX[cell.level - 1] * 100}%, var(--surface-chip))`,
+                      : `color-mix(in srgb, var(--usage-heatmap-accent, var(--accent-emphasis)) ${LEVEL_MIX[cell.level - 1] * 100}%, var(--surface-chip))`,
                 };
                 const visual = (
                   <div
@@ -317,15 +317,16 @@ export function UsageHeatmap({
                     key={ri}
                     type="button"
                     aria-label={accessibleLabel}
+                    title={title}
                     aria-pressed={selectedDay === cell.day}
                     onClick={() => onDayClick(cell.day)}
-                    className="group relative flex cursor-pointer items-center justify-center rounded-none border-0 bg-transparent p-0 outline-none"
+                    className="usage-chart-target group relative flex cursor-pointer items-center justify-center rounded-none border-0 bg-transparent p-0 outline-none"
                     style={{ width: cellSize, height: cellSize }}
                   >
                     {visual}
                     <span
                       aria-hidden="true"
-                      className="pointer-events-none absolute inset-0 rounded-[2px] outline outline-1 outline-offset-1 outline-transparent group-hover:outline-[var(--text-tertiary)] group-focus-visible:outline-2 group-focus-visible:outline-[var(--focus-ring)] group-aria-pressed:outline-2 group-aria-pressed:outline-[var(--focus-ring)]"
+                      className="usage-chart-indicator pointer-events-none absolute inset-0 rounded-[2px]"
                     />
                   </button>
                 ) : (

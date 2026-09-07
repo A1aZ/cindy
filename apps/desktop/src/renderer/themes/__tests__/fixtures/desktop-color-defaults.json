@@ -1,6 +1,6 @@
 {
   "source": "apps/desktop/src/renderer/themes/colors.ts",
-  "count": 535,
+  "count": 541,
   "colors": [
     {
       "id": "surface",
@@ -276,6 +276,36 @@
       "id": "process-utility-icon",
       "light": "#059669",
       "dark": "#34D399"
+    },
+    {
+      "id": "usage-heatmap-high",
+      "light": "var(--process-agent-task-icon)",
+      "dark": "var(--process-agent-task-icon)"
+    },
+    {
+      "id": "usage-model-1",
+      "light": "var(--process-agent-task-icon)",
+      "dark": "var(--process-agent-task-icon)"
+    },
+    {
+      "id": "usage-model-2",
+      "light": "var(--process-renderer-icon)",
+      "dark": "var(--process-renderer-icon)"
+    },
+    {
+      "id": "usage-model-3",
+      "light": "var(--process-agent-service-icon)",
+      "dark": "var(--process-agent-service-icon)"
+    },
+    {
+      "id": "usage-model-4",
+      "light": "var(--process-utility-icon)",
+      "dark": "var(--process-utility-icon)"
+    },
+    {
+      "id": "usage-model-5",
+      "light": "var(--process-gpu-icon)",
+      "dark": "var(--process-gpu-icon)"
     },
     {
       "id": "shadow-soft-panel",

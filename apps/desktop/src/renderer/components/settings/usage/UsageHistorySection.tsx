@@ -17,6 +17,8 @@
  * (见 UsageTokenBars 的注释), 但共享同一条聚合链路与配色。
  */
 
+import './usageCharts.css';
+
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as Select from '@radix-ui/react-select';
@@ -141,7 +143,7 @@ export function UsageHistorySection(): React.JSX.Element {
   };
 
   return (
-    <div className="pb-2">
+    <div className="usage-history-charts pb-2">
       <h2 className="mb-1.5 text-15 font-semibold text-[var(--text-primary)]">
         {t('settings.tabs.usage')}
       </h2>

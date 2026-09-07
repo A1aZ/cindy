@@ -28,6 +28,11 @@ const usageHistorySectionSource = readFileSync(
   'utf8',
 );
 
+const chartStyles = readFileSync(
+  resolve(__dirname, '../components/settings/usage/usageCharts.css'),
+  'utf8',
+);
+
 describe('HomeUsageDashboard source contract', () => {
   it('uses the Claude account daily spend for the visible today amount when available', () => {
     expect(source).toMatch(
@@ -82,8 +87,11 @@ describe('HomeUsageDashboard source contract', () => {
   it('keeps selected usage chart days flat without ad-hoc shadows', () => {
     expect(heatmapSource).not.toContain('boxShadow');
     expect(tokenBarsSource).not.toContain('boxShadow');
-    expect(heatmapSource).toContain('group-aria-pressed:outline-2');
-    expect(tokenBarsSource).toContain('group-aria-pressed:outline-2');
+    expect(heatmapSource).toContain('usage-chart-indicator');
+    expect(tokenBarsSource).toContain('usage-chart-indicator');
+    expect(chartStyles).toContain('outline: 2px solid var(--focus-ring)');
+    expect(chartStyles).toContain('prefers-reduced-motion: reduce');
+    expect(chartStyles).toContain('transition: none');
   });
 
   it('keeps registered chart geometry dense with a same-page equivalent date control', () => {

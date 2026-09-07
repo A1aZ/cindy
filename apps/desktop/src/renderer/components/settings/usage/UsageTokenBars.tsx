@@ -19,7 +19,9 @@ import { useTranslation } from 'react-i18next';
 
 import { formatCompactTokens } from '@/lib/usageFormat';
 import type { UsageHistoryModelDay } from '@/hooks/useUsageHistory';
-import { usageModelKey, usageRankColor, usageRankOf } from '@/components/new-chat/usagePalette';
+import { usageModelKey, usageRankOf } from '@/components/new-chat/usagePalette';
+
+import { usageHistoryModelColor } from './usageHistoryColors';
 
 const WINDOW_DAYS = 30;
 const CHART_HEIGHT_PX = 96;
@@ -182,15 +184,16 @@ export function UsageTokenBars({
                   disabled={!onDayClick}
                   // Hit height remains generous without forcing the visible bar width.
                   // The same-page date control supplies the §5 Equivalent route.
-                  className="group relative flex min-w-0 flex-1 cursor-pointer items-end justify-center rounded-none border-0 bg-transparent p-0 outline-none"
+                  className="usage-chart-target group relative flex min-w-0 flex-1 cursor-pointer items-end justify-center rounded-none border-0 bg-transparent p-0 outline-none"
                   style={{ height: hitHeight }}
                 >
                   <span
                     aria-hidden="true"
                     data-usage-mark="usage-token-bar"
-                    className="flex w-full flex-col overflow-hidden rounded-[2px]"
+                    className="usage-chart-mark pointer-events-none flex shrink-0 flex-col overflow-hidden rounded-[2px]"
                     style={{
                       height: visualHeight,
+                      width: 'calc(100% + var(--usage-mark-grow, 0px))',
                       backgroundColor: b.segments.length === 0 ? 'var(--surface-chip)' : undefined,
                     }}
                   >
@@ -199,14 +202,14 @@ export function UsageTokenBars({
                         key={s.rank}
                         style={{
                           height: `${(s.tokens / b.tokens) * 100}%`,
-                          backgroundColor: usageRankColor(s.rank),
+                          backgroundColor: usageHistoryModelColor(s.rank, colorOrder.length),
                         }}
                       />
                     ))}
                   </span>
                   <span
                     aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 rounded-[2px] outline outline-1 outline-offset-1 outline-transparent group-[:enabled:hover]:outline-[var(--text-tertiary)] group-focus-visible:outline-2 group-focus-visible:outline-[var(--focus-ring)] group-aria-pressed:outline-2 group-aria-pressed:outline-[var(--focus-ring)]"
+                    className="usage-chart-indicator pointer-events-none absolute inset-0 rounded-[2px]"
                   />
                 </button>
               );

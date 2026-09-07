@@ -241,6 +241,33 @@ registerColor('process-utility-icon', {
   light: '#059669',
   dark: '#34D399',
 }, '资源用量表：Utility 服务进程图标');
+// Usage History colors: owner-approved 2026-09-08. Reuse the existing palette
+// through separate chart roles; do not redefine process or status semantics.
+registerColor('usage-heatmap-high', {
+  light: 'var(--process-agent-task-icon)',
+  dark: 'var(--process-agent-task-icon)',
+}, '用量历史图表：usage-heatmap-high（09-08 登记的配色引用）');
+registerColor('usage-model-1', {
+  light: 'var(--process-agent-task-icon)',
+  dark: 'var(--process-agent-task-icon)',
+}, '用量历史图表：usage-model-1（09-08 登记的配色引用）');
+registerColor('usage-model-2', {
+  light: 'var(--process-renderer-icon)',
+  dark: 'var(--process-renderer-icon)',
+}, '用量历史图表：usage-model-2（09-08 登记的配色引用）');
+registerColor('usage-model-3', {
+  light: 'var(--process-agent-service-icon)',
+  dark: 'var(--process-agent-service-icon)',
+}, '用量历史图表：usage-model-3（09-08 登记的配色引用）');
+registerColor('usage-model-4', {
+  light: 'var(--process-utility-icon)',
+  dark: 'var(--process-utility-icon)',
+}, '用量历史图表：usage-model-4（09-08 登记的配色引用）');
+registerColor('usage-model-5', {
+  light: 'var(--process-gpu-icon)',
+  dark: 'var(--process-gpu-icon)',
+}, '用量历史图表：usage-model-5（09-08 登记的配色引用）');
+
 registerColor('shadow-soft-panel', {
   light: '0 4px 12px rgb(0 0 0 / 0.08)',
   dark: '0 4px 12px rgb(0 0 0 / 0.3)',

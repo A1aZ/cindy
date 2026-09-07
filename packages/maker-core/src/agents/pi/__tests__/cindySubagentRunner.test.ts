@@ -1595,7 +1595,24 @@ describe('Cindy durable PI Subagent runner', () => {
         undefined,
         'the runner to launch its hanging child',
       );
-      const childPid = Number((await readFile(fixture.pidsFile, 'utf8')).trim().split('\n')[0]);
+      // The runner publishes `running` once the lane dispatches the task, but
+      // the freshly spawned child has not necessarily booted far enough to
+      // have recorded its pid yet — the same spawn/write window that
+      // `gateFinishOnPidCount` closes for the multi-lane cases. Wait for the
+      // pid to land on disk instead of racing the first read, or this flakes
+      // as an ENOENT under a loaded CI runner.
+      const childPid = await waitFor(
+        async () => {
+          try {
+            const pid = Number((await readFile(fixture.pidsFile, 'utf8')).trim().split('\n')[0]);
+            return Number.isSafeInteger(pid) ? pid : null;
+          } catch {
+            return null;
+          }
+        },
+        undefined,
+        'the hanging child to record its pid',
+      );
       expect(Number.isSafeInteger(childPid)).toBe(true);
 
       process.kill(fixture.child.pid!, 'SIGTERM');

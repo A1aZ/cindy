@@ -107,9 +107,72 @@ describe('getPdfRenderPixelRatio', () => {
     expect(getPdfRenderPixelRatio(918, 1188, Number.NaN)).toBe(1);
     expect(getPdfRenderPixelRatio(918, 1188, 0)).toBe(1);
   });
+
+  it.each([
+    [1.5, 1_500_000_000],
+    [1_500_000_000, 1.5],
+    [2.25, 1_620_000_000],
+    [1_620_000_000, 2.25],
+    [1e200, 1e200],
+    [1, 1e308],
+    [1e308, 1],
+  ])('honors the budget after rounding a %s by %s viewport to integer pixels', (width, height) => {
+    const ratio = getPdfRenderPixelRatio(width, height, 2);
+    // Match the actual backing-store allocation, including its one-pixel floor.
+    const pixels = Math.max(1, Math.floor(width * ratio)) * Math.max(1, Math.floor(height * ratio));
+    expect(ratio).toBeGreaterThan(0);
+    expect(pixels).toBeGreaterThan(0);
+    expect(pixels).toBeLessThanOrEqual(PDF_PREVIEW_MAX_CANVAS_PIXELS);
+  });
 });
 
 describe('PdfPreview lazy page rendering', () => {
+  it('keeps mixed-width pages left-aligned while rendering only nearby pages', async () => {
+    const widths = [3000, 918, 3000];
+    const pages = widths.map((width) => ({
+      getViewport: vi.fn(() => ({ width, height: 1188 })),
+      render: vi.fn(() => ({ cancel: vi.fn(), promise: Promise.resolve() })),
+    }));
+    const pdf = {
+      numPages: pages.length,
+      getPage: vi.fn(async (pageNumber: number) => pages[pageNumber - 1]),
+      destroy: vi.fn(async () => undefined),
+    };
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(pdf),
+      destroy: vi.fn(async () => undefined),
+    } as never);
+
+    const { container } = render(
+      <PdfPreview workdir="C:/work" relPath="mixed.pdf" size={100} mtimeMs={1} />,
+    );
+    await waitFor(() => expect(container.querySelectorAll('[data-pdf-page]')).toHaveLength(3));
+    const pageNodes = [...container.querySelectorAll<HTMLElement>('[data-pdf-page]')];
+    // jsdom has no layout: lock the cross-axis contract as well as the lazy
+    // lifecycle. Centering these children moves narrow placeholders outside
+    // the horizontal viewport once a wide page establishes the host width.
+    expect(pageNodes[0].parentElement!.classList.contains('items-start')).toBe(true);
+    let observer: FakeIntersectionObserver | undefined;
+    await waitFor(() => {
+      observer = FakeIntersectionObserver.instances.find((candidate) =>
+        candidate.targets.has(pageNodes[0]),
+      );
+      expect(observer).toBeDefined();
+    });
+
+    for (let index = 0; index < pages.length; index += 1) {
+      await act(async () => {
+        if (index > 0) observer!.emit(pageNodes[index - 1], false);
+        observer!.emit(pageNodes[index], true);
+      });
+      await waitFor(() => expect(pageNodes[index].dataset.pdfPagePlaceholder).toBeUndefined());
+      expect(pageNodes[index].style.width).toBe(`${widths[index]}px`);
+      expect(pdf.getPage).toHaveBeenCalledTimes(index + 1);
+      expect(pdf.getPage).toHaveBeenLastCalledWith(index + 1);
+      expect(container.querySelectorAll('[data-pdf-page] canvas')).toHaveLength(1);
+    }
+  });
+
   it('observes any intersection and restores huge pages after leaving the viewport', async () => {
     const page = {
       getViewport: vi.fn(() => ({ width: 15_000, height: 15_000 })),

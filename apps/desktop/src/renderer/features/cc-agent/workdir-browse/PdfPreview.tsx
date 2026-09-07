@@ -94,9 +94,15 @@ export function getPdfRenderPixelRatio(
 ): number {
   const safeDpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
   const dpr = Math.min(safeDpr, PDF_PREVIEW_MAX_DPR);
-  const cssPixels = Math.max(1, cssWidth) * Math.max(1, cssHeight);
-  const budgetRatio = Math.sqrt(PDF_PREVIEW_MAX_CANVAS_PIXELS / cssPixels);
-  return Math.max(Number.EPSILON, Math.min(dpr, budgetRatio));
+  const width = Math.max(1, cssWidth);
+  const height = Math.max(1, cssHeight);
+  // Divide separately to avoid overflowing the area of very large viewports.
+  const budgetRatio = Math.sqrt(PDF_PREVIEW_MAX_CANVAS_PIXELS) / Math.sqrt(width) / Math.sqrt(height);
+  // The canvas allocation rounds each side up to at least one pixel. For a
+  // very thin page, area alone would then allow its long side to exceed 4M.
+  const minSideBudgetRatio = PDF_PREVIEW_MAX_CANVAS_PIXELS / Math.max(width, height);
+  // Extremely large finite viewports may need ratios below Number.EPSILON.
+  return Math.min(dpr, budgetRatio, minSideBudgetRatio);
 }
 
 function cancelRenderTask(task: ActiveRenderTask | null) {
@@ -413,7 +419,9 @@ export function PdfPreview({ workdir, relPath, size, mtimeMs }: PdfPreviewProps)
       ref={scrollContainerRef}
       className="relative h-full w-full overflow-y-auto bg-[var(--surface)]"
     >
-      <div ref={pagesHostRef} className="mx-auto flex w-fit flex-col items-center gap-2 px-4 py-6">
+      {/* Align pages to a shared left edge: a wide page must not push narrower
+          placeholders outside the observer's horizontal viewport. */}
+      <div ref={pagesHostRef} className="mx-auto flex w-fit flex-col items-start gap-2 px-4 py-6">
         {pdfDoc &&
           Array.from({ length: pageCount }, (_, index) => (
             <PdfPage

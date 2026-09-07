@@ -47,6 +47,13 @@ export async function downloadMediaResult(input: {
   const approved = input.context?.approvals ?? new Set<string>();
   const byteLimits = input.context?.byteLimits ?? new Map<string, number>();
   const approvalKey = (reason: MediaDownloadReason) => {
+    if (reason === 'network') {
+      // A private-network exception belongs to this exact HTTP target. Source
+      // approval may cover an origin, but cannot authorize another internal API.
+      const target = new URL(url);
+      target.hash = '';
+      return `network:${createHash('sha256').update(target.href).digest('hex')}`;
+    }
     const credentials = reason === 'credentials'
       ? createHash('sha256').update(`${url.username}:${url.password}`).digest('hex') : '';
     return `${url.origin}:${reason}:${credentials}`;

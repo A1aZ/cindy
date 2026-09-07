@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { MediaCapability } from '@cindy/model-providers';
 import type { CindyMediaToolRequest } from 'cindy-tools';
 import type {
@@ -828,15 +829,28 @@ async function materializeResults(
       throw error;
     }
     assertAuthScope(scope);
-    const stored = await ingestMedia(
-      {
-        buffer: media.buffer,
-        mimeType: media.mimeType,
-        refs: [],
-        assertStillValid: () => assertAuthScope(scope),
-      },
-      db.drizzle,
-    );
+    let stored: Awaited<ReturnType<typeof ingestMedia>>;
+    for (let attempt = 0; ; attempt += 1) {
+      assertAuthScope(scope);
+      try {
+        // Content-addressed writes and zero-reference ledger updates are
+        // idempotent. Retry these same bytes without downloading or approving again.
+        stored = await ingestMedia(
+          {
+            buffer: media.buffer,
+            mimeType: media.mimeType,
+            refs: [],
+            assertStillValid: () => assertAuthScope(scope),
+          },
+          db.drizzle,
+        );
+        break;
+      } catch (error) {
+        assertAuthScope(scope);
+        if (attempt >= 2) throw error;
+        await delay(250 * 2 ** attempt, undefined, { signal: scope.downloadContext?.signal });
+      }
+    }
     assertAuthScope(scope);
     if (item.extractor.kind === 'image') images.push(stored.url);
     else if (item.extractor.kind === 'video') videos.push(stored.url);
@@ -1554,6 +1568,11 @@ async function pollInvocation(
     const rawStatus = valuesAtPath(response, guide.statusPath)[0];
     const status = typeof rawStatus === 'string' ? rawStatus : '';
     if (guide.successValues.includes(status)) {
+      if (invocation.responseJson) {
+        // Keep the original durable response until refreshed media has actually
+        // been ingested. Completion replaces it atomically with managed URLs.
+        return materializeAsyncInvocation(invocation, response, scope, db);
+      }
       const responseJson = JSON.stringify(response);
       const persisted = await transitionMediaInvocation(
         {

@@ -114,6 +114,23 @@ describe('media download approval and network recovery', () => {
     expect(mocks.fetch.mock.calls[0][3]).toMatchObject({ allowHttp: true, targetUrl: 'http://known.example.com:8080/video' });
   });
 
+  it.each(['/internal/admin', '/video?operation=admin'])(
+    'requires a fresh private-network decision for the same-origin target %s', async (location) => {
+      const ctx = context();
+      ctx.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      mocks.fetch.mockRejectedValueOnce(new SsrFBlockedError('private'))
+        .mockResolvedValueOnce(response(null, { status: 302, headers: { location } }))
+        .mockRejectedValueOnce(new SsrFBlockedError('unapproved private target'));
+      await expect(download(ctx)).rejects.toMatchObject({ code: 'MEDIA_DOWNLOAD_DENIED' });
+      expect(ctx.confirm.mock.calls.map(([request]) => request.reasons)).toEqual([
+        ['source'], ['network'], ['network'],
+      ]);
+      expect(mocks.fetch.mock.calls.map((call) => call[3].allowPrivateNetwork)).toEqual([false, true, false]);
+      expect(mocks.fetch.mock.calls[2][0]).toBe(new URL(location, 'https://new.example.com').href);
+      expect(mocks.release).toHaveBeenCalledOnce();
+    },
+  );
+
   it('does not forward URL credentials on a redirect', async () => {
     const ctx = context();
     mocks.fetch.mockResolvedValueOnce(response(null, { status: 302, headers: { location: '/next' } }));

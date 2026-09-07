@@ -685,7 +685,74 @@ describe('Cindy Core media invocation state and security boundary', () => {
     ).resolves.toMatchObject({ ok: false, errorCode: 'ACCOUNT_CHANGED' });
     expect(mocks.rows.get(invocationId)?.state).toBe('pending');
     expect(mocks.transitionDbs.every((db) => db === originalDb)).toBe(true);
+    expect(mocks.ingestMedia).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['sync', 2], ['sync', 3], ['async', 2], ['async', 3],
+  ] as const)('%s 入库失败 %i 次时仅重试已有字节，不再下载或审批', async (mode, failures) => {
+    const media = [{ path: ['data'], encoding: 'url', kind: 'image', allowedUrlHosts: ['known.example.com'] }];
+    mocks.guide.mockResolvedValue(resolvedGuide(operation(mode === 'sync'
+      ? { mode, media }
+      : { mode, taskIdPath: ['task_id'], poll: {
+          method: 'GET', path: '/tasks/{taskId}', statusPath: ['status'],
+          successValues: ['succeeded'], failureValues: ['failed'], recommendedIntervalMs: 10,
+          timeoutMs: 5_000, maxResponseBytes: 1_048_576, media,
+        } })));
+    const payload = { status: 'succeeded', data: 'https://new.example.com/generated.png' };
+    if (mode === 'async') {
+      mocks.outboundFetch.mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'storage-retry' })));
+    }
+    mocks.outboundFetch.mockResolvedValueOnce(new Response(JSON.stringify(payload)))
+      .mockResolvedValueOnce(new Response(PNG));
+    for (let index = 0; index < failures; index += 1) {
+      mocks.ingestMedia.mockRejectedValueOnce(new Error('temporary database failure'));
+    }
+    const invocationId = await prepare();
+    let result = await callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } });
+    if (mode === 'async') result = await callCindyMedia({ action: 'poll', invocationId });
+    if (failures === 2) {
+      expect(result).toMatchObject({ ok: true, status: 'complete' });
+    } else {
+      expect(result).toMatchObject({ ok: false, errorCode: 'MEDIA_MATERIALIZATION_FAILED', retryable: false });
+      expect(mocks.rows.get(invocationId)).toMatchObject({ state: 'pending', responseJson: JSON.stringify(payload) });
+    }
+    expect(mocks.ingestMedia).toHaveBeenCalledTimes(3);
+    const firstBytes = mocks.ingestMedia.mock.calls[0][0].buffer;
+    expect(firstBytes).toEqual(PNG);
+    expect(mocks.ingestMedia.mock.calls.every(([input]) => input.buffer === firstBytes)).toBe(true);
+    expect(mocks.guardedOutboundFetch).toHaveBeenCalledOnce();
+    expect(mocks.confirm).toHaveBeenCalledOnce();
+    expect(mocks.outboundFetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
+  });
+
+  it.each(['missing', 'invalid', 'expired', 'storage'])(
+    '刷新结果 %s 失败时保留原成功响应', async (failure) => {
+      mocks.guide.mockResolvedValue(resolvedGuide(operation({
+        mode: 'async', taskIdPath: ['task_id'], poll: {
+          method: 'GET', path: '/tasks/{taskId}', statusPath: ['status'],
+          successValues: ['succeeded'], failureValues: ['failed'], recommendedIntervalMs: 10,
+          timeoutMs: 5_000, maxResponseBytes: 1_048_576,
+          media: [{ path: ['data'], encoding: 'url', kind: 'image', allowedUrlHosts: ['cdn.example.com'] }],
+        },
+      })));
+      const original = { status: 'succeeded', data: 'https://cdn.example.com/original.png', task_id: 'preserved-task' };
+      const refreshed = { status: 'succeeded', ...(failure === 'missing' ? {} : { data: 'https://cdn.example.com/refreshed.png' }) };
+      mocks.outboundFetch.mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'preserved-task' })))
+        .mockResolvedValueOnce(new Response(JSON.stringify(original)))
+        .mockResolvedValueOnce(new Response(null, { status: 403 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify(refreshed)))
+        .mockResolvedValueOnce(failure === 'expired' ? new Response(null, { status: 403 })
+          : new Response(failure === 'invalid' ? 'not an image' : PNG));
+      if (failure === 'storage') mocks.ingestMedia.mockRejectedValue(new Error('storage unavailable'));
+      const invocationId = await prepare();
+      await callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } });
+      expect(await callCindyMedia({ action: 'poll', invocationId })).toMatchObject({ ok: false, retryable: false });
+      expect(mocks.rows.get(invocationId)).toMatchObject({ state: 'pending', responseJson: JSON.stringify(original) });
+      expect(mocks.outboundFetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
+      expect(mocks.outboundFetch.mock.calls.filter(([url]) => url === 'https://gateway.example.com/tasks/preserved-task')).toHaveLength(2);
+    },
+  );
 
   it('Guide 缺少目标 operation 时在 prepare 返回稳定的能力不支持错误', async () => {
     mocks.guide.mockResolvedValue(

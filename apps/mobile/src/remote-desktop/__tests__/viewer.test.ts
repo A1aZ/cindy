@@ -306,6 +306,45 @@ describe("remote desktop viewport", () => {
     expect(v.elements.image.style.width).toBe("400px");
     expect(parseFloat(v.elements.image.style.top)).toBeGreaterThan(0);
   });
+  it.each([1, 2])("keeps landscape scale %sx and centers the cursor above keyboard overlays", (scale) => {
+    const v = viewer();
+    v.elements.stage.clientWidth = 800;
+    v.elements.stage.clientHeight = 400;
+    v.send({ type: "init", epoch: "keyboard", width: 1920, height: 1080, fillHeight: true });
+    if (scale === 2) {
+      v.pointer("pointerdown", 1, 200, 200);
+      v.pointer("pointerdown", 2, 400, 200);
+      v.pointer("pointermove", 1, 100, 200);
+      v.pointer("pointermove", 2, 500, 200);
+      v.frame();
+      v.frame(40);
+      v.pointer("pointerup", 1, 100, 200);
+      v.pointer("pointerup", 2, 500, 200);
+    }
+    v.send({ type: "frame", jpeg: "", cursor: {
+      x: .9, y: .85, width: 18, height: 18, hotX: 9, hotY: 9,
+      visible: true, png: "iVBORw0KGgo=",
+    } });
+    const width = v.elements.image.style.width;
+    expect(parseFloat(v.elements.image.style.height)).toBeCloseTo(400 * scale);
+    // Header, computer keyboard, phone keyboard, and closing the keyboard.
+    for (const bottomInset of [60, 260, 300, 0]) {
+      v.send({ type: "mouseButtons", keyboardOpen: bottomInset > 0, bottomInset, leftInset: 50, rightInset: 0 });
+      v.blur();
+      for (let i = 0; i < 30; i++) v.frame();
+      const image = v.elements.image.style;
+      expect(image.width).toBe(width);
+      expect(parseFloat(image.height)).toBeCloseTo(400 * scale);
+      expect(parseFloat(image.left) + .9 * parseFloat(image.width)).toBeCloseTo(425);
+      expect(parseFloat(image.top) + .85 * parseFloat(image.height)).toBeCloseTo((400 - bottomInset) / 2);
+    }
+  });
+  it("does not recenter portrait content for a keyboard overlay message", () => {
+    const v = viewer();
+    const before = { ...v.elements.image.style };
+    v.send({ type: "mouseButtons", keyboardOpen: true, bottomInset: 260 });
+    expect(v.elements.image.style).toEqual(before);
+  });
   it("initializes when the native engine cannot serialize function source", () => {
     const stringify = vi
       .spyOn(Function.prototype, "toString")

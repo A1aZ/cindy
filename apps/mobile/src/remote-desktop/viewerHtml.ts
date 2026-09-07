@@ -79,7 +79,7 @@ const VIEWER_SCRIPT = String.raw`
   const post=(message)=>window.ReactNativeWebView.postMessage(JSON.stringify({...message,epoch}));
   const clamp=(v)=>Math.max(0,Math.min(1,v));
   let fillHeight=false;
-  let panAnimation=null,viewportRightInset=0,viewportLeftInset=0,viewportBottomInset=0;
+  let panAnimation=null,viewportRightInset=0,viewportLeftInset=0,viewportBottomInset=0,keyboardViewportInset=0;
   let cursorNeedsEntry=true,manualViewMoved=false,followRest=null;
   // Insets guide centering and pan limits without clipping the full-screen
   // video surface or adding an opaque strip beside the Dynamic Island.
@@ -322,7 +322,16 @@ const VIEWER_SCRIPT = String.raw`
       case 'resume':if(video.srcObject)video.play().catch(()=>{});break;
       case 'releaseInput':release();break;
       case 'theme':if(/^#[0-9a-f]{3,8}$/i.test(message.surface)){document.body.style.background=message.surface;document.documentElement.style.setProperty('--surface',message.surface);}if(/^#[0-9a-f]{3,8}$/i.test(message.foreground)){cursor.style.borderColor=message.foreground;document.documentElement.style.setProperty('--foreground',message.foreground);}break;
-      case 'mouseButtons':if(Number.isFinite(message.bottomInset))viewportBottomInset=Math.max(0,Math.min(stage.clientHeight-1,message.bottomInset));if(Number.isFinite(message.leftInset)){const left=Math.max(0,Math.min(stage.clientWidth-1,message.leftInset));if(left!==viewportLeftInset){viewportLeftInset=left;settlePan();render();}}if(Number.isFinite(message.rightInset)){const inset=Math.max(0,Math.min(stage.clientWidth-1,message.rightInset));if(inset!==viewportRightInset){viewportRightInset=inset;settlePan();render();}}if(!message.enabled){for(const button of heldMouse.keys())queue({kind:'button',button,down:false,x:cx,y:cy});heldMouse.clear();resetWheel();flush();}for(const [edge,value] of [['bottom',message.bottomInset],['right',message.rightInset]])if(Number.isFinite(value)&&value>=0&&value<=4096)mouseButtons.style[edge]=value+'px';showMouseButtons=message.enabled===true;for(const name of ['left','right','wheel'])if(typeof message.labels?.[name]==='string')document.getElementById('mouse-'+name).setAttribute('aria-label',message.labels[name]);updateMouseButtons();break;
+      case 'mouseButtons':if(Number.isFinite(message.bottomInset))viewportBottomInset=Math.max(0,Math.min(stage.clientHeight-1,message.bottomInset));if(Number.isFinite(message.leftInset)){const left=Math.max(0,Math.min(stage.clientWidth-1,message.leftInset));if(left!==viewportLeftInset){viewportLeftInset=left;settlePan();render();}}if(Number.isFinite(message.rightInset)){const inset=Math.max(0,Math.min(stage.clientWidth-1,message.rightInset));if(inset!==viewportRightInset){viewportRightInset=inset;settlePan();render();}}const keyboardInset=fillHeight&&message.keyboardOpen===true?viewportBottomInset:0;
+        if(keyboardInset!==keyboardViewportInset){
+          const wasOpen=keyboardViewportInset>0;keyboardViewportInset=keyboardInset;
+          if(fillHeight&&(keyboardInset>0||wasOpen)){
+            stopPanAnimation();const r=layout(),v=cursorViewport();
+            place((v.minX+v.maxX)/2-cx*r.width,(v.minY+v.maxY)/2-cy*r.height,r);
+            followRest={fx,fy,zoom};cursorNeedsEntry=false;manualViewMoved=false;render();
+          }
+        }
+        if(!message.enabled){for(const button of heldMouse.keys())queue({kind:'button',button,down:false,x:cx,y:cy});heldMouse.clear();resetWheel();flush();}for(const [edge,value] of [['bottom',message.bottomInset],['right',message.rightInset]])if(Number.isFinite(value)&&value>=0&&value<=4096)mouseButtons.style[edge]=value+'px';showMouseButtons=message.enabled===true;for(const name of ['left','right','wheel'])if(typeof message.labels?.[name]==='string')document.getElementById('mouse-'+name).setAttribute('aria-label',message.labels[name]);updateMouseButtons();break;
       case 'init':followRest=null;cursorNeedsEntry=true;stopPanAnimation();resetCursor();control=false;release();pending=[];sending=false;seq=0;epoch=message.epoch;dw=message.width;dh=message.height;fillHeight=message.fillHeight===true;video.muted=!message.audio;render();connect();break;
       case 'viewport':fillHeight=message.fillHeight===true;release();render();break;
       case 'answer':if(pc){const current=pc;pc.setRemoteDescription({type:'answer',sdp:message.sdp}).catch(()=>{if(pc===current){closeRtc();post({type:'fallback'});}});}break;

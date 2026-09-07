@@ -12,6 +12,7 @@ import {
   StatusBar,
   Keyboard,
   KeyboardAvoidingView,
+  type KeyboardEvent,
   Platform,
   Pressable,
   ScrollView,
@@ -217,6 +218,13 @@ export default function RemoteDesktopScreen() {
   const [fullKeys, setFullKeys] = useState(false);
   const [keyboardFocusRequest, setKeyboardFocusRequest] = useState(0);
   const [nativeKeyboard, setNativeKeyboard] = useState(false);
+  const [nativeKeyboardHeight, setNativeKeyboardHeight] = useState(0);
+  const [keyboardPanelHeight, setKeyboardPanelHeight] = useState(0);
+  // Android's system keyboard already resizes the window. Keep its existing
+  // flow layout; only iOS needs an offset above the native keyboard.
+  const landscapeKeyboardOverlay = landscape && (Platform.OS === "ios" || fullKeys);
+  const keyboardBottom = Platform.OS === "ios" && keyboard && !fullKeys
+    ? nativeKeyboardHeight : 0;
   const heldKeys = useRef(new Map<string, string[]>());
   const [keyPage, setKeyPage] = useState(0);
   const [comboMode, setComboMode] = useState(true);
@@ -282,14 +290,25 @@ export default function RemoteDesktopScreen() {
     }
   };
   useEffect(() => {
-    const show = Keyboard.addListener("keyboardDidShow", () => {
-      setNativeKeyboard(true);
+    const updateFrame = (event: KeyboardEvent) => {
+      const height = Math.max(
+        0,
+        Dimensions.get("screen").height - event.endCoordinates.screenY,
+      );
+      setNativeKeyboardHeight(height);
+      setNativeKeyboard(height > 0);
+    };
+    const show = Keyboard.addListener("keyboardDidShow", updateFrame);
+    const frame = Platform.OS === "ios"
+      ? Keyboard.addListener("keyboardWillChangeFrame", updateFrame)
+      : null;
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      setNativeKeyboard(false);
+      setNativeKeyboardHeight(0);
     });
-    const hide = Keyboard.addListener("keyboardDidHide", () =>
-      setNativeKeyboard(false),
-    );
     return () => {
       show.remove();
+      frame?.remove();
       hide.remove();
     };
   }, []);
@@ -640,7 +659,11 @@ export default function RemoteDesktopScreen() {
   useEffect(() => {
     send({
       type: "mouseButtons",
-      bottomInset: !keyboard && !landscape ? toolbarSize.height : 0,
+      bottomInset:
+        keyboard && landscapeKeyboardOverlay
+          ? keyboardPanelHeight + keyboardBottom
+          : !keyboard && !landscape ? toolbarSize.height : 0,
+      keyboardOpen: keyboard && landscapeKeyboardOverlay,
       rightInset: !keyboard && landscape ? toolbarSize.width : 0,
       leftInset: landscape ? insets.left : 0,
       enabled:
@@ -659,6 +682,9 @@ export default function RemoteDesktopScreen() {
     showMouseButtons,
     insets.left,
     toolbarSize,
+    keyboardPanelHeight,
+    landscapeKeyboardOverlay,
+    keyboardBottom,
     landscape,
     focused,
     operations,
@@ -1083,6 +1109,8 @@ export default function RemoteDesktopScreen() {
   );
   return (
     <KeyboardAvoidingView
+      testID="remoteDesktop.layout"
+      enabled={!landscapeKeyboardOverlay}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       style={styles.root}
     >
@@ -1331,8 +1359,13 @@ export default function RemoteDesktopScreen() {
       )}
       {keyboard && (
         <View
+          testID="remoteDesktop.keyboardPanel"
+          onLayout={({ nativeEvent: { layout } }) =>
+            setKeyboardPanelHeight(layout.height)
+          }
           style={[
             styles.keyboard,
+            landscapeKeyboardOverlay && [styles.keyboardOverlay, { bottom: keyboardBottom }],
             {
               paddingLeft: Math.max(spacing.xs, edgePadding.paddingLeft),
               paddingRight: Math.max(spacing.sm, edgePadding.paddingRight),
@@ -1626,8 +1659,9 @@ const makeStyles = (colors: ThemeColors) =>
     },
     disabled: { opacity: 0.4 },
     buttonText: { color: colors.textPrimary, fontSize: typeScale.caption },
+    keyboardOverlay: { position: "absolute", left: 0, right: 0 },
     keyboard: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.surfaceTranslucent,
       paddingHorizontal: spacing.sm,
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: colors.border,

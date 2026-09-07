@@ -7,6 +7,9 @@ import { AppState } from "react-native";
 import { goBackGuarded } from "@/utils/backGuard";
 
 const fixture = vi.hoisted(() => ({
+  platform: "ios",
+  keyboardListeners: {} as Record<string, (event: unknown) => void>,
+  views: {} as Record<string, any>,
   invoke: vi.fn(),
   openLink: vi.fn(),
   post: vi.fn(),
@@ -22,8 +25,9 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock("react-native", async () => {
   const { createElement } = await import("react");
-  const view = (tag: string) => (p: any) =>
-    createElement(
+  const view = (tag: string) => (p: any) => {
+    if (p.testID) fixture.views[p.testID] = p;
+    return createElement(
       tag,
       {
         onClick: p.onPress,
@@ -34,8 +38,10 @@ vi.mock("react-native", async () => {
       },
       p.children,
     );
+  };
   return {
     View: view("div"),
+    Modal: (p: any) => p.visible ? createElement("div", {}, p.children) : null,
     Pressable: view("button"),
     ScrollView: view("div"),
     KeyboardAvoidingView: view("div"),
@@ -53,10 +59,16 @@ vi.mock("react-native", async () => {
         return { remove() {} };
       },
     },
-    Keyboard: { dismiss() {}, addListener: () => ({ remove() {} }) },
+    Keyboard: {
+      dismiss() {},
+      addListener: (name: string, listener: (event: unknown) => void) => {
+        fixture.keyboardListeners[name] = listener;
+        return { remove() {} };
+      },
+    },
     Dimensions: { get: () => fixture.size },
     useWindowDimensions: () => fixture.size,
-    Platform: { OS: "ios" },
+    Platform: { get OS() { return fixture.platform; } },
   };
 });
 vi.mock("@/components/AppText", () => ({
@@ -92,6 +104,7 @@ vi.mock("lucide-react-native", () => ({
   VolumeX: () => null,
   PictureInPicture2: () => null,
   Check: () => null,
+  ClipboardList: () => null,
   ChevronDown: () => null,
   ChevronRight: () => null,
   Eye: () => null,
@@ -143,6 +156,7 @@ vi.mock("react-native-webview", () => ({
     fixture.crashed = p.onContentProcessDidTerminate;
     useImperativeHandle(ref, () => ({
       postMessage: fixture.post,
+      requestFocus() {},
       reload: fixture.reload,
     }));
     return createElement("div", { "data-testid": p.testID });
@@ -160,6 +174,9 @@ const button = (key: string) =>
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
+  fixture.platform = "ios";
+  fixture.views = {};
+  fixture.keyboardListeners = {};
   vi.useFakeTimers();
   fixture.focused = true;
   fixture.status = "online";
@@ -211,6 +228,51 @@ const connect = async () => {
 };
 
 describe("remote desktop controls", () => {
+  it("overlays landscape keyboards and includes their measured occlusion", async () => {
+    fixture.size = { width: 844, height: 390 };
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    act(() => button("keyboard").click());
+    expect(fixture.views["remoteDesktop.layout"].enabled).toBe(false);
+    const panel = () => fixture.views["remoteDesktop.keyboardPanel"];
+    expect(panel().style.flat(Infinity)).toContainEqual(expect.objectContaining({ position: "absolute" }));
+    act(() => panel().onLayout({ nativeEvent: { layout: { height: 60 } } }));
+    act(() => fixture.keyboardListeners.keyboardWillChangeFrame({ endCoordinates: { screenY: 180 } }));
+    expect(panel().style.flat(Infinity)).toContainEqual({ bottom: 210 });
+    expect(sent().filter((m) => m.type === "mouseButtons").at(-1)).toMatchObject({
+      bottomInset: 270, keyboardOpen: true,
+    });
+    const computer = [...host.querySelectorAll("button")].find((element) => element.textContent === "remoteDesktop.computerKeyboard")!;
+    act(() => computer.click());
+    act(() => panel().onLayout({ nativeEvent: { layout: { height: 280 } } }));
+    expect(panel().style.flat(Infinity)).toContainEqual({ bottom: 0 });
+    expect(sent().filter((m) => m.type === "mouseButtons").at(-1)).toMatchObject({
+      bottomInset: 280, keyboardOpen: true,
+    });
+    act(() => button("close").click());
+    expect(sent().filter((m) => m.type === "mouseButtons").at(-1)).toMatchObject({
+      bottomInset: 0, keyboardOpen: false,
+    });
+  });
+
+  it("keeps Android native keyboard avoidance without adding its height twice", async () => {
+    fixture.platform = "android";
+    fixture.size = { width: 844, height: 390 };
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    act(() => button("keyboard").click());
+    const panel = () => fixture.views["remoteDesktop.keyboardPanel"];
+    act(() => fixture.keyboardListeners.keyboardDidShow({ endCoordinates: { screenY: 180 } }));
+    act(() => panel().onLayout({ nativeEvent: { layout: { height: 60 } } }));
+    expect(panel().style.flat(Infinity)).not.toContainEqual(expect.objectContaining({ position: "absolute" }));
+    expect(sent().filter((m) => m.type === "mouseButtons").at(-1)).toMatchObject({ bottomInset: 0, keyboardOpen: false });
+    const computer = [...host.querySelectorAll("button")].find((element) => element.textContent === "remoteDesktop.computerKeyboard")!;
+    act(() => computer.click());
+    act(() => panel().onLayout({ nativeEvent: { layout: { height: 280 } } }));
+    expect(panel().style.flat(Infinity)).toContainEqual({ bottom: 0 });
+    expect(sent().filter((m) => m.type === "mouseButtons").at(-1)).toMatchObject({ bottomInset: 280, keyboardOpen: true });
+  });
+
   it("keeps a video answer arriving after control initialization and ignores it after exit", async () => {
     const original = fixture.invoke.getMockImplementation()!;
     let control!: (value: object) => void;

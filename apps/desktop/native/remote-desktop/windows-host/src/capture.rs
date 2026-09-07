@@ -89,7 +89,10 @@ impl Capture {
                 ptr::null_mut(),
                 0,
             );
-            if dib.is_null() {
+            if dib.is_null() || pixels.is_null() {
+                if !dib.is_null() {
+                    DeleteObject(dib);
+                }
                 DeleteDC(target);
                 ReleaseDC(ptr::null_mut(), source);
                 return Err(error());

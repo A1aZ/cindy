@@ -29,7 +29,7 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 // an integrity boundary. Installation does not silently repair administrator ACLs.
 pub fn protected_install() -> Result<Vec<Handle>> {
     let mut raw = ptr::null_mut();
-    if unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, ptr::null_mut(), &mut raw) } < 0 {
+    if unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, ptr::null_mut(), &mut raw) } < 0 || raw.is_null() {
         return denied();
     }
     let root = unsafe {
@@ -155,17 +155,21 @@ pub fn protected_install() -> Result<Vec<Handle>> {
         if code != ERROR_SUCCESS {
             return denied();
         }
+        if acl.is_null() || owner.is_null() || unsafe { IsValidAcl(acl) } == 0 {
+            unsafe { LocalFree(descriptor); }
+            return denied();
+        }
         let trusted = |sid| unsafe {
             IsWellKnownSid(sid, WinLocalSystemSid) != 0
                 || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
                 || EqualSid(sid, trusted_installer.0) != 0
         };
-        let mut safe = !acl.is_null() && trusted(owner);
+        let mut safe = trusted(owner);
         if safe {
             unsafe {
                 for i in 0..(*acl).AceCount as u32 {
                     let mut ace = ptr::null_mut();
-                    if GetAce(acl, i, &mut ace) == 0 {
+                    if GetAce(acl, i, &mut ace) == 0 || ace.is_null() {
                         safe = false;
                         break;
                     }
@@ -177,6 +181,10 @@ pub fn protected_install() -> Result<Vec<Handle>> {
                         continue;
                     }
                     if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+                        safe = false;
+                        break;
+                    }
+                    if (header.AceSize as usize) < mem::size_of::<ACCESS_ALLOWED_ACE>() {
                         safe = false;
                         break;
                     }

@@ -129,7 +129,7 @@ export function RemoteDesktopHost() {
                   audioSource = await boundedCapture();
                 } catch (error) {
                   if (current !== generation) throw error;
-                  // Native video remains usable when system audio is unavailable.
+                  // Validate the final track set below, including native video.
                 }
               }
               captured = await nativeStream();
@@ -150,7 +150,7 @@ export function RemoteDesktopHost() {
             captured.getTracks().forEach((track) => track.stop());
             return;
           }
-          if (command.settings?.audio && !command.nativeCapture && !captured.getAudioTracks().length) {
+          if (command.settings?.audio && !captured.getAudioTracks().length) {
             captured.getTracks().forEach((track) => track.stop());
             throw new Error('DESKTOP_AUDIO_UNAVAILABLE');
           }

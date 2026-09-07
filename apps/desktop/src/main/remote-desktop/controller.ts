@@ -278,13 +278,16 @@ export class RemoteDesktopController {
       case 'resolution': {
         if (!active.controlling) throw new Error('DESKTOP_VIEW_ONLY');
         if (!this.deps.resolution) throw new Error('DESKTOP_DISPLAY_MODES_UNAVAILABLE');
-        await this.deps.resolution(active.display.id, request.modeId, () => {
+        const generation = this.controlGeneration;
+        const isCurrent = () => {
           this.tick();
-          return this.active === active && active.controlling;
-        });
+          return this.active === active && active.controlling && generation === this.controlGeneration;
+        };
+        await this.deps.resolution(active.display.id, request.modeId, isCurrent);
+        if (!isCurrent()) throw new Error('DESKTOP_LEASE_EXPIRED');
         // The OS geometry change ends capture/input; the viewer reconnects using
         // fresh capabilities. This never tears down the shared device link.
-        if (this.active === active) this.stop(peer);
+        this.stop(peer);
         return { ok: true };
       }
       case 'offer': {

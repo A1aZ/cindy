@@ -234,6 +234,7 @@ import {
 import { cleanupComputerDriverSession } from '../mcp-integrations/computer.js';
 import { createPluginRegistry, resetPluginRegistry } from './plugins/index.js';
 import {
+  withCodexMcpDiscoveryContext,
   getActiveCodexBridgeServerNames,
   getCodexExtraSpawnConfig,
   registerCodexMcpThreadContext,
@@ -1698,6 +1699,8 @@ export function getMaker(): Maker {
             : {}),
         };
       },
+      withCodexMcpDiscoveryContext: (ctx, run) =>
+        withCodexMcpDiscoveryContext({ ...ctx, agentKind: 'codex' }, run),
       registerCodexMcpThreadContext: ({
         threadId,
         sessionId,

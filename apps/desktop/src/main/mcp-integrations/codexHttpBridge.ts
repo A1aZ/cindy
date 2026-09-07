@@ -138,6 +138,8 @@ export interface CodexHttpBridge {
   instanceId: string;
   /** 拼出 codex 端 config 用的 URL，例如 http://127.0.0.1:54321/mcp/lizi_feishu */
   url(serverName: string): string;
+  /** Temporary startup identity, usable only by tools/list before thread registration. */
+  withDiscoveryContext<T>(ctx: LiziMcpSessionContext, run: () => Promise<T>): Promise<T>;
   registerThreadContext(threadId: string, ctx: LiziMcpSessionContext): void;
   unregisterThreadContext(threadId: string, expectedSessionInstanceId?: string): void;
   /**
@@ -213,6 +215,7 @@ export async function startCodexHttpBridge(
     transportsByServer.set(name, new Map());
   }
   const threadContextStore = createCodexMcpThreadContextStore();
+  const discoveryContexts = new Map<string, LiziMcpSessionContext>();
   // sessionId → ctx (远端 cc 的身份通道, 经 ?session= query 路由, 见 interface 注释)。
   const sessionCtxById = new Map<string, LiziMcpSessionContext>();
   // sessionId → per-session bearer token 注册代次(pi 会话, 见 interface 注释)。
@@ -362,6 +365,7 @@ export async function startCodexHttpBridge(
         serverName,
         log,
         threadContextStore,
+        discoveryContexts,
         pluginId: opts.pluginIdByServerName?.[serverName],
         sessionTokenCtx,
         threadInstanceQuery: sessionQuery === null ? instanceQuery : null,
@@ -487,6 +491,15 @@ export async function startCodexHttpBridge(
     token,
     instanceId: randomBytes(8).toString('hex'),
     url: (serverName) => `http://127.0.0.1:${port}${MCP_PATH_PREFIX}${encodeURIComponent(serverName)}`,
+    withDiscoveryContext: async (ctx, run) => {
+      const instance = ctx.sessionInstanceId;
+      if (!instance) return run();
+      // Each lease owns its exact object, so late completion cannot delete a replacement.
+      const lease = { ...ctx };
+      discoveryContexts.set(instance, lease);
+      try { return await run(); }
+      finally { if (discoveryContexts.get(instance) === lease) discoveryContexts.delete(instance); }
+    },
     registerThreadContext: threadContextStore.registerThreadContext,
     unregisterThreadContext: threadContextStore.unregisterThreadContext,
     registerSessionCtx: (sessionId, ctx) => {
@@ -552,6 +565,7 @@ interface DispatchOpts {
   serverName: string;
   log: Logger;
   threadContextStore: ReturnType<typeof createCodexMcpThreadContextStore>;
+  discoveryContexts: ReadonlyMap<string, LiziMcpSessionContext>;
   pluginId?: string;
   /** per-session token 命中时解析出的 ctx;存在即优先于 _meta.threadId 路由。 */
   sessionTokenCtx?: LiziMcpSessionContext;
@@ -582,6 +596,7 @@ async function dispatchToTransport(opts: DispatchOpts): Promise<void> {
     serverName,
     log,
     threadContextStore,
+    discoveryContexts,
     pluginId,
     sessionTokenCtx,
     threadInstanceQuery,
@@ -620,6 +635,14 @@ async function dispatchToTransport(opts: DispatchOpts): Promise<void> {
           threadContextStore,
           threadInstanceQuery,
         );
+        // Native Codex lists tools before thread/start returns. Only that exact
+        // request may use the startup lease; batches, calls and claimed thread ids
+        // still require the real registered execution context.
+        if (!activeContext && !threadId && threadInstanceQuery !== null
+          && parsedBody && !Array.isArray(parsedBody)
+          && (parsedBody as { method?: unknown }).method === 'tools/list') {
+          activeContext = discoveryContexts.get(threadInstanceQuery);
+        }
         let decision:
           | 'no_thread_id'
           | 'thread_unregistered'

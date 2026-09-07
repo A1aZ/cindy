@@ -27,6 +27,7 @@
 
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { jsonObjectArg } from './json-object-arg.js';
 
@@ -90,6 +91,14 @@ const D_LIST_TOOLS =
 
 const D_CALL_TOOL =
   '调用 list_tools 为当前任务返回的一个具体工具。不要猜工具名，也不要把它当成通用命令入口。';
+
+const LIST_TOOLS_INPUT = {
+  category: z.string().optional().describe('list_tools 上一步返回的类目；不传则先取类目概览。'),
+};
+const CALL_TOOL_INPUT = {
+  name: z.string().describe('工具名,从 list_tools 获取(如 get_capabilities)'),
+  args: jsonObjectArg('工具参数(JSON 对象)。不确定 schema 时可先传 {} 触发错误反馈。'),
+};
 
 // list_tools 入口类目: cindy(自省) / control(会话控制面) / history(聊天历史) / feedback(官方反馈提交) / handoff(session 间 handoff)。
 // 协同 team 工具已拆到独立 cindy_orca server(插件开关 gate)。
@@ -155,9 +164,7 @@ function registerListToolsEntry(
   server.tool(
     'list_tools',
     D_LIST_TOOLS,
-    {
-      category: z.string().optional().describe('list_tools 上一步返回的类目；不传则先取类目概览。'),
-    },
+    LIST_TOOLS_INPUT,
     async ({ category }) => {
       const allowed = await allowedCategories();
       if (category) {
@@ -221,12 +228,7 @@ function registerCallToolEntry(
   server.tool(
     'call_tool',
     D_CALL_TOOL,
-    {
-      name: z
-        .string()
-        .describe('工具名,从 list_tools 获取(如 get_capabilities)'),
-      args: jsonObjectArg('工具参数(JSON 对象)。不确定 schema 时可先传 {} 触发错误反馈。'),
-    },
+    CALL_TOOL_INPUT,
     async ({ name, args }) => {
       const allowed = await allowedCategories();
       const definition = registry.get(name);
@@ -701,5 +703,39 @@ export function createXdtHelperMcpServer(
     getSessionId: () => resolveLiziMcpSessionContext(sessionCtx).sessionId,
   }, allowedCategories);
 
+  // Pi already provides direct Bot tools through its native bridge. CC and Codex
+  // consume MCP tools/list instead; expose the same registered definitions there.
+  // Resolve identity per request: Codex's HTTP server is shared across sessions.
+  if (sessionCtx.agentKind !== 'pi') {
+    const directTools = registry.list('bots').map((summary) => registry.get(summary.name)!);
+    for (const definition of directTools) {
+      server.registerTool(definition.name, {
+        description: definition.description, inputSchema: z.strictObject(definition.inputShape),
+      }, async (args) => {
+        const allowed = await allowedCategories();
+        if (!allowed?.has('bots')) {
+          return errorPayload('CAPABILITY_NOT_AVAILABLE', '这个工具不属于当前任务的能力面。');
+        }
+        const result = await registry.call(definition.name, args);
+        logToolResultErrorCode({
+          logger: deps.logger, server: 'cindy_helper', tool: definition.name, result,
+          sessionId: resolveLiziMcpSessionContext(sessionCtx).sessionId,
+        });
+        return result;
+      });
+    }
+    const schema = (shape: z.ZodRawShape): Tool['inputSchema'] =>
+      z.toJSONSchema(z.strictObject(shape)) as Tool['inputSchema'];
+    const entryTools: Tool[] = [
+      { name: 'list_tools', description: D_LIST_TOOLS, inputSchema: schema(LIST_TOOLS_INPUT) },
+      { name: 'call_tool', description: D_CALL_TOOL, inputSchema: schema(CALL_TOOL_INPUT) },
+    ];
+    const botTools: Tool[] = directTools.map((definition) => ({
+      name: definition.name, description: definition.description, inputSchema: schema(definition.inputShape),
+    }));
+    server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: (await allowedCategories())?.has('bots') ? [...entryTools, ...botTools] : entryTools,
+    }));
+  }
   return server;
 }

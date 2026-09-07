@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getLiziMcpSessionContext } from '@cindy/mcps';
 
@@ -153,6 +154,56 @@ describe('codexHttpBridge', () => {
   afterEach(async () => {
     await bridge?.shutdown();
     bridge = null;
+  });
+
+  it('scopes startup tools/list before thread registration without authorizing execution', async () => {
+    bridge = await startCodexHttpBridge({
+      serverFactories: { cindy_helper: () => {
+        const server = createTestServer();
+        server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
+          name: getLiziMcpSessionContext()?.sessionId ?? 'unbound',
+          inputSchema: { type: 'object', properties: {} },
+        }] }));
+        return server;
+      } },
+      pluginIdByServerName: { cindy_helper: 'cindy_helper' },
+      logger: noopLogger(),
+    });
+    const current = bridge;
+    const url = withMcpRouteIdentity(current.url('cindy_helper'), { sessionInstanceId: 'starting-instance' });
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${current.token}`, accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initialized = await fetch(url, { method: 'POST', headers, body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'startup-test', version: '1' },
+      },
+    }) });
+    headers['mcp-session-id'] = initialized.headers.get('mcp-session-id')!;
+    await initialized.text();
+    let id = 2;
+    const request = (method: string, params: unknown = {}) => fetch(url, {
+      method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: id++, method, params }),
+    });
+    const list = async () => await readRpcResponse(await request('tools/list')) as { result: { tools: Array<{ name: string }> } };
+    expect((await list()).result.tools[0].name).toBe('unbound');
+    const context = { agentKind: 'codex' as const, sessionId: 'bot-parent', sessionInstanceId: 'starting-instance', workingDir: '/bot' };
+    await expect(current.withDiscoveryContext(context, async () => {
+      expect((await list()).result.tools[0].name).toBe('bot-parent');
+      const execution = await request('tools/call', { name: 'current_session', arguments: {} });
+      expect(execution.status).toBe(401);
+      await execution.text();
+      const stale = await readRpcResponse(await request('tools/list', { _meta: { threadId: 'unregistered-thread' } })) as { result: { tools: Array<{ name: string }> } };
+      expect(stale.result.tools[0].name).toBe('unbound');
+      throw new Error('native startup failed');
+    })).rejects.toThrow('native startup failed');
+    expect((await list()).result.tools[0].name).toBe('unbound');
+    current.registerThreadContext('real-thread', context);
+    expect((await list()).result.tools[0].name).toBe('bot-parent');
+    const execution = await request('tools/call', { name: 'current_session', arguments: {}, _meta: { threadId: 'real-thread' } });
+    expect(execution.status).toBe(200);
+    expect(await readRpcResponse(execution)).toMatchObject({ result: { content: [{ text: 'bot-parent' }] } });
   });
 
   it('accepts an additional bearer token (remote daemon) and rejects unknown tokens', async () => {

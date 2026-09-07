@@ -960,6 +960,11 @@ export interface AgentDeps {
    */
   reviewAutoPermissionAction?: AutoReviewDelegate;
 
+  /** Scope tools/list during native startup, before a real thread id exists. Never authorizes tools/call. */
+  withCodexMcpDiscoveryContext?: <T>(
+    args: Pick<CodexMcpThreadContextArgs, 'sessionId' | 'sessionInstanceId' | 'workingDir' | 'vendorOptions'>,
+    run: () => Promise<T>,
+  ) => Promise<T>;
   /**
    * Codex-only: bind app-server thread ids back to xdt-maker session context
    * for host-owned HTTP MCP bridges. Missing hooks keep the old no-session

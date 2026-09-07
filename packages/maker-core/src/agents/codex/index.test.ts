@@ -5360,7 +5360,15 @@ describe('CodexAgent.startSession developerInstructions', () => {
 
     const params = host.request.mock.calls.find(([method]) => method === Method.ThreadStart)?.[1] as {
       developerInstructions?: string;
+      config?: Record<string, unknown>;
     };
+    expect(params.config).toMatchObject({
+      'features.multi_agent': false,
+      'features.multi_agent_v2': false,
+      'agents.enabled': false,
+      'memories.generate_memories': false,
+      'memories.use_memories': false,
+    });
     expect(params.developerInstructions).toContain('BOT SOUL');
     expect(params.developerInstructions).toContain('BOT HOME CONTEXT');
     expect(params.developerInstructions).not.toContain('GLOBAL CINDY HOST PROMPT');
@@ -8469,6 +8477,32 @@ describe('CodexAgent MCP thread context hooks', () => {
       'start-thread-id',
       'instance-codex-mcp-context',
     );
+  });
+
+  it.each([false, true])('registers discovery identity around native startup (resume=%s)', async (resume) => {
+    const order: string[] = [];
+    const deps = createDeps();
+    deps.withCodexMcpDiscoveryContext = async (ctx, run) => {
+      expect(ctx).toMatchObject({ sessionId: 'bot-parent', sessionInstanceId: 'bot-instance' });
+      order.push('discovery');
+      try { return await run(); } finally { order.push('released'); }
+    };
+    const agent = new CodexAgent(deps);
+    const host = installFakeHost(agent);
+    const original = host.request.getMockImplementation()!;
+    host.request.mockImplementation(async (...args) => {
+      if (args[0] === Method.ThreadStart || args[0] === Method.ThreadResume) {
+        expect(order).toEqual(['discovery']);
+        order.push('native');
+      }
+      return original(...args);
+    });
+    const handle = await agent.startSession({
+      sessionId: 'bot-parent', sessionInstanceId: 'bot-instance', workingDir: '/bot', model: 'gpt-5.4',
+      ...(resume ? { resumeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } : {}),
+    });
+    expect(order).toEqual(['discovery', 'native', 'released']);
+    await handle.close();
   });
 
   it('applies instance-bound MCP URLs to both thread/start and thread/resume', async () => {

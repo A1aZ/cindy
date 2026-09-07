@@ -1,3 +1,4 @@
+import { registerSessionSetModelHandler } from './sessionSetModelHandler.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
  * registerMakerIpc — 把 Maker Core 的能力暴露为 maker:* IPC channel。
@@ -14776,7 +14777,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 可以乐观调用 (UI 更新先行, IPC 失败也不会回滚 UI, 老 agentManager 同语义)。
 
   const handleSetModel = async (
-    event: Electron.IpcMainInvokeEvent | undefined,
     sessionId: unknown,
     model: unknown,
     providerId: unknown,
@@ -14784,9 +14784,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     selection: unknown,
     internalOptions: InternalRuntimeSelectionOptions,
   ) => {
-    if (internalOptions.source === 'user' && !internalOptions.sessionLockHeld && !isDeviceLinkInvoke()) {
-      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
-    }
     if (typeof sessionId !== 'string' || typeof model !== 'string') {
       throwIpcError('INVALID_PARAMS', 'sessionId + model required');
     }
@@ -15983,14 +15980,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return internalOptions.sessionLockHeld ? applyLocked() : withSendToSessionLock(sessionId, applyLocked);
   };
   applySessionRuntimeSelection = (sessionId, model, providerId, selection, options) =>
-    handleSetModel(undefined, sessionId, model, providerId, undefined, selection, options);
-  ipcMain.handle(
-    MAKER_INVOKE.SET_MODEL,
-    (event, sessionId, model, providerId, expectedAgentSwitchRevision, selection) =>
-      handleSetModel(event, sessionId, model, providerId, expectedAgentSwitchRevision, selection, {
-        source: 'user',
-      }),
-  );
+    handleSetModel(sessionId, model, providerId, undefined, selection, options);
+  registerSessionSetModelHandler(makerSessionRegistry, {
+    isDeviceLinkInvoke,
+    assertTrustedSender: (event) => assertTrustedAppRendererEvent(
+      event as Parameters<typeof assertTrustedAppRendererEvent>[0],
+    ),
+    apply: (sessionId, model, providerId, revision, selection) =>
+      handleSetModel(sessionId, model, providerId, revision, selection, { source: 'user' }),
+  });
 
   const recoverRemoteRuntimeAxisPersistence = async (
     sessionId: string,

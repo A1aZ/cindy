@@ -1,17 +1,16 @@
 import { botInvitationProgress, type BotInvitationProgress } from '../../../shared/botInvitation';
 import { useSyncExternalStore } from 'react';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
-import { effectiveSourceIdForModel, getModel } from '@cindy/model-providers';
+import { getModel } from '@cindy/model-providers';
 import { getDraft, getPersistedVendorModel } from '@/state/newMakerDraft';
 import { getDefaultModelForVendor } from '@/lib/modelDefinitions';
-import { pickFirstConnectedModelForAgent } from '@/lib/draftModelCalibration';
+import { pickConnectedModelForAgent } from '@/lib/draftModelCalibration';
 import { refreshLocalCatalogSnapshot } from '@/lib/localCatalogSnapshot';
+import { defaultBotModelChain } from '../../../shared/botDefaultModelChain';
+import { getCachedAvailableVendors } from '@/hooks/useAvailableAgents';
 import { getCachedProvidersSnapshot } from '@/lib/providersSnapshotStore';
 import {
   NEW_BOT_DEFAULT_HARNESS,
-  NEW_BOT_DEFAULT_PI_EFFORT,
-  NEW_BOT_DEFAULT_PI_MODEL,
-  NEW_BOT_DEFAULT_PI_PROVIDER,
 } from '../../../shared/botDefaults';
 import { getBotLastReadAtMap, pruneBotReadState, seedMissingBotReadState } from './botReadState';
 import type { BotGender } from '../../../shared/botGender';
@@ -206,70 +205,15 @@ export function canonicalBotSessionId(bot: BotProfile): string | undefined {
   return canonicalBotSession(bot)?.id;
 }
 
-/**
- * 伙伴该用哪个模型:用户真正选过的优先,没选过就跟系统默认。
- *
- * 新建伙伴与**设置页换 harness** 共用这一条 —— 换 harness 时原来直接读
- * `lastByVendor[vendor].model`,把种子快照当成用户的选择,与新建那边曾经的
- * bug 完全同形。同一个决定不留两份实现。
- *
- * 两条都必须走既有来源,这里只加一层有界首选:
- *  - `lastByVendor` 的整份快照会随任意 draft 写入落盘,里面的 model 即使用户从没碰过
- *    也带着种子默认 —— 直接读它,新建的每个伙伴都会撞上种子档,与用户自己选的无关
- *    (2026-08-21 用户实测投诉)。`modelChosenByVendor` 才是「真选过」的判据,
- *    `getPersistedVendorModel` 就是按它做的读取。
- *  - 新建 Pi Bot 优先 GLM-5.3-Flash,但只有它在当前**已连接来源**里真的可路由才选;
- *    否则取当前可选模型的第一项。一个可选模型都没有时 model 留空,让选择器展示空态。
- *    model / provider / effort 始终从同一个来源条目一起解析。
- *  - 其它 harness 仍直接取 `getDefaultModelForVendor()`,也就是模型选择器给新对话用的
- *    同一个默认值(服务端目录的 newSessionDefault)。
- */
+/** Manual harness changes use the ordinary client model picker calibration. */
 function defaultBotModelSettings(vendor: ReturnType<typeof vendorForHarness>): BotModelOverride {
-  if (vendor === 'pi') {
-    const providers = getCachedProvidersSnapshot()?.providers ?? [];
-    const preferredProviderId = effectiveSourceIdForModel(
-      providers,
-      null,
-      NEW_BOT_DEFAULT_PI_MODEL,
-      'pi',
-    );
-    if (preferredProviderId) {
-      const provider = providers.find((item) => item.id === preferredProviderId);
-      const preferred = provider ? getModel(provider, NEW_BOT_DEFAULT_PI_MODEL, 'pi') : undefined;
-      return {
-        model: NEW_BOT_DEFAULT_PI_MODEL,
-        providerId: preferredProviderId,
-        effort: preferred?.defaultEffort ?? '',
-        fastMode: false,
-      };
-    }
-    const fallback = pickFirstConnectedModelForAgent(providers, 'pi');
-    if (fallback) {
-      const provider = providers.find((item) => item.id === fallback.providerId);
-      const model = provider ? getModel(provider, fallback.model, 'pi') : undefined;
-      return {
-        model: fallback.model,
-        providerId: fallback.providerId,
-        effort: model?.defaultEffort ?? '',
-        fastMode: false,
-      };
-    }
-    // The Bot default is a durable product choice, not a transient projection
-    // of whether the provider catalog happened to finish loading first.
-    return {
-      model: NEW_BOT_DEFAULT_PI_MODEL,
-      providerId: NEW_BOT_DEFAULT_PI_PROVIDER,
-      effort: NEW_BOT_DEFAULT_PI_EFFORT,
-      fastMode: false,
-    };
-  }
-  const fallback = getDefaultModelForVendor(vendor);
-  return {
-    model: fallback.id,
-    providerId: null,
-    effort: fallback.defaultEffort ?? '',
-    fastMode: false,
-  };
+  const providers = getCachedProvidersSnapshot()?.providers ?? [];
+  const agent = vendor === 'cc' ? 'claude-code' : vendor;
+  const picked = pickConnectedModelForAgent(providers, agent, getDefaultModelForVendor(vendor).id);
+  const provider = providers.find((item) => item.id === picked?.providerId);
+  const model = provider && picked ? getModel(provider, picked.model, agent) : undefined;
+  return { model: picked?.model ?? '', providerId: picked?.providerId ?? null,
+    effort: model?.defaultEffort ?? '', fastMode: false };
 }
 
 export function defaultBotModel(vendor: ReturnType<typeof vendorForHarness>): string {
@@ -360,15 +304,11 @@ export function getEffectiveBotModelChain(
 ): BotModelRoute[] {
   const stored = getBotGlobalModelChain();
   if (stored) return stored;
-  return [
-    {
-      harness: NEW_BOT_DEFAULT_HARNESS,
-      model: NEW_BOT_DEFAULT_PI_MODEL,
-      providerId: NEW_BOT_DEFAULT_PI_PROVIDER,
-      effort: NEW_BOT_DEFAULT_PI_EFFORT,
-      fastMode: false,
-    },
-  ];
+  const providers = getCachedProvidersSnapshot();
+  const availableAgents = getCachedAvailableVendors();
+  return defaultBotModelChain({ providers: providers?.providers ?? [],
+    providersLoading: !providers, availableAgents: availableAgents ?? new Set(),
+    availableAgentsLoaded: availableAgents !== null });
 }
 
 export async function setBotGlobalModelChain(chain: BotModelRoute[]): Promise<void> {
@@ -410,10 +350,8 @@ function defaultCapabilities(
 ): BotCapabilities {
   const vendor = vendorForHarness(harness);
   const prefs = getDraft().lastByVendor[vendor];
-  const override = getBotGlobalModelOverride(vendor);
-  const resolved = getEffectiveBotModelSettings(vendor, override);
   const globalChain = getEffectiveBotModelChain(harness);
-  const primary = globalChain[0] ?? { harness, ...resolved };
+  const primary = globalChain[0] ?? { harness, model: '', providerId: null, effort: '', fastMode: false };
   const model = primary.model;
   return {
     model,
@@ -531,9 +469,11 @@ function normalizeDbProfile(value: unknown): BotProfile | null {
     rawCapabilities ?? {},
     harness,
   );
-  const resolvedModel =
-    modelOverride ?? getEffectiveBotModelSettings(vendorForHarness(harness), null);
-  const modelChain = normalizeBotModelChain(rawCapabilities?.modelChain, {
+  const followsDefault = rawCapabilities?.modelChainOverride === null || rawCapabilities?.modelOverride === null;
+  const resolvedModel = modelOverride ?? (followsDefault
+    ? { model: '', providerId: null, effort: '', fastMode: false }
+    : getEffectiveBotModelSettings(vendorForHarness(harness), null));
+  const modelChain = normalizeBotModelChain(rawCapabilities?.modelChain, followsDefault ? null : {
     harness,
     model: resolvedModel.model || rawCapabilities?.model,
     providerId: resolvedModel.providerId ?? rawCapabilities?.providerId,
@@ -710,11 +650,9 @@ async function hydrateFromDatabase(): Promise<void> {
           if (!isCurrent()) return;
         }
         const persisted = normalizeBotModelChain(state.modelChain);
-        if (persisted.length > 0) {
-          globalModelChainCache = persisted;
-          window.localStorage.removeItem(BOT_GLOBAL_MODEL_CHAIN_KEY);
-          for (const listener of botModelListeners) listener();
-        }
+        globalModelChainCache = persisted;
+        window.localStorage.removeItem(BOT_GLOBAL_MODEL_CHAIN_KEY);
+        for (const listener of botModelListeners) listener();
       } catch {
         // Profile hydration remains usable if the settings file is temporarily
         // unavailable. A later explicit refresh retries the Main-owned source.
@@ -867,6 +805,12 @@ export async function addBotProfileAndWait(input: CreateBotProfileInput): Promis
   const needsPiDefault = harness === 'pi' && input.capabilities?.model === undefined;
   if (needsPiDefault && getCachedProvidersSnapshot() === null && typeof window !== 'undefined') {
     await refreshLocalCatalogSnapshot();
+  }
+  const settingsApi = botsApi();
+  if (settingsApi?.getModelChainSettings) {
+    const state = await settingsApi.getModelChainSettings();
+    assertCurrentOwner(owner);
+    globalModelChainCache = normalizeBotModelChain(state.modelChain);
   }
   assertCurrentOwner(owner);
   const bot = addBotProfile(input);

@@ -2,13 +2,20 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import type { ProviderView } from '@cindy/model-providers';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   readBotModelChainSettingsState,
   readEffectiveBotModelChain,
   writeBotModelChainSettings,
 } from '../bot-model-chain-settings-store';
+
+vi.mock('../createDesktopProviderService.js', () => ({
+  getDesktopProviderService: () => ({ listProviders: async () => [] }),
+}));
+
+vi.mock('../index.js', () => ({ getMakerIfReady: () => ({ listAvailableAgents: () => ['claude-code', 'codex', 'pi'] }) }));
 
 const roots: string[] = [];
 
@@ -23,21 +30,32 @@ afterEach(async () => {
 });
 
 describe('bot model chain settings store', () => {
-  it('defaults to Pi + GLM-5.3-Flash without creating an override', async () => {
+  it('keeps unconfigured defaults empty without writing a Gateway placeholder', async () => {
     const rootPath = await testRoot();
-
-    expect(readBotModelChainSettingsState({ rootPath })).toMatchObject({
-      isCustomized: false,
-      value: {
-        modelChain: [{
-          harness: 'pi',
-          model: 'z-ai/glm-5.3-flash',
-          providerId: 'xd',
-          effort: 'high',
-          fastMode: false,
-        }],
-      },
+    expect(await readBotModelChainSettingsState({ rootPath, providers: [] })).toMatchObject({
+      isCustomized: false, value: { modelChain: [] },
     });
+  });
+
+  it('resolves uncustomized defaults from current connections without writing an override', async () => {
+    const rootPath = await testRoot();
+    const providers = [{
+      id: 'openai', source: 'builtin', connected: true, agents: ['codex'],
+      access: { kind: 'subscription', product: 'ChatGPT' },
+      routing: { codex: { upstream: 'https://example.invalid', authStrategy: 'oauth-passthrough' } },
+      models: { codex: [{ id: 'gpt-5.6-sol', mode: 'chat', status: 'active', efforts: ['medium'], defaultEffort: 'medium' }] },
+    }] as ProviderView[];
+    const state = await readBotModelChainSettingsState({ rootPath, providers });
+    expect(state.isCustomized).toBe(false);
+    expect(state.value.modelChain[0]).toMatchObject({
+      harness: 'codex', providerId: 'openai', model: 'gpt-5.6-sol', effort: 'medium',
+    });
+    expect(await fs.readdir(rootPath)).toEqual([]);
+    expect(await readEffectiveBotModelChain({ modelChainOverride: null }, { rootPath, providers }))
+      .toEqual(state.value.modelChain);
+    await writeBotModelChainSettings(state.value.modelChain, { rootPath });
+    expect((await readBotModelChainSettingsState({ rootPath, providers: [] })).value)
+      .toEqual(state.value);
   });
 
   it('persists an ordered 1-5 route chain as the Main-owned source of truth', async () => {
@@ -61,17 +79,17 @@ describe('bot model chain settings store', () => {
 
     await writeBotModelChainSettings(modelChain, { rootPath });
 
-    expect(readBotModelChainSettingsState({ rootPath })).toMatchObject({
+    expect(await readBotModelChainSettingsState({ rootPath, providers: [] })).toMatchObject({
       isCustomized: true,
       value: { modelChain },
     });
 
-    expect(readEffectiveBotModelChain({
+    expect(await readEffectiveBotModelChain({
       model: 'legacy-cache',
       harness: 'claude',
       modelOverride: null,
     }, { rootPath })).toEqual(modelChain);
-    expect(readEffectiveBotModelChain({
+    expect(await readEffectiveBotModelChain({
       modelChainOverride: null,
       modelChain: [{ harness: 'claude', model: 'stale-cache' }],
     }, { rootPath })).toEqual(modelChain);
@@ -87,7 +105,7 @@ describe('bot model chain settings store', () => {
       fastMode: false,
     }];
 
-    expect(readEffectiveBotModelChain({
+    expect(await readEffectiveBotModelChain({
       modelChain: [{ harness: 'pi', model: 'stale-cache' }],
       modelChainOverride: explicit,
     }, { rootPath })).toEqual(explicit);

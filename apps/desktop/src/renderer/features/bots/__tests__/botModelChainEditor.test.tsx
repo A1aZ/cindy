@@ -9,6 +9,8 @@ const { modelSelectorProps } = vi.hoisted(() => ({
 
 vi.mock('@/components/new-chat/ModelSelector', () => ({
   ModelSelector: (props: {
+    onEffortChange: (effort: string) => void;
+    onFastModeChange: (enabled: boolean) => void;
     onUnifiedSelect: (selection: {
       providerId: string;
       modelId: string;
@@ -21,6 +23,8 @@ vi.mock('@/components/new-chat/ModelSelector', () => ({
     modelSelectorProps(props);
     return (
       <>
+        <button onClick={() => props.onEffortChange("high")}>set-high-effort</button>
+        <button onClick={() => props.onFastModeChange(true)}>enable-fast-mode</button>
         <button
           type="button"
           onClick={() =>
@@ -79,7 +83,7 @@ afterEach(() => {
 });
 
 describe('BotModelChainEditor', () => {
-  it('uses the model-only unified picker with official routing', () => {
+  it('uses the standard configurable picker for the current harness', () => {
     render(
       <BotModelChainEditor
         value={[
@@ -100,12 +104,25 @@ describe('BotModelChainEditor', () => {
     expect(modelSelectorProps.mock.calls[0]?.[0].unifiedLayout).toBeUndefined();
     expect(modelSelectorProps.mock.calls[0]?.[0].unifiedLayoutControls).toBeUndefined();
     expect(modelSelectorProps.mock.calls[0]?.[0]).toMatchObject({
-      configurationEnabled: false,
+      configurationEnabled: true,
+      vendorKey: 'pi',
       unifiedPanel: true,
       unifiedAgents: ['pi', 'claude-code'],
-      unifiedSelectionPolicy: 'official',
       triggerVariant: 'toolbar',
     });
+  });
+
+  it('writes depth and fast mode to the selected route without changing its model', () => {
+    const route = { harness: 'codex' as const, model: 'gpt-5.6-sol',
+      providerId: 'openai', effort: 'medium', fastMode: false };
+    const fallback = { ...route, model: 'fallback-model' };
+    const onChange = vi.fn();
+    render(<BotModelChainEditor value={[route, fallback]} onChange={onChange} />);
+    fireEvent.click(screen.getByText('set-high-effort'));
+    expect(onChange).toHaveBeenLastCalledWith([{ ...route, effort: 'high' }, fallback]);
+    fireEvent.click(screen.getByText('enable-fast-mode'));
+    expect(onChange).toHaveBeenLastCalledWith([{ ...route, fastMode: true }, fallback]);
+    expect(modelSelectorProps.mock.calls[0]?.[0].unifiedSelectionPolicy).toBeUndefined();
   });
 
   it('atomically stores the official harness, provider, model, effort, and fast mode', () => {

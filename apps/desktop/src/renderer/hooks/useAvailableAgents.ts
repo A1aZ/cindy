@@ -298,3 +298,8 @@ export function __resetAvailableAgentsCacheForTest(): void {
   inFlight.clear();
   agentsCacheInvalidationScheduled.clear();
 }
+
+/** Synchronous projection of the same runtime roster used by the client picker. */
+export function getCachedAvailableVendors(): ReadonlySet<MakerVendor> | null {
+  return agentsCache.get('')?.vendors ?? null;
+}

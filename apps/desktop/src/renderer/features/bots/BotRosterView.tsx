@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { BotInvitationWelcome } from './BotInvitationWelcome';
+import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
+import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { Spinner } from '@/components/ui/spinner';
 import { BOT_AVATAR_MAX_BYTES } from '../../../shared/botAvatarValue';
 import {
@@ -37,6 +39,7 @@ export function BotRosterView({ onCreated, onClose, restoreFocus }: BotRosterVie
   const { t } = useTranslation();
   const navigate = useNavigate();
   const bots = useBotProfiles();
+  const providerOnboarding = useProviderOnboarding();
   const [invited, setInvited] = useState<BotProfile | null>(null);
   useEffect(() => {
     if (!invited) return;
@@ -187,7 +190,12 @@ export function BotRosterView({ onCreated, onClose, restoreFocus }: BotRosterVie
           }}
           className="fixed left-1/2 top-1/2 z-50 max-h-[85vh] w-[calc(100vw-32px)] max-w-[440px] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--confirm-bg)] p-5 outline-none"
         >
-          {invitedBot ? (
+          {providerOnboarding.visible ? (
+            <>
+              <Dialog.Title className="sr-only">{t('onboarding.connectProvider.title')}</Dialog.Title>
+              <ConnectProviderCard />
+            </>
+          ) : invitedBot ? (
             <>
               <Dialog.Title className="sr-only">{t('bots.invitation.title')}</Dialog.Title>
               <BotInvitationWelcome bot={invitedBot} />

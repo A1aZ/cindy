@@ -77,6 +77,7 @@ export function BotModelChainEditor({
   const picker = (route: BotModelRoute, index: number) => (
     <div className="min-w-0 flex-1">
       <ModelSelector
+        vendorKey={vendorFor(route.harness)}
         modelId={route.model}
         effort={route.effort}
         currentProviderId={route.providerId}
@@ -86,12 +87,12 @@ export function BotModelChainEditor({
         excludeSubscriptionDirect={remote}
         excludeChatBridgedCodex={remote}
         fastMode={route.fastMode}
-        onModelChange={() => undefined}
-        onEffortChange={() => undefined}
-        configurationEnabled={false}
+        onModelChange={(model) => replace(index, { model })}
+        onEffortChange={(effort) => replace(index, { effort })}
+        onFastModeChange={(fastMode) => replace(index, { fastMode })}
+        configurationEnabled
         unifiedPanel
         unifiedAgents={unifiedAgents}
-        unifiedSelectionPolicy="official"
         onUnifiedSelect={(selection) =>
           replace(index, {
             harness: harnessFor(selection.engine),

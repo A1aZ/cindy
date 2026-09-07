@@ -10,8 +10,11 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 const mocks = vi.hoisted(() => ({
   addBotProfileAndWait: vi.fn(),
   navigate: vi.fn(),
+  onboarding: false,
   profiles: [] as Array<{ id: string; name: string; invitation: { stage: string } }>,
 }));
+vi.mock('@/hooks/useProviderOnboarding', () => ({ useProviderOnboarding: () => ({ visible: mocks.onboarding }) }));
+vi.mock('@/components/onboarding/ConnectProviderCard', () => ({ ConnectProviderCard: () => <div>Shared provider setup</div> }));
 vi.mock('../botStore', () => ({
   addBotProfileAndWait: mocks.addBotProfileAndWait,
   useBotProfiles: () => mocks.profiles,
@@ -27,11 +30,23 @@ beforeEach(() => {
   mocks.addBotProfileAndWait.mockResolvedValue({ id: 'bot-new', name: 'Ops buddy' });
   mocks.navigate.mockReset();
   mocks.profiles = [];
+  mocks.onboarding = false;
 });
 
 afterEach(() => cleanup());
 
 describe('BotRosterView — 唯一的伙伴创建界面', () => {
+  it('uses the shared connection guide before creating an unconfigured teammate', () => {
+    mocks.onboarding = true;
+    const view = render(<BotRosterView />);
+    expect(screen.getByText('Shared provider setup')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'bots.roster.create' })).toBeNull();
+    expect(mocks.addBotProfileAndWait).not.toHaveBeenCalled();
+    mocks.onboarding = false;
+    view.rerender(<BotRosterView />);
+    expect(screen.getByRole('button', { name: 'bots.roster.create' })).toBeTruthy();
+  });
+
   it('waits in the invitation dialog and meets only after preparation completes', async () => {
     const preparing = { id: 'new', name: '阿橙', invitation: { stage: 'skills' } };
     mocks.addBotProfileAndWait.mockResolvedValue(preparing);

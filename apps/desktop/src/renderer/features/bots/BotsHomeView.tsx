@@ -1,3 +1,5 @@
+import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
+import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Check, FolderOpen } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -381,6 +383,7 @@ export function BotsHomeView() {
   const { botId, sessionId } = useParams();
   const [searchParams] = useSearchParams();
   const bots = useBotProfiles();
+  const providerOnboarding = useProviderOnboarding();
   const creatingBotRef = useRef<{ botId: string; token: symbol } | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<unknown>(null);
@@ -490,6 +493,7 @@ export function BotsHomeView() {
   useRegisterContentHeader(headerContent);
 
   useEffect(() => {
+    if (providerOnboarding.visible) return;
     if (selectedBot?.invitation && selectedBot.invitation.stage !== 'ready') return;
     if (!selectedBot || shouldDeferCanonicalBotSessionNavigation({ settingsOpen, addRequested }))
       return;
@@ -581,7 +585,11 @@ export function BotsHomeView() {
         creatingBotRef.current = null;
       }
     };
-  }, [addRequested, createCanonicalSession, selectedBot, sessionId, settingsOpen, navigate]);
+  }, [addRequested, createCanonicalSession, selectedBot, sessionId, settingsOpen, navigate, providerOnboarding.visible]);
+
+  if (providerOnboarding.visible && !settingsOpen) {
+    return <main className="flex h-full items-center justify-center px-6" role="main"><ConnectProviderCard /></main>;
+  }
 
   if (!selectedBot) {
     if (bots.length === 0)

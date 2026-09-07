@@ -4,6 +4,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BotCapabilities, BotProfile } from '../botStore';
 
+vi.mock('@/hooks/useProviderOnboarding', () => ({
+  useProviderOnboarding: () => ({ visible: false }),
+}));
+vi.mock('@/components/onboarding/ConnectProviderCard', () => ({
+  ConnectProviderCard: () => null,
+}));
+
 const translate = (key: string, opts?: Record<string, unknown>) =>
   opts ? `${key}:${JSON.stringify(opts)}` : key;
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));

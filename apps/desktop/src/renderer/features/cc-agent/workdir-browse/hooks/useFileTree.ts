@@ -193,6 +193,8 @@ interface FileTreeStore {
 interface DirectoryRefresh {
   promise: Promise<void>;
   trailing: boolean;
+  /** At most one trailing scan may be queued for this refresh lifecycle. */
+  trailingScheduled: boolean;
 }
 
 /** 全局 stores 表。key 由 storeKey() 算,同 (workdir, options) 共享同一份。 */
@@ -292,17 +294,24 @@ function setDirectoryLoading(store: FileTreeStore, relPath: string, loading: boo
 /**
  * Fetch one directory at a time. Calls made while the request is running set
  * one trailing bit; the request loop consumes that bit after the current
- * result is applied. This keeps watcher storms from producing a request per
- * event while still observing a change that arrived during the first scan.
+ * result is applied. The trailing budget is capped at one scan per lifecycle,
+ * so a watcher storm cannot keep the loop alive indefinitely.
  */
 function fetchDir(store: FileTreeStore, relPath: string): Promise<void> {
   const current = store.inFlight.get(relPath);
   if (current) {
-    current.trailing = true;
+    if (!current.trailingScheduled) {
+      current.trailingScheduled = true;
+      current.trailing = true;
+    }
     return current.promise;
   }
 
-  const refresh: DirectoryRefresh = { promise: Promise.resolve(), trailing: false };
+  const refresh: DirectoryRefresh = {
+    promise: Promise.resolve(),
+    trailing: false,
+    trailingScheduled: false,
+  };
   refresh.promise = (async () => {
     do {
       refresh.trailing = false;

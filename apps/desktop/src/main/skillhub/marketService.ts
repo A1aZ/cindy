@@ -296,7 +296,7 @@ export class SkillhubMarketService {
     };
   }
 
-  async listCategories(scope: SkillhubCatalogScope = 'market') {
+  async listCategories(scope: SkillhubCatalogScope = 'market', includeEmpty = true) {
     const items = await this.fetch<Array<{
       slug: string;
       name: string;
@@ -309,8 +309,9 @@ export class SkillhubMarketService {
         skillCount?: number;
         mySkillCount?: number;
       }>;
-    }>>(`/api/skills-hub/categories?scope=${scope}`);
-    const categories = flattenHubCategories(items ?? []);
+    }>>(`/api/skills-hub/categories?scope=${scope}${includeEmpty ? '' : '&includeEmpty=false'}`);
+    // Older servers may ignore includeEmpty; keep their empty tags out of browse results too.
+    const categories = flattenHubCategories(items ?? []).filter((category) => includeEmpty || category.count > 0);
     const totalCount = categories.reduce((s, c) => s + c.count, 0);
     const myTotalCount = categories.reduce((s, c) => s + c.myCount, 0);
     return { success: true as const, categories, totalCount, myTotalCount };

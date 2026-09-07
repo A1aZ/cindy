@@ -379,6 +379,32 @@ describe('SkillhubMarketService', () => {
       opts: undefined,
     }]);
   });
+
+  it.each(['market', 'team'] as const)('excludes empty browse tags from older %s servers, including nested tags', async (scope) => {
+    const { fetch, calls } = makeFetch([[
+      { slug: 'empty', name: 'Empty', skillCount: 0, mySkillCount: 2,
+        children: [{ slug: 'used', name: 'Used', skillCount: 3, mySkillCount: 1 }] },
+      { slug: 'missing-count', name: 'Missing' },
+    ]]);
+    const service = new SkillhubMarketService({ fetch });
+
+    await expect(service.listCategories(scope, false)).resolves.toEqual({
+      success: true,
+      categories: [{ slug: 'used', name: 'Used', count: 3, myCount: 1 }],
+      totalCount: 3,
+      myTotalCount: 1,
+    });
+    expect(calls[0]?.path).toBe(`/api/skills-hub/categories?scope=${scope}&includeEmpty=false`);
+  });
+
+  it('keeps unused tags selectable in explicit full-list mode', async () => {
+    const { fetch, calls } = makeFetch([[{ slug: 'empty', name: 'Empty', skillCount: 0 }]]);
+    const service = new SkillhubMarketService({ fetch });
+    await expect(service.listCategories('market', true)).resolves.toMatchObject({
+      categories: [{ slug: 'empty', count: 0 }],
+    });
+    expect(calls[0]?.path).toBe('/api/skills-hub/categories?scope=market');
+  });
 });
 
 describe('skillhub market helpers', () => {

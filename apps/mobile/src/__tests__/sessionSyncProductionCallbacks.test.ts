@@ -7,6 +7,7 @@ import { runConnectionScopedSessionMetadataRead, waitForIndependentSnapshotReads
 import { syncSessionMessageWindow } from '@/session/sessionMessageWindowSync';
 import { shouldClearOperationErrorAfterSync } from '@/session/sessionSyncErrorRecovery';
 import { hasOlderMessagesAfterReopen, shouldKeepOlderMessagesAffordance } from '@/session/messagePaging';
+import { HistoryViewController, isHistoryViewUnavailable, projectHistoryView } from '@cindy/maker-shared/message-window';
 
 // Execute the actual page callbacks, not a duplicate orchestration written for tests.
 // This catches a helper becoming disconnected from the screen during integration.
@@ -79,8 +80,8 @@ function fixture(reopen = false) {
   };
   const bindings = {
     deviceId: 'd1', deviceName: 'test', sessionId: 's1',
-    historyView: { snapshot: { ready: false }, view: { refresh: async () => undefined, getSnapshot: (): { ready: boolean; error: Error | null } => ({ ready: false, error: new Error('[CHANNEL_NOT_ALLOWED] legacy host') }) } },
-    remoteSessionStore: store, maker, shouldBlockSessionSync: () => false,
+    historyView: { snapshot: { ready: false }, view: { refresh: async (): Promise<void> => undefined, getSnapshot: (): { ready: boolean; error: unknown } => ({ ready: false, error: new Error('[CHANNEL_NOT_ALLOWED] legacy host') }) } },
+    remoteSessionStore: store, maker, isHistoryViewUnavailable, shouldBlockSessionSync: () => false,
     readAckEpochRef: { current: 1 }, readAckGateGenRef: { current: 1 },
     sessionSubscriptionIdentityRef: { current: JSON.stringify(['d1', 's1', 1]) },
     createRemoteSyncReopenCoordinator: () => ({ captureVersion: () => 0 }),
@@ -125,6 +126,26 @@ function fixture(reopen = false) {
 }
 
 describe('production session recovery callbacks', () => {
+  it('commits raw history after a previously ready projection loses Host support', async () => {
+    const f = fixture(true);
+    const read = vi.fn(async () => ({ version: 1 as const, items: projectHistoryView([
+      { id: 'old', clientId: 'old', role: 'user', content: 'old', createdAt: session.updatedAt },
+    ], false), hasMore: false, nextCursor: null }));
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    await view.refresh();
+    f.bindings.historyView.snapshot.ready = true;
+    f.bindings.historyView.view = view;
+    read.mockRejectedValueOnce(new Error('[CHANNEL_NOT_ALLOWED] downgraded Host'));
+    // Call the actual callback again with the new view binding.
+    const coordinator = createRemoteSyncCoordinator(pageCallback('syncSession', f.bindings));
+    coordinator.setContext('d1:s1:2');
+    await coordinator.request({ reason: 'manual' });
+    expect(view.getSnapshot().ready).toBe(false);
+    expect(f.store.setLatestMessageWindow).toHaveBeenCalled();
+    expect(f.state.rows).toEqual(page.messages);
+    expect(f.store.markSessionMessagesSynced).toHaveBeenCalled();
+  });
   it('accepts a history view without certifying sparse rows as a complete raw window', async () => {
     const f = fixture();
     f.bindings.historyView.view.getSnapshot = () => ({ ready: true, error: null });

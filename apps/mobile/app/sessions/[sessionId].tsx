@@ -110,7 +110,7 @@ import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
-import { renderHistoryView } from '@cindy/maker-shared/message-window';
+import { renderHistoryView, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
@@ -3361,7 +3361,7 @@ export default function SessionScreen() {
             usedHistoryView = true;
             return { messages: [], limit: 20, reducedByPayloadTooLarge: false };
           }
-          if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(viewState.error))) throw viewState.error;
+          if (!isHistoryViewUnavailable(viewState.error)) throw viewState.error;
           return retryRead(() => listMessagesWithPayloadRetry(
           (limit) => runSessionMessagesSnapshotSingleFlight(
             snapshotScope,

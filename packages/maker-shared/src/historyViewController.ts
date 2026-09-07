@@ -1,5 +1,5 @@
 import {
-  readHistoryWorkDetails, type HistoryDetailPage, type HistoryMessageSource,
+  readHistoryWorkDetails, isHistoryViewUnavailable, type HistoryDetailPage, type HistoryMessageSource,
   type HistoryViewItem, type HistoryViewPage, type HistoryWorkSummary,
 } from './historyView.js';
 
@@ -45,6 +45,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   private intentQueue: Promise<void> = Promise.resolve();
   private active = true;
   private pagePromise: Promise<void> | null = null;
+  private pageOlder = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly transport: HistoryViewTransport<T>) {}
@@ -60,7 +61,14 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   refresh(older = false): Promise<void> {
-    if (this.pagePromise) return this.pagePromise;
+    if (this.pagePromise) {
+      if (older === this.pageOlder) return this.pagePromise;
+      const generation = this.generation;
+      return this.pagePromise.then(() => {
+        if (this.active && generation === this.generation && !this.state.error) return this.refresh(older);
+      });
+    }
+    this.pageOlder = older;
     const promise = this.readPage(older);
     this.pagePromise = promise;
     void promise.finally(() => { if (this.pagePromise === promise) this.pagePromise = null; });
@@ -105,7 +113,18 @@ export class HistoryViewController<T extends HistoryMessageSource> {
       }
       this.sendIntent();
     } catch (error) {
-      if (generation === this.generation && this.active) this.publish({ loading: false, error });
+      if (generation === this.generation && this.active) {
+        if (isHistoryViewUnavailable(error)) {
+          // A downgraded Host must not leave a ready projection masking the raw
+          // fallback. Invalidate in-flight details and every cached source row.
+          this.generation++;
+          this.detailRuns.clear();
+          if (this.refreshTimer) clearTimeout(this.refreshTimer);
+          this.refreshTimer = null;
+          this.publish({ items: [], details: new Map(), expanded: new Set(), ready: false,
+            nextCursor: null, hasMore: false, loading: false, error });
+        } else this.publish({ loading: false, error });
+      }
     }
   }
 

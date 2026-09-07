@@ -21,7 +21,7 @@
  * - User-initiated stopSession (NOT called on session switch anymore)
  */
 
-import { HistoryViewController, type HistoryViewPage, type HistoryDetailPage } from '@cindy/maker-shared/message-window';
+import { HistoryViewController, isHistoryViewUnavailable, type HistoryViewPage, type HistoryDetailPage } from '@cindy/maker-shared/message-window';
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
 import { parseMessageToolUse } from '@cindy/maker-shared/message-normalize';
 import {
@@ -10815,7 +10815,7 @@ function ensureInitialMessages(sessionId: string): void {
         void reconcilePendingInteractions(sessionId);
         return null;
       }
-      if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(snapshot.error))) throw snapshot.error;
+      if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
       view.setActive(false);
       remoteHistoryViews.delete(sessionId);
     }
@@ -11476,6 +11476,11 @@ const _remoteReconcileInFlight = new Map<
 function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
   const view = getRemoteHistoryView(sessionId);
   if (view?.getSnapshot().ready) return Promise.all([view.refresh(), reconcilePendingInteractions(sessionId)]).then(() => {
+    if (isHistoryViewUnavailable(view.getSnapshot().error)) {
+      view.setActive(false);
+      remoteHistoryViews.delete(sessionId);
+      return reconcileRemoteMessages(sessionId, { force: true });
+    }
     if (view.getSnapshot().error) throw view.getSnapshot().error;
     return true;
   });
@@ -11793,6 +11798,11 @@ function loadOlderMessages(
 ): Promise<boolean> {
   const view = getRemoteHistoryView(sessionId);
   if (view?.getSnapshot().ready) return view.refresh(true).then(() => {
+    if (isHistoryViewUnavailable(view.getSnapshot().error)) {
+      view.setActive(false);
+      remoteHistoryViews.delete(sessionId);
+      return reconcileRemoteMessages(sessionId, { force: true }).then(() => loadOlderMessages(sessionId, automatic, maxPages));
+    }
     if (view.getSnapshot().error) throw view.getSnapshot().error;
     return true;
   });

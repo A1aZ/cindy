@@ -23,7 +23,9 @@ export function isHistoryDetailTool(name: string): boolean {
 
 export function hasVisibleHistoryResult(content: unknown): boolean {
   const text = messageContentToPreview(content);
-  return extractPayloadToolResultMedia(text).length > 0
+  return /<tool_use_error>/.test(text)
+    || (content !== null && typeof content === 'object' && 'isError' in content && content.isError === true)
+    || extractPayloadToolResultMedia(text).length > 0
     || /xdt_card_id|xdt_anchor_card_id|cindy-media:|xdt-file:/.test(text);
 }
 

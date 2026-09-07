@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import { isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { findRemoteHistoryView } from '@/session/remoteHistoryView';
 import { createBackgroundConnection } from './backgroundConnection';
 import { createRecoveryDiagnostics, settleMeasuredSnapshot, type RecoveryPhase } from './recoveryDiagnostics';
@@ -1534,7 +1535,7 @@ async function rebuildSessionSnapshot(
       const snapshot = historyView.getSnapshot();
       if (!snapshot.error && snapshot.ready) return isCurrent() && historyView.isActive()
         && findRemoteHistoryView(deviceId, sessionId) === historyView;
-      if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(snapshot.error))) throw snapshot.error;
+      if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
     }
     return applyHistory(await readRawHistory());
   };

@@ -125,6 +125,7 @@ function makeFakeHost(deviceId: string, deviceName: string) {
     deviceId,
     deviceName,
     enableHistoryView: () => { historyViewEnabled = true; },
+    disableHistoryView: () => { historyViewEnabled = false; },
     invoke,
     /** 注册控制端 onRemotePush 回调(被控端经此向控制端转发广播)。 */
     registerPush(cb: (p: RemotePush) => void): () => void {
@@ -213,6 +214,24 @@ afterEach(() => {
 });
 
 describe('device-link controller mirror — end-to-end scenarios', () => {
+  it('returns to raw history when a previously capable Host is downgraded', async () => {
+    const s = sid();
+    host.enableHistoryView();
+    host.seedSession(s, {}, [dbMessage(s, 'old', 'old', '2026-06-15T00:00:00.000Z')]);
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+    await flush();
+    const view = getRemoteHistoryView(s)!;
+    expect(view.getSnapshot().ready).toBe(true);
+    host.disableHistoryView();
+    host.hostMessage(s, dbMessage(s, 'new', 'new', '2026-06-15T00:00:01.000Z'), { lossy: true });
+    await makerChatStore.reconcileRemoteMessages(s, { force: true });
+    expect(view.getSnapshot().ready).toBe(false);
+    expect(getRemoteHistoryView(s)).toBeUndefined();
+    expect(host.invoke).toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
+    expect(makerChatStore.getSnapshot(s).messages.map((row) => row.clientId)).toEqual(['client-old', 'client-new']);
+  });
   it('reads visible history first and fetches a collapsed work range only after expansion', async () => {
     const s = sid();
     host.enableHistoryView();

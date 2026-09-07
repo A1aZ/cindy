@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { projectHistoryView } from '../historyViewProjection.js';
 import { readHistoryWorkDetails, type HistoryMessageSource } from '../historyView.js';
 
@@ -8,6 +8,13 @@ function row(id: number, role: string, content: unknown): HistoryMessageSource {
 }
 
 describe('history reading projection', () => {
+  it.each(['<tool_use_error>Permission denied</tool_use_error>', { isError: true, text: 'Failed' }])('keeps failed tools visible with their originating call', (content) => {
+    const rows = [row(0, 'user', 'Work'), row(1, 'thinking', 'reasoning'),
+      { ...row(2, 'tool_use', { toolName: 'Read', input: {} }), toolUseId: 't' },
+      { ...row(3, 'tool_result', content), toolUseId: 't' }];
+    const visible = projectHistoryView(rows, true).flatMap((item) => item.type === 'messages' ? item.messages : []);
+    expect(visible.map((item) => item.id)).toEqual(['0', '2', '3']);
+  });
   it('reaches the preceding visible conversation without transmitting hundreds of hidden bodies', () => {
     const rows = [row(0, 'user', 'Inspect this problem')];
     for (let id = 1; id <= 600; id++) rows.push(row(id, 'thinking', 'detail '.repeat(1000)));
@@ -80,6 +87,54 @@ import { renderHistoryView } from '../historyViewRender.js';
 import type { HistoryViewPage } from '../historyView.js';
 
 describe('shared history view lifecycle', () => {
+  it.each([false, true])('preserves an opposite-direction request during a pending page (older=%s)', async (older) => {
+    let resolve!: (page: HistoryViewPage<HistoryMessageSource>) => void;
+    const page = { version: 1 as const, items: projectHistoryView([row(2, 'user', 'current')], false), hasMore: true, nextCursor: '2' };
+    const read = vi.fn(async (_before?: string) => page);
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    await view.refresh();
+    read.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const current = view.refresh(older);
+    const queued = [view.refresh(!older), view.refresh(!older)];
+    expect(read).toHaveBeenCalledTimes(2);
+    resolve(page);
+    await Promise.all([current, ...queued]);
+    expect(read.mock.calls.map(([before]) => before)).toEqual([undefined, older ? '2' : undefined, older ? undefined : '2']);
+  });
+
+  it('cancels queued older intent when the view leaves before the current request settles', async () => {
+    let resolve!: (page: HistoryViewPage<HistoryMessageSource>) => void;
+    const read = vi.fn(() => new Promise<HistoryViewPage<HistoryMessageSource>>((done) => { resolve = done; }));
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    const current = view.refresh();
+    const older = view.refresh(true);
+    view.setActive(false);
+    resolve({ version: 1, items: [], hasMore: true, nextCursor: '2' });
+    await Promise.all([current, older]);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a ready projection on Host downgrade and rejects late detail results', async () => {
+    const read = vi.fn(async () => ({ version: 1 as const, items: projectHistoryView([row(1, 'thinking', 'old')], true), hasMore: false, nextCursor: null }));
+    let resolve!: (page: { version: 1; messages: HistoryMessageSource[]; hasMore: false; nextCursor: null }) => void;
+    const view = new HistoryViewController({ page: read,
+      details: () => new Promise((done) => { resolve = done; }), expanded: async () => undefined });
+    await view.refresh();
+    view.setExpanded(view.getSnapshot().items[0].key, true);
+    read.mockRejectedValueOnce(new Error('timeout'));
+    await view.refresh();
+    expect(view.getSnapshot().ready).toBe(true);
+    read.mockRejectedValueOnce(new Error('[CHANNEL_NOT_ALLOWED] old Host'));
+    await view.refresh();
+    resolve({ version: 1, messages: [row(1, 'thinking', 'late')], hasMore: false, nextCursor: null });
+    await new Promise((done) => setTimeout(done, 0));
+    expect(view.getSnapshot()).toMatchObject({ ready: false, items: [], hasMore: false, nextCursor: null });
+    expect(view.getSnapshot().details.size).toBe(0);
+    expect(view.getSnapshot().expanded.size).toBe(0);
+  });
+
   it('reloads an edited prefix when new rows arrive in the same revision', async () => {
     let rows = [row(1, 'thinking', 'old'), row(2, 'thinking', 'tail')];
     const cursors: Array<string | undefined> = [];

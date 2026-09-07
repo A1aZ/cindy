@@ -310,8 +310,9 @@ export class SkillhubMarketService {
         mySkillCount?: number;
       }>;
     }>>(`/api/skills-hub/categories?scope=${scope}${includeEmpty ? '' : '&includeEmpty=false'}`);
-    // Older servers may ignore includeEmpty; keep their empty tags out of browse results too.
-    const categories = flattenHubCategories(items ?? []).filter((category) => includeEmpty || category.count > 0);
+    // Filtering belongs to the server: legacy counts may be absent, and older servers'
+    // team responses may contain public-market counts rather than team counts.
+    const categories = flattenHubCategories(items ?? []);
     const totalCount = categories.reduce((s, c) => s + c.count, 0);
     const myTotalCount = categories.reduce((s, c) => s + c.myCount, 0);
     return { success: true as const, categories, totalCount, myTotalCount };

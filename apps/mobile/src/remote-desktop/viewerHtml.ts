@@ -1,5 +1,10 @@
 import { DESKTOP_TRANSFORM_SCRIPT } from "./geometry";
-import { DESKTOP_KEY_CODES } from "@cindy/device-link";
+import {
+  DESKTOP_KEY_CODES,
+  REMOTE_DESKTOP_ICE_SERVERS,
+  REMOTE_DESKTOP_NETWORK,
+} from "@cindy/device-link";
+import { DESKTOP_RTC_SCRIPT } from "./viewerRtc";
 import { DESKTOP_NETWORK_STATS_SCRIPT } from "./networkStats";
 
 export function remoteDesktopViewerHtml(
@@ -34,6 +39,7 @@ export function remoteDesktopViewerHtml(
   </div><textarea id="keyboard-input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Keyboard"></textarea><script>
   const transform=${DESKTOP_TRANSFORM_SCRIPT};
   const networkStats=${DESKTOP_NETWORK_STATS_SCRIPT};
+  const net=${JSON.stringify(REMOTE_DESKTOP_NETWORK)},iceServers=${JSON.stringify(REMOTE_DESKTOP_ICE_SERVERS)};
   const validKeys=new Set(${JSON.stringify(DESKTOP_KEY_CODES)});
   ${VIEWER_SCRIPT}
   </script></body></html>`;
@@ -193,7 +199,7 @@ const VIEWER_SCRIPT = String.raw`
     else if(event.kind==='scroll'&&tail?.kind==='scroll'){tail.dx=Math.max(-2000,Math.min(2000,tail.dx+event.dx));tail.dy=Math.max(-2000,Math.min(2000,tail.dy+event.dy));}
     else pending.push(event);
     if(pending.length>64){pending=[{kind:'release'}];control=false;post({type:'inputOverflow'});}}
-  function flush(){if(!pending.length||sending)return;const events=pending.splice(0,64),sequence=++seq;if(dc&&dc.readyState==='open'&&dc.bufferedAmount<16384){dc.send(JSON.stringify({sequence,events}));}else{sending=true;post({type:'input',sequence,events});}}
+  function flush(){if(!pending.length||sending)return;const events=pending.splice(0,64),sequence=++seq;if(pc?.connectionState==='connected'&&dc&&dc.readyState==='open'&&dc.bufferedAmount<16384){dc.send(JSON.stringify({sequence,events}));}else{sending=true;post({type:'input',sequence,events});}}
   setInterval(()=>{
     // Hold displacement controls speed, even without further pointer moves.
     // Skip missed ticks while awaiting ACK instead of building a scroll backlog.
@@ -284,23 +290,7 @@ const VIEWER_SCRIPT = String.raw`
     const canvas=document.createElement('canvas');
     try{const scale=Math.min(1,1280/Math.max(video.videoWidth,video.videoHeight));canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));const context=canvas.getContext('2d');if(context){context.drawImage(video,0,0,canvas.width,canvas.height);image.src=canvas.toDataURL('image/jpeg',.7);}}catch{/* Keep the previous compatibility frame if WebKit cannot read video. */}finally{canvas.width=0;canvas.height=0;}
   }
-  function closeRtc(preserveFrame=true){if(preserveFrame)retainFrame();generation++;clearInterval(statsTimer);statsTimer=null;statsSample=null;if(dc)dc.close();if(pc)pc.close();pc=null;dc=null;video.srcObject=null;video.style.display='none';image.style.display='block';if(!preserveFrame)image.removeAttribute('src');}
-  async function connect(){closeRtc();const g=generation;if(!window.RTCPeerConnection){post({type:'fallback'});return;}
-    try{const rtc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});pc=rtc;dc=rtc.createDataChannel('input-v1');rtc.addTransceiver('video',{direction:'recvonly'});rtc.addTransceiver('audio',{direction:'recvonly'});
-      dc.onmessage=e=>{try{if(g!==generation||pc!==rtc)return;if(typeof e.data!=='string'||e.data.length>80000)return;const message=JSON.parse(e.data);if(message.type==='cursor')receiveCursor(message.cursor);if((video.webkitPresentationMode==='picture-in-picture'||document.pictureInPictureElement===video)&&message.type==='viewPing'&&typeof message.challenge==='string'&&message.challenge.length<=64&&dc?.readyState==='open')dc.send(message.challenge);}catch{}};
-      let readingStats=false;
-      statsTimer=setInterval(async()=>{
-        if(readingStats||g!==generation)return;readingStats=true;
-        try{const stats=await rtc.getStats();if(g!==generation||pc!==rtc)return;const result=networkStats(stats,statsSample);statsSample=result.sample;post({type:'network',transport:result.transport,bytesPerSecond:result.bytesPerSecond,latencyMs:result.latencyMs});}catch{/* Metrics must never interrupt the stream. */}finally{readingStats=false;}
-      },1000);
-      rtc.ontrack=e=>{if(g!==generation)return;video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{});};
-      video.onplaying=()=>{if(g!==generation)return;video.style.display='block';image.style.display='none';post({type:'streaming'});post({type:'pipCapability',supported:!!(video.webkitSupportsPresentationMode?.('picture-in-picture')||document.pictureInPictureEnabled)});render();};
-      rtc.onconnectionstatechange=()=>{if(g===generation&&['failed','disconnected','closed'].includes(rtc.connectionState)){release();closeRtc();post({type:'fallback'});}};
-      await rtc.setLocalDescription(await rtc.createOffer());await new Promise(resolve=>{if(rtc.iceGatheringState==='complete')return resolve();const timer=setTimeout(resolve,3000);rtc.onicegatheringstatechange=()=>{if(rtc.iceGatheringState==='complete'){clearTimeout(timer);resolve();}};});
-      if(g===generation)post({type:'offer',sdp:rtc.localDescription.sdp});
-      setTimeout(()=>{if(g===generation&&rtc.connectionState!=='connected'){closeRtc();post({type:'fallback'});}},12000);
-    }catch{if(g===generation){closeRtc();post({type:'fallback'});}}
-  }
+  ${DESKTOP_RTC_SCRIPT}
   function reportPresentation(){post({type:'presentation',active:video.webkitPresentationMode==='picture-in-picture'||document.pictureInPictureElement===video});}
   video.addEventListener('webkitpresentationmodechanged',reportPresentation);
   video.addEventListener('enterpictureinpicture',reportPresentation);
@@ -317,7 +307,7 @@ const VIEWER_SCRIPT = String.raw`
           }else if(video.webkitSetPresentationMode)video.webkitSetPresentationMode('inline');
           else if(document.pictureInPictureElement)document.exitPictureInPicture().catch(()=>{});
         }catch{post({type:'presentationFailed'});}break;
-      case 'videoSettings':video.muted=!message.audio;connect();break;
+      case 'videoSettings':video.muted=!message.audio;retries=0;connect();break;
       case 'keyboard':showKeyboard(message.enabled===true);break;
       case 'resume':if(video.srcObject)video.play().catch(()=>{});break;
       case 'releaseInput':release();break;
@@ -332,10 +322,11 @@ const VIEWER_SCRIPT = String.raw`
           }
         }
         if(!message.enabled){for(const button of heldMouse.keys())queue({kind:'button',button,down:false,x:cx,y:cy});heldMouse.clear();resetWheel();flush();}for(const [edge,value] of [['bottom',message.bottomInset],['right',message.rightInset]])if(Number.isFinite(value)&&value>=0&&value<=4096)mouseButtons.style[edge]=value+'px';showMouseButtons=message.enabled===true;for(const name of ['left','right','wheel'])if(typeof message.labels?.[name]==='string')document.getElementById('mouse-'+name).setAttribute('aria-label',message.labels[name]);updateMouseButtons();break;
-      case 'init':followRest=null;cursorNeedsEntry=true;stopPanAnimation();resetCursor();control=false;release();pending=[];sending=false;seq=0;epoch=message.epoch;dw=message.width;dh=message.height;fillHeight=message.fillHeight===true;video.muted=!message.audio;render();connect();break;
+      case 'init':followRest=null;cursorNeedsEntry=true;stopPanAnimation();resetCursor();control=false;release();pending=[];sending=false;seq=0;epoch=message.epoch;dw=message.width;dh=message.height;fillHeight=message.fillHeight===true;video.muted=!message.audio;trickleIce=message.trickleIce===true;retries=0;render();connect();break;
       case 'viewport':fillHeight=message.fillHeight===true;release();render();break;
-      case 'answer':if(pc){const current=pc;pc.setRemoteDescription({type:'answer',sdp:message.sdp}).catch(()=>{if(pc===current){closeRtc();post({type:'fallback'});}});}break;
-      case 'fallback':closeRtc();break;
+      case 'answer':if(message.epoch===epoch)void receiveAnswer(message);break;
+      case 'ice':if(message.epoch===epoch)void receiveIce(message);break;
+      case 'fallback':if(message.epoch===epoch&&message.attemptId===attemptId)failRtc('host',message.retry!==false);break;
       case 'frame':{if('cursor' in message)receiveCursor(message.cursor);else resetCursor();const frameEpoch=epoch;image.onload=()=>{if(epoch===frameEpoch)post({type:'framePresented'});};image.src='data:image/jpeg;base64,'+message.jpeg;break;}
       case 'control':release();control=message.enabled;if(!control)showKeyboard(false);pending=[];updateMouseButtons();render();break;
       case 'mode':release();if(message.mode!=='pointer')followRest=null;settlePan();clearTimeout(touchCursorTimer);touchCursorVisible=false;mode=message.mode;render();break;

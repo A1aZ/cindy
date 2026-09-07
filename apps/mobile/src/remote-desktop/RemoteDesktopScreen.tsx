@@ -35,6 +35,11 @@ import { X } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import {
   REMOTE_DESKTOP_CHANNEL,
+  isDesktopAttemptId,
+  isDesktopIceCursor,
+  parseDesktopIceCandidates,
+  parseDesktopIceReply,
+  type RemoteDesktopIceReply,
   isRemoteDesktopCursor,
   type RemoteDesktopCursor,
   REMOTE_DESKTOP_MAX_CLIPBOARD_CHARS,
@@ -178,6 +183,7 @@ export default function RemoteDesktopScreen() {
   const connecting = useRef(false);
   const ready = useRef(false);
   const streaming = useRef(false);
+  const mediaAttempt = useRef<string | null>(null);
   const receiveWindow = useRef({
     since: Date.now(),
     bytes: 0,
@@ -196,8 +202,11 @@ export default function RemoteDesktopScreen() {
   const [frameReady, setFrameReady] = useState(false);
   const [controlReady, setControlReady] = useState(false);
   const connectionPending = !error && (!lease || !frameReady || !controlReady);
+  const showConnectionStatus = connectionPending || (!error && status === "reconnecting");
   const connectionLabel = t(
-    recovery.current.at ? "remoteDesktop.reconnecting" : "remoteDesktop.connecting",
+    recovery.current.at || status === "reconnecting"
+      ? "remoteDesktop.reconnecting"
+      : "remoteDesktop.connecting",
   );
   const [busy, setBusy] = useState(false);
   const [inputMode, setInputMode] = useInputModePreference();
@@ -254,8 +263,10 @@ export default function RemoteDesktopScreen() {
     send,
   ]);
   const request = useCallback(
-    <T,>(message: RemoteDesktopRequest) =>
-      linkRef.current.invoke<T>(deviceId, REMOTE_DESKTOP_CHANNEL, [message]),
+    <T,>(message: RemoteDesktopRequest, preSend?: () => void) =>
+      linkRef.current.invoke<T>(deviceId, REMOTE_DESKTOP_CHANNEL, [message], {
+        preSend,
+      }),
     [deviceId],
   );
   const transferClipboard = async (action: "copy" | "paste") => {
@@ -322,6 +333,7 @@ export default function RemoteDesktopScreen() {
     connecting.current = false;
     const previous = active.current;
     active.current = null;
+    mediaAttempt.current = null;
     heldKeys.current.clear();
     streaming.current = false;
     receiveWindow.current = {
@@ -452,6 +464,7 @@ export default function RemoteDesktopScreen() {
         }
         send({
           type: "init",
+          trickleIce: result.trickleIce === true,
           epoch: next.lease,
           width: display.width,
           height: display.height,
@@ -715,38 +728,132 @@ export default function RemoteDesktopScreen() {
     }
     const current = active.current;
     if (!current || message.epoch !== current.lease) return;
+    const requireMediaAttempt = () => {
+      if (
+        active.current !== current ||
+        mediaAttempt.current !== message.attemptId
+      )
+        throw new Error("DESKTOP_VIDEO_STOPPED");
+    };
     switch (message.type) {
       case "offer":
-        if (typeof message.sdp !== "string" || message.sdp.length > 64_000)
+        if (
+          typeof message.sdp !== "string" ||
+          message.sdp.length > 64_000 ||
+          !isDesktopAttemptId(message.attemptId)
+        )
           return;
-        void request<{ sdp: string }>({
-          op: "offer",
-          lease: current.lease,
-          sdp: message.sdp,
-          cursorOverlay: caps?.cursorOverlay === true,
-          ...(caps?.videoSettings
-            ? {
-                settings: {
-                  ...videoSettingsRef.current,
-                  audio: Boolean(
-                    caps.systemAudio && videoSettingsRef.current.audio,
-                  ),
-                },
-              }
-            : {}),
-        })
+        mediaAttempt.current = message.attemptId;
+        void request<{ sdp: string }>(
+          {
+            op: "offer",
+            lease: current.lease,
+            sdp: message.sdp,
+            ...(caps?.trickleIce ? { attemptId: message.attemptId } : {}),
+            cursorOverlay: caps?.cursorOverlay === true,
+            ...(caps?.videoSettings
+              ? {
+                  settings: {
+                    ...videoSettingsRef.current,
+                    audio: Boolean(
+                      caps.systemAudio && videoSettingsRef.current.audio,
+                    ),
+                  },
+                }
+              : {}),
+          },
+          requireMediaAttempt,
+        )
           .then((answer) => {
-            if (active.current === current)
-              send({ type: "answer", sdp: answer.sdp });
+            if (
+              active.current === current &&
+              mediaAttempt.current === message.attemptId
+            )
+              send({
+                type: "answer",
+                epoch: current.lease,
+                attemptId: message.attemptId,
+                sdp: answer.sdp,
+              });
           })
-          .catch(() => {
-            if (active.current === current) {
-              send({ type: "fallback" });
+          .catch((error) => {
+            if (
+              active.current === current &&
+              mediaAttempt.current === message.attemptId
+            ) {
+              const permanent =
+                /DESKTOP_(AUDIO_UNAVAILABLE|SCREEN_PERMISSION_REQUIRED|DISABLED|STOPPED|LEASE_EXPIRED)/.test(
+                  String(error),
+                );
+              send({
+                type: "fallback",
+                epoch: current.lease,
+                attemptId: message.attemptId,
+                retry: !permanent,
+              });
               setStatus("compatibility");
               setSettingBusy(false);
               setSettingNotice(t("remoteDesktop.videoSettingsFailed"));
             }
           });
+        break;
+      case "ice": {
+        if (
+          !caps?.trickleIce ||
+          message.attemptId !== mediaAttempt.current ||
+          !isDesktopAttemptId(message.attemptId) ||
+          !isDesktopIceCursor(message.after) ||
+          !Number.isSafeInteger(message.exchangeId)
+        )
+          return;
+        let candidates;
+        try {
+          candidates = parseDesktopIceCandidates(message.candidates);
+        } catch {
+          return;
+        }
+        void request<RemoteDesktopIceReply>(
+          {
+            op: "ice",
+            lease: current.lease,
+            attemptId: message.attemptId,
+            after: message.after,
+            candidates,
+          },
+          requireMediaAttempt,
+        )
+          .then((value) => {
+            const reply = parseDesktopIceReply(value);
+            if (
+              active.current === current &&
+              mediaAttempt.current === message.attemptId &&
+              reply.attemptId === message.attemptId
+            )
+              send({
+                type: "ice",
+                epoch: current.lease,
+                exchangeId: message.exchangeId,
+                ...reply,
+              });
+          })
+          .catch(() => {
+            if (
+              active.current === current &&
+              mediaAttempt.current === message.attemptId
+            )
+              send({
+                type: "ice",
+                epoch: current.lease,
+                attemptId: message.attemptId,
+                exchangeId: message.exchangeId,
+                error: true,
+              });
+          });
+        break;
+      }
+      case "reconnecting":
+        if (message.attemptId === mediaAttempt.current)
+          setStatus("reconnecting");
         break;
       case "pipCapability":
         setCanPip(message.supported === true);
@@ -1156,7 +1263,7 @@ export default function RemoteDesktopScreen() {
             style={styles.webview}
             testID="remoteDesktop.viewer"
           />
-          {(connectionPending || (!lease && error)) && (
+          {(showConnectionStatus || (!lease && error)) && (
             <View
               pointerEvents="box-none"
               style={[
@@ -1164,7 +1271,7 @@ export default function RemoteDesktopScreen() {
                 { top: edgePadding.paddingTop + spacing.xs + 44 + spacing.lg },
               ]}
             >
-              {connectionPending ? (
+              {showConnectionStatus ? (
                 <View
                   style={styles.connectionBadge}
                   accessibilityRole="progressbar"
@@ -1196,7 +1303,7 @@ export default function RemoteDesktopScreen() {
               )}
             </View>
           )}
-          {lease && !connectionPending && !lease.controlling && !operations && (
+          {lease && !showConnectionStatus && !lease.controlling && !operations && (
             <Text
               style={[
                 styles.viewOnly,
@@ -1206,7 +1313,7 @@ export default function RemoteDesktopScreen() {
               {t("remoteDesktop.viewOnly")}
             </Text>
           )}
-          {lease && !connectionPending && !operations && !landscape && (
+          {lease && !showConnectionStatus && !operations && !landscape && (
             <RemoteDesktopNetworkStatus
               stats={network}
               video={status === "live"}
@@ -1226,7 +1333,7 @@ export default function RemoteDesktopScreen() {
               landscape={landscape}
               topInset={edgePadding.paddingTop}
               title={deviceName}
-              caption={connectionPending ? connectionLabel : `${t(`remoteDesktop.${status}`)}${lease ? ` · ${t(lease.controlling ? "remoteDesktop.controlling" : "remoteDesktop.viewOnly")}` : ""}`}
+              caption={showConnectionStatus ? connectionLabel : `${t(`remoteDesktop.${status}`)}${lease ? ` · ${t(lease.controlling ? "remoteDesktop.controlling" : "remoteDesktop.viewOnly")}` : ""}`}
               onClose={() => setOperations(false)}
               footer={<RemoteDesktopDisconnect onPress={leave} />}
             >

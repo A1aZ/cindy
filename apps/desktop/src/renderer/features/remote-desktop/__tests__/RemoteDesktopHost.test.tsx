@@ -8,27 +8,162 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 vi.mock('@/components/ui/confirm-dialog', () => ({ ConfirmDialog: () => null }));
 vi.mock('@/components/settings/RemoteDesktopPermissions', () => ({ RemoteDesktopPermissions: () => null }));
 vi.mock('../nativeCaptureStream', () => ({ nativeCaptureStream: vi.fn() }));
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
-it.each(['rejected', 'missing'] as const)('rejects native video with %s requested audio and releases capture', async (audio) => {
-  const track = { stop: vi.fn() };
-  const stream = { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [], addTrack: vi.fn() };
-  const stopNative = vi.fn();
-  vi.mocked(nativeCaptureStream).mockResolvedValue({ stream, stop: stopNative } as unknown as Awaited<ReturnType<typeof nativeCaptureStream>>);
-  const capture = audio === 'rejected' ? vi.fn().mockRejectedValue(new Error('unavailable')) : vi.fn().mockResolvedValue(stream);
-  vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: capture } });
-  let command!: (value: unknown) => void;
+it.each(['rejected', 'missing'] as const)(
+  'rejects native video with %s requested audio and releases capture',
+  async (audio) => {
+    const track = { stop: vi.fn() };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+      getAudioTracks: () => [],
+      addTrack: vi.fn(),
+    };
+    const stopNative = vi.fn();
+    vi.mocked(nativeCaptureStream).mockResolvedValue({
+      stream,
+      stop: stopNative,
+    } as unknown as Awaited<ReturnType<typeof nativeCaptureStream>>);
+    const capture =
+      audio === 'rejected'
+        ? vi.fn().mockRejectedValue(new Error('unavailable'))
+        : vi.fn().mockResolvedValue(stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: capture } });
+    let command!: (value: unknown) => void;
+    const reply = vi.fn().mockResolvedValue(undefined);
+    Object.assign(window, {
+      electronAPI: {
+        remoteDesktop: {
+          onCommand: (callback: typeof command) => {
+            command = callback;
+            return () => {};
+          },
+          registerHost: vi.fn().mockResolvedValue(undefined),
+          state: vi.fn().mockResolvedValue(null),
+          stop: vi.fn().mockResolvedValue(undefined),
+          reply,
+        },
+      },
+    });
+    render(<RemoteDesktopHost />);
+    await act(async () => {
+      command({
+        op: 'offer',
+        id: 'offer',
+        lease: 'lease',
+        sdp: 'sdp',
+        sourceId: 'screen:1',
+        nativeCapture: true,
+        cursorOverlay: true,
+        settings: { audio: true, fps: 30 },
+      });
+    });
+    expect(reply).toHaveBeenCalledWith('offer', { error: 'DESKTOP_AUDIO_UNAVAILABLE' });
+    expect(stopNative).toHaveBeenCalled();
+    expect(track.stop).toHaveBeenCalled();
+  },
+);
+
+it('exchanges replayable candidates without recapturing, tolerates transient disconnect and fences old attempts', async () => {
+  vi.useFakeTimers();
+  const peers: any[] = [];
+  class Peer {
+    connectionState = 'new';
+    iceGatheringState = 'gathering';
+    localDescription = { sdp: 'answer' };
+    onconnectionstatechange = () => {};
+    onicecandidate = (_event: any) => {};
+    close = vi.fn(() => {
+      this.connectionState = 'closed';
+      this.onconnectionstatechange();
+    });
+    addIceCandidate = vi.fn(async () => {});
+    constructor() {
+      peers.push(this);
+    }
+    addTrack() {}
+    getSenders() {
+      return [];
+    }
+    async setRemoteDescription() {}
+    async setLocalDescription() {}
+    async createAnswer() {
+      return {};
+    }
+  }
+  vi.stubGlobal('RTCPeerConnection', Peer);
+  const track = { stop: vi.fn() },
+    stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+  const capture = vi.fn().mockResolvedValue(stream);
+  vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: capture } });
+  let command!: (value: any) => void;
   const reply = vi.fn().mockResolvedValue(undefined);
-  Object.assign(window, { electronAPI: { remoteDesktop: {
-    onCommand: (callback: typeof command) => { command = callback; return () => {}; },
-    registerHost: vi.fn().mockResolvedValue(undefined), state: vi.fn().mockResolvedValue(null),
-    stop: vi.fn().mockResolvedValue(undefined), reply,
-  } } });
-  render(<RemoteDesktopHost />);
-  await act(async () => {
-    command({ op: 'offer', id: 'offer', lease: 'lease', sdp: 'sdp', sourceId: 'screen:1', nativeCapture: true, cursorOverlay: true, settings: { audio: true, fps: 30 } });
+  Object.assign(window, {
+    electronAPI: {
+      remoteDesktop: {
+        onCommand: (cb: typeof command) => {
+          command = cb;
+          return () => {};
+        },
+        reply,
+        registerHost: vi.fn().mockResolvedValue(undefined),
+        state: vi.fn().mockResolvedValue(null),
+        stop: vi.fn().mockResolvedValue(undefined),
+      },
+    },
   });
-  expect(reply).toHaveBeenCalledWith('offer', null);
-  expect(stopNative).toHaveBeenCalled();
-  expect(track.stop).toHaveBeenCalled();
+  render(<RemoteDesktopHost />);
+  const offer = {
+    op: 'offer',
+    id: 'offer',
+    lease: 'lease',
+    sdp: 'sdp',
+    sourceId: 'screen:1',
+    attemptId: 'a',
+  };
+  await act(async () => command(offer));
+  expect(reply).toHaveBeenCalledWith('offer', 'answer'); // No gather delay for new endpoints.
+  const candidate = {
+    candidate: 'candidate:1 1 UDP 100 192.0.2.1 5000 typ host',
+    sdpMid: '0',
+    sdpMLineIndex: 0,
+  };
+  peers[0].onicecandidate({ candidate });
+  const ice = {
+    op: 'ice',
+    id: 'ice',
+    lease: 'lease',
+    attemptId: 'a',
+    after: 0,
+    candidates: [candidate],
+  };
+  await act(async () => command(ice));
+  await act(async () => command({ ...ice, id: 'replay' }));
+  expect(reply).toHaveBeenCalledWith('replay', {
+    attemptId: 'a',
+    next: 1,
+    candidates: [candidate],
+    complete: false,
+  });
+  expect(peers[0].addIceCandidate).toHaveBeenCalledTimes(1);
+  expect(capture).toHaveBeenCalledTimes(1);
+  expect(track.stop).not.toHaveBeenCalled();
+  peers[0].connectionState = 'disconnected';
+  peers[0].onconnectionstatechange();
+  await act(() => vi.advanceTimersByTimeAsync(4999));
+  expect(peers[0].close).not.toHaveBeenCalled();
+  peers[0].connectionState = 'connected';
+  peers[0].onconnectionstatechange();
+  await act(() => vi.advanceTimersByTimeAsync(2));
+  expect(peers[0].close).not.toHaveBeenCalled();
+  await act(async () => command({ ...offer, id: 'new', attemptId: 'b' }));
+  await act(async () => command({ ...ice, id: 'old' }));
+  expect(reply).toHaveBeenCalledWith('old', { error: 'DESKTOP_VIDEO_STOPPED' });
+  expect(peers[1].addIceCandidate).not.toHaveBeenCalled();
+  expect(peers[1].close).not.toHaveBeenCalled();
 });

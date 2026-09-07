@@ -11,6 +11,8 @@ import {
   type RemoteDesktopCapabilities,
   type RemoteDesktopLease,
   type RemoteDesktopPermissions,
+  type RemoteDesktopIceRequest,
+  type RemoteDesktopIceReply,
   desktopPermissionReady,
 } from '@cindy/device-link';
 
@@ -28,7 +30,9 @@ export interface DesktopControllerDeps {
     sdp: string,
     settings?: RemoteDesktopVideoSettings,
     cursorOverlay?: boolean,
+    attemptId?: string,
   ): Promise<string>;
+  ice?(request: RemoteDesktopIceRequest): Promise<RemoteDesktopIceReply>;
   displayModes?(displayId: string): Promise<RemoteDesktopDisplayMode[]>;
   resolution?(displayId: string, modeId: string, isCurrent: () => boolean): Promise<void>;
   clipboard?(
@@ -291,9 +295,21 @@ export class RemoteDesktopController {
         return { ok: true };
       }
       case 'offer': {
-        const sdp = await this.deps.offer(active, request.sdp, request.settings, request.cursorOverlay);
+        const sdp = await this.deps.offer(
+          active,
+          request.sdp,
+          request.settings,
+          request.cursorOverlay,
+          request.attemptId,
+        );
         this.require(peer, request.lease);
         return { sdp };
+      }
+      case 'ice': {
+        if (!this.deps.ice) throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+        const result = await this.deps.ice(request);
+        this.require(peer, request.lease);
+        return result;
       }
     }
   }

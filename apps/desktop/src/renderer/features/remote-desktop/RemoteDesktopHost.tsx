@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { isDesktopInput, type DesktopInput, type RemoteDesktopCursor } from '@cindy/device-link';
+import {
+  isDesktopInput,
+  parseDesktopIceCandidates,
+  REMOTE_DESKTOP_ICE_SERVERS,
+  REMOTE_DESKTOP_NETWORK,
+  type RemoteDesktopIceCandidate,
+  type DesktopInput,
+  type RemoteDesktopCursor,
+} from '@cindy/device-link';
 import type { DesktopLocalState } from '../../../shared/remoteDesktop';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { RemoteDesktopPermissions } from '@/components/settings/RemoteDesktopPermissions';
@@ -25,8 +33,24 @@ export function RemoteDesktopHost() {
     let native: Awaited<ReturnType<typeof nativeCaptureStream>> | null = null;
     let recoverCapture: (() => void) | null = null;
     let activeLease: string | null = null;
+    let attemptId: string | undefined;
+    let localCandidates: RemoteDesktopIceCandidate[] = [];
+    let remoteCandidates = new Set<string>();
+    let disconnectedTimer: ReturnType<typeof setTimeout> | undefined;
+    let gatheringTimer: ReturnType<typeof setTimeout> | undefined;
+    let finishGathering: (() => void) | undefined;
+    let exchanging = false;
     const stop = () => {
       generation++;
+      exchanging = false;
+      clearTimeout(disconnectedTimer);
+      clearTimeout(gatheringTimer);
+      finishGathering?.();
+      finishGathering = undefined;
+      disconnectedTimer = gatheringTimer = undefined;
+      attemptId = undefined;
+      localCandidates = [];
+      remoteCandidates = new Set();
       latestCursor = undefined;
       if (cursorTimer) clearInterval(cursorTimer);
       cursorTimer = null;
@@ -42,6 +66,55 @@ export function RemoteDesktopHost() {
       stream = null;
     };
     const unsubscribe = api.onCommand((command) => {
+      if (command.op === 'ice') {
+        const rtc = peer,
+          current = generation;
+        if (exchanging) {
+          void api.reply(command.id, { error: 'DESKTOP_VIDEO_STOPPED' }).catch(() => {});
+          return;
+        }
+        exchanging = true;
+        const seen = remoteCandidates;
+        void (async () => {
+          if (
+            !rtc ||
+            command.lease !== activeLease ||
+            !attemptId ||
+            command.attemptId !== attemptId ||
+            !Number.isSafeInteger(command.after) ||
+            command.after! < 0 ||
+            command.after! > localCandidates.length
+          )
+            throw new Error('DESKTOP_VIDEO_STOPPED');
+          for (const candidate of parseDesktopIceCandidates(command.candidates)) {
+            if (current !== generation) throw new Error('DESKTOP_VIDEO_STOPPED');
+            const key = JSON.stringify(candidate);
+            if (seen.has(key)) continue;
+            if (seen.size >= REMOTE_DESKTOP_NETWORK.maxCandidates)
+              throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+            await rtc.addIceCandidate(candidate);
+            seen.add(key);
+          }
+          if (current !== generation) throw new Error('DESKTOP_VIDEO_STOPPED');
+          const candidates = localCandidates.slice(
+            command.after,
+            command.after! + REMOTE_DESKTOP_NETWORK.batchSize,
+          );
+          await api.reply(command.id, {
+            attemptId,
+            candidates,
+            next: command.after! + candidates.length,
+            complete:
+              rtc.iceGatheringState === 'complete' &&
+              command.after! + candidates.length === localCandidates.length,
+          });
+        })()
+          .catch(() => api.reply(command.id, { error: 'DESKTOP_VIDEO_STOPPED' }).catch(() => {}))
+          .finally(() => {
+            if (current === generation) exchanging = false;
+          });
+        return;
+      }
       if (command.op === 'capture-reset') {
         if (command.lease === activeLease) {
           native?.clear();
@@ -60,6 +133,7 @@ export function RemoteDesktopHost() {
       const current = generation;
       const lease = command.lease;
       activeLease = lease;
+      attemptId = command.attemptId;
       void (async () => {
         try {
           const capture = async () =>
@@ -156,9 +230,24 @@ export function RemoteDesktopHost() {
           }
           stream = captured;
           const rtc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+            iceServers: REMOTE_DESKTOP_ICE_SERVERS,
           });
           peer = rtc;
+          rtc.onicecandidate = ({ candidate }) => {
+            if (!command.attemptId || current !== generation || !candidate?.candidate) return;
+            if (localCandidates.length >= REMOTE_DESKTOP_NETWORK.maxCandidates) {
+              stop();
+              return;
+            }
+            localCandidates.push({
+              candidate: candidate.candidate,
+              sdpMid: candidate.sdpMid,
+              sdpMLineIndex: candidate.sdpMLineIndex,
+              ...(candidate.usernameFragment
+                ? { usernameFragment: candidate.usernameFragment }
+                : {}),
+            });
+          };
           let recovering = false;
           recoverCapture = () => {
             if (!command.nativeCapture || native || recovering || current !== generation) return;
@@ -182,11 +271,20 @@ export function RemoteDesktopHost() {
             track.onmute = () => recoverCapture?.();
           });
           rtc.onconnectionstatechange = () => {
-            if (
-              current === generation &&
-              ['failed', 'closed', 'disconnected'].includes(rtc.connectionState)
-            )
+            if (current !== generation) return;
+            if (['failed', 'closed'].includes(rtc.connectionState)) {
               stop();
+              return;
+            }
+            if (rtc.connectionState === 'disconnected') {
+              if (!disconnectedTimer)
+                disconnectedTimer = setTimeout(() => {
+                  if (current === generation && rtc.connectionState === 'disconnected') stop();
+                }, REMOTE_DESKTOP_NETWORK.disconnectedMs);
+            } else {
+              clearTimeout(disconnectedTimer);
+              disconnectedTimer = undefined;
+            }
           };
           rtc.ondatachannel = ({ channel }) => {
             if (channel.label !== 'input-v1') {
@@ -259,25 +357,37 @@ export function RemoteDesktopHost() {
             }
             await sender.setParameters(parameters);
           }
-          await new Promise<void>((resolve) => {
-            if (rtc.iceGatheringState === 'complete') {
-              resolve();
-              return;
-            }
-            const timer = setTimeout(resolve, 3500);
-            rtc.onicegatheringstatechange = () => {
+          if (!command.attemptId)
+            await new Promise<void>((resolve) => {
+              finishGathering = resolve;
               if (rtc.iceGatheringState === 'complete') {
-                clearTimeout(timer);
                 resolve();
+                return;
               }
-            };
-          });
+              gatheringTimer = setTimeout(resolve, REMOTE_DESKTOP_NETWORK.legacyGatherMs);
+              rtc.onicegatheringstatechange = () => {
+                if (rtc.iceGatheringState === 'complete') {
+                  clearTimeout(gatheringTimer);
+                  resolve();
+                }
+              };
+            });
           if (current === generation)
             await api.reply(command.id, rtc.localDescription?.sdp ?? null);
-        } catch {
+        } catch (error) {
           if (current === generation) {
             stop();
-            await api.reply(command.id, null).catch(() => {});
+            const code = error instanceof Error ? error.message : '';
+            await api
+              .reply(command.id, {
+                error:
+                  code === 'DESKTOP_AUDIO_UNAVAILABLE'
+                    ? code
+                    : code === 'DESKTOP_VIDEO_TIMEOUT'
+                      ? code
+                      : 'DESKTOP_VIDEO_UNAVAILABLE',
+              })
+              .catch(() => {});
           }
         }
       })();

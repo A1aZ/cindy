@@ -4,6 +4,8 @@ import type {
   DesktopPermission,
   RemoteDesktopVideoSettings,
   RemoteDesktopPermissions,
+  RemoteDesktopIceCandidate,
+  RemoteDesktopIceReply,
 } from '@cindy/device-link';
 export const DESKTOP_LOCAL = {
   STATE: 'remote-desktop:state',
@@ -22,7 +24,10 @@ export const DESKTOP_LOCAL = {
 } as const;
 export interface DesktopHostCommand {
   id: string;
-  op: 'offer' | 'stop' | 'capture-reset';
+  op: 'offer' | 'stop' | 'capture-reset' | 'ice';
+  attemptId?: string;
+  candidates?: RemoteDesktopIceCandidate[];
+  after?: number;
   nativeCapture?: boolean;
   cursorOverlay?: boolean;
   lease?: string;
@@ -36,6 +41,17 @@ export interface DesktopLocalState {
   permissionGuide?: boolean;
   windowsSupport?: WindowsDesktopSupport;
 }
+export type DesktopHostReply =
+  | string
+  | RemoteDesktopIceReply
+  | {
+      error:
+        | 'DESKTOP_AUDIO_UNAVAILABLE'
+        | 'DESKTOP_VIDEO_UNAVAILABLE'
+        | 'DESKTOP_VIDEO_TIMEOUT'
+        | 'DESKTOP_VIDEO_STOPPED';
+    }
+  | null;
 export type WindowsDesktopSupport = 'ready' | 'missing' | 'installRequired' | 'unavailable';
 export interface RemoteDesktopApi {
   state(checkWindowsSupport?: boolean): Promise<DesktopLocalState>;
@@ -47,7 +63,7 @@ export interface RemoteDesktopApi {
   dismissPermissionGuide(): Promise<void>;
   registerHost(): Promise<void>;
   onCommand(listener: (command: DesktopHostCommand) => void): () => void;
-  reply(id: string, sdp: string | null): Promise<void>;
+  reply(id: string, result: DesktopHostReply): Promise<void>;
   viewHeartbeat(lease: string): Promise<void>;
   nativeFrame(lease: string): Promise<string | RemoteDesktopCursorFrame | null>;
   input(lease: string, sequence: number, events: DesktopInput[]): Promise<void>;

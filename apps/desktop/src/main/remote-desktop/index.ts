@@ -14,10 +14,17 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   isDesktopPermission,
+  parseDesktopIceReply,
+  type RemoteDesktopIceRequest,
+  type RemoteDesktopIceReply,
   type RemoteDesktopLease,
   type RemoteDesktopVideoSettings,
 } from '@cindy/device-link';
-import { DESKTOP_LOCAL, type DesktopHostCommand } from '../../shared/remoteDesktop';
+import {
+  DESKTOP_LOCAL,
+  type DesktopHostCommand,
+  type DesktopHostReply,
+} from '../../shared/remoteDesktop';
 import {
   assertTrustedAppRendererEvent,
   isTrustedAppRendererWindow,
@@ -101,15 +108,18 @@ let offerGeneration = 0;
 let nativeOverlay = false;
 let nativeSettings: RemoteDesktopVideoSettings | undefined;
 let preparingOffer = false;
+let videoAttempt: string | undefined;
 let pending: {
   id: string;
-  resolve(sdp: string): void;
+  op: 'offer' | 'ice';
+  resolve(result: DesktopHostReply): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 } | null = null;
 const input = new DesktopInputHost(() => remoteDesktop.stop());
 function stopVideo(): void {
   offerGeneration++;
+  videoAttempt = undefined;
   nativeOverlay = false;
   nativeSettings = undefined;
   nativeCapture.stop();
@@ -146,6 +156,7 @@ async function offer(
   sdp: string,
   settings?: RemoteDesktopVideoSettings,
   cursorOverlay?: boolean,
+  attemptId?: string,
 ): Promise<string> {
   if (
     !host ||
@@ -168,14 +179,15 @@ async function offer(
     nativeAvailable ||=
       process.platform === 'win32' && (await readWindowsDesktopSupport()) === 'ready';
     try {
-      const available = nativeAvailable
-        ? await Promise.race([
-            sources(),
-            new Promise<never>((_, reject) => {
-              enumerationTimer = setTimeout(() => reject(new Error('DESKTOP_VIDEO_TIMEOUT')), 2000);
-            }),
-          ])
-        : await sources();
+      const available = await Promise.race([
+        sources(),
+        new Promise<never>((_, reject) => {
+          enumerationTimer = setTimeout(
+            () => reject(new Error('DESKTOP_VIDEO_TIMEOUT')),
+            nativeAvailable ? 2000 : 5000,
+          );
+        }),
+      ]);
       source = desktopCaptureSource(available, lease.display.id, screen.getAllDisplays());
     } catch (error) {
       // A locked macOS session can reject Chromium's source enumeration even
@@ -205,18 +217,10 @@ async function offer(
   nativeOverlay = cursorOverlay === true && process.platform === 'darwin';
   nativeSettings = settings;
   setVideoLease(lease.lease);
-  return new Promise<string>((resolve, reject) => {
-    const id = randomUUID();
-    const timer = setTimeout(() => {
-      if (pending?.id === id) {
-        pending = null;
-        stopVideo();
-        reject(new Error('DESKTOP_VIDEO_TIMEOUT'));
-      }
-    }, 10_000);
-    pending = { id, resolve, reject, timer };
-    currentHost.send(DESKTOP_LOCAL.COMMAND, {
-      id,
+  videoAttempt = attemptId;
+  const result = await requestHost(
+    {
+      id: randomUUID(),
       op: 'offer',
       sourceId: source?.id,
       nativeCapture: nativeAvailable,
@@ -224,8 +228,57 @@ async function offer(
       lease: lease.lease,
       sdp,
       settings,
-    } satisfies DesktopHostCommand);
+      attemptId,
+    },
+    18_000,
+  );
+  if (typeof result !== 'string') throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+  return result;
+}
+
+/** One bounded command to the existing capture owner; never reset the shared device link. */
+function requestHost(
+  command: DesktopHostCommand & { op: 'offer' | 'ice' },
+  timeoutMs: number,
+): Promise<DesktopHostReply> {
+  const currentHost = host;
+  if (!currentHost || currentHost.isDestroyed())
+    return Promise.reject(new Error('DESKTOP_VIDEO_UNAVAILABLE'));
+  if (pending) return Promise.reject(new Error('DESKTOP_VIDEO_BUSY'));
+  return new Promise((resolve, reject) => {
+    const { id } = command;
+    const timer = setTimeout(() => {
+      if (pending?.id === id) {
+        pending = null;
+        if (command.op === 'offer') stopVideo();
+        reject(new Error('DESKTOP_VIDEO_TIMEOUT'));
+      }
+    }, timeoutMs);
+    pending = { id, op: command.op, resolve, reject, timer };
+    try {
+      currentHost.send(DESKTOP_LOCAL.COMMAND, command);
+    } catch {
+      stopVideo();
+    }
   });
+}
+
+async function ice(request: RemoteDesktopIceRequest): Promise<RemoteDesktopIceReply> {
+  if (
+    request.lease !== videoLease ||
+    request.attemptId !== videoAttempt ||
+    !remoteDesktop.hasLease(request.lease)
+  )
+    throw new Error('DESKTOP_VIDEO_STOPPED');
+  const generation = offerGeneration;
+  const result = await requestHost({ ...request, id: randomUUID() }, 4000);
+  if (
+    generation !== offerGeneration ||
+    request.lease !== videoLease ||
+    request.attemptId !== videoAttempt
+  )
+    throw new Error('DESKTOP_VIDEO_STOPPED');
+  return parseDesktopIceReply(result);
 }
 
 export const remoteDesktop = new RemoteDesktopController({
@@ -247,6 +300,7 @@ export const remoteDesktop = new RemoteDesktopController({
       clipboardContent: process.platform === 'darwin' || process.platform === 'win32',
       clipboardText: process.platform === 'darwin' || process.platform === 'win32',
       videoSettings: true,
+      trickleIce: true,
       backgroundViewing: true,
       systemAudio: supportsSystemAudio,
       displayModes: process.platform === 'darwin',
@@ -286,6 +340,7 @@ export const remoteDesktop = new RemoteDesktopController({
   input: (events) => input.input(events),
   stopInput: () => input.stop(),
   offer,
+  ice,
   stopVideo,
   changed: () => {
     // Applies to the viewer lease, not the global remote-control preference.
@@ -468,10 +523,29 @@ export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void
     const request = pending;
     pending = null;
     clearTimeout(request.timer);
-    if (typeof sdp === 'string' && sdp.length <= 64_000) request.resolve(sdp);
-    else {
-      stopVideo();
-      request.reject(new Error('DESKTOP_VIDEO_UNAVAILABLE'));
+    try {
+      if (
+        sdp &&
+        typeof sdp === 'object' &&
+        'error' in sdp &&
+        [
+          'DESKTOP_AUDIO_UNAVAILABLE',
+          'DESKTOP_VIDEO_UNAVAILABLE',
+          'DESKTOP_VIDEO_TIMEOUT',
+          'DESKTOP_VIDEO_STOPPED',
+        ].includes(String(sdp.error))
+      )
+        throw new Error(String(sdp.error));
+      if (request.op === 'offer' && typeof sdp === 'string' && sdp.length <= 64_000)
+        request.resolve(sdp);
+      else if (request.op === 'ice') {
+        const result = parseDesktopIceReply(sdp);
+        if (result.attemptId !== videoAttempt) throw new Error('DESKTOP_VIDEO_STOPPED');
+        request.resolve(result);
+      } else throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+    } catch (error) {
+      if (request.op === 'offer') stopVideo();
+      request.reject(error instanceof Error ? error : new Error('DESKTOP_VIDEO_UNAVAILABLE'));
     }
   });
   ipcMain.handle(

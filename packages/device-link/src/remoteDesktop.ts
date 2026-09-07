@@ -1,4 +1,13 @@
-import { parseClipboardContentRequest, type ClipboardContentRequest } from "./remoteClipboard";
+import {
+  parseClipboardContentRequest,
+  type ClipboardContentRequest,
+} from "./remoteClipboard";
+import {
+  isDesktopAttemptId,
+  isDesktopIceCursor,
+  parseDesktopIceCandidates,
+  type RemoteDesktopIceRequest,
+} from "./remoteDesktopIce";
 /** Additive, same-account business channel. Never broadcast screen data or input. */
 export const REMOTE_DESKTOP_CHANNEL = "device-link:remote-desktop:v1";
 export const REMOTE_DESKTOP_LEASE_MS = 12_000;
@@ -117,6 +126,7 @@ export interface RemoteDesktopCapabilities {
   /** Explicit same-account replacement of the active viewer. */
   connectionTakeover?: boolean;
   videoSettings?: boolean;
+  trickleIce?: boolean;
   systemAudio?: boolean;
   displayModes?: boolean;
   backgroundViewing?: boolean;
@@ -147,6 +157,7 @@ export interface RemoteDesktopLease {
   controlling: boolean;
 }
 export type RemoteDesktopRequest =
+  | RemoteDesktopIceRequest
   | ClipboardContentRequest
   | { op: "capabilities" }
   | { op: "permissions"; action: "check" | "guide" }
@@ -159,6 +170,7 @@ export type RemoteDesktopRequest =
       op: "offer";
       lease: string;
       sdp: string;
+      attemptId?: string;
       cursorOverlay?: boolean;
       settings?: RemoteDesktopVideoSettings;
     }
@@ -195,7 +207,19 @@ export function parseRemoteDesktopRequest(
   if (typeof v.lease !== "string" || v.lease.length > 128 || !v.lease)
     throw new Error("INVALID_LEASE");
   const lease = v.lease;
-  if (v.op === "clipboardContent") return parseClipboardContentRequest(v, lease);
+  if (v.op === "ice") {
+    if (!isDesktopAttemptId(v.attemptId) || !isDesktopIceCursor(v.after))
+      throw new Error("INVALID_REQUEST");
+    return {
+      op: "ice",
+      lease,
+      attemptId: v.attemptId,
+      after: v.after,
+      candidates: parseDesktopIceCandidates(v.candidates),
+    };
+  }
+  if (v.op === "clipboardContent")
+    return parseClipboardContentRequest(v, lease);
   if (v.op === "clipboard") {
     if (v.action === "copy") return { op: v.op, lease, action: "copy" };
     if (v.action === "paste" && typeof v.text === "string" && v.text.length > 0 && v.text.length <= REMOTE_DESKTOP_MAX_CLIPBOARD_CHARS)
@@ -221,9 +245,16 @@ export function parseRemoteDesktopRequest(
   )
     return { op: v.op, lease, modeId: v.modeId };
   if (v.op === "offer" && typeof v.sdp === "string" && v.sdp.length <= 64_000) {
-    if (v.cursorOverlay !== undefined && typeof v.cursorOverlay !== "boolean") throw new Error("INVALID_REQUEST");
-    const overlay = v.cursorOverlay === true ? { cursorOverlay: true } : {};
-    if (v.settings === undefined) return { op: v.op, lease, sdp: v.sdp, ...overlay };
+    if (v.cursorOverlay !== undefined && typeof v.cursorOverlay !== "boolean")
+      throw new Error("INVALID_REQUEST");
+    if (v.attemptId !== undefined && !isDesktopAttemptId(v.attemptId))
+      throw new Error("INVALID_REQUEST");
+    const overlay = {
+      ...(v.cursorOverlay === true ? { cursorOverlay: true } : {}),
+      ...(v.attemptId === undefined ? {} : { attemptId: v.attemptId }),
+    };
+    if (v.settings === undefined)
+      return { op: v.op, lease, sdp: v.sdp, ...overlay };
     const settings = v.settings as RemoteDesktopVideoSettings;
     if (
       !settings ||

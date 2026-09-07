@@ -17,6 +17,7 @@ const fixture = vi.hoisted(() => ({
   message: null as null | ((e: unknown) => void),
   size: { width: 390, height: 844 },
   canControl: true,
+  trickleIce: false,
   focused: true,
   status: "online",
   appState: null as null | ((state: string) => void),
@@ -182,6 +183,7 @@ beforeEach(() => {
   fixture.status = "online";
   AppState.currentState = "active";
   fixture.canControl = true;
+  fixture.trickleIce = false;
   fixture.size = { width: 390, height: 844 };
   fixture.openLink.mockResolvedValue({});
   fixture.invoke.mockImplementation(async (_device, _channel, [request]) => {
@@ -189,6 +191,7 @@ beforeEach(() => {
       case "capabilities":
         return {
           version: 1,
+          trickleIce: fixture.trickleIce,
           automaticReconnect: true,
           enabled: true,
           canControl: fixture.canControl,
@@ -294,19 +297,157 @@ describe("remote desktop controls", () => {
     const offer = () =>
       fixture.message!({
         nativeEvent: {
-          data: JSON.stringify({ type: "offer", epoch: "lease", sdp: "offer" }),
+          data: JSON.stringify({
+            type: "offer",
+            epoch: "lease",
+            attemptId: "1",
+            sdp: "offer",
+          }),
         },
       });
     act(offer);
     await act(async () => control({ controlling: true }));
     expect(host.querySelector('[data-testid="remoteDesktop.connectingStatus"]')).toBeNull();
     await act(async () => answer({ sdp: "valid-answer" }));
-    expect(sent()).toContainEqual({ type: "answer", sdp: "valid-answer" });
+    expect(sent()).toContainEqual({
+      type: "answer",
+      epoch: "lease",
+      attemptId: "1",
+      sdp: "valid-answer",
+    });
     act(offer);
     act(() => root.unmount());
     mounted = false;
     await act(async () => answer({ sdp: "late-answer" }));
-    expect(sent()).not.toContainEqual({ type: "answer", sdp: "late-answer" });
+    expect(
+      sent().some((m) => m.type === "answer" && m.sdp === "late-answer"),
+    ).toBe(false);
+  });
+  it("fences late signaling within one lease and preserves the legacy desktop path", async () => {
+    await connect();
+    const original = fixture.invoke.getMockImplementation()!;
+    const answers: ((value: object) => void)[] = [];
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "offer"
+        ? new Promise((resolve) => answers.push(resolve))
+        : original(...args),
+    );
+    const offer = (attemptId: string) =>
+      act(() =>
+        fixture.message!({
+          nativeEvent: {
+            data: JSON.stringify({
+              type: "offer",
+              epoch: "lease",
+              attemptId,
+              sdp: "offer",
+            }),
+          },
+        }),
+      );
+    offer("old");
+    offer("new");
+    expect(
+      requests()
+        .filter((m) => m.op === "offer")
+        .every((m) => m.attemptId === undefined),
+    ).toBe(true);
+    const oldSend = fixture.invoke.mock.calls.find(
+      (call) => call[2][0].op === "offer",
+    )![3].preSend;
+    expect(oldSend).toThrow("DESKTOP_VIDEO_STOPPED");
+    await act(async () => answers[0]({ sdp: "old" }));
+    expect(sent().some((m) => m.type === "answer" && m.sdp === "old")).toBe(
+      false,
+    );
+    await act(async () => answers[1]({ sdp: "new" }));
+    expect(sent()).toContainEqual({
+      type: "answer",
+      epoch: "lease",
+      attemptId: "new",
+      sdp: "new",
+    });
+    expect(requests().filter((m) => m.op === "start")).toHaveLength(1);
+  });
+  it("forwards bounded ICE batches only when both endpoints support incremental signaling", async () => {
+    fixture.trickleIce = true;
+    await connect();
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) => {
+      const r = args[2][0];
+      return r.op === "ice"
+        ? Promise.resolve({
+            attemptId: r.attemptId,
+            next: r.after,
+            candidates: [],
+            complete: true,
+          })
+        : original(...args);
+    });
+    const message = (data: object) =>
+      act(async () =>
+        fixture.message!({
+          nativeEvent: { data: JSON.stringify({ epoch: "lease", ...data }) },
+        }),
+      );
+    await message({ type: "offer", attemptId: "a", sdp: "offer" });
+    await message({
+      type: "ice",
+      attemptId: "a",
+      after: 0,
+      candidates: [],
+      exchangeId: 1,
+    });
+    expect(sent()).toContainEqual({
+      type: "ice",
+      epoch: "lease",
+      attemptId: "a",
+      next: 0,
+      candidates: [],
+      complete: true,
+      exchangeId: 1,
+    });
+    await message({
+      type: "ice",
+      attemptId: "stale",
+      after: 0,
+      candidates: [],
+      exchangeId: 2,
+    });
+    await message({
+      type: "ice",
+      attemptId: "a",
+      after: -1,
+      candidates: [],
+      exchangeId: 3,
+    });
+    expect(requests().filter((m) => m.op === "ice")).toHaveLength(1);
+  });
+  it.each([false, true])("shows media recovery without replacing the lease (landscape=%s)", async (landscape) => {
+    if (landscape) {
+      fixture.size = { width: 844, height: 390 };
+      act(() => root.render(<RemoteDesktopScreen />));
+    }
+    await connect();
+    const message = (type: string) => act(async () => {
+      fixture.message!({ nativeEvent: { data: JSON.stringify({
+        type, epoch: "lease", attemptId: "1", sdp: "offer",
+      }) } });
+    });
+    await message("offer");
+    await message("streaming");
+    const ownership = () => requests().filter((r) => ["start", "control", "stop"].includes(r.op));
+    const previousOwnership = [...ownership()];
+    await message("reconnecting");
+    const badge = () => host.querySelector('[data-testid="remoteDesktop.connectingStatus"]');
+    expect(badge()?.textContent).toBe("remoteDesktop.reconnecting");
+    expect(host.textContent).not.toContain("remoteDesktop.viewOnly");
+    expect(host.querySelector('[data-testid="remoteDesktop.viewer"]')).not.toBeNull();
+    expect(button("keyboard").disabled).toBe(false);
+    expect(ownership()).toEqual(previousOwnership);
+    await message("streaming");
+    expect(badge()).toBeNull();
+    expect(ownership()).toEqual(previousOwnership);
   });
   it("shows live receive rate, rejects old lease samples, and expires stale metrics", async () => {
     await connect();

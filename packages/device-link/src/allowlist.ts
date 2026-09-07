@@ -652,6 +652,9 @@ export const PUSH_FORWARD_ALLOWLIST: ReadonlySet<string> = new Set([
  * client-agnostic:mobile/web 控制端应使用同一映射(与 allowlist 同为协议契约)。
  */
 export const INVOKE_TIMEOUT_OVERRIDES_MS: Readonly<Record<string, number>> = {
+  // Source enumeration (<=5s), capture/legacy ICE (<=18s), plus reply delivery.
+  // Keep mobile's shorter 15s default from prematurely aborting negotiation.
+  "device-link:remote-desktop:v1": 30_000,
   // 被控端 CMD_TIMEOUT_MS(30s)+ CMD_KILL_GRACE_MS(5s)+ 5s 回程余量
   'desktop-cmd:run': 40_000,
   // 被控端 worktree:create 含 git worktree add(--no-checkout)+ 白名单文件选择性

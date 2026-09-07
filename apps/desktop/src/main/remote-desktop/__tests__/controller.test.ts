@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteDesktopController, type DesktopControllerDeps } from '../controller';
 import { acquireHumanDesktopInput, withAgentDesktopInput } from '../inputOwnership';
-import type { RemoteDesktopLease } from '@cindy/device-link';
+import type { RemoteDesktopIceReply, RemoteDesktopLease } from '@cindy/device-link';
 
 function harness() {
   let now = 1000;
@@ -39,37 +39,81 @@ function harness() {
   };
 }
 describe('remote desktop authority and lifecycle', () => {
-  it.each(['release', 'takeover', 'revoke'] as const)('invalidates pending resolution after %s without stopping replacement control', async (action) => {
-    const h = harness();
-    const { lease } = await h.start();
-    await h.controller.request('phone', { op: 'control', lease, enabled: true });
-    let finish!: () => void;
-    let isCurrent!: () => boolean;
-    h.deps.resolution = vi.fn((_display, _mode, current) => {
-      isCurrent = current;
-      return new Promise<void>((resolve) => { finish = resolve; });
-    });
-    const pending = h.controller.request('phone', { op: 'resolution', lease, modeId: '1' });
-    expect(isCurrent()).toBe(true);
-    let currentLease = lease;
-    if (action === 'release') {
-      await h.controller.request('phone', { op: 'control', lease, enabled: false });
-      await h.controller.request('phone', { op: 'control', lease, enabled: true });
-    } else if (action === 'takeover') {
-      const next = await h.controller.request('other', { op: 'start', displayId: '1', takeover: true }) as RemoteDesktopLease;
-      currentLease = next.lease;
-      await h.controller.request('other', { op: 'control', lease: currentLease, enabled: true });
-    } else {
-      h.revoke();
-    }
-    expect(isCurrent()).toBe(false);
-    finish();
-    await expect(pending).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
-    if (action !== 'revoke') {
-      expect(h.controller.hasLease(currentLease)).toBe(true);
-      expect(h.controller.state?.controlling).toBe(true);
-    }
+  it('keeps ICE and media retries inside their peer lease, including after takeover', async () => {
+    const h = harness(),
+      first = await h.start();
+    let finish!: (value: RemoteDesktopIceReply) => void;
+    h.deps.ice = vi.fn(
+      () =>
+        new Promise<RemoteDesktopIceReply>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const ice = { op: 'ice', lease: first.lease, attemptId: 'a', after: 0, candidates: [] };
+    await expect(h.controller.request('other', ice)).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
+    expect(h.deps.ice).not.toHaveBeenCalled();
+    expect(h.deps.stopVideo).not.toHaveBeenCalled();
+    for (const attemptId of ['a', 'b'])
+      await h.controller.request('phone', {
+        op: 'offer',
+        lease: first.lease,
+        sdp: 'offer',
+        attemptId,
+      });
+    expect(h.deps.stopInput).not.toHaveBeenCalled();
+    expect(h.controller.hasLease(first.lease)).toBe(true);
+    const pending = h.controller.request('phone', ice);
+    const next = (await h.controller.request('other', {
+      op: 'start',
+      displayId: '1',
+      takeover: true,
+    })) as RemoteDesktopLease;
+    const stopped = vi.mocked(h.deps.stopVideo).mock.calls.length;
+    finish({ attemptId: 'a', next: 0, candidates: [], complete: false });
+    await expect(pending).rejects.toThrow('DESKTOP_STOPPED');
+    expect(h.controller.hasLease(next.lease)).toBe(true);
+    expect(h.deps.stopVideo).toHaveBeenCalledTimes(stopped);
   });
+  it.each(['release', 'takeover', 'revoke'] as const)(
+    'invalidates pending resolution after %s without stopping replacement control',
+    async (action) => {
+      const h = harness();
+      const { lease } = await h.start();
+      await h.controller.request('phone', { op: 'control', lease, enabled: true });
+      let finish!: () => void;
+      let isCurrent!: () => boolean;
+      h.deps.resolution = vi.fn((_display, _mode, current) => {
+        isCurrent = current;
+        return new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      });
+      const pending = h.controller.request('phone', { op: 'resolution', lease, modeId: '1' });
+      expect(isCurrent()).toBe(true);
+      let currentLease = lease;
+      if (action === 'release') {
+        await h.controller.request('phone', { op: 'control', lease, enabled: false });
+        await h.controller.request('phone', { op: 'control', lease, enabled: true });
+      } else if (action === 'takeover') {
+        const next = (await h.controller.request('other', {
+          op: 'start',
+          displayId: '1',
+          takeover: true,
+        })) as RemoteDesktopLease;
+        currentLease = next.lease;
+        await h.controller.request('other', { op: 'control', lease: currentLease, enabled: true });
+      } else {
+        h.revoke();
+      }
+      expect(isCurrent()).toBe(false);
+      finish();
+      await expect(pending).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
+      if (action !== 'revoke') {
+        expect(h.controller.hasLease(currentLease)).toBe(true);
+        expect(h.controller.state?.controlling).toBe(true);
+      }
+    },
+  );
   it('takes over only explicitly and prevents the evicted device from automatically returning', async () => {
     const h = harness();
     const first = await h.start();

@@ -56,8 +56,10 @@ the existing, trusted main renderer, with exact Main-side host identity checks.
 The phone runs a dedicated trusted inline WebView document; the untrusted HTML
 preview's restrictions are unchanged. The mobile presentation module requests scene rotation and a playback audio session
 for system picture in picture. This requires a new native mobile build. Voice
-recording and ordinary audio retain their foreground-only runtime policy. The current direct-connection ICE configuration uses a public STUN
-server; there is no bundled TURN service.
+recording and ordinary audio retain their foreground-only runtime policy. Direct
+connections use independent Cloudflare and Google STUN endpoints; there is no
+bundled TURN service. Neither public endpoint guarantees reachability in mainland
+China or across every carrier.
 
 When WebRTC is unavailable or cannot connect, the phone uses an explicitly
 labeled compatibility mode: JPEG at at most 1280 pixels per dimension, at most
@@ -66,6 +68,72 @@ per second. Images are transient and pass through the authenticated TLS relay.
 This mode trades frame rate and clarity for reachability. It is suitable for
 ordinary desktop work, not game streaming. A production TURN service is the
 follow-up needed for consistently smooth video across restrictive networks.
+
+### Incremental ICE and media recovery
+
+New desktops advertise optional `trickleIce`. When both endpoints support it,
+the phone sends its offer without waiting for candidate gathering, and the
+desktop answers after capture is ready. Candidates discovered later travel via
+the existing authenticated `device-link:remote-desktop:v1` invoke channel's
+`ice` operation. No new server message kind, listening port or credential store
+is introduced. Older endpoints retain the full-SDP path, with a five-second
+gathering deadline.
+
+Three identifiers have different lifetimes:
+
+- The peer-bound lease owns viewing/control. Media recovery never obtains a new
+  lease, takes over another viewer or renews authorization on its own.
+- `attemptId` owns one offer/answer and its peer connection. Replacing an attempt
+  invalidates asynchronous capture, answers and candidate responses from its
+  predecessor. The host rechecks the lease after asynchronous work.
+- A viewer-local `exchangeId` owns one candidate request/reply. A late response
+  cannot acknowledge candidates from a later request. The host's `after`/`next`
+  cursor reads a retained candidate buffer, so retrying a lost reply is safe.
+
+Candidate batches contain at most 16 entries, with at most 128 candidates per
+attempt and 2,048 characters per candidate. Fields and cursors are validated on
+both sides. Duplicate candidates are applied once. A timed-out exchange does
+not tear down healthy video; polling is bounded to 30 seconds. SDP, candidate
+addresses, credentials and desktop content are not added to logs.
+
+| Phase | Bound |
+| --- | --- |
+| Desktop source enumeration | 2 seconds with native capture, 5 seconds otherwise |
+| Desktop offer command | 18 seconds |
+| Remote-desktop invoke | 30 seconds; other invoke channels are unchanged |
+| Viewer waiting for answer | 25 seconds |
+| ICE checks after answer | 15 seconds |
+| Temporary media disconnect | 5-second grace period |
+| Automatic media retries | 1, 3 and 8 seconds; restored after 30 seconds connected |
+
+On a transient disconnect the viewer keeps the picture, releases held input and
+shows the existing reconnecting badge. Input uses the existing authorized invoke
+path while the data channel is disconnected. Recovery changes only this remote
+desktop's media connection; shared device-link sessions and other peers are never
+reset. Exhausted retries leave the existing JPEG compatibility transport
+available. Explicit stop, lease replacement and leaving the page cancel timers
+and invalidate late work. Permission/capture errors that require user action do
+not repeatedly start media attempts.
+
+For mainland-China deployment, restrictive NAT and UDP-blocked networks still
+need authenticated regional TURN with short-lived credentials and UDP plus
+TCP/TLS fallback, tested across carriers. This change does not provision that
+infrastructure or add an unconfigured TURN option. Native ICE retains available
+LAN, IPv6 and overlay-network candidates; being on Tailscale does not itself
+prove that the media path is direct.
+
+Deterministic tests exercise candidate replay, stale generations, bounded retry,
+lease takeover isolation and old-version signaling. The loopback smoke harness
+uses real Chromium WebRTC and synthetic video, delays candidate delivery, loses
+an exchange response, verifies input and recovers after closing the host peer:
+
+```sh
+node --import tsx apps/mobile/scripts/remote-desktop-network-smoke.mjs [chromium-executable]
+```
+
+This harness does not validate WKWebView, Android WebView, carrier NAT, regional
+STUN availability, TURN relay performance or Windows native capture. Those need
+device/network verification before claiming a measured connection-success gain.
 
 ## Authority and lifetime
 

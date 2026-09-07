@@ -4,7 +4,7 @@ import {
   type ClipboardContentRequest, type RemoteClipboardContent,
 } from '@cindy/device-link';
 
-/** One bounded, short-lived transfer per controller. Payloads never reach disk/logs. */
+/** One bounded transfer per controller, released after 60s idle. Payloads never reach disk/logs. */
 export class ClipboardTransfer {
   private value: { id: string; lease: string; length: number; data: string; direction: 'copy' | 'paste' } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -37,12 +37,14 @@ export class ClipboardTransfer {
     if (request.action === 'cancel') { this.reset(); return { ok: true }; }
     if (request.action === 'read' && value.direction === 'copy') {
       if (request.offset >= value.length) throw new Error('INVALID_REQUEST');
+      this.timer?.refresh(); // Slow links may need more than a minute for a complete item.
       return { data: value.data.slice(request.offset, request.offset + CLIPBOARD_CHUNK_CHARS) };
     }
     if (request.action === 'write' && value.direction === 'paste') {
       if (request.offset !== value.data.length || value.data.length + request.data.length > value.length)
         throw new Error('INVALID_REQUEST');
       value.data += request.data;
+      this.timer?.refresh();
       return { ok: true };
     }
     if (request.action === 'commit' && value.direction === 'paste') {

@@ -1,11 +1,11 @@
 import { z } from "zod";
-import type { SchedulerMcpDeps } from "../types.js";
+import type { RoutineToolService } from "../types.js";
 import type { SchedulerToolRegistry } from "../cindy_schedulerToolRegistry.js";
 
 /** Routine tools share the UI's host service and do not expose event-source impersonation. */
 export function registerRoutineTools(
   registry: SchedulerToolRegistry,
-  deps: Pick<SchedulerMcpDeps, "routines">,
+  deps: { routines?: RoutineToolService },
 ): void {
   if (!deps.routines) return;
   const service = deps.routines;

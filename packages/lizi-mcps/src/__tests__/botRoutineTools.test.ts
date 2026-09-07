@@ -56,3 +56,24 @@ it('does not access the native service for an unbound caller', async () => {
   expect(resolveBotId).not.toHaveBeenCalled();
   expect(list).not.toHaveBeenCalled();
 });
+
+it('rejects unrelated and background callers before reaching any routine operation', async () => {
+  const registry = new XdtHelperToolRegistry();
+  const operation = vi.fn();
+  const service: BotRoutineCallbacks['service'] = {
+    list: operation, sources: operation, save: operation,
+    history: operation, remove: operation, runNow: operation,
+  };
+  registerBotRoutineTools(registry, {
+    service, resolveBotId: async () => { throw new Error('not canonical'); },
+  }, () => 'ordinary-background-session');
+  for (const name of ['routine_list', 'routine_sources', 'routine_history', 'routine_delete', 'routine_run_now']) {
+    const args = ['routine_list', 'routine_sources'].includes(name) ? {} : { id: 'routine' };
+    expect((await registry.call(name, args)).isError).toBe(true);
+  }
+  expect((await registry.call('routine_save', {
+    name: 'Other', prompt: 'Do work', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  })).isError).toBe(true);
+  expect(operation).not.toHaveBeenCalled();
+});

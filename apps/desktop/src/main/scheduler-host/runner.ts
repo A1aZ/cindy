@@ -462,7 +462,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
    * (review #944 第十九轮 P1;本函数原来的注释已经把 manual 算在排除项里,代码没跟上)。
    * 排除后走可见失败:用户知道这次没跑成,可以自己再点一次,不会莫名多出自动运行。
    */
-  private canDefer(schedule: Schedule): boolean {
+  private canDefer(schedule: Schedule, ctx: FireContext): boolean {
+    // RoutineEngine explicitly owns retries; no nextFireAt is armed in this mode.
+    if (ctx.deferToCaller) return true;
     return schedule.recurring === true && schedule.status === 'active' && schedule.manual !== true;
   }
 
@@ -472,7 +474,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     sessionId: string,
     allowDefer: boolean,
   ): Promise<FireResult> {
-    if (allowDefer && this.canDefer(schedule)) {
+    if (allowDefer && this.canDefer(schedule, ctx)) {
       return this.deferFire(schedule, sessionId, 'session-running');
     }
     const sendContext = buildSchedulerSendContext(schedule, ctx, sessionId);
@@ -704,7 +706,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 落点一致,无功能回退,仅 telemetry reason 偏"user-active"。
         const recentlyUserDriven =
           row?.userSendAt != null && Date.now() - row.userSendAt < ACTIVE_YIELD_WINDOW_MS;
-        if (recentlyUserDriven && isSessionInTurn(sessionId) && this.canDefer(schedule)) {
+        if (recentlyUserDriven && isSessionInTurn(sessionId) && this.canDefer(schedule, ctx)) {
           holder.releaseAgentSwitchLock?.();
           holder.releaseAgentSwitchLock = undefined;
           return this.deferFire(schedule, sessionId, 'user-active');
@@ -1572,7 +1574,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // (用户远程控制 / 上轮心跳未完)→ 不记失败,顺延重排。非 heartbeat 是新建
       // session,SESSION_RUNNING 属异常,维持原 failed(可见)。先就近摘掉本轮挂
       // 的 listener(turnFinished + abort),否则它们持有 session 引用阻止 GC。
-      if (isHeartbeat && normalized.reason === 'SESSION_RUNNING' && this.canDefer(schedule)) {
+      if (isHeartbeat && normalized.reason === 'SESSION_RUNNING' && this.canDefer(schedule, ctx)) {
         waiter.stopListening();
         ctx.signal.removeEventListener('abort', onAbort);
         return this.deferFire(schedule, session.id, 'session-running');
@@ -1636,7 +1638,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     ctx: FireContext,
     sessionId: string,
   ): Promise<FireResult> {
-    if (this.canDefer(schedule)) {
+    if (this.canDefer(schedule, ctx)) {
       return this.deferFire(schedule, sessionId, 'already-queued');
     }
     const errMsg = formatSchedulerSendError(
@@ -1998,7 +2000,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     if ('retry' in enqueueResult) {
       // 崩溃恢复快照尚未成功读回 → 持久化去重做不了,顺延本次 fire(90s 后重试,
       // 届时恢复多半已完成);一次性任务无法顺延,按可见失败收口。
-      if (this.canDefer(schedule)) {
+      if (this.canDefer(schedule, ctx)) {
         return this.deferFire(schedule, sessionId, 'queue-restore-pending');
       }
       const errMsg = formatSchedulerSendError(
@@ -2135,7 +2137,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 若空闲就直发,槽位届时也可能腾出来)。
       // 不能顺延的(一次性 / manual / 已 paused)退回可见失败,否则任务静默消失。
       if (err instanceof QueuedDispatchTimeoutError || err instanceof QueuedSlotUnavailableError) {
-        if (this.canDefer(schedule)) {
+        if (this.canDefer(schedule, ctx)) {
           return this.deferFire(schedule, sessionId, 'queue-wait-timeout');
         }
         const errMsg = formatSchedulerSendError(

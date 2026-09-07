@@ -1,4 +1,3 @@
-import { registerRoutineTools } from './scheduler/routines.js';
 /**
  * cindy_schedulerMcpServer.ts
  * ---------------------------------------------------------------------------
@@ -180,7 +179,6 @@ export function createSchedulerMcpServer(
 
   // 注册顺序 = list_tools 里的位次。读优先 → 写次之 → 危险写在最后。
   registerScheduleListTool(registry, deps);
-  registerRoutineTools(registry, deps);
   registerScheduleGetTool(registry, deps);
   registerScheduleListRunsTool(registry, deps);
   // create / update 都注入 ctx:bindToCurrentSession 据 sessionId 自动填 targetSessionId,

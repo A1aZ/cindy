@@ -1,11 +1,11 @@
 import { SchedulerToolRegistry } from '../cindy_schedulerToolRegistry.js';
 import type { XdtHelperToolRegistry } from '../lizi_xdtHelperToolRegistry.js';
 import { registerRoutineTools } from '../scheduler/routines.js';
-import type { SchedulerMcpDeps } from '../types.js';
+import type { RoutineToolService } from '../types.js';
 
 export interface BotRoutineCallbacks {
   resolveBotId(callerSessionId: string): Promise<string>;
-  service: NonNullable<SchedulerMcpDeps['routines']>;
+  service: RoutineToolService;
 }
 
 /** Same native service/schema as automation, scoped to the calling companion. */

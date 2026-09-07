@@ -1251,6 +1251,20 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     expect(harness.send).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('manual busy dispatch defers only when the caller owns retries: %s', async (deferToCaller) => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, hasQueued: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const result = runner.fire(
+      heartbeatSchedule({ manual: true, source: 'bot' }),
+      { ...createFireContext(), deferToCaller },
+    );
+    if (deferToCaller) await expect(result).resolves.toMatchObject({ deferred: true });
+    else await expect(result).rejects.toThrow('HEARTBEAT_ALREADY_QUEUED');
+    expect(queue.enqueueCalls).toHaveLength(0);
+    expect(harness.send).not.toHaveBeenCalled();
+  });
+
   it('settles the run as aborted-style failure when the queued prompt is discarded', async () => {
     const harness = createSessionHarness(async () => ({ accepted: true }));
     const queue = createQueueHarness({ busy: true });

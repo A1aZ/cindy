@@ -203,6 +203,16 @@ export interface SlackHookMcpDeps {
   logger?: LiziMcpLogger;
 }
 
+/** Native routine service; only caller-bound companion tools expose it to agents. */
+export interface RoutineToolService {
+  list(botId: string): Promise<import('@cindy/maker-scheduler').Routine[]>;
+  sources(): Promise<import('@cindy/maker-scheduler').RoutineSource[]>;
+  save(botId: string, input: import('@cindy/maker-scheduler').RoutineInput, id?: string): Promise<import('@cindy/maker-scheduler').Routine>;
+  history(botId: string, id: string): Promise<import('@cindy/maker-scheduler').RoutineRun[]>;
+  remove(botId: string, id: string): Promise<void>;
+  runNow(botId: string, id: string): Promise<void>;
+}
+
 /**
  * Host injects a `getScheduler()` accessor — the cindy_scheduler MCP server
  * never holds a long-lived Scheduler reference because the host may
@@ -215,14 +225,6 @@ export interface SlackHookMcpDeps {
  * @cindy/maker-scheduler still has zero runtime deps per Phase 1).
  */
 export interface SchedulerMcpDeps {
-  routines?: {
-    list(botId: string): Promise<import('@cindy/maker-scheduler').Routine[]>;
-    sources(): Promise<import('@cindy/maker-scheduler').RoutineSource[]>;
-    save(botId: string, input: import('@cindy/maker-scheduler').RoutineInput, id?: string): Promise<import('@cindy/maker-scheduler').Routine>;
-    history(botId: string, id: string): Promise<import('@cindy/maker-scheduler').RoutineRun[]>;
-    remove(botId: string, id: string): Promise<void>;
-    runNow(botId: string, id: string): Promise<void>;
-  };
   getScheduler(): import('@cindy/maker-scheduler').Scheduler;
   /**
    * 前置检查脚本(preRunHook)统一安装服务(host 注入,desktop 实现为

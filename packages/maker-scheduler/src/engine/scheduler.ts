@@ -1006,7 +1006,9 @@ export class Scheduler extends EventEmitter {
   // - 副作用：recurring=false 的任务被手动 runNow 后 lastFiredAt 落地，
   //   重启 app 时 computeNextFireAt 会返回 undefined → 不会再被 cron 触发。
   //   这反而更贴合"Once"语义：用户手动跑过一次就视作用完。
-  async runNow(id: string): Promise<{ runId: string }> {
+  // Internal callers with their own durable queue may own the deferred retry.
+  // This option is not exposed through schedule CRUD or public MCP arguments.
+  async runNow(id: string, options?: { deferToCaller?: boolean }): Promise<{ runId: string; deferred?: boolean }> {
     // 手动触发不受并发闸门拦截(用户显式动作要即时响应),但计入 in-flight 占用,
     // 会挤压后续自动触发的槽位。
     const runId = this.generateId();
@@ -1017,13 +1019,13 @@ export class Scheduler extends EventEmitter {
       phase: 'loading',
     });
     try {
-      return await this.runNowInner(id, runId);
+      return await this.runNowInner(id, runId, options);
     } finally {
       this.finishInflightAttempt(runId);
     }
   }
 
-  private async runNowInner(id: string, runId: string): Promise<{ runId: string }> {
+  private async runNowInner(id: string, runId: string, options?: { deferToCaller?: boolean }): Promise<{ runId: string; deferred?: boolean }> {
     const schedule = await this.storage.get(id);
     if (!schedule) throw new Error(`Schedule not found: ${id}`);
     this.updateInflightAttempt(runId, 'persisting', schedule);
@@ -1083,6 +1085,7 @@ export class Scheduler extends EventEmitter {
       const result = await this.runner.fire(schedule, {
         runId,
         firedAt,
+        deferToCaller: options?.deferToCaller,
         signal: controller.signal,
         onSessionBound: this.buildOnSessionBound(schedule.id, runId),
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),
@@ -1119,6 +1122,7 @@ export class Scheduler extends EventEmitter {
     // 顺延(手动触发撞忙也礼让,与 cron 路径一致):撤销预插的 running run、不通知。
     // runNow 正常路径不动 nextFireAt;但顺延必须把 nextFireAt 前移到短延后,让 cron
     // tick 在会话空闲后接力真跑(否则手动触发撞忙就石沉大海)。
+    // deferToCaller 由宿主持久队列接力，保留原 nextFireAt，不建立第二个重试来源。
     if (deferred && !wasAborted) {
       try {
         await this.storage.deleteRun(runId);
@@ -1133,7 +1137,7 @@ export class Scheduler extends EventEmitter {
       // ② 对 recurring=false 的 Once 任务,lastFiredAt 一旦落地,重启时
       // computeNextFireAt 会因 lastFiredAt 已设而返回 undefined → 顺延的重试被吞掉。
       const updated = await this.storage.update(schedule.id, {
-        nextFireAt: retryAt,
+        nextFireAt: options?.deferToCaller ? schedule.nextFireAt : retryAt,
         lastFiredAt: schedule.lastFiredAt,
       });
       if (updated && updated.status === 'active') {
@@ -1142,7 +1146,7 @@ export class Scheduler extends EventEmitter {
       // 'deferred' 配对先前的 'fired'(清 UI running 态、不留可见 run);'changed' revalidate。
       this.emitEvent({ type: 'deferred', scheduleId: schedule.id, runId });
       this.emitEvent({ type: 'changed', scheduleId: schedule.id });
-      return { runId };
+      return { runId, deferred: true };
     }
 
     if (stallAborted) {

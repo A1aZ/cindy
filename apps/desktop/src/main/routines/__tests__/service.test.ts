@@ -14,7 +14,7 @@ const mock = vi.hoisted(() => ({
     ]),
   },
   scheduler: {
-    runNow: vi.fn(async () => ({ runId: 'execution' })),
+    runNow: vi.fn(async (): Promise<{ runId: string; deferred?: boolean }> => ({ runId: 'execution' })),
     pause: vi.fn(async () => {}),
     delete: vi.fn(async () => {}),
   },
@@ -102,4 +102,26 @@ it('restarts after a cancelled account transition instead of returning a stopped
   await vi.advanceTimersByTimeAsync(1000);
   mock.boundaryPending = false;
   expect(await getRoutineEngine()).not.toBe(first);
+});
+
+it('keeps a busy batch queued for 30 seconds and then executes it once', async () => {
+  vi.useFakeTimers();
+  mock.scheduler.runNow.mockResolvedValueOnce({ runId: 'busy', deferred: true });
+  const routine = await routineTools.save('bot', {
+    name: 'Review', prompt: 'Check the PR', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  await routineTools.runNow('bot', routine.id);
+  await vi.advanceTimersByTimeAsync(0);
+  const pending = (await routineTools.history('bot', routine.id))[0];
+  expect(pending.status).toBe('queued');
+  expect(mock.scheduler.runNow).toHaveBeenCalledWith(`routine-${routine.id}`, { deferToCaller: true });
+  expect(mock.scheduler.pause).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(29000);
+  expect(mock.scheduler.runNow).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(mock.scheduler.runNow).toHaveBeenCalledTimes(2);
+  const history = await routineTools.history('bot', routine.id);
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({ id: pending.id, status: 'success', resultText: 'Reviewed PR' });
 });

@@ -84,16 +84,13 @@ async function execute(scope: string, routine: Routine, run: RoutineRun, signal:
   };
   signal.addEventListener('abort', abort, { once: true });
   try {
-    const result = await scheduler.runNow(id);
+    const result = await scheduler.runNow(id, { deferToCaller: true });
     assertScope(scope);
+    // The routine queue owns this batch and its retry delay, not the backing schedule.
+    if (result.deferred) return { deferred: true };
     const rows = await storage.listRuns(id, 10);
     const completed = rows.find((row) => row.id === result.runId);
-    if (!completed) {
-      // The existing runner deferred because the canonical task is busy. Keep retry ownership
-      // in the routine queue; never let the backing schedule replay a stale event batch.
-      await scheduler.pause(id);
-      return { deferred: true };
-    }
+    if (!completed) throw new Error('Routine execution record is missing');
     return {
       scheduleRunId: result.runId,
       resultText: completed.resultText,

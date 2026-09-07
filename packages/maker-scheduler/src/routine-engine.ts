@@ -419,7 +419,8 @@ export class RoutineEngine {
         this.retryAfter.set(run.routineId, this.deps.now() + 30_000);
         return;
       }
-      const { deferred: _deferred, ...completed } = result;
+      const completed = { ...result };
+      delete completed.deferred;
       Object.assign(run, completed, {
         status: controller.signal.aborted
           ? "cancelled"

@@ -1,17 +1,17 @@
 import { expect, it, vi } from "vitest";
 import { SchedulerToolRegistry } from "../cindy_schedulerToolRegistry.js";
 import { registerRoutineTools } from "../scheduler/routines.js";
-import type { SchedulerMcpDeps } from "../types.js";
+import type { RoutineToolService } from "../types.js";
 it("exposes local management only when supported and propagates the host error", async () => {
   const registry = new SchedulerToolRegistry();
-  registerRoutineTools(registry, {} as SchedulerMcpDeps);
+  registerRoutineTools(registry, {});
   expect(registry.list()).toHaveLength(0);
   const save = vi.fn(async () => {
     throw new Error("Teammate not found");
   });
   registerRoutineTools(registry, {
     routines: { save },
-  } as unknown as SchedulerMcpDeps);
+  } as unknown as { routines: RoutineToolService });
   expect(registry.list().map((tool) => tool.name)).toEqual([
     "routine_list",
     "routine_sources",

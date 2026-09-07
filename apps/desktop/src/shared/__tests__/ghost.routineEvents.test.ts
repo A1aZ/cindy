@@ -23,6 +23,16 @@ describe.each([
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.manifest.routineEvents).toBeUndefined();
   });
+  it('accepts legacy v2 plugins but rejects their v3-only event capability', () => {
+    const legacy = { ...manifest, schemaVersion: 2, slots: [] };
+    expect(validate(legacy).ok).toBe(true);
+    const rejected = validate({
+      ...legacy,
+      routineEvents: { events: [{ type: 'new', name: 'New', fields: [] }] },
+    });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.reason).toContain('schemaVersion 3');
+  });
   it('roundtrips declared event types and rejects invalid declarations', () => {
     const routineEvents = {
       events: [{ type: 'message.new', name: 'New Message', fields: ['channel'] }],

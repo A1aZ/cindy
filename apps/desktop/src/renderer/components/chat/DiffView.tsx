@@ -48,6 +48,9 @@ interface SkipMarker {
 
 type RenderRow = DiffLine | SkipMarker;
 
+const DIFF_PRE_CLASS_NAME =
+  'm-0 w-max min-w-full p-0 text-[length:calc(var(--app-code-font-size)_-_1px)] leading-[1.5] font-mono';
+
 /**
  * 把超出 ±contextLines 范围的连续 ctx 行折叠成一个 SkipMarker。
  *
@@ -254,7 +257,7 @@ export function DiffView({ oldString, newString, analysis, contextLines }: DiffV
         className="diff-hscroll select-text overflow-x-auto overflow-y-auto max-h-[60vh] rounded-[12px] border border-[var(--msg-tool-card-border)]"
       >
         <pre
-          className="relative m-0 w-max min-w-full p-0 text-[length:calc(var(--app-code-font-size)_-_1px)] leading-[1.5] font-mono"
+          className={cn('relative', DIFF_PRE_CLASS_NAME)}
           style={{ height: virtualizer.getTotalSize(), minWidth: `${minWidthCh}ch` }}
         >
           {virtualizer.getVirtualItems().map((item) => (
@@ -275,7 +278,7 @@ export function DiffView({ oldString, newString, analysis, contextLines }: DiffV
 
   return (
     <div className="diff-hscroll select-text overflow-x-auto rounded-[12px] border border-[var(--msg-tool-card-border)]">
-      <pre className="m-0 w-max min-w-full p-0 text-[length:calc(var(--app-code-font-size)_-_1px)] leading-[1.5] font-mono">
+      <pre className={DIFF_PRE_CLASS_NAME}>
         {rows.map((row, index) => (
           <div
             key={

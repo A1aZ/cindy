@@ -38,7 +38,7 @@ export interface DesktopLocalState {
 }
 export type WindowsDesktopSupport = 'ready' | 'missing' | 'installRequired' | 'unavailable';
 export interface RemoteDesktopApi {
-  state(): Promise<DesktopLocalState>;
+  state(checkWindowsSupport?: boolean): Promise<DesktopLocalState>;
   enable(enabled: boolean): Promise<void>;
   windowsSupport(enabled: boolean): Promise<void>;
   stop(): Promise<void>;

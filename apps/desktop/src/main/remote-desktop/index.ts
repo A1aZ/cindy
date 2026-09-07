@@ -89,6 +89,14 @@ const supportsSystemAudio =
       return major > 14 || (major === 14 && minor >= 2);
     })());
 let videoLease: string | null = null;
+let onVideoActivityChanged = () => {};
+export function isRemoteDesktopVideoActive(): boolean {
+  return videoLease !== null;
+}
+function setVideoLease(lease: string | null): void {
+  videoLease = lease;
+  onVideoActivityChanged();
+}
 let offerGeneration = 0;
 let nativeOverlay = false;
 let nativeSettings: RemoteDesktopVideoSettings | undefined;
@@ -107,9 +115,8 @@ function stopVideo(): void {
   nativeCapture.stop();
   nativeDisplay = null;
   captureGrant = null;
-  videoLease = null;
+  setVideoLease(null);
   if (host && !host.isDestroyed()) {
-    host.setBackgroundThrottling(true);
     if (isTrustedAppRendererWindow(BrowserWindow.fromWebContents(host)))
       host.send(DESKTOP_LOCAL.COMMAND, {
         id: randomUUID(),
@@ -151,7 +158,7 @@ async function offer(
   const generation = ++offerGeneration;
   nativeCapture.stop();
   nativeDisplay = null;
-  videoLease = null;
+  setVideoLease(null);
   captureGrant = null;
   const currentHost = host;
   let source: DesktopCapturerSource | null = null;
@@ -197,8 +204,7 @@ async function offer(
   nativeDisplay = nativeAvailable ? lease.display.id : null;
   nativeOverlay = cursorOverlay === true && process.platform === 'darwin';
   nativeSettings = settings;
-  videoLease = lease.lease;
-  currentHost.setBackgroundThrottling(false);
+  setVideoLease(lease.lease);
   return new Promise<string>((resolve, reject) => {
     const id = randomUUID();
     const timer = setTimeout(() => {
@@ -293,7 +299,9 @@ export const remoteDesktop = new RemoteDesktopController({
   },
 });
 
-export function registerRemoteDesktopIpc(): void {
+export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void): void {
+  onVideoActivityChanged = refreshBackgroundThrottling;
+  onVideoActivityChanged();
   const timer = setInterval(() => remoteDesktop.tick(), 1000);
   timer.unref();
   app.on('before-quit', () => {
@@ -354,13 +362,17 @@ export function registerRemoteDesktopIpc(): void {
       throwIpcError('PERMISSION_DENIED', 'Invalid desktop viewer heartbeat');
     remoteDesktop.viewHeartbeat(lease);
   });
-  ipcMain.handle(DESKTOP_LOCAL.STATE, async (event) => {
+  ipcMain.handle(DESKTOP_LOCAL.STATE, async (event, checkWindowsSupport: unknown) => {
     assertTrustedAppRendererEvent(event);
+    if (checkWindowsSupport !== undefined && typeof checkWindowsSupport !== 'boolean')
+      throwIpcError('INVALID_PARAMS', 'Invalid Windows support status request');
     return {
       enabled: readDeviceLinkSettings().remoteDesktopEnabled,
       active: remoteDesktop.state,
       permissionGuide: permissions.guideOpen,
-      windowsSupport: await readWindowsDesktopSupport(),
+      ...(checkWindowsSupport === true
+        ? { windowsSupport: await readWindowsDesktopSupport() }
+        : {}),
     };
   });
   let windowsSetupBusy = false;

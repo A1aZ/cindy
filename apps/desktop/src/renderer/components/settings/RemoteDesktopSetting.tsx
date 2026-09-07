@@ -24,7 +24,7 @@ export function RemoteDesktopSetting() {
       reading = true;
       const current = revision.current;
       void api
-        .state()
+        .state(true)
         .then((state) => {
           if (active && current === revision.current) {
             setEnabled(state.enabled);
@@ -109,7 +109,7 @@ export function RemoteDesktopSetting() {
               setServiceError(false);
               void window.electronAPI.remoteDesktop
                 .windowsSupport(windowsSupport !== 'ready')
-                .then(() => window.electronAPI.remoteDesktop.state())
+                .then(() => window.electronAPI.remoteDesktop.state(true))
                 .then((state) => setWindowsSupport(state.windowsSupport))
                 .catch(() => setServiceError(true))
                 .finally(() => {

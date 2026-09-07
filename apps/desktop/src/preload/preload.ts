@@ -4178,7 +4178,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 同账号设备经 server relay 互联;此处只暴露开关 + 设备列表管理面,
   // 隧道(远程会话控制)在 M3 接入。
   remoteDesktop: {
-    state: () => ipcRenderer.invoke(DESKTOP_LOCAL.STATE),
+    state: (checkWindowsSupport) => ipcRenderer.invoke(DESKTOP_LOCAL.STATE, checkWindowsSupport),
     permissions: () => ipcRenderer.invoke(DESKTOP_LOCAL.PERMISSIONS),
     openPermission: (permission) => ipcRenderer.invoke(DESKTOP_LOCAL.OPEN_PERMISSION, permission),
     dismissPermissionGuide: () => ipcRenderer.invoke(DESKTOP_LOCAL.DISMISS_GUIDE),

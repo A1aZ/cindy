@@ -899,7 +899,20 @@ export function IOSSimulatorTabBody({
       acceptStream(resultStream(result));
       if (nextInstance) void refresh();
       const nextViewport = resultViewport(result);
-      if (!cancelled && nextViewport) setViewport(nextViewport);
+      // Frame polls re-report the same viewport on every result. Keep the
+      // previous reference when nothing changed so an unchanged poll does not
+      // re-render the whole panel 20×/s — under a slow runner that churn also
+      // starves `act()` drains in tests until the suite times out.
+      if (!cancelled && nextViewport) {
+        setViewport((previous) =>
+          previous &&
+          previous.width === nextViewport.width &&
+          previous.height === nextViewport.height &&
+          previous.orientation === nextViewport.orientation
+            ? previous
+            : nextViewport,
+        );
+      }
       const nextMutation = resultMutation(result);
       if (!cancelled && nextMutation) setLiveMutation(nextMutation);
     };

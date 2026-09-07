@@ -2108,14 +2108,24 @@ it('routes Bot shortcuts through the scoped helper entry without exposing them t
 
   const bot: any[] = [];
   gateway.register({ registerTool: (tool: unknown) => bot.push(tool) }, { botMemoryFacade: true });
-  for (const name of ['start_session_task', 'check_session_task', 'message_session_task', 'stop_session_task', 'send_to_agent', 'create_teammate']) {
+  for (const name of ['start_session_task', 'check_session_task', 'message_session_task', 'stop_session_task', 'send_to_agent', 'create_teammate', 'routine_list', 'routine_save', 'routine_sources', 'routine_history', 'routine_delete', 'routine_run_now']) {
     const tool = bot.find((item) => item.name === name);
     expect(tool).toBeDefined();
-    const args = name === 'start_session_task' ? { instruction: 'Prepare a report' }
+    const args = name === 'routine_save' ? {
+      name: 'Rest', prompt: 'Remind me to rest', enabled: true,
+      triggers: [{ id: 'minute', kind: 'interval', intervalMs: 60000 }],
+    } : name === 'routine_list' || name === 'routine_sources' ? {}
+      : name.startsWith('routine_') ? { id: 'routine-1' }
+      : name === 'start_session_task' ? { instruction: 'Prepare a report' }
       : name === 'send_to_agent' ? { target_id: 'bot-b', message: 'Please review' }
       : name === 'create_teammate' ? { name: 'Writer', description: 'Novelist', identity_source: 'Write stories', welcome_message: 'Hello' }
       : name === 'message_session_task' ? { task_id: 'task-1', message: 'Add a summary' }
       : { task_id: 'task-1' };
+    if (name === 'routine_save') {
+      expect(tool.parameters.required).toEqual(['name', 'prompt', 'enabled', 'triggers']);
+      expect(tool.parameters.properties.botId).toBeUndefined();
+      expect(tool.parameters.properties.triggers.items.anyOf[0].properties.intervalMs.minimum).toBe(60000);
+    }
     const resolved = gateway.resolveDirectHelperTool(name, args);
     expect(resolved.qualifiedName).toBe('mcp__cindy_helper__' + name);
     expect(resolved.args).toEqual(args); // Permission review retains the actual operation and arguments.

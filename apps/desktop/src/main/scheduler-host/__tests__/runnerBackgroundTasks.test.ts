@@ -17,18 +17,24 @@ import type {
 const mocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
   getSessionRowSnapshot: vi.fn(),
+  getSessionFsSnapshot: vi.fn(),
   ensureDialogueWorkspaceDir: vi.fn(),
   wireSessionToIpc: vi.fn(),
   resolveWorkingDir: vi.fn(),
   backfillSessionMeta: vi.fn(),
 }));
 
+vi.mock('../../im/shared/turnRetryNotice.js', () => ({ terminalErrorText: (error: unknown) => String(error) }));
+
 vi.mock('../../localDb/ipc/messages.js', () => ({
   createMessage: mocks.createMessage,
 }));
 
 vi.mock('../../localDb/ipc/sessions.js', () => ({
+  getOverwritableAutoTitle: vi.fn(),
+  persistSessionTitleIfStillDraft: vi.fn(),
   getSessionRowSnapshot: mocks.getSessionRowSnapshot,
+  getSessionFsSnapshot: mocks.getSessionFsSnapshot,
   touchUserSendInDb: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -177,6 +183,7 @@ function createRunnerHarness(session: Session) {
   const logger: Logger = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
   const maker = {
     createSession: vi.fn(async () => session),
+    getSession: vi.fn(() => undefined),
     getSessionMeta: vi.fn(async () => null),
     isSessionAlive: vi.fn(() => false),
     closeSession: vi.fn(async () => undefined),
@@ -187,7 +194,7 @@ function createRunnerHarness(session: Session) {
     notifier,
     logger,
   });
-  return { runner, notifier, logger };
+  return { runner, notifier, logger, maker };
 }
 
 function acceptingSend(): SendImpl {
@@ -234,6 +241,21 @@ describe('MakerScheduleRunner background subagent task tracking', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each(['ask', 'auto', 'bypassPermissions'])('routine cold resume preserves teammate permission %s and hides the synthetic wake', async (mode) => {
+    const h = createSessionHarness(acceptingSend());
+    const { runner, maker } = createRunnerHarness(h.session);
+    vi.mocked(maker.getSessionMeta).mockResolvedValue({ id: 'bot-session', agentKind: 'claude-code', model: 'claude-sonnet-4-6', workDir: '/repo/project' } as never);
+    mocks.getSessionFsSnapshot.mockResolvedValue({ permissionMode: mode, planModeEnabled: true });
+    const fire = runner.fire(baseSchedule({ source: 'bot', targetSessionId: 'bot-session' }), createFireContext());
+    await vi.waitFor(() => expect(mocks.createMessage).toHaveBeenCalled());
+    expect(maker.createSession).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: mode, planMode: true, id: 'bot-session' }));
+    expect(h.session.send).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ planMode: true }));
+    expect(mocks.createMessage.mock.calls[0][1].content).not.toBe('review pending PRs');
+    expect(mocks.createMessage.mock.calls[0][1].content).toContain('review pending PRs');
+    h.emit({ type: 'done', data: {} });
+    await fire;
   });
 
   it('无后台任务:首个 done 照常收尾,resultText 为本轮最终文本', async () => {

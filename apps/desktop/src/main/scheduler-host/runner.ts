@@ -1,3 +1,5 @@
+import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
+import { routinePermissionMode } from './routinePermission.js';
 /**
  * Phase 3: MakerScheduleRunner
  *
@@ -60,7 +62,7 @@ import type {
 } from '@cindy/maker-scheduler';
 
 import { createMessage } from '../localDb/ipc/messages.js';
-import { getSessionRowSnapshot, touchUserSendInDb } from '../localDb/ipc/sessions.js';
+import { getSessionRowSnapshot, getSessionFsSnapshot, touchUserSendInDb } from '../localDb/ipc/sessions.js';
 import {
   getSessionProvider,
   setSessionProvider,
@@ -180,9 +182,9 @@ const INTERRUPTED_ERROR_DONE_FALLBACK_MS = 250;
  * ⚠️ 必须与 UI 显示的空值回退一致（ModelEffortChip 也走 getScheduleDefaultModel），
  * 否则用户看到"已选 X"实际跑的却是 Y（2026-06 实际踩坑：UI 显示 Opus 4.8、跑的 4.7）。
  *
- * permissionMode 两个 agent 都用 'bypassPermissions'（types/common.ts:23 注释确认
+ * 普通 schedule 的 permissionMode 两个 agent 都用 'bypassPermissions'（types/common.ts:23 注释确认
  * codex 支持子集 ask/auto/bypassPermissions）—— 调度本质是 unattended，bypass 是
- * 唯一行得通的策略；用户想要更严格可未来给 Schedule schema 加显式 permissionMode 字段。
+ * 既有无人值守策略。伙伴例行任务不使用此默认值，继承伙伴的权限与计划模式。
  */
 function defaultPermissionModeForSchedule(): PermissionMode {
   // 两个 agent 都支持 bypassPermissions（types/common.ts:23），暂不按 agentKind 分支
@@ -205,6 +207,7 @@ export interface SchedulerQueueDeps {
     sessionId: string;
     text: string;
     persistedContent: string;
+    inheritTargetPlanMode?: boolean;
     origin: { kind: 'scheduler'; scheduleId: string; scheduleName: string; runId: string };
     onAccepted: () => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
@@ -811,7 +814,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // heartbeat 且 schedule.model 留空才沿用绑定 session 的 meta.model；
     // 都空时按 agentKind 兜底 (与 renderer schedulerFallbackModel 同源)，
     // 不留空字符串 — UI picker 显示 placeholder。
-    // permissionMode: schedule 没字段，runner 强制 'bypassPermissions'（headless 唯一可行）。
+    // 普通 schedule 沿用既有默认权限；伙伴例行任务继承当前伙伴的权限和计划模式。
     const effectiveAgentKind = isHeartbeat
       ? (heartbeatAgentKind ?? schedule.agentKind)
       : schedule.agentKind;
@@ -866,7 +869,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const materializedDefaultProviderId = shouldMaterializeFreshClaudeProvider
       ? (dynamicDefaultRoute?.providerId ?? null)
       : null;
-    const permissionMode = defaultPermissionModeForSchedule();
+    const routineSnapshot = schedule.source === 'bot' && isHeartbeat ? await getSessionFsSnapshot(sessionId) : null;
+    const permissionMode = schedule.source === 'bot' && isHeartbeat
+      ? routinePermissionMode(this.deps.maker.getSession(sessionId)?.permissionModeState.mode, routineSnapshot?.permissionMode)
+      : defaultPermissionModeForSchedule();
     // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
     let fastMode =
@@ -1082,6 +1088,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         effort: reconciledEffort,
         fastMode,
         permissionMode,
+        ...(schedule.source === 'bot' ? { planMode: !!routineSnapshot?.planModeEnabled } : {}),
         title: isHeartbeat ? undefined : `[Schedule] ${schedule.name}`,
         resumeSessionId,
         // Pi distinguishes an explicit null (Cindy default route) from undefined
@@ -1464,7 +1471,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       }
       const sendResult = await session.send(outgoingMessage as never, {
         origin,
-        planMode: false,
+        planMode: schedule.source === 'bot' ? !!routineSnapshot?.planModeEnabled : false,
         onAccepted: async () => {
           // createSession 之后到真正 dispatch 之间仍会 await 模型切换、baseline
           // 等准备工作。复用 desktop session 时不能在这些准备阶段把用户正在跑的
@@ -1485,7 +1492,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
             await createMessage(session.id, {
               clientId: randomUUID(),
               role: 'user',
-              content: schedule.prompt,
+              content: schedule.source === 'bot' ? `${UI_ACTION_TRIGGER_PREFIX}${schedule.prompt}` : schedule.prompt,
               agentMeta: { origin },
             });
           } catch (err) {
@@ -1854,7 +1861,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const enqueueResult = await sq.enqueuePrompt({
       sessionId,
       text: promptToSend,
-      persistedContent: schedule.prompt,
+      ...(schedule.source === 'bot' ? { inheritTargetPlanMode: true } : {}),
+      persistedContent: schedule.source === 'bot' ? `${UI_ACTION_TRIGGER_PREFIX}${schedule.prompt}` : schedule.prompt,
       origin,
       onAccepted: async () => {
         dispatched = true;

@@ -434,12 +434,12 @@ beforeEach(() => {
 });
 
 describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
-  it('enqueues instead of sending directly; captures turn result after dispatch', async () => {
+  it.each(['user', 'bot'] as const)('%s enqueues without direct send and preserves routine plan mode', async (source) => {
     const harness = createSessionHarness(async () => ({ accepted: true }));
     const queue = createQueueHarness({ busy: true });
     const { runner, notifier } = createRunnerHarness(harness.session, queue.deps);
 
-    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    const firePromise = runner.fire(heartbeatSchedule({ source }), createFireContext());
 
     // 入队参数:发送正文带静默协议后缀,落库/展示用原始 prompt,origin=scheduler。
     await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
@@ -447,7 +447,10 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     expect(req.sessionId).toBe(SESSION_ID);
     expect(req.text).toContain('PR #971 heartbeat prompt');
     expect(req.text).toContain('[Silent scheduled run]');
-    expect(req.persistedContent).toBe('PR #971 heartbeat prompt');
+    expect(req.inheritTargetPlanMode).toBe(source === 'bot' ? true : undefined);
+    expect(req.persistedContent).toContain('PR #971 heartbeat prompt');
+    if (source === 'user') expect(req.persistedContent).toBe('PR #971 heartbeat prompt');
+    else expect(req.persistedContent).not.toBe('PR #971 heartbeat prompt');
     expect(req.origin).toEqual({
       kind: 'scheduler',
       scheduleId: 'schedule-hb',

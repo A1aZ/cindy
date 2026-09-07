@@ -28,6 +28,7 @@
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { registerBotRoutineTools, type BotRoutineCallbacks } from './xdt-helper/botRoutineTools.js';
 import { jsonObjectArg } from './json-object-arg.js';
 
 import { XdtHelperToolRegistry } from './lizi_xdtHelperToolRegistry.js';
@@ -538,6 +539,7 @@ export interface XdtHelperMcpDeps {
   sendToSession?: SendToSessionCallback;
   /** Cindy Bot-only background Session-task controls. Host validates the caller Session. */
   sessionTasks?: SessionTaskCallbacks;
+  botRoutines?: BotRoutineCallbacks;
   /** Direct Bot-to-Bot messages over each partner's canonical Cindy Session. */
   botMessaging?: BotMessagingCallbacks;
   /** Direct lightweight Bot creation for a Bot-bound session. */
@@ -682,6 +684,11 @@ export function createXdtHelperMcpServer(
       getSessionContext: () => resolveLiziMcpSessionContext(sessionCtx),
       callbacks: deps.botSkills,
     });
+  }
+
+  if (deps.botRoutines) {
+    registerBotRoutineTools(registry, deps.botRoutines,
+      () => resolveLiziMcpSessionContext(sessionCtx).sessionId);
   }
 
   registerStartSessionTaskEntry(registry, deps, sessionCtx);

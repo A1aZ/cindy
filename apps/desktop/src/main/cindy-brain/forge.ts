@@ -1453,6 +1453,30 @@ export async function packGhostDirToFile(
  */
 export const FORGE_GUIDE = `# 意识(Ghost)编写手册
 
+## 本地例行任务事件
+
+插件通过 schemaVersion 3 的 routineEvents 声明事件来源：
+
+    "routineEvents": { "events": [{ "type": "message.received", "name": "新消息", "fields": ["chatId", "senderId"] }] }
+
+这只授予提交事件的能力，不授予创建、修改例行任务或指定伙伴的能力。用户在伙伴的例行任务界面选择来源、事件和条件后才能触发执行。插件自行选择 SDK 长连接、系统监听或本地 CLI 等接入方式，继续遵守原有 node/network 能力边界；来源与连接器不绑定。第一阶段没有公网 webhook 接收服务。
+
+插件确认监听连接已建立后，调用：
+
+    await cindy.send({ type: "routine-request", action: "status", status: "listening" });
+
+连接断开/故障时提交 disconnected/error。连接重建后重新报告 listening。发送事件：
+
+    await cindy.send({ type: "routine-request", action: "publish", event: {
+      id: "upstream-delivery-id", type: "message.received", occurredAt: Date.now(),
+      subject: "thread-id", data: { chatId: "chat-1", senderId: "user-1" }
+    } });
+
+也可使用 cindy.routines.request，参数省略 type。Host 从真实管子身份生成 plugin:<id> 来源，不接受自报 sourceId、botId 或 prompt。id 必须使用上游稳定投递 ID；重投同一个 ID 得到 duplicate:true，不重复执行。没有上游 ID 时由插件生成并持久化后重投，不得每次重试重造 ID。data 只允许字符串、有限数字和布尔值，总计至多 32000 字符；只提交处理所需的事件引用和筛选字段，不提交凭证。需要邮件/文档全文时由伙伴通过已配置工具读取。知道由哪条例行任务造成的回声时，填写 originRoutineId；接入端也应过滤自己发出的消息。
+
+返回 {ok:true,accepted,duplicate} 表示事件已持久接收（accepted 是匹配例行任务数），不代表模型已运行或业务已成功。ok:false 时保留投递 ID，按退避重试；不可假报已处理。多条件 OR 命中只入队一次；运行期间的新事件可合并进下一轮。重启不自动重放已经开始、结果未知的执行，以免重复外部副作用。时间与事件共用运行历史。去重针对投递身份，业务对象已完成与否仍由任务指令和工具记录判断。
+
+
 意识是 Cindy 的第三方能力包,文件形态是 \`.cindy\`(zip 包)。装入后可给
 主机叠加:AI 可调用的工具、常驻界面面板、模型代办能力。本手册教你(agent)替用户
 写一个意识。**流程:先取手册目录 → 按 §0 用提问卡片和用户对齐设计 → 按需用 section

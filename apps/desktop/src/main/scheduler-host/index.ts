@@ -221,6 +221,7 @@ async function startSchedulerInternal(deps: StartSchedulerDeps): Promise<Schedul
     },
   });
   _scheduler = scheduler;
+  void import('../routines/service.js').then(({ getRoutineEngine }) => getRoutineEngine()).catch((error) => deps.logger.warn?.('routine startup failed', { error: String(error) }));
   _loader = loader;
   deps.logger.info?.(`[scheduler-host] started${passive ? ' (passive: auto-fire disabled)' : ''}`);
   void loader.reconcileAll().catch((err) => {
@@ -266,6 +267,7 @@ export function getProjectAutomationLoader(): ProjectAutomationLoader {
  * 当前 resetMaker（maker-host:131）也不会调本函数。
  */
 export async function resetScheduler(): Promise<void> {
+  await (await import('../routines/service.js')).stopRoutines();
   _startupGeneration++;
   const pendingStartup = _startupPromise;
   if (pendingStartup) {

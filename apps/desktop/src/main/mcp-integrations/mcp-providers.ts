@@ -1,3 +1,5 @@
+import { activeOwnerScopeKey, getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
+import { routineTools } from '../routines/service.js';
 import { join as pathJoin } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 
@@ -244,6 +246,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
       logger: createLogger('mcp/cindy_slack'),
     },
     scheduler: {
+      routines: routineTools,
       getScheduler: () => getScheduler(),
       // 前置检查脚本统一安装服务:落盘路径/协议/自测与 UI「AI 生成」共用同一实现
       // (hook-script-generator)。lazy import:该链上有 electron app 依赖,且 maker
@@ -555,6 +558,32 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
               message: err instanceof Error ? err.message : String(err),
             };
           }
+        },
+      },
+      botRoutines: {
+        service: routineTools,
+        resolveBotId: async (callerSessionId) => {
+          const scope = activeOwnerScopeKey();
+          if (!getActiveAppSession().dataOwnerId || isAppSessionBoundaryPending()) {
+            throw new Error('Routine account is no longer active');
+          }
+          const dbClient = tryGetDbClient();
+          if (!dbClient) throw new Error('localDb not ready');
+          const [owned] = await dbClient.drizzle
+            .select({ botId: botSessionLinks.botId })
+            .from(botSessionLinks)
+            .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
+            .where(and(
+              eq(botSessionLinks.sessionId, callerSessionId),
+              eq(sessions.source, 'bot'),
+              eq(botSessionLinks.role, 'canonical'),
+            ))
+            .limit(1);
+          if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== scope) {
+            throw new Error('Routine account is no longer active');
+          }
+          if (!owned) throw new Error('当前调用未绑定伙伴主任务');
+          return owned.botId;
         },
       },
       botProfiles: {

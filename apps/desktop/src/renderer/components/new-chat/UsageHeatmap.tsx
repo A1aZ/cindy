@@ -8,7 +8,7 @@
  * 那个页面不出现任何金额, 见 issue #2785)。两种口径共用同一套分位分桶与色阶。
  *
  * 视觉: 7 行 (周日起) × 至少 20 列周网格, 单色阶 — 非零值按 4 分位分桶,
- * 用 color-mix 在 --accent-emphasis 上做透明度阶梯 (黑白反色设计, 不引入彩色)。
+ * 用 color-mix 做强度阶梯：用量历史使用登记蓝色，其余入口沿用 --accent-emphasis。
  * 格子用原生 title 做 tooltip (Radix per-cell 实例太重)。
  */
 

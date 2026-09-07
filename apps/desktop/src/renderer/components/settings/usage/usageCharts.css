@@ -15,7 +15,7 @@
 }
 
 .usage-history-charts .usage-chart-mark {
-  transition-property: width, height;
+  transition-property: width, height, opacity;
   transition-duration: var(--motion-fast);
   transition-timing-function: var(--motion-ease-out);
 }
@@ -43,12 +43,26 @@
   }
 }
 
-/* A quiet persistent selection cue, separate from the animated mark. */
-.usage-history-charts .usage-chart-target[aria-pressed='true'] .usage-chart-indicator {
-  outline: 1px solid var(--text-primary);
-  outline-offset: 2px;
+/* Selection uses emphasis, never a pointer-selection outline. Only categorical
+   bars fade; heatmap intensity must keep encoding usage without attenuation.
+   :has scopes this to dates actually present in the 30-day plot. */
+.usage-history-charts
+  .usage-token-plot:has(.usage-chart-target[aria-pressed='true'])
+  .usage-chart-target:not([aria-pressed='true']):not(:focus-visible)
+  .usage-chart-mark {
+  opacity: 0.24;
 }
 
+@media (hover: hover) {
+  .usage-history-charts
+    .usage-token-plot:has(.usage-chart-target[aria-pressed='true'])
+    .usage-chart-target:enabled:hover
+    .usage-chart-mark {
+    opacity: 1;
+  }
+}
+
+/* Keyboard focus remains independently visible; mouse selection adds no frame. */
 .usage-history-charts .usage-chart-target:focus-visible .usage-chart-indicator {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;

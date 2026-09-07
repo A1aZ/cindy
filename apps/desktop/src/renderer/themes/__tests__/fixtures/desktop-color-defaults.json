@@ -284,28 +284,28 @@
     },
     {
       "id": "usage-model-1",
-      "light": "var(--process-agent-task-icon)",
-      "dark": "var(--process-agent-task-icon)"
+      "light": "#14B8A6",
+      "dark": "#2DD4BF"
     },
     {
       "id": "usage-model-2",
-      "light": "var(--process-renderer-icon)",
-      "dark": "var(--process-renderer-icon)"
+      "light": "#F43F5E",
+      "dark": "#FB7185"
     },
     {
       "id": "usage-model-3",
-      "light": "var(--process-agent-service-icon)",
-      "dark": "var(--process-agent-service-icon)"
+      "light": "#8B5CF6",
+      "dark": "#A78BFA"
     },
     {
       "id": "usage-model-4",
-      "light": "var(--process-utility-icon)",
-      "dark": "var(--process-utility-icon)"
+      "light": "#6366F1",
+      "dark": "#818CF8"
     },
     {
       "id": "usage-model-5",
-      "light": "var(--process-gpu-icon)",
-      "dark": "var(--process-gpu-icon)"
+      "light": "#F59E0B",
+      "dark": "#FBBF24"
     },
     {
       "id": "shadow-soft-panel",

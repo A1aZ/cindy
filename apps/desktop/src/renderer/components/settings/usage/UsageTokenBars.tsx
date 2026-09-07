@@ -154,7 +154,7 @@ export function UsageTokenBars({
           />
         ))}
         <div className="absolute inset-0">
-          <div className="flex h-full items-end gap-[3px]">
+          <div className="usage-token-plot flex h-full items-end gap-[3px]">
             {bars.list.map((b) => {
               const ratio = bars.max > 0 ? b.tokens / bars.max : 0;
               const visualHeight =

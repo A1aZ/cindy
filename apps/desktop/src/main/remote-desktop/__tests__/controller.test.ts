@@ -273,6 +273,56 @@ describe('remote desktop authority and lifecycle', () => {
     await expect(first).rejects.toThrow('DISABLED');
     expect(h.controller.state).toBeNull();
   });
+  it('cancels a disconnected takeover candidate without affecting the current owner', async () => {
+    const h = harness();
+    const first = await h.start();
+    await h.controller.request('phone', { op: 'control', lease: first.lease, enabled: true });
+    let finishCopy!: (value: string) => void;
+    let currentCopy!: () => boolean;
+    h.deps.clipboard = (_action, _text, isCurrent) => {
+      currentCopy = isCurrent;
+      return new Promise<string>((resolve) => { finishCopy = resolve; });
+    };
+    const copy = h.controller.request('phone', { op: 'clipboard', lease: first.lease, action: 'copy' });
+    const caps = await h.deps.capabilities();
+    let finishStart!: (value: typeof caps) => void;
+    h.deps.capabilities = vi.fn()
+      .mockImplementationOnce(() => new Promise<typeof caps>((resolve) => { finishStart = resolve; }))
+      .mockResolvedValue(caps);
+    const next = h.controller.request('other', { op: 'start', displayId: '1', takeover: true });
+    const changes = vi.mocked(h.deps.changed).mock.calls.length;
+    h.controller.stop('other');
+    h.controller.stop('other'); // Revocation and link cleanup can both notify the controller.
+    expect(h.controller.state).toEqual({ peer: 'phone', controlling: true });
+    expect(h.controller.hasLease(first.lease)).toBe(true);
+    expect(h.deps.stopInput).not.toHaveBeenCalled();
+    expect(h.deps.stopVideo).not.toHaveBeenCalled();
+    expect(h.deps.changed).toHaveBeenCalledTimes(changes);
+    expect(currentCopy()).toBe(true);
+    h.controller.input(first.lease, 1, [{ kind: 'release' }]);
+    expect(h.deps.input).toHaveBeenCalledTimes(1);
+    finishCopy('selected');
+    await expect(copy).resolves.toEqual({ text: 'selected' });
+    // Authorization remains true (or may have recovered), but this start stays cancelled.
+    finishStart(caps);
+    await expect(next).rejects.toThrow('DESKTOP_DISABLED');
+    expect(h.controller.hasLease(first.lease)).toBe(true);
+    await expect(h.controller.request('other', { op: 'start', displayId: '1', takeover: true }))
+      .resolves.toHaveProperty('lease');
+  });
+  it.each([false, true])('isolates unrelated peer stop while retaining global cancellation (global=%s)', async (global) => {
+    const h = harness();
+    const pending = h.start();
+    if (global) h.controller.stop();
+    else h.controller.stop('unrelated');
+    if (global) {
+      await expect(pending).rejects.toThrow('DESKTOP_DISABLED');
+      expect(h.controller.state).toBeNull();
+    } else {
+      await expect(pending).resolves.toHaveProperty('lease');
+      expect(h.deps.stopVideo).not.toHaveBeenCalled();
+    }
+  });
 });
 describe('human / Agent input ownership', () => {
   it('excludes simultaneous input in both directions and releases on error', async () => {

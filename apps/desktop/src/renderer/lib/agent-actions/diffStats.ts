@@ -151,6 +151,15 @@ function boundedDetailsForRequest(oldString: string, newString: string): DiffDet
     : computeDiffDetails(oldString, newString);
 }
 
+/**
+ * A worker failure must never put a large batch back through diffLines on the
+ * renderer thread. Keep this fallback deliberately bounded even when an
+ * individual segment would otherwise fit the small-input fast path.
+ */
+function workerFallbackDetails(oldString: string, newString: string): DiffDetails {
+  return computeBoundedDetails(oldString, newString);
+}
+
 function previewLines(text: string): string[] {
   const end = text.endsWith('\n') ? text.length - 1 : text.length;
   if (end === 0) return [];
@@ -257,7 +266,6 @@ export function computeDiffStats(oldStr: string, newStr: string): DiffStat {
 
 /** Count additions/deletions in an already-materialized unified diff. */
 export function computeUnifiedDiffStats(raw: string): DiffStat | null {
-  if (raw.length > DIFF_MAX_INPUT_CHARS) return null;
   let add = 0;
   let del = 0;
   for (const rawLine of raw.split('\n')) {
@@ -369,12 +377,12 @@ function getDiffWorker(): Worker | null {
 
 function failDiffWorker(worker: Worker): void {
   for (const pending of [...pendingDetails]) {
-    pending.resolve(boundedDetailsForRequest(pending.oldString, pending.newString));
+    pending.resolve(workerFallbackDetails(pending.oldString, pending.newString));
   }
   for (const pending of [...pendingBatches]) {
     const segments = pending.segments.map((segment) => ({
       key: segment.key,
-      details: boundedDetailsForRequest(segment.oldString, segment.newString),
+      details: workerFallbackDetails(segment.oldString, segment.newString),
     }));
     pending.resolve({ stats: aggregateStats(segments), segments, truncated: true });
   }
@@ -411,7 +419,7 @@ function requestWorkerBatchDetails(segments: ToolDiffSegmentInput[]): Promise<To
   if (!worker) {
     const values = segments.map((segment) => ({
       key: segment.key,
-      details: boundedDetailsForRequest(segment.oldString, segment.newString),
+      details: workerFallbackDetails(segment.oldString, segment.newString),
     }));
     return Promise.resolve({ stats: aggregateStats(values), segments: values, truncated: true });
   }
@@ -425,7 +433,7 @@ function requestWorkerBatchDetails(segments: ToolDiffSegmentInput[]): Promise<To
       if (!event.data.ok) {
         const values = segments.map((segment) => ({
           key: segment.key,
-          details: boundedDetailsForRequest(segment.oldString, segment.newString),
+          details: workerFallbackDetails(segment.oldString, segment.newString),
         }));
         resolve({ stats: aggregateStats(values), segments: values, truncated: true });
         return;
@@ -448,7 +456,7 @@ function requestWorkerBatchDetails(segments: ToolDiffSegmentInput[]): Promise<To
       worker.removeEventListener('message', onMessage);
       const values = segments.map((segment) => ({
         key: segment.key,
-        details: boundedDetailsForRequest(segment.oldString, segment.newString),
+        details: workerFallbackDetails(segment.oldString, segment.newString),
       }));
       resolve({ stats: aggregateStats(values), segments: values, truncated: true });
     }
@@ -463,7 +471,7 @@ function requestWorkerBatchDetails(segments: ToolDiffSegmentInput[]): Promise<To
 function requestWorkerDetails(segment: ToolDiffSegmentInput): Promise<DiffDetails> {
   const worker = getDiffWorker();
   if (!worker)
-    return Promise.resolve(boundedDetailsForRequest(segment.oldString, segment.newString));
+    return Promise.resolve(workerFallbackDetails(segment.oldString, segment.newString));
   const existing = pendingDetails.find(
     (pending) => pending.oldString === segment.oldString && pending.newString === segment.newString,
   );
@@ -476,12 +484,12 @@ function requestWorkerDetails(segment: ToolDiffSegmentInput): Promise<DiffDetail
       if (event.data.id !== id) return;
       worker.removeEventListener('message', onMessage);
       if (!event.data.ok) {
-        resolve(boundedDetailsForRequest(segment.oldString, segment.newString));
+        resolve(workerFallbackDetails(segment.oldString, segment.newString));
         return;
       }
       const details =
         event.data.result.segments[0]?.details ??
-        boundedDetailsForRequest(segment.oldString, segment.newString);
+        workerFallbackDetails(segment.oldString, segment.newString);
       setCachedDetails(segment.oldString, segment.newString, details);
       resolve(details);
     };
@@ -495,7 +503,7 @@ function requestWorkerDetails(segment: ToolDiffSegmentInput): Promise<DiffDetail
       worker.postMessage({ id, segments: [segment] } satisfies WorkerRequest);
     } catch {
       worker.removeEventListener('message', onMessage);
-      resolve(boundedDetailsForRequest(segment.oldString, segment.newString));
+      resolve(workerFallbackDetails(segment.oldString, segment.newString));
     }
   }).finally(() => {
     const index = pendingDetails.findIndex((pending) => pending.promise === promise);
@@ -615,25 +623,19 @@ export function statsForToolCall(toolName: string, toolInput: unknown): DiffStat
   if (!inp) return null;
   if (toolName === 'file_change') {
     const changes = Array.isArray(inp.changes) ? inp.changes : [];
-    let truncated = changes.length > DIFF_MAX_SEGMENTS;
     let add = 0;
     let del = 0;
     let hasDiff = false;
-    for (let index = 0; index < Math.min(changes.length, DIFF_MAX_SEGMENTS); index += 1) {
-      const change = changes[index];
+    for (const change of changes) {
       const diff = readRecord(change)?.diff;
       if (typeof diff !== 'string') continue;
-      if (diff.length > DIFF_MAX_INPUT_CHARS) {
-        truncated = true;
-        continue;
-      }
       const stats = computeUnifiedDiffStats(diff);
       if (!stats) continue;
       hasDiff = true;
       add += stats.add;
       del += stats.del;
     }
-    return hasDiff && !truncated ? { add, del } : null;
+    return hasDiff ? { add, del } : null;
   }
   const sources = diffSourcesForToolCall(toolName, inp);
   if (!sources || sources.truncated) return null;

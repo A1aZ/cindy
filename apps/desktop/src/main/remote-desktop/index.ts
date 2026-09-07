@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   desktopCapturer,
   ipcMain,
+  nativeImage,
   powerMonitor,
   powerSaveBlocker,
   screen,
@@ -33,7 +34,7 @@ import { readDeviceLinkSettings, writeDeviceLinkSetting } from '../device-link/s
 import { throwIpcError } from '../utils/ipcValidate';
 import { RemoteDesktopController } from './controller';
 import { desktopCaptureSource } from './captureSource';
-import { encodeDesktopFrame } from './frame';
+import { encodeDesktopFrame, encodeNativeRelayFrame } from './frame';
 import { transferDesktopClipboard, transferDesktopClipboardContent } from './clipboard';
 import { NativeDesktopCapture } from './nativeCapture';
 import { readWindowsDesktopSupport, configureWindowsDesktopSupport } from './windowsHost';
@@ -326,7 +327,10 @@ export const remoteDesktop = new RemoteDesktopController({
   frame: async (displayId, cursorOverlay) => {
     // Compatibility viewers must also wake/capture without waiting for
     // Chromium's thumbnail enumeration, which may hang on a sleeping display.
-    if (process.platform === 'darwin' || windowsAvailable) return nativeCapture.frame(displayId, cursorOverlay === true && process.platform === 'darwin', nativeSettings);
+    if (process.platform === 'darwin' || windowsAvailable) {
+      const frame = await nativeCapture.frame(displayId, cursorOverlay === true && process.platform === 'darwin', nativeSettings);
+      return encodeNativeRelayFrame(frame, (jpeg) => nativeImage.createFromBuffer(jpeg));
+    }
     const source = desktopCaptureSource(await sources(true), displayId, screen.getAllDisplays());
     return source ? encodeDesktopFrame(source.thumbnail) : null;
   },

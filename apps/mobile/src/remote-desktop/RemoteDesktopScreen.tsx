@@ -35,6 +35,7 @@ import { X } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import {
   REMOTE_DESKTOP_CHANNEL,
+  REMOTE_DESKTOP_MAX_FRAME_BYTES,
   isDesktopAttemptId,
   isDesktopIceCursor,
   parseDesktopIceCandidates,
@@ -598,7 +599,7 @@ export default function RemoteDesktopScreen() {
             active.current === current &&
             !streaming.current &&
             typeof result.jpeg === "string" &&
-            result.jpeg.length <= (capsRef.current?.cursorOverlay ? 1_333_336 : 240_000)
+            result.jpeg.length <= Math.ceil(REMOTE_DESKTOP_MAX_FRAME_BYTES / 3) * 4
           ) {
             recovery.current.delay = 1000;
             const meter = receiveWindow.current;

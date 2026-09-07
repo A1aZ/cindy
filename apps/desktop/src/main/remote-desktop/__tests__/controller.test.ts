@@ -129,6 +129,79 @@ describe('remote desktop authority and lifecycle', () => {
     h.controller.stop('other');
     await expect(h.controller.request('phone', { op: 'start', displayId: '1', resume: true })).rejects.toThrow('DESKTOP_STOPPED');
   });
+  it('recovers its own display with a fresh input sequence after a lost start reply', async () => {
+    const h = harness();
+    const first = await h.start();
+    await h.controller.request('phone', { op: 'control', lease: first.lease, enabled: true });
+    h.controller.input(first.lease, 100, [{ kind: 'release' }]);
+    for (const request of [
+      { displayId: '1' },
+      { displayId: 'other', resume: true },
+    ]) await expect(h.controller.request('phone', { op: 'start', ...request })).rejects.toThrow('DESKTOP_BUSY');
+    await expect(h.controller.request('other', { op: 'start', displayId: '1', resume: true })).rejects.toThrow('DESKTOP_BUSY');
+    const next = await h.controller.request('phone', { op: 'start', displayId: '1', resume: true }) as RemoteDesktopLease;
+    expect(next.lease).not.toBe(first.lease);
+    expect(h.controller.hasLease(first.lease)).toBe(false);
+    expect(h.deps.stopInput).toHaveBeenCalledTimes(1);
+    expect(h.deps.stopVideo).toHaveBeenCalledTimes(1);
+    await expect(h.controller.request('phone', { op: 'stop', lease: first.lease })).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
+    await h.controller.request('phone', { op: 'control', lease: next.lease, enabled: true });
+    h.controller.input(next.lease, 0, [{ kind: 'release' }]);
+    expect(h.deps.input).toHaveBeenCalledTimes(2);
+    expect(h.controller.hasLease(next.lease)).toBe(true);
+  });
+  it.each(['cancel', 'revoke', 'host-stop', 'reject'] as const)(
+    'does not revive a pending same-peer resume after %s', async (event) => {
+      const h = harness();
+      const first = await h.start();
+      let resolve!: (value: Awaited<ReturnType<DesktopControllerDeps['capabilities']>>) => void;
+      let reject!: (reason: Error) => void;
+      const caps = await h.deps.capabilities();
+      h.deps.capabilities = () => new Promise((yes, no) => { resolve = yes; reject = no; });
+      const pending = h.controller.request('phone', { op: 'start', displayId: '1', resume: true })
+        .then(() => null, (error: unknown) => error);
+      expect(resolve).toBeTypeOf('function');
+      await expect(h.controller.request('other', { op: 'start', displayId: '1', takeover: true })).rejects.toThrow('DESKTOP_BUSY');
+      if (event === 'cancel') h.controller.stop('phone');
+      if (event === 'revoke') h.revoke();
+      if (event === 'host-stop') h.controller.stopByUser();
+      if (event === 'reject') reject(new Error('capture unavailable'));
+      else resolve(caps);
+      expect(await pending).toBeInstanceOf(Error);
+      expect(h.controller.hasLease(first.lease)).toBe(event === 'reject');
+      if (event === 'reject') expect(h.deps.stopVideo).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects a late frame from the resumed lease and keeps capturing for its replacement', async () => {
+    const h = harness();
+    const first = await h.start();
+    let finish!: (jpeg: string) => void;
+    h.deps.frame = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const frame = h.controller.request('phone', { op: 'frame', lease: first.lease });
+    const next = await h.controller.request('phone', { op: 'start', displayId: '1', resume: true }) as RemoteDesktopLease;
+    finish('old frame');
+    await expect(frame).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
+    h.advance(350);
+    h.deps.frame = vi.fn(async () => 'new frame');
+    await expect(h.controller.request('phone', { op: 'frame', lease: next.lease })).resolves.toEqual({ jpeg: 'new frame' });
+    expect(h.controller.hasLease(next.lease)).toBe(true);
+    expect(h.deps.stopVideo).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])('bounds relay frames with cursor overlay=%s without stopping the lease', async (overlay) => {
+    const h = harness();
+    const { lease } = await h.start();
+    const cursor = null;
+    for (const bytes of [180_000, 180_001, 180_000]) {
+      const jpeg = Buffer.alloc(bytes).toString('base64');
+      h.deps.frame = vi.fn(async () => overlay ? { jpeg, cursor } : jpeg);
+      const result = await h.controller.request('phone', { op: 'frame', lease, cursorOverlay: overlay });
+      expect(result).toEqual(bytes > 180_000 ? { jpeg: null } : overlay ? { jpeg, cursor } : { jpeg });
+      h.advance(350);
+    }
+    expect(h.controller.hasLease(lease)).toBe(true);
+    expect(h.deps.stopVideo).not.toHaveBeenCalled();
+    expect(h.deps.stopInput).not.toHaveBeenCalled();
+  });
   it('keeps the same lease and video negotiation through an empty fallback frame', async () => {
     const h = harness();
     h.deps.frame = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce('jpeg');

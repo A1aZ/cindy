@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   parseRemoteDesktopRequest,
   REMOTE_DESKTOP_LEASE_MS,
+  REMOTE_DESKTOP_MAX_FRAME_BYTES,
   type DesktopInput,
   type RemoteDesktopCursorFrame,
   type RemoteClipboardContent,
@@ -149,7 +150,10 @@ export class RemoteDesktopController {
     }
     if (request.op === 'start') {
       if (request.resume && this.userStopped.has(peer)) throw new Error('DESKTOP_STOPPED');
-      if (this.starting || (this.active && !request.takeover)) throw new Error('DESKTOP_BUSY');
+      const resumesActive = request.resume && this.active?.peer === peer &&
+        this.active.display.id === request.displayId;
+      if (this.starting || (this.active && !request.takeover && !resumesActive))
+        throw new Error('DESKTOP_BUSY');
       this.starting = true;
       this.startingPeer = peer;
       const generation = this.controlGeneration;
@@ -163,6 +167,9 @@ export class RemoteDesktopController {
           throw new Error('DESKTOP_SCREEN_PERMISSION_REQUIRED');
         if (request.resume && this.userStopped.has(peer)) throw new Error('DESKTOP_STOPPED');
         if (request.takeover && this.active) this.stopByUser();
+        // A lost start reply can leave our own lease alive. Rotate it using the
+        // existing cleanup so the new viewer can restart its input sequence at 0.
+        else if (resumesActive) this.stop(peer);
         if (!request.resume) this.userStopped.delete(peer);
         const lease: RemoteDesktopLease = { lease: randomUUID(), display, controlling: false };
         this.active = {
@@ -272,7 +279,11 @@ export class RemoteDesktopController {
         try {
           const jpeg = await this.deps.frame(active.display.id, request.cursorOverlay);
           this.require(peer, request.lease); // revoke during capture must not leak the result
-          return typeof jpeg === 'object' && jpeg !== null ? jpeg : { jpeg };
+          const frame = typeof jpeg === 'object' && jpeg !== null ? jpeg : { jpeg };
+          // Cursor metadata does not turn a relay frame into a local media frame.
+          if (frame.jpeg && frame.jpeg.length > Math.ceil(REMOTE_DESKTOP_MAX_FRAME_BYTES / 3) * 4)
+            return { jpeg: null };
+          return frame;
         } finally {
           this.framePending = false;
         }

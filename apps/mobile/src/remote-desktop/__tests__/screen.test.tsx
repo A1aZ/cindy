@@ -510,6 +510,23 @@ describe("remote desktop controls", () => {
     expect(host.textContent).toContain("remoteDesktop.screenshotRelay");
     expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
   });
+  it.each([false, true])("bounds relay frames regardless of cursor overlay=%s", async (overlay) => {
+    const original = fixture.invoke.getMockImplementation()!;
+    let jpeg = "a".repeat(240_004);
+    fixture.invoke.mockImplementation(async (...args) => {
+      const op = args[2][0].op;
+      if (op === "frame") return { jpeg, cursor: null };
+      const result = await original(...args);
+      return op === "capabilities" ? { ...result, cursorOverlay: overlay } : result;
+    });
+    await connect();
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(sent().filter((message) => message.type === "frame")).toHaveLength(0);
+    jpeg = "a".repeat(240_000);
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(sent().filter((message) => message.type === "frame")).toEqual([{ type: "frame", jpeg, cursor: null }]);
+    expect(requests().filter((request) => request.op === "start")).toHaveLength(1);
+  });
   it("measures screenshot payloads separately and clears frame time when frames stop", async () => {
     const original = fixture.invoke.getMockImplementation()!;
     fixture.invoke.mockImplementation((...args) =>

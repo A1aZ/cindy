@@ -87,7 +87,11 @@ export class RemoteDesktopController {
       this.stop();
   }
   stop(peer?: string): void {
-    if (peer && this.active?.peer !== peer && this.startingPeer !== peer) return;
+    if (peer && this.active?.peer !== peer) {
+      // Cancelling a takeover candidate must not revoke the current owner's work.
+      if (this.startingPeer === peer) this.startingPeer = null;
+      return;
+    }
     if (this.active) this.lastEnded = { peer: this.active.peer, lease: this.active.lease };
     this.clipboardTransfer.reset();
     this.controlGeneration++;
@@ -153,7 +157,7 @@ export class RemoteDesktopController {
         const caps = await this.deps.capabilities();
         const display = caps.displays.find((d) => d.id === request.displayId);
         if (!display) throw new Error('DESKTOP_DISPLAY_MISSING');
-        if (generation !== this.controlGeneration || !this.deps.authorized(peer))
+        if (this.startingPeer !== peer || generation !== this.controlGeneration || !this.deps.authorized(peer))
           throw new Error('DESKTOP_DISABLED');
         if (caps.permissions && !desktopPermissionReady(caps.permissions.screenRecording))
           throw new Error('DESKTOP_SCREEN_PERMISSION_REQUIRED');

@@ -88,6 +88,13 @@
   Pop $R0
   Pop $R1
   ${If} $R0 != 0
+    ; Per-user uninstallers may lack service permissions. Keep the direct path
+    ; first so missing services (including ordinary per-user installs) need no UAC.
+    nsExec::ExecToStack '"$INSTDIR\resources\tools\remote-desktop\cindy-windows-desktop-host.exe" --elevate-uninstall'
+    Pop $R0
+    Pop $R1
+  ${EndIf}
+  ${If} $R0 != 0
     MessageBox MB_OK|MB_ICONSTOP "Could not stop the Cindy remote desktop service. Run the uninstaller as administrator and try again."
     Abort
   ${EndIf}

@@ -21,6 +21,7 @@
  * - User-initiated stopSession (NOT called on session switch anymore)
  */
 
+import { HistoryViewController, type HistoryViewPage, type HistoryDetailPage } from '@cindy/maker-shared/message-window';
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
 import { parseMessageToolUse } from '@cindy/maker-shared/message-normalize';
 import {
@@ -3424,6 +3425,8 @@ function _purgeSession(sessionId: string): void {
   cancelRemoteOptimisticSendsForSessionPurge(sessionId);
   clearWakeBridgeReconcileTimer(sessionId);
   cancelIdlePlanDiscovery(sessionId);
+  getRemoteHistoryView(sessionId)?.setActive(false);
+  remoteHistoryViews.delete(sessionId);
   sessions.delete(sessionId);
   localSentUserMessageIds.delete(sessionId);
   pendingLocalRetryIntents.delete(sessionId);
@@ -3903,6 +3906,7 @@ function resolveGatewayRecoveryProviderId(
 }
 
 function enterView(sessionId: string): () => void {
+  getRemoteHistoryView(sessionId)?.setActive(true);
   _activeViewSessions.set(sessionId, (_activeViewSessions.get(sessionId) ?? 0) + 1);
   _lastViewedAt.delete(sessionId);
   _ensureDemoteTimer();
@@ -4006,6 +4010,7 @@ function leaveView(sessionId: string): void {
     return;
   }
   _activeViewSessions.delete(sessionId);
+  getRemoteHistoryView(sessionId)?.setActive(false);
   cancelIdlePlanDiscovery(sessionId);
   _lastViewedAt.set(sessionId, Date.now());
   if (_pendingErrorClearOnLeave.has(sessionId)) {
@@ -8433,6 +8438,10 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
       // stall 看门狗信号:只用重会话流刷新 lastInboundEventAt。列表级轻量 activity/patch
       // 可能仍在持续抵达,但 maker:event 重 topic 已经断流;若这里也刷新会掩盖卡死。
       if (inboundSid && isRemoteHeavyInboundChannel(push.channel)) _markInboundEvent(inboundSid);
+      if (inboundSid) {
+        const view = getRemoteHistoryView(inboundSid);
+        if (view && ['maker:history-view-changed', 'local-db:messages:created', 'maker:status-changed'].includes(push.channel)) view.invalidate();
+      }
       switch (push.channel) {
         case 'maker:event':
           handleMakerEventRaw(push.payload, remoteIngress);
@@ -10442,6 +10451,7 @@ function bumpMessagesEpoch(sessionId: string): void {
  * bumpMessagesEpoch。
  */
 function invalidateMessageHistoryWindow(sessionId: string): void {
+  getRemoteHistoryView(sessionId)?.reset();
   bumpMessagesEpoch(sessionId);
   resetSessionAutomaticHistoryLoadCompletion(sessionId);
 }
@@ -10625,6 +10635,52 @@ function releaseCacheHydrationAfterFailure(sessionId: string): void {
   _cacheHydrateStarted.delete(sessionId);
 }
 
+export type HistoryChatMessage = ChatMessage & { id: string; createdAt: string };
+const remoteHistoryViews = new Map<string, HistoryViewController<HistoryChatMessage>>();
+export function getRemoteHistoryView(sessionId: string) { return remoteHistoryViews.get(sessionId); }
+function createRemoteHistoryView(sessionId: string) {
+  const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+  if (!deviceId) return undefined;
+  const existing = remoteHistoryViews.get(sessionId);
+  if (existing) return existing;
+  const owner = getDataOwnerGeneration();
+  const mapRows = (rows: Message[]): HistoryChatMessage[] => mapServerMessages(rows).map((row) => ({
+    ...row, id: row.id ?? row.clientId, createdAt: row.createdAt ?? '',
+  }));
+  const call = async <T,>(channel: string, args: unknown[]): Promise<T> => {
+    const value = await window.electronAPI.deviceLink.invoke(deviceId, channel, args);
+    if (!isDataOwnerGenerationCurrent(owner) || remoteProjectsStore.getSessionDeviceId(sessionId) !== deviceId) throw new Error('History source changed');
+    return value as T;
+  };
+  const view = new HistoryViewController<HistoryChatMessage>({
+    page: async (before) => {
+      const page = await call<HistoryViewPage<Message>>('local-db:messages:view', [sessionId, { before }]);
+      if (page == null) throw new Error('[CHANNEL_NOT_ALLOWED] History view is unavailable');
+      return { ...page, items: page.items.map((item) => item.type === 'work' ? item : { ...item, messages: mapRows(item.messages) }) };
+    },
+    details: async (ref, after) => {
+      const page = await call<HistoryDetailPage<Message>>('local-db:messages:work-details', [sessionId, ref, { after }]);
+      return { ...page, messages: mapRows(page.messages) };
+    },
+    expanded: (refs) => call<void>('local-db:messages:view-intent', [sessionId, refs]),
+  });
+  remoteHistoryViews.set(sessionId, view);
+  view.subscribe(() => {
+    if (remoteHistoryViews.get(sessionId) !== view || !sessions.has(sessionId)) return;
+    const snapshot = view.getSnapshot();
+    if (!snapshot.ready) return;
+    const available = snapshot.items.flatMap((item) => item.type === 'messages' ? item.messages : []);
+    for (const detail of snapshot.details.values()) available.push(...detail.messages);
+    setState(sessionId, (state) => ({ ...state, historyLoaded: true,
+      messages: mergeMessages(available, state.messages, { addOnly: true }),
+      hasMoreMessages: snapshot.hasMore, isLoadingMore: snapshot.loading,
+      oldestMessageId: snapshot.nextCursor,
+      historyWindowHasIsland: false,
+    }));
+  });
+  return view;
+}
+
 function ensureInitialMessages(sessionId: string): void {
   const state = getOrCreateState(sessionId);
   requestInputProjection(sessionId);
@@ -10749,8 +10805,24 @@ function ensureInitialMessages(sessionId: string): void {
       }
     });
 
-  listMessagesFor(sessionId)
+  (async () => {
+    const view = createRemoteHistoryView(sessionId);
+    if (view) {
+      await view.refresh();
+      const snapshot = view.getSnapshot();
+      if (!snapshot.error && snapshot.ready) {
+        releaseHistoryFetchIfCurrent(sessionId, historyFetchToken);
+        void reconcilePendingInteractions(sessionId);
+        return null;
+      }
+      if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(snapshot.error))) throw snapshot.error;
+      view.setActive(false);
+      remoteHistoryViews.delete(sessionId);
+    }
+    return listMessagesFor(sessionId);
+  })()
     .then(async (existing) => {
+      if (existing === null) return;
       if (
         !isCurrentHistoryFetch(
           sessionId,
@@ -11071,6 +11143,7 @@ function cancelIdlePlanDiscovery(sessionId: string): void {
 }
 
 function scheduleIdlePlanDiscoveryIfNeeded(sessionId: string): void {
+  if (getRemoteHistoryView(sessionId)) return;
   if (!_activeViewSessions.has(sessionId)) return;
   const state = sessions.get(sessionId);
   if (!state?.historyLoaded || state.isLoadingMore || !state.hasMoreMessages) return;
@@ -11089,6 +11162,7 @@ function scheduleIdlePlanDiscoveryIfNeeded(sessionId: string): void {
 }
 
 function loadOneOlderPageForPlanDiscovery(sessionId: string): Promise<boolean> {
+  if (getRemoteHistoryView(sessionId)) return Promise.resolve(false);
   if (!_activeViewSessions.has(sessionId)) return Promise.resolve(false);
   const state = sessions.get(sessionId);
   if (!state?.historyLoaded || state.isLoadingMore || !state.hasMoreMessages) {
@@ -11400,6 +11474,11 @@ const _remoteReconcileInFlight = new Map<
 >();
 
 function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
+  const view = getRemoteHistoryView(sessionId);
+  if (view?.getSnapshot().ready) return Promise.all([view.refresh(), reconcilePendingInteractions(sessionId)]).then(() => {
+    if (view.getSnapshot().error) throw view.getSnapshot().error;
+    return true;
+  });
   // 返回完成 promise 供调用方需要时等待;既有调用方均按 fire-and-forget 使用。
   if (!sessionId || !isRemoteSession(sessionId)) return Promise.resolve(false);
   const inFlight = _remoteReconcileInFlight.get(sessionId);
@@ -11712,6 +11791,11 @@ function loadOlderMessages(
   automatic = false,
   maxPages = MAX_LOAD_OLDER_PAGES,
 ): Promise<boolean> {
+  const view = getRemoteHistoryView(sessionId);
+  if (view?.getSnapshot().ready) return view.refresh(true).then(() => {
+    if (view.getSnapshot().error) throw view.getSnapshot().error;
+    return true;
+  });
   const state = getOrCreateState(sessionId);
   if (state.isLoadingMore || !state.hasMoreMessages) return Promise.resolve(false);
 
@@ -12290,7 +12374,12 @@ async function loadAroundMessage(
   // around 行会被当成新代际 merge 回窗口。
   const epochAtStart = _messagesEpoch.get(sessionId) ?? 0;
   // 按来源路由:远程会话经隧道 local-db:messages:around(直连本机会查控制端空库,跳转必失败)。
-  const rows = await aroundMessagesFor(sessionId, messageId, opts);
+  const view = getRemoteHistoryView(sessionId);
+  const rows = await aroundMessagesFor(sessionId, messageId, view?.getSnapshot().ready ? { radius: 0 } : opts);
+  if (view?.getSnapshot().ready) {
+    const target = rows.find((row) => row.id === messageId);
+    return target ? view.locate(target.clientId, target.createdAt) : null;
+  }
   if (rows.length === 0) return null;
 
   const mapped = mapServerMessages(rows);
@@ -12355,7 +12444,12 @@ async function loadAroundMessageClientId(
 ): Promise<ChatMessage | null> {
   // 同 loadAroundMessage:epoch 在 around 请求之前快照,覆盖该请求自身的竞态窗口。
   const epochAtStart = _messagesEpoch.get(sessionId) ?? 0;
-  const rows = await aroundMessagesByClientIdFor(sessionId, clientId, opts);
+  const view = getRemoteHistoryView(sessionId);
+  const rows = await aroundMessagesByClientIdFor(sessionId, clientId, view?.getSnapshot().ready ? { radius: 0 } : opts);
+  if (view?.getSnapshot().ready) {
+    const target = rows.find((row) => row.clientId === clientId);
+    return target ? view.locate(clientId, target.createdAt) : null;
+  }
   if (rows.length === 0) return null;
 
   const mapped = mapServerMessages(rows);

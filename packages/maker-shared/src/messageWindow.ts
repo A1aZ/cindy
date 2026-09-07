@@ -1,3 +1,8 @@
+export * from './historyView.js';
+export { projectHistoryView, isHistoryDetailTool, hasVisibleHistoryResult } from './historyViewProjection.js';
+export * from './historyViewController.js';
+export { renderHistoryView } from './historyViewRender.js';
+
 export interface MessageScrollMetrics {
   contentHeight: number;
   offsetY: number;

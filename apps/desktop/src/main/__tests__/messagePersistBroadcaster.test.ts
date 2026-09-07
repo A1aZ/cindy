@@ -86,6 +86,7 @@ import {
   onInteractionMessage,
   onInteractionResolved,
   onThinkingEvent,
+  getSessionThinkingSnapshots,
   flushAssistantBlock,
   sealAssistantBlockForLateFinal,
   flushOrphanToolResults,
@@ -1683,6 +1684,19 @@ describe('done orphan:残留 buffer 在 turn 末 flush', () => {
 });
 
 describe('thinking persistence', () => {
+  it('recovers thinking accumulated while folded, then rejects it after an owner change', () => {
+    onThinkingEvent(SESSION, { stage: 'start', blockId: 'live-thought' }, null);
+    onThinkingEvent(SESSION, { stage: 'delta', blockId: 'live-thought', text: 'first ' }, null);
+    onThinkingEvent(SESSION, { stage: 'delta', blockId: 'live-thought', text: 'second' }, null);
+    expect(getSessionThinkingSnapshots(SESSION)).toEqual([expect.objectContaining({
+      clientId: 'live-thought', content: expect.objectContaining({ text: 'first second' }),
+    })]);
+    ownerScopeState.current = false;
+    expect(getSessionThinkingSnapshots(SESSION)).toEqual([]);
+    ownerScopeState.current = true;
+    expect(getSessionThinkingSnapshots(SESSION)).toEqual([]);
+  });
+
   it('uses the final event timestamp instead of delayed write time', async () => {
     const finishedAt = Date.parse('2026-06-20T09:10:00.000Z');
     const delayedWriteTime = Date.parse('2026-06-20T09:10:04.000Z');

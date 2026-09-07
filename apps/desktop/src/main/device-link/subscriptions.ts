@@ -48,6 +48,35 @@ const rememberedTopicsByController = new Map<string, Set<StoredTopic>>();
  * 新控制端误判成 legacy，否则 set-model 的显式 provider null 会被当成占位。
  */
 const rememberedCapabilitiesByController = new Map<string, Set<string>>();
+const historyViewsByController = new Map<string, Map<string, { liveKey: string | null; expanded: Set<string> }>>();
+
+export function updateHistoryView(deviceId: string, sessionId: string, liveKey: string | null): void {
+  if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return;
+  const views = historyViewsByController.get(deviceId) ?? new Map();
+  const view = views.get(sessionId) ?? { liveKey: null, expanded: new Set<string>() };
+  view.liveKey = liveKey;
+  views.set(sessionId, view);
+  historyViewsByController.set(deviceId, views);
+}
+
+export function setHistoryExpanded(deviceId: string, sessionId: string, keys: readonly string[]): void {
+  // Do not recreate detail intent after an explicit session unsubscribe.
+  if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return;
+  const views = historyViewsByController.get(deviceId) ?? new Map();
+  const view = views.get(sessionId) ?? { liveKey: null, expanded: new Set<string>() };
+  view.expanded = new Set(keys);
+  views.set(sessionId, view);
+  historyViewsByController.set(deviceId, views);
+}
+
+export function hasHistoryView(deviceId: string, sessionId: string): boolean {
+  return historyViewsByController.get(deviceId)?.has(sessionId) === true;
+}
+
+export function projectsHistoryDetails(deviceId: string, sessionId: string): boolean {
+  const view = historyViewsByController.get(deviceId)?.get(sessionId);
+  return !!view && (!view.liveKey || !view.expanded.has(view.liveKey));
+}
 
 /**
  * topic 生命周期监听(fs-watch 档消费:订阅驱动被控端文件 watch 启停)。
@@ -162,6 +191,10 @@ export function controllerHasTopic(deviceId: string, topic: string): boolean {
 
 /** 取消订阅指定 topics;该控制端 topic 清空后整条移除。空 topics 为 no-op。 */
 export function unsubscribe(deviceId: string, topics: readonly string[]): void {
+  for (const topic of topics) {
+    if (topic.startsWith('session:')) historyViewsByController.get(deviceId)?.delete(topic.slice(8));
+  }
+  if (historyViewsByController.get(deviceId)?.size === 0) historyViewsByController.delete(deviceId);
   const e = registry.get(deviceId);
   const remembered = rememberedTopicsByController.get(deviceId);
   if (!e && !remembered) return;
@@ -191,6 +224,7 @@ export function clearController(deviceId: string): boolean {
 
 /** 显式撤销/账号边界使用：释放 active topics，并删除断线恢复状态。 */
 export function forgetKnownController(deviceId: string): void {
+  historyViewsByController.delete(deviceId);
   clearController(deviceId);
   knownControllerIds.delete(deviceId);
   rememberedTopicsByController.delete(deviceId);
@@ -199,6 +233,7 @@ export function forgetKnownController(deviceId: string): void {
 
 /** 清空所有订阅(登出 / 关被控 / 退出)。 */
 export function clearAll(): void {
+  historyViewsByController.clear();
   const held = new Set<StoredTopic>();
   for (const e of registry.values()) for (const t of e.topics) held.add(t);
   registry.clear();
@@ -290,6 +325,7 @@ export function getUpdateRelaunchControllers(): ActiveController[] {
 
 export const __testing = {
   reset(): void {
+    historyViewsByController.clear();
     registry.clear();
     knownControllerIds.clear();
     rememberedTopicsByController.clear();

@@ -120,6 +120,34 @@ describe('negotiated mobile tool projection', () => {
   });
 });
 
+describe('history detail interest', () => {
+  it('sends full thinking only to expanded/legacy peers and coalesces folded summaries', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = mkClient();
+      __testing.setActiveClient(client as never);
+      for (const peer of ['folded', 'expanded', 'legacy']) subscriptions.subscribe(peer, ['session:s1']);
+      for (const peer of ['folded', 'expanded']) subscriptions.updateHistoryView(peer, 's1', 'work');
+      subscriptions.setHistoryExpanded('expanded', 's1', ['work']);
+      const push = (stage: string) => ({ sessionId: 's1', event: { type: 'thinking', data: { stage, blockId: 'b', text: 'private detail' } } });
+      __testing.forwardPush('maker:event', push('start'));
+      for (let n = 0; n < 100; n++) __testing.forwardPush('maker:event', push('delta'));
+      expect(client.sendPush.mock.calls.filter((call) => call[0] === 'folded')).toHaveLength(0);
+      expect(client.sendPush.mock.calls.filter((call) => call[0] === 'expanded' && call[1] === 'maker:event')).toHaveLength(101);
+      expect(client.sendPush.mock.calls.filter((call) => call[0] === 'legacy')).toHaveLength(101);
+      await vi.advanceTimersByTimeAsync(500);
+      const folded = client.sendPush.mock.calls.filter((call) => call[0] === 'folded');
+      expect(folded).toEqual([['folded', 'maker:history-view-changed', { sessionId: 's1' }]]);
+      for (let n = 0; n < 100; n++) __testing.forwardPush('maker:event', push('delta'));
+      await vi.advanceTimersByTimeAsync(500);
+      expect(client.sendPush.mock.calls.filter((call) => call[0] === 'folded')).toHaveLength(1);
+    } finally {
+      __testing.reset();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('[14] sendInvokeResultSafe — 结果超限兜底', () => {
   it('消息页首发抛 PAYLOAD_TOO_LARGE → 先压缩超大消息内容并重发 ok:true,不冒泡', () => {
     const sendInvokeResult = vi.fn().mockImplementationOnce(() => {

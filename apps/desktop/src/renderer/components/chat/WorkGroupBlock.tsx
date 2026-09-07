@@ -103,6 +103,7 @@ export function collectLiveWorkActivities(
 }
 
 export interface WorkGroupBlockProps {
+  deferred?: import('@cindy/maker-shared/message-window').DeferredHistoryWork;
   /** Stable persistence key:动作段 `work:<clientId>`,外层 `work:summary-<clientId>`. */
   blockId: string;
   /** Wall-clock span of the run; undefined when timestamps are unavailable. */
@@ -268,6 +269,7 @@ function ExpandedWorkGroupChild({
 }
 
 export function WorkGroupBlock({
+  deferred,
   blockId,
   durationMs,
   isStreaming = false,
@@ -275,7 +277,8 @@ export function WorkGroupBlock({
   childItems,
 }: WorkGroupBlockProps) {
   const { t } = useTranslation();
-  const { expanded, setExpanded } = useExpandedBlockMemory(blockId);
+  const { expanded: rememberedExpanded, setExpanded } = useExpandedBlockMemory(blockId);
+  const expanded = deferred?.expanded ?? rememberedExpanded;
   const [elapsedMs, setElapsedMs] = useState(0);
 
   useEffect(() => {
@@ -310,12 +313,12 @@ export function WorkGroupBlock({
   );
   // 运行中预览已经等于全部内容时，折叠/展开是视觉空操作 — 组头不提供交互。
   const canToggle =
-    !isStreaming
+    !!deferred || !isStreaming
     || hasBeyondPreviewChild
     || recentActivities.length > MAX_LIVE_WORK_ACTIVITIES;
   const effectiveExpanded = expanded && canToggle;
   const isLivePreviewVisible =
-    isStreaming && !effectiveExpanded && liveActivities.length > 0;
+    !deferred && isStreaming && !effectiveExpanded && liveActivities.length > 0;
   // 完成态只计算一次完整摘要；运行态保持折叠时走上面的反向 latest-five
   // 热路径，用户主动展开后才投影全部历史。
   const activityProjection = useMemo(
@@ -329,10 +332,11 @@ export function WorkGroupBlock({
   // 外层完成态组展开成文字 + 内层动作组;内层动作组与运行态组复用本组件,
   // 展开后直接渲染 thinking /工具行,不再多套一层子卡摘要。
   const onToggle = useCallback(() => {
+    if (deferred) { deferred.toggle(); return; }
     setExpanded((v) => !v);
-  }, [setExpanded]);
+  }, [deferred, setExpanded]);
 
-  if (childItems.length === 0) return null;
+  if (childItems.length === 0 && !deferred) return null;
 
   // durationMs === 0(同毫秒时间戳的极短 run)也显示时长 — formatDuration
   // 自带最小 1s 钳制;只有时间戳缺失(undefined)才退化为无时长文案。
@@ -448,6 +452,12 @@ export function WorkGroupBlock({
                 />
               </Fragment>
             ))}
+            {deferred?.loading && <Spinner size={14} />}
+            {deferred?.failed && (
+              <button type="button" onClick={deferred.retry} className="text-muted-foreground hover:text-foreground text-sm">
+                {t('chat.errorBanner.retry')}
+              </button>
+            )}
           </div>
         </Collapse>
       </div>

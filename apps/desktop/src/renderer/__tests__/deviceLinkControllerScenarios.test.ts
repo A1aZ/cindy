@@ -48,7 +48,8 @@ vi.mock('@/lib/composerDraftStore', () => ({
   plainTextToTiptapDoc: (s: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: s }] }] }),
 }));
 
-import { makerChatStore } from '@/lib/makerChatStore';
+import { makerChatStore, getRemoteHistoryView } from '@/lib/makerChatStore';
+import { projectHistoryView } from '@cindy/maker-shared/message-window';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 
 // ─── 忠实的被控端内存替身(单一真相源)───────────────────────────────────────────
@@ -77,6 +78,7 @@ function makeFakeHost(deviceId: string, deviceName: string) {
   const sessionsMeta = new Map<string, Record<string, unknown>>();
   const messages = new Map<string, Message[]>();
   let pushCb: ((p: RemotePush) => void) | null = null;
+  let historyViewEnabled = false;
 
   function meta(sid: string): Record<string, unknown> {
     return {
@@ -88,6 +90,13 @@ function makeFakeHost(deviceId: string, deviceName: string) {
 
   const invoke = vi.fn(async (_d: string, channel: string, args: unknown[]) => {
     switch (channel) {
+      case 'local-db:messages:view':
+        return historyViewEnabled ? { version: 1, items: projectHistoryView(messages.get(args[0] as string) ?? [], false), hasMore: false, nextCursor: null } : null;
+      case 'local-db:messages:work-details': {
+        const rows = messages.get(args[0] as string) ?? [];
+        const ref = args[1] as { firstMessageId: string; lastMessageId: string };
+        return { version: 1, messages: rows.slice(rows.findIndex((row) => row.id === ref.firstMessageId), rows.findIndex((row) => row.id === ref.lastMessageId) + 1), hasMore: false, nextCursor: null };
+      }
       case 'local-db:messages:list': {
         const sid = args[0] as string;
         const opts = (args[1] ?? {}) as { limit?: number };
@@ -115,6 +124,7 @@ function makeFakeHost(deviceId: string, deviceName: string) {
   return {
     deviceId,
     deviceName,
+    enableHistoryView: () => { historyViewEnabled = true; },
     invoke,
     /** 注册控制端 onRemotePush 回调(被控端经此向控制端转发广播)。 */
     registerPush(cb: (p: RemotePush) => void): () => void {
@@ -203,6 +213,29 @@ afterEach(() => {
 });
 
 describe('device-link controller mirror — end-to-end scenarios', () => {
+  it('reads visible history first and fetches a collapsed work range only after expansion', async () => {
+    const s = sid();
+    host.enableHistoryView();
+    const history = [dbMessage(s, 'u', 'question', '2026-06-15T00:00:00.000Z', 'user'),
+      { ...dbMessage(s, 'thought', '', '2026-06-15T00:00:01.000Z', 'thinking'), content: { kind: 'thinking', text: 'hidden body', durationMs: 500, isRedacted: false } },
+      dbMessage(s, 'answer', 'answer', '2026-06-15T00:00:02.000Z')];
+    host.seedSession(s, {}, history);
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+    await flush();
+    expect(host.invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
+    expect(makerChatStore.getSnapshot(s).messages.map((row) => row.clientId)).toEqual(['client-u', 'client-answer']);
+    const view = getRemoteHistoryView(s)!;
+    const group = view.getSnapshot().items.find((item) => item.type === 'work')!;
+    expect(view.getSnapshot().details.size).toBe(0);
+    view.setExpanded(group.key, true);
+    await flush();
+    expect(view.getSnapshot().details.get(group.key)?.messages[0].content).toBe('hidden body');
+    expect(makerChatStore.getSnapshot(s).messages.some((row) => row.clientId === 'client-thought')).toBe(true);
+    view.setActive(false);
+  });
+
   it('完整镜像回路:开会话见历史 → live push 追加 → 丢帧 reconcile heal → 设置变更镜像', async () => {
     const s = sid();
     // 被控端已有 1 条历史 + 注册到远程项目(getSessionDeviceId 命中 → 传输层走隧道)。

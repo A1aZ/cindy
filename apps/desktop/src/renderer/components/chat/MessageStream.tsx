@@ -28,6 +28,8 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
+import { renderHistoryView } from '@cindy/maker-shared/message-window';
+import { getRemoteHistoryView, type HistoryChatMessage } from '@/lib/makerChatStore';
 import { createPortal } from 'react-dom';
 import { GitFork } from 'lucide-react';
 import { SelectionQuoteButton } from './SelectionQuoteButton';
@@ -2477,6 +2479,12 @@ export function MessageStream({
   onInlinePlanVisibilityChange,
 }: MessageStreamProps) {
   const { i18n, t } = useTranslation();
+  const historyView = sessionId ? getRemoteHistoryView(sessionId) : undefined;
+  const historySnapshot = useSyncExternalStore(
+    historyView?.subscribe ?? (() => () => undefined),
+    historyView?.getSnapshot ?? (() => null),
+    historyView?.getSnapshot ?? (() => null),
+  );
   // 右上角 chip 栈插槽 —— PrevMessageJumpChip 通过 portal 挂到这里,
   // 与 DiffPanelToggle 在同一栈中各占一行。Provider 不存在时返回 null,
   // 渲染处会兜底跳过(典型场景:其他视图直接用 MessageStream 但不需要栈)。
@@ -2723,12 +2731,42 @@ export function MessageStream({
       botSessionId: simplifiedBotConversation ? sessionId : undefined,
       markdownImageTargetCache: markdownImageTargetCacheRef.current,
     });
+    if (historyView && historySnapshot?.ready) {
+      const results = new Map(built.singleResultMap);
+      const liveMessages: HistoryChatMessage[] = messages.map((row) => ({ ...row,
+        id: row.id ?? row.clientId, createdAt: row.createdAt ?? '',
+      }));
+      const items = renderHistoryView<HistoryChatMessage, RenderItem>({
+        view: historyView, snapshot: historySnapshot, liveMessages, streaming: isSessionStreaming,
+        isLive: (row) => row.isStreaming === true,
+        build: (rows) => {
+          const chunk = buildRenderItems([...rows], taskUpdates, ghostCardSnapshot, {
+            historyWindowIncomplete: true, workingDir,
+            markdownImageTargetCache: markdownImageTargetCacheRef.current,
+          });
+          for (const [key, value] of chunk.singleResultMap) results.set(key, value);
+          return chunk.items;
+        },
+        work: (summary, details, deferred) => ({ type: 'work_group', key: summary.key,
+          children: details.filter((item): item is WorkChildItem => item.type === 'message'
+            || item.type === 'tool_segment' || item.type === 'agent_task'),
+          deferred, isStreaming: summary.isStreaming, startedAtMs: summary.startedAtMs,
+          durationMs: Math.max(0, summary.endedAtMs - summary.startedAtMs),
+        }),
+      });
+      const keys = new Set<string>();
+      const unique = items.filter((item) => { if (keys.has(item.key)) return false; keys.add(item.key); return true; });
+      return { items: reuseGeneratedFilesRenderItems(unique, generatedFilesItemCacheRef.current), singleResultMap: results };
+    }
     return {
       items: reuseGeneratedFilesRenderItems(built.items, generatedFilesItemCacheRef.current),
       singleResultMap: built.singleResultMap,
     };
   }, [
     messages,
+    historyView,
+    historySnapshot,
+    isSessionStreaming,
     taskUpdates,
     ghostCardSnapshot,
     historyLoaded,
@@ -2757,13 +2795,13 @@ export function MessageStream({
   // isSessionStreaming 翻转(每 turn 一次)与 items 变化时重算,O(n) 单扫描。
   const allRenderItems = useMemo(() => {
     const grouped = insertForkOriginItem(
-      groupWorkRuns(ungroupedRenderItems, isSessionStreaming),
+      historySnapshot?.ready ? ungroupedRenderItems : groupWorkRuns(ungroupedRenderItems, isSessionStreaming),
       forkOrigin,
   );
     return simplifiedBotConversation
       ? simplifyBotRenderItems(grouped, isSessionStreaming)
       : grouped;
-  }, [ungroupedRenderItems, isSessionStreaming, forkOrigin, simplifiedBotConversation]);
+  }, [ungroupedRenderItems, isSessionStreaming, forkOrigin, simplifiedBotConversation, historySnapshot?.ready]);
   const botMessageTimeGroups = useMemo(() => {
     if (!simplifiedBotConversation) return new Map<string, number>();
     return collectBotMessageTimeGroups(
@@ -5570,6 +5608,7 @@ export function MessageStream({
                             isStreaming={item.isStreaming}
                             startedAtMs={item.startedAtMs}
                             childItems={childItems}
+                            deferred={item.deferred}
                           />
                         </div>
                       );

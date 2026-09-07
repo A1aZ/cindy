@@ -79,6 +79,7 @@ function fixture(reopen = false) {
   };
   const bindings = {
     deviceId: 'd1', deviceName: 'test', sessionId: 's1',
+    historyView: { snapshot: { ready: false }, view: { refresh: async () => undefined, getSnapshot: (): { ready: boolean; error: Error | null } => ({ ready: false, error: new Error('[CHANNEL_NOT_ALLOWED] legacy host') }) } },
     remoteSessionStore: store, maker, shouldBlockSessionSync: () => false,
     readAckEpochRef: { current: 1 }, readAckGateGenRef: { current: 1 },
     sessionSubscriptionIdentityRef: { current: JSON.stringify(['d1', 's1', 1]) },
@@ -124,6 +125,17 @@ function fixture(reopen = false) {
 }
 
 describe('production session recovery callbacks', () => {
+  it('accepts a history view without certifying sparse rows as a complete raw window', async () => {
+    const f = fixture();
+    f.bindings.historyView.view.getSnapshot = () => ({ ready: true, error: null });
+    await f.sync();
+    expect(f.maker.listMessages).not.toHaveBeenCalled();
+    expect(f.store.setMessages).not.toHaveBeenCalled();
+    expect(f.store.setLatestMessageWindow).not.toHaveBeenCalled();
+    expect(f.store.markSessionMessagesSynced).not.toHaveBeenCalled();
+    expect(f.state.synced).not.toBeNull();
+  });
+
   it('routes the visible history retry to pagination rather than full sync', () => {
     const screen = source.getFullText().replace(/\r\n/g, '\n');
     expect(screen).toContain('const bannerError = connectionRecoveryError ?? historyError;');

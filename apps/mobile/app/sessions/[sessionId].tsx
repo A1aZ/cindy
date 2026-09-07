@@ -109,6 +109,8 @@ import { syncSessionMessageWindow } from '@/session/sessionMessageWindowSync';
 import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '@/session/sessionSyncErrorRecovery';
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
+import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
+import { renderHistoryView } from '@cindy/maker-shared/message-window';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
@@ -488,6 +490,8 @@ import {
 } from '@/session/historyWindowGap';
 import {
   insertMobileForkOriginItem,
+  buildMobileMessageRenderItems,
+  type MobileWorkChildItem,
   type MobileMessageRenderItem,
 } from '@/session/messageRenderModel';
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
@@ -961,6 +965,7 @@ export default function SessionScreen() {
       }
       return () => {
         messageScreenFocusedRef.current = false;
+        findRemoteHistoryView(deviceId, sessionId)?.setActive(false);
         const authority = messageAuthorityRef.current;
         messageAuthorityRef.current = null;
         if (authority) {
@@ -974,6 +979,7 @@ export default function SessionScreen() {
       const active = nextState === 'active';
       messageAppActiveRef.current = active;
       if (!active) {
+        findRemoteHistoryView(deviceId, sessionId)?.setActive(false);
         const authority = messageAuthorityRef.current;
         messageAuthorityRef.current = null;
         if (authority) {
@@ -983,6 +989,7 @@ export default function SessionScreen() {
       }
       if (!messageScreenFocusedRef.current || messageAuthorityRef.current) return;
       messageAuthorityRef.current = remoteSessionStore.enterSessionMessageDetail(sessionId);
+      findRemoteHistoryView(deviceId, sessionId)?.setActive(true);
       setMessageReloadRevision((value) => value + 1);
     });
     return () => subscription.remove();
@@ -1006,8 +1013,26 @@ export default function SessionScreen() {
   const revokedDevices = useRevokedDevices();
   const unresponsiveDevices = useUnresponsiveDevices();
   const maker = useMobileMakerTransport(deviceId);
+  const historyView = useRemoteHistoryView(deviceId, sessionId, maker,
+    () => messageScreenFocusedRef.current && messageAppActiveRef.current);
+  useEffect(() => {
+    if (messageScreenFocusedRef.current && messageAppActiveRef.current) historyView.view.setActive(true);
+  }, [connectionEpoch, messageReloadRevision, historyView.view]);
   const sessions = useRemoteSessions();
-  const messages = useSessionMessages(sessionId, deviceId);
+  useEffect(() => {
+    if (messageReloadRevision > 0) historyView.view.reset();
+  }, [messageReloadRevision, historyView.view]);
+  const rawMessages = useSessionMessages(sessionId, deviceId);
+  const messages = useMemo(() => {
+    if (!historyView.snapshot.ready) return rawMessages;
+    const available = historyView.snapshot.items.flatMap((item) => item.type === 'messages' ? item.messages : []);
+    for (const detail of historyView.snapshot.details.values()) available.push(...detail.messages);
+    const byId = new Map(available.map((row) => [row.clientId, row]));
+    for (const row of rawMessages) {
+      if (row.agentMeta?.isStreaming === true) byId.set(row.clientId, row);
+    }
+    return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.rowid ?? 0) - (b.rowid ?? 0));
+  }, [rawMessages, historyView.snapshot]);
   const messageStructureToken = remoteSessionStore.getSessionMessageStructureToken(sessionId);
   const messageStructureChangedIndexes = remoteSessionStore
     .getSessionMessageStructureChangedIndexes(sessionId);
@@ -2102,7 +2127,7 @@ export default function SessionScreen() {
     remoteSessionStore.subscribe,
     () => remoteSessionStore.getSessionLiveActivity(sessionId)?.attention === true,
   );
-  const hasRenderedMessages = messages.length > 0;
+  const hasRenderedMessages = historyView.snapshot.ready ? historyView.snapshot.items.length > 0 : messages.length > 0;
   useRemoteResourceSession(deviceId, deviceName, sessionId,
     currentSession?.id === sessionId && hasRenderedMessages
       && readAckSyncedKey === `${sessionId}:${connectionEpoch}`
@@ -2309,7 +2334,7 @@ export default function SessionScreen() {
   const syncingWhileEmpty = shouldSuppressEmptyMessageState({
     loading,
     showSyncingShell,
-    messageCount: messages.length,
+    messageCount: historyView.snapshot.ready ? historyView.snapshot.items.length : messages.length,
     hasSyncedThisOpen: lastSyncedAt !== null,
     remoteUnavailable: !!remoteUnavailableReason,
   });
@@ -3321,13 +3346,23 @@ export default function SessionScreen() {
       const isCurrent = () => !syncRun.isStale() && messageAuthorityCurrent();
       const pushRefresh = notificationResponse !== null
         && syncedNotificationResponseRef.current !== notificationResponse;
+      let usedHistoryView = false;
       const messageRead = syncSessionMessageWindow({
         readMetadata: () => retryRead(fetchSessionMetadata),
         isReopen,
         storedSession: storedSessionAtStart,
-        eager: !isReopen || pushRefresh,
+        eager: !isReopen || pushRefresh || historyView.snapshot.ready,
         isWindowSynced: (sessionMeta) => remoteSessionStore.isSessionMessageWindowSynced(sessionId, sessionMeta),
-        readLatest: () => retryRead(() => listMessagesWithPayloadRetry(
+        readLatest: async () => {
+          if (options.replaceMessages && historyView.view.getSnapshot().ready) historyView.view.reset();
+          await historyView.view.refresh();
+          const viewState = historyView.view.getSnapshot();
+          if (!viewState.error && viewState.ready) {
+            usedHistoryView = true;
+            return { messages: [], limit: 20, reducedByPayloadTooLarge: false };
+          }
+          if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(viewState.error))) throw viewState.error;
+          return retryRead(() => listMessagesWithPayloadRetry(
           (limit) => runSessionMessagesSnapshotSingleFlight(
             snapshotScope,
             limit,
@@ -3335,9 +3370,11 @@ export default function SessionScreen() {
             () => maker.listMessages(sessionId, { limit }),
           ),
           isReopen ? REOPEN_MESSAGE_WINDOW_LIMITS : undefined,
-        )),
+        ));
+        },
         isCurrent,
         commitMessages: (history) => {
+          if (usedHistoryView) { messageWindowReconciledRef.current = true; return; }
           const historyPage: RemoteMessage[] = Array.isArray(history.messages) ? history.messages : [];
           const moreBeyondWindow = shouldKeepOlderMessagesAffordance(history);
           if (options.replaceMessages) {
@@ -3353,7 +3390,7 @@ export default function SessionScreen() {
           setHasOlderMessages(moreBeyondWindow);
         },
         commit: (sessionMeta, history) => {
-          if (history !== null) {
+          if (history !== null && !usedHistoryView) {
             remoteSessionStore.markSessionMessagesSynced(sessionId, sessionMeta);
             if (pushRefresh) syncedNotificationResponseRef.current = notificationResponse;
           }
@@ -4120,8 +4157,8 @@ export default function SessionScreen() {
   const projectedMessages = projectedMessageWindow.projected;
   const projectedMessageStructureChangedIndexes = projectedMessageWindow.changedIndexes;
   const oldestLoadedMessageCursor = useMemo(
-    () => oldestMessageCursor(latestMessagesRef.current),
-    [messageStructureToken],
+    () => historyView.snapshot.ready ? historyView.snapshot.nextCursor : oldestMessageCursor(latestMessagesRef.current),
+    [messageStructureToken, historyView.snapshot],
   );
   const previousRenderItemsRef = useRef<{
     sessionId: string;
@@ -4145,12 +4182,25 @@ export default function SessionScreen() {
         prefixCache: streamingRenderPrefixRef,
         taskUpdates,
       });
+      const historyItems = historyView.snapshot.ready ? renderHistoryView({
+        view: historyView.view, snapshot: historyView.snapshot, liveMessages: projectedMessages,
+        isLive: (row) => row.agentMeta?.isStreaming === true,
+        streaming: isMessageListStreaming,
+        build: (rows, streaming) => buildMobileMessageRenderItems(rows, { isSessionStreaming: streaming, sessionId }, taskUpdates),
+        work: (summary, details, deferred): MobileMessageRenderItem => ({
+          type: 'work_group', key: summary.key, deferred,
+          isStreaming: summary.isStreaming, startedAtMs: summary.startedAtMs,
+          durationMs: Math.max(0, summary.endedAtMs - summary.startedAtMs),
+          children: details.flatMap((item): MobileWorkChildItem[] => item.type === 'work_group' ? item.children
+            : ['message', 'thinking', 'tool_group', 'agent_task', 'todo'].includes(item.type) ? [item as MobileWorkChildItem] : []),
+        }),
+      }) : builtWindow.items;
       let items = insertMobileForkOriginItem(
         // 孤儿 agent_task 兜底用 maker status 驱动的权威 turn 边界 gate,与 store 的
         // turn-start 清理同源闭环——渲染开启时 map 必已清过 stale。不用 isSessionStreaming
         // (含本地 sending / canStopQueue,发送→status 间隙会闪现残留),也不用
         // remoteSessionRunning(activity 推送 / 活跃快照会先置 true,重连场景渲染先于清理)。
-        builtWindow.items,
+        historyItems,
         forkOrigin,
       );
       if (errorTailClientId) {
@@ -4162,10 +4212,10 @@ export default function SessionScreen() {
         ? previousRenderItemsRef.current
         : null;
       const previous = previousRenderState?.items ?? [];
-      const committedPrefix = forkOrigin || errorTailClientId
+      const committedPrefix = historyView.snapshot.ready || forkOrigin || errorTailClientId
         ? null
         : builtWindow.prefix;
-      const stablePrefixItemCount = forkOrigin || errorTailClientId
+      const stablePrefixItemCount = historyView.snapshot.ready || forkOrigin || errorTailClientId
         ? 0
         : committedMobileStreamingPrefixItemCount(
             builtWindow,
@@ -4185,12 +4235,12 @@ export default function SessionScreen() {
         stablePrefixItemCount,
       };
     },
-    [errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
+    [historyView.snapshot, historyView.view, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
   );
   const renderItems = renderWindow.items;
   const renderItemsStructureKey = useMemo(
     () => ({}),
-    [errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, sessionId, taskUpdates],
+    [historyView.snapshot, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, sessionId, taskUpdates],
   );
   // Reconciliation must only use committed rows. Unlike the prefix cache above, a speculative
   // render-item baseline could leak rows from an abandoned render and destabilize tail memoization.
@@ -4210,7 +4260,7 @@ export default function SessionScreen() {
   }, [renderItems, renderWindow.prefix, sessionId]);
   // 后台静默刷新:仅在首次加载、还没有任何内容(messages 为空)时显示"正在同步";已有内容
   // (重开已看过的会话,messages 还在内存)时后台对账一律静默,不再弹同步提示打扰用户。
-  const showSyncingIndicator = loading && messages.length === 0;
+  const showSyncingIndicator = loading && !hasRenderedMessages;
   const diffCount = renderWindow.diffCount;
   const searchHits = useMemo(
     () => searchOpen && searchQuery.trim()
@@ -4263,14 +4313,20 @@ export default function SessionScreen() {
     };
     const messageAuthority = remoteSessionStore.captureSessionMessageAuthority(sessionId);
     void withTransientRemoteRetry(() =>
-      maker.aroundMessagesByClientId(sessionId, routeFocusClientId, { radius: 60 }),
+      maker.aroundMessagesByClientId(sessionId, routeFocusClientId, { radius: historyView.snapshot.ready ? 0 : 60 }),
     )
-      .then((list) => {
+      .then(async (list) => {
         if (
           cancelled
           || !remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)
         ) {
           releasePendingRouteFocusLookup();
+          return;
+        }
+        if (historyView.view.getSnapshot().ready) {
+          const target = list.find((row) => row.clientId === routeFocusClientId);
+          const found = target ? await historyView.view.locate(target.clientId, target.createdAt) : null;
+          if (!found && !cancelled) setError(t('session.screen.locateMessageNotFound'));
           return;
         }
         remoteSessionStore.mergeMessages(
@@ -4444,6 +4500,12 @@ export default function SessionScreen() {
 
   const loadEarlierMessages = useCallback(async () => {
     if (isScheduleDetail) return;
+    if (historyView.snapshot.ready) {
+      await historyView.view.refresh(true);
+      const error = historyView.view.getSnapshot().error;
+      setHistoryError(error ? formatRemoteError(error) : null);
+      return;
+    }
     if (!deviceId || !sessionId || loadingEarlier || historyRequestInFlightRef.current !== null || !hasOlderMessages) return;
     const messageAuthority = remoteSessionStore.captureSessionMessageAuthority(sessionId);
     if (!remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)) return;
@@ -4486,7 +4548,7 @@ export default function SessionScreen() {
         setLoadingEarlier(false);
       }
     }
-  }, [abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
+  }, [historyView.snapshot.ready, historyView.view, abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
 
   const loadToolInput = useCallback(async (
     ref: MobileToolInputProjection,
@@ -4553,6 +4615,7 @@ export default function SessionScreen() {
     // 完成前就基于旧缓存快照动手 —— 而空洞 key 在请求前已记为已考察,那一处从此不再重试
     // (#1210 review)。readAckSyncedKey 正是「本会话在当前连接代完成过整窗同步」这个判据的
     // 既有单一来源(见它的声明处),这里直接复用。
+    if (historyView.snapshot.ready) return;
     if (readAckSyncedKey !== `${sessionId}:${connectionEpoch}`) return;
     // 与「加载更早」互斥:两者都按 before 游标翻页,同时跑只会让窗口反复 merge、白拉页。
     // 飞行判定只挡**同一会话**,别的会话残留的那一轮不连坐(见 backfillInFlightRun)。
@@ -9109,7 +9172,7 @@ export default function SessionScreen() {
                     topOverlayHeight={topOverlayHeight}
                     busyAction={messageActionBusy?.kind ?? null}
                     busyClientId={messageActionBusy?.clientId ?? null}
-                    canLoadEarlier={hasOlderMessages && messages.length > 0 && !isScheduleDetail}
+                    canLoadEarlier={(historyView.snapshot.ready ? historyView.snapshot.hasMore : hasOlderMessages && messages.length > 0) && !isScheduleDetail}
                     emptyTestID="session.messageList.empty"
                     focusedItemKey={focusedMessageItemKey ?? null}
                     focusedRequestKey={focusedMessageRequestKey}
@@ -9123,7 +9186,7 @@ export default function SessionScreen() {
                     items={messageListItems}
                     itemsStructureKey={messageListStructureKey}
                     pendingSend={pendingSendActions}
-                    loadingEarlier={loadingEarlier}
+                    loadingEarlier={historyView.snapshot.ready ? historyView.snapshot.loading : loadingEarlier}
                     loadEarlierProgressKey={oldestLoadedMessageCursor}
                     onCopyMessageLink={copyMessageLink}
                     onAddMessageToComposer={canUseComposer ? addMessageToComposer : undefined}
@@ -9337,7 +9400,7 @@ export default function SessionScreen() {
                   紧接着消息落屏时这条又要重排一次。等有内容了再显示活动条。
                   判据必须带 messageCount:syncingWhileEmpty 只要 loading 就为真,而收口后
                   还会再来几轮 load(实测日志),只看它会让已有消息的会话反复熄灭活动条。 */}
-              {showComposerActivity && !(syncingWhileEmpty && messages.length === 0) ? (
+              {showComposerActivity && !(syncingWhileEmpty && !hasRenderedMessages) ? (
                 <View
                   style={[
                     styles.composerActivityFrame,

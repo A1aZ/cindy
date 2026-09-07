@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import { findRemoteHistoryView } from '@/session/remoteHistoryView';
 import { createBackgroundConnection } from './backgroundConnection';
 import { createRecoveryDiagnostics, settleMeasuredSnapshot, type RecoveryPhase } from './recoveryDiagnostics';
 import { confirmTrackedSubscription, SubscriptionAcknowledgements } from './subscriptionAcknowledgements';
@@ -1383,7 +1384,14 @@ export function routeFrame(env: Envelope, handlers: {
     );
     return;
   }
+  const historySessionId = (push.payload as { sessionId?: unknown } | null)?.sessionId;
+  const historyView = typeof historySessionId === 'string' ? findRemoteHistoryView(env.src, historySessionId) : undefined;
+  if (push.channel === 'maker:history-view-changed') {
+    historyView?.invalidate();
+    return;
+  }
   remoteSessionStore.applyRemotePush(env.src, push.channel, push.payload);
+  if (historyView?.getSnapshot().ready && (push.channel === 'local-db:messages:created' || push.channel === 'maker:status-changed')) historyView.invalidate();
 }
 
 /** provider revision 后并行重拉所有 agent 的能力；旧代或异常结果都不触碰当前页面。 */
@@ -1500,8 +1508,8 @@ async function rebuildSessionSnapshot(
     }
     return false;
   };
-  const [history, pending, projection, goal] = await Promise.all([
-    measured('history', runSessionMessagesSnapshotSingleFlight(
+  const historyView = findRemoteHistoryView(deviceId, sessionId);
+  const readRawHistory = () => runSessionMessagesSnapshotSingleFlight(
       snapshotScope,
       RECONNECT_MESSAGE_WINDOW_LIMIT,
       messageAuthorityAtRequestStart
@@ -1518,7 +1526,20 @@ async function rebuildSessionSnapshot(
         [sessionId, { limit: RECONNECT_MESSAGE_WINDOW_LIMIT }],
         sendOpts,
       ),
-    ), applyHistory),
+    );
+  const readHistory = async () => {
+    if (historyView) {
+      if (!historyView.isActive()) return false;
+      await historyView.refresh();
+      const snapshot = historyView.getSnapshot();
+      if (!snapshot.error && snapshot.ready) return isCurrent() && historyView.isActive()
+        && findRemoteHistoryView(deviceId, sessionId) === historyView;
+      if (!/CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(snapshot.error))) throw snapshot.error;
+    }
+    return applyHistory(await readRawHistory());
+  };
+  const [history, pending, projection, goal] = await Promise.all([
+    measured('history', readHistory(), (applied) => applied),
     measured('pending', runSessionPendingInteractionsSnapshotSingleFlight(
       snapshotScope,
       pendingSnapshotAtRequestStart,

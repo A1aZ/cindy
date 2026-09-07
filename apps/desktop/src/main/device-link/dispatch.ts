@@ -67,6 +67,7 @@ import {
 } from '@cindy/model-providers/branding';
 import { app } from 'electron';
 import type { DeviceLinkClient } from '@cindy/device-link';
+import { isDeferredHistoryPush, deferredToolBoundary } from './historyViewPush';
 import { createLogger } from '../logger';
 import { projectMobileMessagePage, projectMobileToolPush } from './mobileToolProjection';
 import { normalizeSessionProviderId } from '../maker-host/session-provider-store.js';
@@ -108,6 +109,9 @@ const pushFailures = createPushFailureLog((summary) => log.warn('push delivery f
 function reportPushFailure(dst: string, channel: string, error: unknown): void {
   pushFailures.record(shortId(dst), channel, error instanceof DeviceLinkError ? error.code : 'UNKNOWN');
 }
+let readHistoryToolName = (_sessionId: string, _toolUseId: string): string => '';
+export function setHistoryToolNameReader(read: typeof readHistoryToolName): void { readHistoryToolName = read; }
+
 
 /**
  * 老版本 mobile 只认识 #527 之前已发布的 logo kind。新 mark 可由同版本客户端按
@@ -1550,6 +1554,7 @@ function scheduleSessionActivityRetry(dst: string, stage: SessionActivityStage):
 }
 
 function clearSessionActivityStage(dst: string): void {
+  clearHistoryNotices(dst);
   const stage = sessionActivityStages.get(dst);
   if (!stage) return;
   if (stage.retryTimer) clearTimeout(stage.retryTimer);
@@ -1558,6 +1563,7 @@ function clearSessionActivityStage(dst: string): void {
 
 function clearAllSessionActivityStages(): void {
   pushFailures.flush();
+  for (const dst of historyNoticeStages.keys()) clearHistoryNotices(dst);
   for (const dst of [...sessionActivityStages.keys()]) clearSessionActivityStage(dst);
   for (const dst of [...sessionPatchStages.keys()]) clearSessionPatchStage(dst);
 }
@@ -1581,6 +1587,26 @@ export function pushSessionActivityToController(
  * 按 topic 把一条本机广播转发给订阅了它的控制端。listener 注册后每条 tap 都过这里
  * (live 读 registry,topic 变化即时生效)。topic 算不出(无 session 标识)→ 丢弃。
  */
+const historyNoticeStages = new Map<string, Map<string, { ownerStamp?: PushOwnerStamp; timer: ReturnType<typeof setTimeout> }>>();
+function stageHistoryNotice(dst: string, sessionId: string, ownerStamp?: PushOwnerStamp): void {
+  const pending = historyNoticeStages.get(dst) ?? new Map();
+  if (pending.has(sessionId)) return;
+  if (pending.size >= 100) return;
+  const timer = setTimeout(() => {
+    pending.delete(sessionId);
+    if (pending.size === 0) historyNoticeStages.delete(dst);
+    if (subscriptions.getControllersForTopic(`session:${sessionId}`).includes(dst)) {
+      sendPushBestEffort(dst, 'maker:history-view-changed', { sessionId }, ownerStamp);
+    }
+  }, 500);
+  pending.set(sessionId, { timer, ownerStamp });
+  historyNoticeStages.set(dst, pending);
+}
+function clearHistoryNotices(dst: string): void {
+  for (const item of historyNoticeStages.get(dst)?.values() ?? []) clearTimeout(item.timer);
+  historyNoticeStages.delete(dst);
+}
+
 function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerStamp): void {
   if (!activeClient) return;
   const topic = topicForPush(channel, payload);
@@ -1651,10 +1677,14 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
     }
     return mobilePayload;
   };
+  const historySessionId = readPushSessionId(remotePayload);
+  const deferred = historySessionId !== null && isDeferredHistoryPush(channel, remotePayload,
+    (id) => readHistoryToolName(historySessionId, id));
   const offlineTargets = subscriptions
     .getKnownControllersForTopic(topic)
     .filter((dst) => !liveTargets.includes(dst));
   for (const dst of offlineTargets) {
+    if (deferred && historySessionId && subscriptions.hasHistoryView(dst, historySessionId)) continue;
     if (OFFLINE_QUEUEABLE_PUSH_CHANNELS.has(channel)) {
       offlinePushQueue.enqueue(dst, {
         channel,
@@ -1665,7 +1695,18 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
     }
   }
   for (const dst of liveTargets) {
-    const targetPayload = payloadFor(dst);
+    let targetPayload = payloadFor(dst);
+    if (deferred && historySessionId && subscriptions.hasHistoryView(dst, historySessionId)) {
+      const folded = subscriptions.projectsHistoryDetails(dst, historySessionId);
+      const event = (remotePayload as { event?: { type?: string; data?: { stage?: string } } })?.event;
+      // A folded duration ticks locally. Token deltas do not change its summary.
+      if (!folded || event?.type !== 'thinking' || event.data?.stage !== 'delta') stageHistoryNotice(dst, historySessionId, ownerStamp);
+      if (folded) {
+        const boundary = channel === MAKER_PUSH.EVENT ? deferredToolBoundary(remotePayload) : null;
+        if (boundary === null) continue;
+        targetPayload = boundary;
+      }
+    }
     const willBatch = batchEligibleSessionId !== null && batchTargets!.has(dst)
       && estimateMakerEventBytes(targetPayload) < MAKER_EVENT_BATCH_MAX_BYTES;
     // 跨 channel 保序(review 两轮):**不入批**的帧必须排在该会话已暂存的事件
@@ -2581,6 +2622,16 @@ function sanitizeMessageInvokeResult(
   result: InvokeResultPayload,
   channel: string | undefined,
 ): InvokeResultPayload {
+  if (result.ok && (channel === 'local-db:messages:view' || channel === 'local-db:messages:work-details')) {
+    const page = result.result as { items?: Array<{ type: string; messages?: unknown[] }>; messages?: unknown[] };
+    const sanitize = (message: unknown) => message && typeof message === 'object' && !Array.isArray(message)
+      ? stripRecoveryCheckpointFromMessage(message as Record<string, unknown>) : message;
+    return { ok: true, result: { ...page,
+      ...(page.messages ? { messages: page.messages.map(sanitize) } : {}),
+      ...(page.items ? { items: page.items.map((item) => item.messages
+        ? { ...item, messages: item.messages.map(sanitize) } : item) } : {}),
+    } };
+  }
   if (!channel || !REMOTE_MESSAGE_CHANNELS.has(channel)) return result;
   if (!result.ok || !Array.isArray(result.result)) return result;
   let changed = false;
@@ -2905,6 +2956,23 @@ function compactInvokeResultForDeviceLink(
   frame: { dst: string; requestId: string },
   args?: unknown[],
 ): InvokeResultPayload | null {
+  if (result.ok && (channel === 'local-db:messages:view' || channel === 'local-db:messages:work-details')
+    && result.result && typeof result.result === 'object') {
+    const page = result.result as Record<string, unknown>;
+    const mapPage = (map: (row: unknown) => unknown): InvokeResultPayload => ({ ok: true, result: {
+      ...page,
+      ...(Array.isArray(page.messages) ? { messages: page.messages.map(map) } : {}),
+      ...(Array.isArray(page.items) ? { items: page.items.map((item) => {
+        const value = item as Record<string, unknown>;
+        return value.type === 'messages' && Array.isArray(value.messages)
+          ? { ...value, messages: value.messages.map(map) } : item;
+      }) } : {}),
+    } });
+    const compact = mapPage(compactRemoteMessageForDeviceLink);
+    if (fitsInvokeResultFrame(frame, compact)) return compact;
+    const placeholder = mapPage((row) => forceCompactRemoteMessageContent(compactRemoteMessageForDeviceLink(row)));
+    return fitsInvokeResultFrame(frame, placeholder) ? placeholder : null;
+  }
   if (!channel || !REMOTE_MESSAGE_CHANNELS.has(channel)) return null;
   if (!result.ok || !Array.isArray(result.result)) return null;
   const compactMessages = result.result.map(compactRemoteMessageForDeviceLink);

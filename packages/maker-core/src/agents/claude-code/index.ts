@@ -138,6 +138,7 @@ import {
   appendAutoReviewUserIntent,
   isAutoReviewUnavailableMetadata,
   isSystemPermissionDenialReason,
+  formatPermissionDenial,
   resolveAutoReviewDecision,
   toolAutoReviewAction,
   type AutoReviewDecision,
@@ -2244,7 +2245,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // (审阅器故障已在 resolveAutoReviewDecision 降级成 ask,不会走到这条分支。)
           return {
             behavior: 'deny',
-            message: autoDecision.reason ?? 'Cindy Auto Review blocked this action. Choose a safer alternative.',
+            message: formatPermissionDenial('auto', autoDecision.reason),
           };
         } else {
           // AI `ask` and deterministic red-line verdicts are never persisted.
@@ -2325,7 +2326,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         }
         return out;
       }
-      return { behavior: 'deny', message: decision.reason ?? 'denied by user' };
+      return { behavior: 'deny', message: formatPermissionDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason) };
     };
 
     // ── thinking display 配置（与 vendor/claude/runtime.ts:121-126 等价） ─────
@@ -3451,7 +3452,7 @@ export class ClaudeCodeAgent extends BaseAgent {
                 return {
                   kind: 'permission',
                   behavior: 'deny',
-                  reason: autoDecision.reason ?? 'Cindy Auto Review blocked this action. Choose a safer alternative.',
+                  reason: formatPermissionDenial('auto', autoDecision.reason),
                 };
               }
               // 与本地分支同口径:故障降级来的 ask 提示一次,让用户知道为何开始被问。
@@ -3506,7 +3507,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               behavior: decision.behavior,
               updatedInput: decision.updatedInput,
               permissionUpdates: remoteForcePrompt ? undefined : decision.permissionUpdates,
-              reason: decision.reason,
+              reason: decision.behavior === 'deny'
+                ? formatPermissionDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason)
+                : decision.reason,
             };
           },
           onSubagentModelAccessRequest: async (rawParams: unknown) => {

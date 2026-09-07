@@ -1,5 +1,7 @@
 import {
   CodexResumePreparationBlockedError,
+  AUTO_REVIEW_SOURCE_CONTENT,
+  AUTO_REVIEW_USER_INTENT,
   MAIN_OWNED_SEND_CONTEXT,
   type AgentKind,
   type MainOwnedSendContext,
@@ -34,6 +36,7 @@ import {
   validateExtraDirs,
 } from './extraDirsValidator.js';
 import type { MakerSessionCreateOpts } from './sessionRequest.js';
+import { currentAutoReviewResourceIntent, readAutoReviewUserText, restoreAutoReviewUserIntent, type AutoReviewHistoryMessage } from './autoReviewUserIntent.js';
 
 type CreateOpts = MakerSessionCreateOpts;
 
@@ -136,6 +139,16 @@ export function stampTrustedDesktopQueuedOrigin(
   preserveSemanticOrigin = false,
 ): AgentInputQueuedMessage {
   const explicitUserItem = withoutDesktopAuthorization(item, preserveSemanticOrigin);
+  // This function is called only after trusted input IPC validation, including queue edits.
+  // Preserve the user's text independently of any later plugin rewrite, without granting
+  // mobile inputs the separate Pi desktop-command privilege.
+  delete explicitUserItem.autoReviewUserText;
+  const ordinary = !item.autoResume && item.originalSyntheticTrigger === undefined
+    && (!item.origin || (item.origin as { kind: string }).kind === 'desktop');
+  // Keep the complete input until the shared atomic history budget is applied.
+  // Pre-compacting a revocation would leave older grants beside an omission marker.
+  if (ordinary) explicitUserItem.autoReviewUserText =
+    readAutoReviewUserText(item.persistedContent) ?? currentAutoReviewResourceIntent(item.persistedContent, item.text);
   if (deviceLinkInvoke || !canTrustDesktopPiCommand(item)) return explicitUserItem;
   const receipt: TrustedDesktopPiCommandSnapshot = {
     version: 1,
@@ -192,6 +205,7 @@ export function revokeTrustedDesktopQueuedOrigin(item: AgentInputQueuedMessage):
 }
 
 type MakerSendOptions = {
+  readonly [AUTO_REVIEW_SOURCE_CONTENT]?: UserMessage['content'];
   readonly [MAIN_OWNED_SEND_CONTEXT]?: MainOwnedSendContext;
   messageUuid?: string;
   userName?: string;
@@ -298,6 +312,8 @@ export interface MakerSendTransactionDeps {
   getSession(sessionId: string): MakerSendTransactionSession | undefined | null;
   closeSession(sessionId: string): Promise<void>;
   getSessionMeta(sessionId: string): Promise<{ title?: string } | null>;
+  /** The same clear/rewind-filtered transcript used for native context handoffs. */
+  readAutoReviewHistory?(sessionId: string): Promise<AutoReviewHistoryMessage[]>;
   ensureRemoteReadyForSessionStart(params: {
     session?: { agentKind: AgentKind; remoteHostId: string | null } | null;
     createOpts?: unknown;
@@ -1096,6 +1112,28 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           ? { origin: { kind: 'desktop' as const }, rawChannelText: trustedDesktopQueueReceipt.text }
           : undefined;
       const mainOwnedSendContext = so[MAIN_OWNED_SEND_CONTEXT] ?? directDesktopContext;
+      // Capture before handoff, reconciliation and mobile notes. Identity-bearing channels
+      // still use MAIN_OWNED_SEND_CONTEXT.rawChannelText in core; do not mint owner identity.
+      const trustedUserText = typeof so[AUTO_REVIEW_SOURCE_CONTENT] === 'string'
+        ? so[AUTO_REVIEW_SOURCE_CONTENT] as string
+        : mainOwnedSendContext?.origin.kind === 'desktop' ? mainOwnedSendContext.rawChannelText : undefined;
+      const autoReviewSourceContent = so[AUTO_REVIEW_SOURCE_CONTENT]
+        ?? (typeof normalized === 'string' ? normalized : normalized.content) as UserMessage['content'];
+      let restoredAutoReviewIntent: string | undefined;
+      if (isOrdinaryUserTurn && trustedUserText !== undefined
+        && (!mainOwnedSendContext || mainOwnedSendContext.origin.kind === 'desktop')) {
+        let history: AutoReviewHistoryMessage[] = [];
+        try {
+          history = await deps.readAutoReviewHistory?.(sessionId) ?? [];
+        } catch {
+          deps.log.warn('auto-review user history unavailable', { sessionId });
+        }
+        restoredAutoReviewIntent = restoreAutoReviewUserIntent(history, {
+          clientId: persistUserMessage?.clientId ?? '',
+          content: persistUserMessage?.content ?? { text: trustedUserText },
+          authoredText: trustedUserText,
+        });
+      }
       const topLevelClearBoundary = normalizeExpectedClearBoundary(so.expectedClearBoundaryMs);
       const topLevelInputGeneration = normalizeExpectedInputGeneration(so.expectedInputGeneration);
       if (
@@ -1188,6 +1226,10 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           ? Math.max(0, Date.now() - 1)
           : null;
         const sendResult = await sess.send(outgoing as never, {
+          [AUTO_REVIEW_SOURCE_CONTENT]: autoReviewSourceContent,
+          ...(restoredAutoReviewIntent !== undefined
+            ? { [AUTO_REVIEW_USER_INTENT]: restoredAutoReviewIntent }
+            : {}),
           logTitle: meta?.title,
           messageUuid: so.messageUuid,
           userName: so.userName,
@@ -1257,6 +1299,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
                       content: persistUserMessage.content,
                       agentMeta: {
                         uuid: so.messageUuid,
+                        ...(trustedUserText !== undefined ? { autoReviewUserText: trustedUserText } : {}),
                         sdkSessionId: persistUserMessage.sdkSessionId,
                         ...(persistUserMessage.delivery
                           ? { delivery: persistUserMessage.delivery }

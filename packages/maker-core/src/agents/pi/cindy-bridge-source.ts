@@ -77,6 +77,15 @@ const TURN_CHANGE_CAPTURE_TITLE = 'cindy:turn-change-capture';
 const PERMISSION_ALLOW = 'allow';
 const PERMISSION_USER_DENY = 'user-deny';
 const PERMISSION_AUTO_REVIEW_DENY = 'auto-review-deny';
+function permissionDenialReason(decision: string | undefined): string {
+  const source = decision?.split(':', 1)[0];
+  const label = source === PERMISSION_AUTO_REVIEW_DENY ? 'Cindy Auto-review denied this tool call'
+    : source === PERMISSION_USER_DENY ? 'User denied this tool call via Cindy'
+      : 'Cindy could not approve this tool call';
+  const known = source === PERMISSION_AUTO_REVIEW_DENY || source === PERMISSION_USER_DENY || source === 'system-deny';
+  const detail = known && decision?.includes(':') ? decision.slice(decision.indexOf(':') + 1).trim().slice(0, 240) : '';
+  return detail ? label + ': ' + detail : label + '.';
+}
 const READONLY_BUILTINS = new Set(['read', 'grep', 'find', 'ls']);
 const FILE_WRITE_BUILTINS = new Set(['edit', 'write']);
 function isCindyShellTool(toolName: unknown): boolean {
@@ -3971,11 +3980,7 @@ export default async function cindyBridge(pi: any) {
     if (decision !== PERMISSION_ALLOW) {
       return {
         block: true,
-        reason: decision === PERMISSION_USER_DENY
-          ? 'User denied this tool call via Cindy.'
-          : decision === PERMISSION_AUTO_REVIEW_DENY
-            ? 'Cindy Auto-review denied this tool call.'
-            : 'Cindy could not approve this tool call.',
+        reason: permissionDenialReason(decision),
       };
     }
     if (

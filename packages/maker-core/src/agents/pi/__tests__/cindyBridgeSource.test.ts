@@ -1266,9 +1266,22 @@ describe('cindy-bridge extension source', () => {
     expect(source).toContain('await ctx.ui.input(');
     expect(source).toContain("const PERMISSION_USER_DENY = 'user-deny'");
     expect(source).toContain("const PERMISSION_AUTO_REVIEW_DENY = 'auto-review-deny'");
-    expect(source).toContain('User denied this tool call via Cindy.');
-    expect(source).toContain('Cindy Auto-review denied this tool call.');
-    expect(source).toContain('Cindy could not approve this tool call.');
+    expect(source).toContain('User denied this tool call via Cindy');
+    expect(source).toContain('Cindy Auto-review denied this tool call');
+    expect(source).toContain('Cindy could not approve this tool call');
+  });
+
+  it('returns the bounded Auto reason to Pi while retaining legacy denial decoding', () => {
+    const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+    const fragment = source.slice(source.indexOf('const PERMISSION_ALLOW'), source.indexOf('const READONLY_BUILTINS'));
+    const decode = runInNewContext(ts.transpile(fragment + '\npermissionDenialReason;', { target: ts.ScriptTarget.ES2022 })) as (value?: string) => string;
+    expect(decode('auto-review-deny:Only inspect; do not deploy.')).toBe('Cindy Auto-review denied this tool call: Only inspect; do not deploy.');
+    expect(decode('auto-review-deny')).toBe('Cindy Auto-review denied this tool call.');
+    expect(decode('user-deny')).toBe('User denied this tool call via Cindy.');
+    expect(decode('user-deny:Do not publish.')).toBe('User denied this tool call via Cindy: Do not publish.');
+    expect(decode('system-deny:session_closed')).toBe('Cindy could not approve this tool call: session_closed');
+    expect(decode(undefined)).toBe('Cindy could not approve this tool call.');
+    expect(decode('auto-review-deny:' + 'x'.repeat(500))).toBe('Cindy Auto-review denied this tool call: ' + 'x'.repeat(240));
   });
 
   it('normalizes bash timeout at the execute boundary without a host-side timer', () => {

@@ -95,6 +95,7 @@ import {
   extractAutoReviewUserIntent,
   appendAutoReviewUserIntent,
   isSystemPermissionDenialReason,
+  formatPermissionDenial,
   resolveAutoReviewDecision,
   toolAutoReviewAction,
   type AutoReviewDecision,
@@ -6510,7 +6511,7 @@ export class CodexAgent extends BaseAgent {
     // 自动 resolve (allow/deny), 同时 emit interaction_dismissed 让 dialog 自动关。
     // 不维护 pending Map 的话, 切 mode 不影响挂起 dialog → UX bug。
     interface PendingEntry {
-      resolve: (decision: ApprovalDecision) => void;
+      resolve: (decision: ApprovalDecision, reason?: string) => void;
       kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation';
       settled: boolean;
       /** AI wait is cancellable, but mode changes are handled after review. */
@@ -6764,9 +6765,12 @@ export class CodexAgent extends BaseAgent {
         autoReviewAction?: ReviewableAction;
         itemId?: string;
       },
-    ): Promise<ApprovalDecision> {
+    ): Promise<{ decision: ApprovalDecision; reason?: string }> {
+      // Reasons stay inside Cindy for Host-owned dynamic tool results. Stock Codex
+      // approval responses cannot carry them into native exec/patch tool output.
       const timingPauseId = `approval:${kind}:${requestId}`;
-      return withCodexGenerationPaused(requestThreadId, turnId, timingPauseId, async () => {
+      let denialReason = formatPermissionDenial('system', 'Approval was cancelled or became stale.');
+      const decision = await withCodexGenerationPaused<ApprovalDecision>(requestThreadId, turnId, timingPauseId, async () => {
         let forcePrompt =
           opts?.forcePrompt === true ||
           (req.kind === 'permission' &&
@@ -6796,7 +6800,10 @@ export class CodexAgent extends BaseAgent {
           const descendant = Boolean(requestThreadId && requestThreadId !== threadId);
           const reviewEntry: PendingEntry = {
             kind, turnId, settled: false, reviewing: true,
-            resolve: () => { reviewEntry.settled = true; },
+            resolve: (_decision, reason) => {
+              if (reason) denialReason = formatPermissionDenial('system', reason);
+              reviewEntry.settled = true;
+            },
             ...(opts?.itemId ? { itemId: opts.itemId } : {}),
           };
           pendingApprovals.set(requestId, reviewEntry);
@@ -6836,6 +6843,7 @@ export class CodexAgent extends BaseAgent {
           } else if (decision.verdict === 'allow') {
             return 'accept';
           } else if (decision.verdict === 'block') {
+            denialReason = formatPermissionDenial('auto', decision.reason);
             // 模型判定动作有更安全的做法 —— 按 Auto 本意保持静默。
             // (审阅器故障已在 resolveAutoReviewDecision 降级成 ask,不会走到这里。)
             return 'decline';
@@ -6859,7 +6867,10 @@ export class CodexAgent extends BaseAgent {
             : approvalRequest;
         return await new Promise<ApprovalDecision>((resolve) => {
           const entry: PendingEntry = {
-            resolve,
+            resolve: (decision, reason) => {
+              if (reason) denialReason = formatPermissionDenial('system', reason);
+              resolve(decision);
+            },
             kind,
             settled: false,
             turnId,
@@ -6878,9 +6889,11 @@ export class CodexAgent extends BaseAgent {
           };
           dispatchInteraction(routedRequest)
             .then((decision) => {
+              if (entry.settled) return;
               if (decision.kind !== 'permission') {
                 log.warn('unexpected non-permission decision → decline', { kind: decision.kind });
                 if (unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
+                denialReason = formatPermissionDenial('system', 'Approval returned an unexpected response.');
                 finalize('decline');
                 return;
               }
@@ -6891,15 +6904,21 @@ export class CodexAgent extends BaseAgent {
               ) {
                 autoReviewConfirmUndeliveredNotice.notify();
               }
+              if (decision.behavior === 'deny') {
+                denialReason = formatPermissionDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason);
+              }
               finalize(mapPermissionDecisionToApproval(decision));
             })
             .catch((e) => {
+              if (entry.settled) return;
               log.error('dispatchInteraction threw → decline', { requestId, message: (e as Error).message });
               if (unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
+              denialReason = formatPermissionDenial('system', 'Approval could not be completed.');
               finalize('decline');
             });
         });
       });
+      return { decision, ...(decision === 'decline' ? { reason: denialReason } : {}) };
     }
 
     /**
@@ -6923,7 +6942,7 @@ export class CodexAgent extends BaseAgent {
         if (effectiveResolveAs === 'deny' && entry.unavailableHandoff) {
           autoReviewConfirmUndeliveredNotice.notify();
         }
-        entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline');
+        entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline', reason);
         eventQueue.push({
           type: 'interaction_dismissed',
           data: { requestId, reason, resolvedAs: effectiveResolveAs },
@@ -7865,7 +7884,7 @@ export class CodexAgent extends BaseAgent {
         },
         itemId: params.itemId,
       });
-      return { decision };
+      return { decision: decision.decision };
     };
 
     const fileChangeApproval = async (
@@ -7911,7 +7930,7 @@ export class CodexAgent extends BaseAgent {
           : { kind: 'file-write', path: params.grantRoot ?? undefined },
         itemId: params.itemId,
       });
-      return { decision };
+      return { decision: decision.decision };
     };
 
     function recordFromUnknown(value: unknown): Record<string, unknown> | null {
@@ -8210,15 +8229,15 @@ export class CodexAgent extends BaseAgent {
         },
       );
 
-      if (decision === 'accept') {
+      if (decision.decision === 'accept') {
         return { action: 'accept', content: null, _meta: null };
       }
-      if (decision === 'acceptForSession') {
+      if (decision.decision === 'acceptForSession') {
         return approvalPolicy === 'prompt-each-time'
           ? { action: 'accept', content: null, _meta: null }
           : { action: 'accept', content: null, _meta: { persist: 'session' } };
       }
-      if (decision === 'cancel') {
+      if (decision.decision === 'cancel') {
         return { action: 'cancel', content: null, _meta: null };
       }
       return { action: 'decline', content: null, _meta: null };
@@ -8247,10 +8266,10 @@ export class CodexAgent extends BaseAgent {
         suggestions: codexSessionApprovalSuggestions(),
         metadata: params.reason ? { reason: params.reason } : undefined,
       }, { itemId: params.itemId ?? undefined });
-      if (decision === 'accept') {
+      if (decision.decision === 'accept') {
         return { permissions: params.permissions as Record<string, unknown>, scope: 'turn' };
       }
-      if (decision === 'acceptForSession') {
+      if (decision.decision === 'acceptForSession') {
         return { permissions: params.permissions as Record<string, unknown>, scope: 'session' };
       }
       return { permissions: {}, scope: 'turn' };
@@ -8792,9 +8811,9 @@ export class CodexAgent extends BaseAgent {
             ...(toolUseId ? { itemId: toolUseId } : {}),
           },
         );
-        if (decision !== 'accept' && decision !== 'acceptForSession') {
+        if (decision.decision !== 'accept' && decision.decision !== 'acceptForSession') {
           return {
-            contentItems: [{ type: 'inputText', text: 'The user declined this tool call.' }],
+            contentItems: [{ type: 'inputText', text: decision.reason ?? formatPermissionDenial('system') }],
             success: false,
           };
         }

@@ -8,6 +8,7 @@ const translate = (key: string, opts?: Record<string, unknown>) =>
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 
 const mocks = vi.hoisted(() => ({
+  BotModelSelectionRequiredError: class extends Error {},
   addBotProfileAndWait: vi.fn(),
   navigate: vi.fn(),
   onboarding: false,
@@ -16,10 +17,16 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/hooks/useProviderOnboarding', () => ({ useProviderOnboarding: () => ({ visible: mocks.onboarding }) }));
 vi.mock('@/components/onboarding/ConnectProviderCard', () => ({ ConnectProviderCard: () => <div>Shared provider setup</div> }));
 vi.mock('../botStore', () => ({
+  BotModelSelectionRequiredError: mocks.BotModelSelectionRequiredError,
   addBotProfileAndWait: mocks.addBotProfileAndWait,
   useBotProfiles: () => mocks.profiles,
   refreshBotProfiles: vi.fn(),
   retryBotInvitation: vi.fn(),
+}));
+vi.mock('../BotModelChainEditor', () => ({
+  BotModelChainEditor: ({ onChange }: { onChange: (routes: unknown[]) => void }) => (
+    <button type="button" onClick={() => onChange([{ harness: 'pi', providerId: 'custom', model: 'custom-model', effort: 'high', fastMode: false }])}>choose-custom-model</button>
+  ),
 }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => mocks.navigate }));
 
@@ -36,6 +43,19 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('BotRosterView — 唯一的伙伴创建界面', () => {
+  it('recovers an empty default chain through model selection before creating', async () => {
+    mocks.addBotProfileAndWait.mockRejectedValueOnce(new mocks.BotModelSelectionRequiredError());
+    render(<BotRosterView />);
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    await screen.findByText('choose-custom-model');
+    expect((screen.getByRole('button', { name: 'bots.roster.create' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('choose-custom-model'));
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    await waitFor(() => expect(mocks.addBotProfileAndWait).toHaveBeenCalledTimes(2));
+    expect(mocks.addBotProfileAndWait.mock.calls[1][0].capabilities.modelChainOverride[0]).toMatchObject({ model: 'custom-model', providerId: 'custom' });
+  });
+
   it('uses the shared connection guide before creating an unconfigured teammate', () => {
     mocks.onboarding = true;
     const view = render(<BotRosterView />);

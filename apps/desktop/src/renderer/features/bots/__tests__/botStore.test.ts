@@ -4,6 +4,7 @@ import type { CatalogModel, ProviderView } from '@cindy/model-providers';
 import {
   addBotProfile,
   addBotProfileAndWait,
+  BotModelSelectionRequiredError,
   duplicateBotProfile,
   getBotProfiles,
   removeBotProfile,
@@ -172,6 +173,12 @@ describe('bot profile store', () => {
       providerId: 'openai',
       effort: 'medium',
     });
+  });
+
+  it('does not create an empty profile when a connected source has no recommended model', async () => {
+    setProviders([piProvider('custom', true, [piModel('custom-model')])]);
+    await expect(addBotProfileAndWait({ name: 'Needs model', description: '' }))
+      .rejects.toBeInstanceOf(BotModelSelectionRequiredError);
   });
 
   it('leaves the model empty when no source is configured', () => {

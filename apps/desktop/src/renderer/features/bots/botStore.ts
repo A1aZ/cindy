@@ -798,6 +798,8 @@ export function addBotProfile(input: CreateBotProfileInput): BotProfile {
   return bot;
 }
 
+export class BotModelSelectionRequiredError extends Error {}
+
 /** Create the local projection and wait until main/SQLite owns the profile. */
 export async function addBotProfileAndWait(input: CreateBotProfileInput): Promise<BotProfile> {
   const owner = getDataOwnerGeneration();
@@ -813,6 +815,12 @@ export async function addBotProfileAndWait(input: CreateBotProfileInput): Promis
     globalModelChainCache = normalizeBotModelChain(state.modelChain);
   }
   assertCurrentOwner(owner);
+  const requested = input.capabilities;
+  const explicit = normalizeBotModelChain(requested?.modelChainOverride, requested?.modelOverride
+    ? { harness: requested.harness, ...requested.modelOverride } : null);
+  if (!explicit.length && !getEffectiveBotModelChain().length) {
+    throw new BotModelSelectionRequiredError();
+  }
   const bot = addBotProfile(input);
   const api = botsApi();
   if (!api) return bot;

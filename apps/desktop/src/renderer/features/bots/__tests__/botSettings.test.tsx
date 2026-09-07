@@ -18,6 +18,8 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   initialSearch: '' as string,
+  profiles: [] as BotProfile[],
+  params: {} as { botId?: string },
   updateBotProfile: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({
     id: 'bot-1',
     currentVersion: 1,
@@ -35,7 +37,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
   const { useCallback, useState } = await import('react');
   return {
     ...actual,
-    useParams: () => ({}),
+    useParams: () => mocks.params,
     useNavigate: () => mocks.navigate,
     useSearchParams: () => {
       const [params, setParams] = useState(() => new URLSearchParams(mocks.initialSearch));
@@ -56,7 +58,8 @@ vi.mock('../botStore', () => ({
   updateBotProfile: mocks.updateBotProfile,
   chooseBotAvatar: mocks.chooseBotAvatar,
   setCanonicalBotSession: vi.fn(),
-  useBotProfiles: () => [],
+  useBotProfiles: () => mocks.profiles,
+  canonicalBotSessionId: (bot: BotProfile) => bot.canonicalSessionId,
   getEffectiveBotModelChain: () => [
     { harness: 'claude', model: 'claude-x', providerId: null, effort: 'medium', fastMode: false },
   ],
@@ -65,7 +68,7 @@ vi.mock('../BotLifecycleSettings', () => ({
   BotLifecycleSettings: () => <div data-testid="bot-lifecycle-settings" />,
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: () => <div data-testid="model-selector" />,
+  ModelSelector: ({ onUnifiedSelect }: { onUnifiedSelect: (selection: unknown) => void }) => <button data-testid="model-selector" onClick={() => onUnifiedSelect({ engine: 'pi', providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>select-model</button>,
 }));
 vi.mock('@/hooks/useAvailableAgents', () => ({
   useAvailableAgents: () => ({ availableVendors: new Set(['cc', 'codex', 'pi']), loaded: true }),
@@ -81,7 +84,9 @@ vi.mock('@/state/newMakerDraft', () => ({
   }),
 }));
 
-import { BotSettings } from '../BotsHomeView';
+vi.mock('../../feature-context', () => ({ useRegisterContentHeader: () => undefined }));
+
+import { BotsHomeView, BotSettings } from '../BotsHomeView';
 
 function capabilities(overrides: Partial<BotCapabilities> = {}): BotCapabilities {
   return {
@@ -158,6 +163,8 @@ beforeEach(() => {
   mocks.openPath.mockReset();
   mocks.openPath.mockResolvedValue({ success: true });
   mocks.initialSearch = '';
+  mocks.profiles = [];
+  mocks.params = {};
   (window as unknown as { electronAPI: unknown }).electronAPI = { openPath: mocks.openPath };
 });
 
@@ -167,6 +174,21 @@ afterEach(() => {
 });
 
 describe('Bot settings profile consolidation', () => {
+  it('opens a model picker for an existing empty-chain bot without retrying creation', async () => {
+    const emptyBot = bot({ capabilities: capabilities({ modelChain: [], model: '' }), sessions: [], canonicalSessionId: undefined });
+    mocks.profiles = [emptyBot];
+    mocks.params = { botId: emptyBot.id };
+    const createCanonicalSession = vi.fn();
+    Object.assign(window.electronAPI, { localDb: { bots: { createCanonicalSession } } });
+    render(<BotsHomeView />);
+    expect(createCanonicalSession).not.toHaveBeenCalled();
+    expect(screen.queryByText('commonUi.retry')).toBeNull();
+    fireEvent.click(screen.getByTestId('model-selector'));
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenCalledWith(emptyBot.id, expect.objectContaining({
+      capabilities: expect.objectContaining({ modelChainOverride: [expect.objectContaining({ model: 'custom-model', providerId: 'custom' })] }),
+    })));
+  });
+
   it('shows one inline basic-information editor and no legacy profile/persona/growth editors', () => {
     renderSettings();
 

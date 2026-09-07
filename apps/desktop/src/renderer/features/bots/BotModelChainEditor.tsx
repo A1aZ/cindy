@@ -52,7 +52,8 @@ export function BotModelChainEditor({
     .map(agentKindFor);
 
   const replace = (index: number, patch: Partial<BotModelRoute>) => {
-    onChange(routes.map((route, at) => (at === index ? { ...route, ...patch } : route)));
+    const editable = routes.length ? routes : [{ harness: 'pi' as const, model: '', providerId: null, effort: '', fastMode: false }];
+    onChange(editable.map((route, at) => (at === index ? { ...route, ...patch } : route)));
   };
   const move = (index: number, delta: -1 | 1) => {
     const target = index + delta;
@@ -112,7 +113,7 @@ export function BotModelChainEditor({
         {label ? (
           <span className="shrink-0 text-12 text-[var(--text-secondary)]">{label}</span>
         ) : null}
-        {routes[0] ? picker(routes[0], 0) : null}
+        {picker(routes[0] ?? { harness: 'pi', model: '', providerId: null, effort: '', fastMode: false }, 0)}
       </div>
       <details
         className="mt-1 text-12 text-[var(--text-tertiary)]"

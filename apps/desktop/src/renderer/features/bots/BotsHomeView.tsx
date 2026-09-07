@@ -493,7 +493,7 @@ export function BotsHomeView() {
   useRegisterContentHeader(headerContent);
 
   useEffect(() => {
-    if (providerOnboarding.visible) return;
+    if (providerOnboarding.visible || selectedBot?.capabilities.modelChain.length === 0) return;
     if (selectedBot?.invitation && selectedBot.invitation.stage !== 'ready') return;
     if (!selectedBot || shouldDeferCanonicalBotSessionNavigation({ settingsOpen, addRequested }))
       return;
@@ -606,6 +606,26 @@ export function BotsHomeView() {
           role="status"
           aria-label={t('ccAgent.common.loading')}
         />
+      </main>
+    );
+  }
+
+  if (selectedBot.capabilities.modelChain.length === 0) {
+    return (
+      <main className="flex h-full flex-col items-center justify-center gap-3 px-6" role="main">
+        <BotModelChainEditor
+          label={t('bots.settingsTabs.model')}
+          value={[]}
+          onChange={(modelChain) => {
+            if (!modelChain[0]?.model) return;
+            setCreateSessionError(null);
+            void updateBotProfile(selectedBot.id, {
+              capabilities: { ...selectedBot.capabilities, ...modelChain[0], modelChain,
+                modelChainOverride: modelChain },
+            }).catch(setCreateSessionError);
+          }}
+        />
+        {createSessionError ? <p role="alert" className="text-12 text-[var(--text-danger)]">{t('bots.createWizard.createFailed')}</p> : null}
       </main>
     );
   }

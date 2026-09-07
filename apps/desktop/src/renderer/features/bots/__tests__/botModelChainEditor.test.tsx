@@ -112,6 +112,13 @@ describe('BotModelChainEditor', () => {
     });
   });
 
+  it('allows selecting the first route when the default chain is empty', () => {
+    const onChange = vi.fn();
+    render(<BotModelChainEditor value={[]} onChange={onChange} />);
+    fireEvent.click(screen.getByText('choose-official-codex-model'));
+    expect(onChange).toHaveBeenCalledWith([{ harness: 'codex', providerId: 'openai', model: 'gpt-5.6-sol', effort: 'medium', fastMode: true }]);
+  });
+
   it('writes depth and fast mode to the selected route without changing its model', () => {
     const route = { harness: 'codex' as const, model: 'gpt-5.6-sol',
       providerId: 'openai', effort: 'medium', fastMode: false };

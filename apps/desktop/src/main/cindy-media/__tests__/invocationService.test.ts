@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SsrFBlockedError } from '@cindy/browser-control-runtime/ssrf-runtime';
 
@@ -718,9 +719,10 @@ describe('Cindy Core media invocation state and security boundary', () => {
       expect(mocks.rows.get(invocationId)).toMatchObject({ state: 'pending', responseJson: JSON.stringify(payload) });
     }
     expect(mocks.ingestMedia).toHaveBeenCalledTimes(3);
-    const firstBytes = mocks.ingestMedia.mock.calls[0][0].buffer;
-    expect(firstBytes).toEqual(PNG);
-    expect(mocks.ingestMedia.mock.calls.every(([input]) => input.buffer === firstBytes)).toBe(true);
+    const firstFile = mocks.ingestMedia.mock.calls[0][0].filePath;
+    expect(firstFile).toEqual(expect.any(String));
+    expect(mocks.ingestMedia.mock.calls.every(([input]) => input.filePath === firstFile && !input.buffer)).toBe(true);
+    await expect(fs.stat(firstFile)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(mocks.guardedOutboundFetch).toHaveBeenCalledOnce();
     expect(mocks.confirm).toHaveBeenCalledOnce();
     expect(mocks.outboundFetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
@@ -1282,39 +1284,34 @@ describe('Cindy Core media invocation state and security boundary', () => {
     expect(mocks.release).toHaveBeenCalledTimes(2);
   });
 
-  it('用户未允许更大文件时先释放连接再停止，不自动重试', async () => {
-    mocks.confirm.mockImplementation(async ({ reasons }) => !reasons.includes('size'));
-    const cancel = vi.fn();
-    mocks.guide.mockResolvedValue(
-      resolvedGuide(
-        operation({
-          mode: 'sync',
-          media: [
-            {
-              path: ['data'],
-              encoding: 'url',
-              kind: 'image',
-              allowedUrlHosts: ['old.example.com'],
-            },
-          ],
-        }),
-      ),
-    );
+  it('超过原图片大小限制的 URL 结果直接分块落盘入库，只审批来源一次', async () => {
+    mocks.guide.mockResolvedValue(resolvedGuide(operation({
+      mode: 'sync',
+      media: [{ path: ['data'], encoding: 'url', kind: 'image', allowedUrlHosts: ['old.example.com'] }],
+    })));
+    const chunk = Buffer.alloc(64 * 1024);
+    PNG.copy(chunk);
+    let remaining = 33 * 16;
     mocks.outboundFetch
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ data: 'https://cdn.example.com/large' })),
-      )
-      .mockResolvedValueOnce(
-        new Response(new ReadableStream({ cancel }), {
-          headers: { 'content-length': String(33 * 1024 * 1024) },
-        }),
-      );
-    await expect(
-      callCindyMedia({ action: 'request', invocationId: await prepare(), body: {} }),
-    ).resolves.toMatchObject({ ok: false, errorCode: 'MEDIA_DOWNLOAD_DENIED' });
-    expect(cancel).toHaveBeenCalledOnce();
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: 'https://cdn.example.com/large' })))
+      .mockResolvedValueOnce(new Response(new ReadableStream({
+        pull(controller) {
+          if (remaining-- > 0) controller.enqueue(chunk);
+          else controller.close();
+        },
+      })));
+    mocks.ingestMedia.mockImplementationOnce(async ({ filePath, buffer, mimeType }) => {
+      expect(buffer).toBeUndefined();
+      expect(mimeType).toBe('image/png');
+      expect((await fs.stat(filePath)).size).toBe(33 * 1024 * 1024);
+      return { url: 'cindy-media://blobs/' + 'a'.repeat(64) + '.png' };
+    });
+    await expect(callCindyMedia({ action: 'request', invocationId: await prepare(), body: {} }))
+      .resolves.toMatchObject({ ok: true, status: 'complete' });
+    expect(mocks.confirm).toHaveBeenCalledOnce();
+    expect(mocks.confirm.mock.calls[0][0].reasons).toEqual(['source']);
     expect(mocks.release).toHaveBeenCalledOnce();
-    expect(mocks.ingestMedia).not.toHaveBeenCalled();
+    await expect(fs.stat(mocks.ingestMedia.mock.calls[0][0].filePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('DNS 等待期间切号会在 dispatch 前拒绝领取', async () => {

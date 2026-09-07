@@ -8002,7 +8002,6 @@
       "port": "This address uses a non-default network port. Confirm access to that port.",
       "credentials": "This download address includes login details. If allowed, those details will be sent only to this address.",
       "network": "This address points to this device, a local network, or a reserved network. Access may reach internal services on the device.",
-      "size": "The file exceeds the default download size. Allow downloading up to {{bytes}} bytes this time, which may use significant memory and disk space.",
       "allow": "Allow this download",
       "defer": "Not now"
     },

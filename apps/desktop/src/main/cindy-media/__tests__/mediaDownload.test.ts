@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { SsrFBlockedError } from '@cindy/browser-control-runtime/ssrf-runtime';
 import { downloadMediaResult, type MediaDownloadContext } from '../mediaDownload.js';
 
@@ -12,8 +14,14 @@ function response(body: BodyInit | null = bytes, init?: ResponseInit) {
 function context(): MediaDownloadContext & { confirm: ReturnType<typeof vi.fn> } {
   return { assertActive: vi.fn(), approvals: new Set(), confirm: vi.fn(async () => true) };
 }
-function download(ctx?: MediaDownloadContext, raw = 'https://new.example.com/video?signature=secret') {
-  return downloadMediaResult({ raw, allowedHosts: ['known.example.com'], maxBytes: 1024, context: ctx, assertActive: vi.fn() });
+const downloads: Awaited<ReturnType<typeof downloadMediaResult>>[] = [];
+async function download(ctx?: MediaDownloadContext, raw = 'https://new.example.com/video?signature=secret') {
+  const result = await downloadMediaResult({ raw, allowedHosts: ['known.example.com'], context: ctx, assertActive: vi.fn() });
+  downloads.push(result);
+  return result;
+}
+async function downloadedBytes(result: Awaited<ReturnType<typeof download>>) {
+  return fs.readFile(result.filePath);
 }
 
 describe('media download approval and network recovery', () => {
@@ -24,11 +32,15 @@ describe('media download approval and network recovery', () => {
     });
     mocks.release.mockClear();
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(async () => {
+    await Promise.all(downloads.splice(0).map((result) => result.dispose()));
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('automatically downloads known sources without asking', async () => {
     const ctx = context();
-    expect((await download(ctx, 'https://known.example.com/video')).buffer).toEqual(bytes);
+    expect(await downloadedBytes(await download(ctx, 'https://known.example.com/video'))).toEqual(bytes);
     expect(ctx.confirm).not.toHaveBeenCalled();
   });
 
@@ -43,7 +55,7 @@ describe('media download approval and network recovery', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
     expect(ctx.confirm).toHaveBeenCalledWith({ origin: 'https://new.example.com', reasons: ['source'] });
     approve(true);
-    expect((await pending).buffer).toEqual(bytes);
+    expect(await downloadedBytes(await pending)).toEqual(bytes);
     expect(mocks.fetch.mock.calls[0][1].headers).toBeUndefined();
   });
 
@@ -60,7 +72,7 @@ describe('media download approval and network recovery', () => {
     mocks.fetch.mockRejectedValueOnce(new TypeError('connection reset'))
       .mockResolvedValueOnce(response(null, { status: 503 }));
     const result = await download(ctx);
-    expect(result.buffer).toEqual(bytes);
+    expect(await downloadedBytes(result)).toEqual(bytes);
     expect(mocks.fetch).toHaveBeenCalledTimes(3);
     expect(ctx.confirm).toHaveBeenCalledOnce();
     expect(mocks.release).toHaveBeenCalledTimes(2);
@@ -78,7 +90,7 @@ describe('media download approval and network recovery', () => {
     const ctx = context();
     mocks.fetch.mockRejectedValueOnce(new SsrFBlockedError('private address'))
       .mockRejectedValueOnce(new TypeError('connection reset'));
-    expect((await download(ctx)).buffer).toEqual(bytes);
+    expect(await downloadedBytes(await download(ctx))).toEqual(bytes);
     expect(ctx.confirm.mock.calls.map(([request]) => request.reasons)).toEqual([['source'], ['network']]);
     expect(mocks.fetch.mock.calls[0][3].allowPrivateNetwork).toBe(false);
     expect(mocks.fetch.mock.calls.slice(1).every((call) => call[3].allowPrivateNetwork === true)).toBe(true);
@@ -149,19 +161,57 @@ describe('media download approval and network recovery', () => {
     expect(ctx.confirm).toHaveBeenCalledOnce();
   });
 
-  it('releases an oversized response before requesting a higher byte limit', async () => {
+  it.each([true, false])('streams to disk without buffering or size approval (length header: %s)', async (declared) => {
     const ctx = context();
-    const cancel = vi.fn();
-    mocks.fetch.mockResolvedValueOnce(response(new ReadableStream({ cancel }), { headers: { 'content-length': '2048' } }));
-    ctx.confirm.mockImplementation(async ({ reasons }) => {
-      if (reasons.includes('size')) {
-        expect(cancel).toHaveBeenCalledOnce();
-        expect(mocks.release).toHaveBeenCalledOnce();
-      }
-      return true;
-    });
-    expect((await download(ctx)).buffer).toEqual(bytes);
-    expect(ctx.confirm.mock.calls[1][0]).toMatchObject({ reasons: ['size'], bytes: 2048 });
+    const chunk = new Uint8Array(64 * 1024).fill(7);
+    const chunks = 40;
+    let emitted = 0;
+    mocks.fetch.mockResolvedValueOnce(response(new ReadableStream({
+      pull(controller) {
+        if (emitted++ < chunks) controller.enqueue(chunk);
+        else controller.close();
+      },
+    }), declared ? { headers: { 'content-length': String(chunks * chunk.length) } } : undefined));
+    const concat = vi.spyOn(Buffer, 'concat');
+    const readFile = vi.spyOn(fs, 'readFile');
+    const result = await download(ctx);
+    expect((await fs.stat(result.filePath)).size).toBe(chunks * chunk.length);
+    expect(concat).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
+    expect(ctx.confirm).toHaveBeenCalledOnce();
+    await result.dispose();
+    await expect(fs.stat(path.dirname(result.filePath))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('removes partial files on failed reads before retrying the same approved source', async () => {
+    const ctx = context();
+    const mkdtemp = vi.spyOn(fs, 'mkdtemp');
+    mocks.fetch.mockResolvedValueOnce(response(new ReadableStream({
+      start(controller) { controller.enqueue(bytes); },
+      pull(controller) { controller.error(new Error('connection lost')); },
+    })));
+    const result = await download(ctx);
+    expect(await downloadedBytes(result)).toEqual(bytes);
+    const failedDir = await mkdtemp.mock.results[0].value;
+    await expect(fs.stat(failedDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(ctx.confirm).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans up a partial file when the task is cancelled', async () => {
+    const ctx = context();
+    const controller = new AbortController();
+    ctx.signal = controller.signal;
+    ctx.assertActive = () => controller.signal.throwIfAborted();
+    const mkdtemp = vi.spyOn(fs, 'mkdtemp');
+    mocks.fetch.mockResolvedValueOnce(response(new ReadableStream({
+      pull(stream) { controller.abort(); stream.enqueue(bytes); },
+    }, { highWaterMark: 0 })));
+    await expect(download(ctx)).rejects.toBeDefined();
+    const dir = await mkdtemp.mock.results[0].value;
+    await expect(fs.stat(dir)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
   });
 
   it('cancelled approval cannot dispatch, even if a late response allows it', async () => {

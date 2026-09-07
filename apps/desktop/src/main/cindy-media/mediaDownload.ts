@@ -1,19 +1,21 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SsrFBlockedError } from '@cindy/browser-control-runtime/ssrf-runtime';
 import { guardedOutboundFetch } from '../maker-host/outbound-fetch.js';
 
-export type MediaDownloadReason = 'source' | 'http' | 'port' | 'credentials' | 'network' | 'size';
+export type MediaDownloadReason = 'source' | 'http' | 'port' | 'credentials' | 'network';
 
 /** Only Host code constructs this context; it is never part of the media tool schema. */
 export interface MediaDownloadContext {
   signal?: AbortSignal;
   /** Scoped to one Host invocation operation, including read-only URL refresh. */
   approvals?: Set<string>;
-  byteLimits?: Map<string, number>;
   dispose?(): void;
   assertActive(): void;
-  confirm(input: { origin: string; reasons: MediaDownloadReason[]; bytes?: number }): Promise<boolean>;
+  confirm(input: { origin: string; reasons: MediaDownloadReason[] }): Promise<boolean>;
 }
 
 export class MediaDownloadError extends Error {
@@ -35,17 +37,14 @@ function parseUrl(raw: string, base?: URL): URL {
 export async function downloadMediaResult(input: {
   raw: string;
   allowedHosts?: string[];
-  maxBytes: number;
   context?: MediaDownloadContext;
   assertActive(): void;
-}): Promise<{ buffer: Buffer; headerMime: string | null }> {
+}): Promise<{ filePath: string; headerMime: string | null; dispose(): Promise<void> }> {
   let url = parseUrl(input.raw);
-  let maxBytes = input.maxBytes;
   const visitedRedirects = new Set([url.href]);
   let failures = 0;
   let remainingMs = 120_000;
   const approved = input.context?.approvals ?? new Set<string>();
-  const byteLimits = input.context?.byteLimits ?? new Map<string, number>();
   const approvalKey = (reason: MediaDownloadReason) => {
     if (reason === 'network') {
       // A private-network exception belongs to this exact HTTP target. Source
@@ -62,12 +61,12 @@ export async function downloadMediaResult(input: {
     input.assertActive();
     input.context?.assertActive();
   };
-  const confirm = async (reasons: MediaDownloadReason[], bytes?: number) => {
+  const confirm = async (reasons: MediaDownloadReason[]) => {
     assertActive();
     if (!input.context) {
       throw new MediaDownloadError('MEDIA_DOWNLOAD_CONFIRMATION_REQUIRED', '本次下载需要用户确认，当前任务的审批通道不可用');
     }
-    const allowed = await input.context.confirm({ origin: url.origin, reasons, ...(bytes ? { bytes } : {}) });
+    const allowed = await input.context.confirm({ origin: url.origin, reasons });
     assertActive();
     if (!allowed) {
       throw new MediaDownloadError('MEDIA_DOWNLOAD_DENIED', '用户未允许本次下载，已停止；不要自动重试或再次请求审批');
@@ -77,8 +76,6 @@ export async function downloadMediaResult(input: {
 
   for (;;) {
     assertActive();
-    const resourceKey = `${url.origin}${url.pathname}`;
-    maxBytes = Math.max(input.maxBytes, byteLimits.get(resourceKey) ?? 0);
     const reasons: MediaDownloadReason[] = [];
     const knownHost = input.allowedHosts?.some((suffix) => {
       const host = suffix.toLowerCase();
@@ -121,8 +118,8 @@ export async function downloadMediaResult(input: {
     resetIdleTimeout();
     let decisionNeeded: MediaDownloadReason | undefined;
     let retryError: MediaDownloadError | undefined;
-    let requestedBytes: number | undefined;
-    let result: { buffer: Buffer; headerMime: string | null } | undefined;
+    let tempDir: string | undefined;
+    let result: { filePath: string; headerMime: string | null; dispose(): Promise<void> } | undefined;
     try {
       const allowPrivateNetwork = approved.has(approvalKey('network'));
       const { response, release } = await guardedOutboundFetch(
@@ -150,45 +147,36 @@ export async function downloadMediaResult(input: {
         } else if (!response.ok) {
           throw new MediaDownloadError([401, 403, 404, 410].includes(response.status) ? 'MEDIA_DOWNLOAD_URL_EXPIRED' : ([408, 425, 429].includes(response.status) || response.status >= 500) ? 'MEDIA_DOWNLOAD_FAILED' : 'MEDIA_DOWNLOAD_UNAVAILABLE', `下载服务暂不可用（HTTP ${response.status}），生成结果已保留`);
         } else {
-          const declaredBytes = Number(response.headers.get('content-length'));
-          if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-            decisionNeeded = 'size';
-            requestedBytes = declaredBytes;
-          } else {
-            const reader = response.body?.getReader();
-            const chunks: Uint8Array[] = [];
-            let size = 0;
-            try {
-              while (reader) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                assertActive();
-                resetIdleTimeout();
-                size += value.byteLength;
-                if (size > maxBytes) {
-                  decisionNeeded = 'size';
-                  requestedBytes = Math.max(size, maxBytes * 2);
-                  await reader.cancel();
-                  break;
-                }
-                chunks.push(value);
-              }
-            } finally {
-              reader?.releaseLock();
+          tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-media-download-'));
+          const filePath = path.join(tempDir, 'result');
+          const file = await fs.open(filePath, 'wx', 0o600);
+          const reader = response.body?.getReader();
+          try {
+            while (reader) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              assertActive();
+              resetIdleTimeout();
+              // Await each write: network backpressure keeps memory bounded.
+              await file.writeFile(value);
             }
-            if (!decisionNeeded) {
-              result = {
-                buffer: Buffer.concat(chunks, size),
-                headerMime: response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? null,
-              };
-            }
+          } finally {
+            reader?.releaseLock();
+            await file.close();
           }
+          const completedDir = tempDir;
+          result = {
+            filePath,
+            headerMime: response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? null,
+            dispose: () => fs.rm(completedDir, { recursive: true, force: true }).catch(() => undefined),
+          };
         }
       } finally {
         try { await response.body?.cancel().catch(() => undefined); }
         finally { await release(); }
       }
     } catch (error) {
+      result = undefined;
       assertActive();
       if (error instanceof SsrFBlockedError && !approved.has(approvalKey('network'))) {
         decisionNeeded = 'network';
@@ -201,6 +189,7 @@ export async function downloadMediaResult(input: {
       clearTimeout(timeout);
       clearTimeout(idleTimeout);
       remainingMs -= Date.now() - startedAt;
+      if (tempDir && !result) await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
     if (retryError) {
       // Retry only transient network failures. Human denial never enters this branch.
@@ -213,10 +202,10 @@ export async function downloadMediaResult(input: {
       continue;
     }
     if (decisionNeeded) {
-      await confirm([decisionNeeded], requestedBytes);
-      if (requestedBytes) byteLimits.set(resourceKey, requestedBytes);
+      await confirm([decisionNeeded]);
     } else if (result) {
-      assertActive();
+      try { assertActive(); }
+      catch (error) { await result.dispose(); throw error; }
       return result;
     }
   }

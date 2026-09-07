@@ -11,8 +11,6 @@ export function createMediaDownloadContext(
 ): MediaDownloadContext {
   const generation = session.getTurnGeneration();
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), 9 * 60_000);
-  deadline.unref?.();
   const isActive = () => isCurrent() && session.getTurnGeneration() === generation &&
     session.getStatus() === 'active' && session.isTurnRunning();
   const assertActive = () => {
@@ -25,16 +23,14 @@ export function createMediaDownloadContext(
   });
   return {
     approvals: new Set<string>(),
-    byteLimits: new Map<string, number>(),
     signal: controller.signal,
-    dispose: () => { clearTimeout(deadline); unsubscribe(); },
+    dispose: unsubscribe,
     assertActive,
-    confirm: async ({ origin, reasons, bytes }) => {
+    confirm: async ({ origin, reasons }) => {
       assertActive();
-      // Leave time for the download inside the enclosing ten-minute MCP call.
+      // Bound only the human decision; generation has its own request timeout.
       const approvalSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(8 * 60_000)]);
-      const details = reasons.map((reason) => t(`newChat.mediaDownload.${reason}`)
-        .replaceAll('{{bytes}}', String(bytes ?? 0))).join('\n');
+      const details = reasons.map((reason) => t(`newChat.mediaDownload.${reason}`)).join('\n');
       const request: InteractionRequest = {
         kind: 'permission',
         requestId: randomUUID(),

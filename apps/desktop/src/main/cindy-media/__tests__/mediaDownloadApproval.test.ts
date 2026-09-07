@@ -24,6 +24,19 @@ function hostSession() {
 describe('Host media permission', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('does not expire the download context while the upstream generation is running', async () => {
+    vi.useFakeTimers();
+    const host = hostSession();
+    const ctx = createMediaDownloadContext(host.session, () => true);
+    try {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(ctx.signal?.aborted).toBe(false);
+      expect(() => ctx.assertActive()).not.toThrow();
+      host.stop();
+      expect(ctx.signal?.aborted).toBe(true);
+    } finally { ctx.dispose?.(); }
+  });
+
   it('uses an ordinary single-use permission request with a reason and sanitized source', async () => {
     const host = hostSession();
     const ctx = createMediaDownloadContext(host.session, () => true);

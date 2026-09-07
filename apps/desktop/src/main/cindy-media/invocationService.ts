@@ -40,7 +40,7 @@ import {
   resolveProviderMediaModel,
   type ProviderMediaRuntimeModel,
 } from './providerMediaRuntime.js';
-import { sniffMediaMime } from './sniffMediaMime.js';
+import { sniffMediaMime, additionalMp3BytesNeeded } from './sniffMediaMime.js';
 import {
   countMediaInvocations,
   createMediaInvocation,
@@ -757,19 +757,40 @@ async function mediaBytes(
   raw: string,
   extractor: MediaResultExtractor,
   scope: MediaAuthScope,
-): Promise<{ buffer: Buffer; mimeType: string }> {
+): Promise<blobStore.BlobSource & { mimeType: string; dispose?(): Promise<void> }> {
   let buffer: Buffer;
   let headerMime: string | null = null;
   if (extractor.encoding === 'url') {
     const downloaded = await downloadMediaResult({
       raw,
       allowedHosts: extractor.allowedUrlHosts,
-      maxBytes: maxResultBytes(extractor.kind),
       context: scope.downloadContext,
       assertActive: () => assertAuthScope(scope),
     });
-    buffer = downloaded.buffer;
-    headerMime = downloaded.headerMime;
+    try {
+      const file = await fs.open(downloaded.filePath, 'r');
+      try {
+        // Reuse the existing bounded MIME probe; file size never controls allocation.
+        let probe = Buffer.alloc(4096);
+        const first = await file.read(probe, 0, probe.length, 0);
+        probe = probe.subarray(0, first.bytesRead);
+        const needed = additionalMp3BytesNeeded(probe);
+        if (needed && needed > probe.length) {
+          probe = Buffer.alloc(needed);
+          const read = await file.read(probe, 0, probe.length, 0);
+          probe = probe.subarray(0, read.bytesRead);
+        }
+        const mimeType = sniffMediaMime(probe, extractor.mediaType ?? downloaded.headerMime ?? '');
+        if (!mimeType) throw new MediaInvocationError('MEDIA_RESULT_INVALID', '无法从上游字节识别媒体类型');
+        assertResultMime(extractor.kind, mimeType);
+        return { filePath: downloaded.filePath, mimeType, dispose: downloaded.dispose };
+      } finally {
+        await file.close();
+      }
+    } catch (error) {
+      await downloaded.dispose();
+      throw error;
+    }
   } else {
     const dataUrl = /^data:([^;,]+);base64,(.+)$/s.exec(raw);
     const encoded = (dataUrl ? dataUrl[2] : raw).replace(/\s/g, '');
@@ -782,7 +803,7 @@ async function mediaBytes(
     }
     buffer = Buffer.from(encoded, 'base64');
   }
-  if (buffer.byteLength === 0 || (extractor.encoding !== 'url' && buffer.byteLength > maxResultBytes(extractor.kind))) {
+  if (buffer.byteLength === 0 || buffer.byteLength > maxResultBytes(extractor.kind)) {
     throw new MediaInvocationError('MEDIA_RESULT_INVALID', '上游返回空媒体或媒体超过大小限制');
   }
   // Guide / Content-Type 只能帮助识别容器变体（例如无 ftyp 的 QuickTime），
@@ -828,33 +849,37 @@ async function materializeResults(
       assertAuthScope(scope);
       throw error;
     }
-    assertAuthScope(scope);
-    let stored: Awaited<ReturnType<typeof ingestMedia>>;
-    for (let attempt = 0; ; attempt += 1) {
+    try {
       assertAuthScope(scope);
-      try {
-        // Content-addressed writes and zero-reference ledger updates are
-        // idempotent. Retry these same bytes without downloading or approving again.
-        stored = await ingestMedia(
-          {
-            buffer: media.buffer,
-            mimeType: media.mimeType,
-            refs: [],
-            assertStillValid: () => assertAuthScope(scope),
-          },
-          db.drizzle,
-        );
-        break;
-      } catch (error) {
+      let stored: Awaited<ReturnType<typeof ingestMedia>>;
+      for (let attempt = 0; ; attempt += 1) {
         assertAuthScope(scope);
-        if (attempt >= 2) throw error;
-        await delay(250 * 2 ** attempt, undefined, { signal: scope.downloadContext?.signal });
+        try {
+          // Content-addressed writes and zero-reference ledger updates are
+          // idempotent. Retry these same bytes without downloading or approving again.
+          stored = await ingestMedia(
+            {
+              ...(media.filePath !== undefined ? { filePath: media.filePath } : { buffer: media.buffer }),
+              mimeType: media.mimeType,
+              refs: [],
+              assertStillValid: () => assertAuthScope(scope),
+            },
+            db.drizzle,
+          );
+          break;
+        } catch (error) {
+          assertAuthScope(scope);
+          if (attempt >= 2) throw error;
+          await delay(250 * 2 ** attempt, undefined, { signal: scope.downloadContext?.signal });
+        }
       }
+      assertAuthScope(scope);
+      if (item.extractor.kind === 'image') images.push(stored.url);
+      else if (item.extractor.kind === 'video') videos.push(stored.url);
+      else audio.push(stored.url);
+    } finally {
+      await media.dispose?.();
     }
-    assertAuthScope(scope);
-    if (item.extractor.kind === 'image') images.push(stored.url);
-    else if (item.extractor.kind === 'video') videos.push(stored.url);
-    else audio.push(stored.url);
   }
   return {
     ...(images.length > 0 ? { xdt_image_urls: images } : {}),

@@ -283,9 +283,12 @@ describe('mobile home desktop-first surface', () => {
     expect(vendorIconSource).toContain('Easing.inOut(Easing.ease)');
     // 行运行态经订阅获取(memo 化后命令式读取会 stale,2026-07-18 重渲染风暴修复)
     expect(homeSource).toContain('const sessionIsRunning = useSessionRunning(item.session.id);');
-    // 保鲜契约:ProjectRow 与 AutomationGroupChildren 内的命令式运行态读取必须各挂一份
-    // storeVersion 订阅(裸语句形态);行内相对时间靠分钟心跳订阅保鲜。丢任何一处都是 stale-UI。
-    expect((homeSource.match(/^  useRemoteSessionStoreVersion\(\);$/gm) ?? []).length).toBeGreaterThanOrEqual(2);
+    // 保鲜契约:项目/自动化折叠只订阅低频首页状态；消息预览下沉到 session 行。
+    // 普通流式 token 不得再通过全局 storeVersion 唤醒整棵首页列表。
+    expect(homeSource).not.toContain('useRemoteSessionStoreVersion();');
+    expect((homeSource.match(/useRemoteHomeStatusVersion\(\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(homeSource).toContain('useRemoteSessionMessagePreview(item.session.id)');
+    expect(homeSource).toContain('useRemoteMessageVersion(normalizedSearchQuery.length > 0)');
     expect(homeSource).toContain('useMinuteNow();');
     expect(homeSource).toContain('<RadioTower');
     expect(homeSource).toContain('<UsersRound');
@@ -312,15 +315,16 @@ describe('mobile home desktop-first surface', () => {
     expect(source).toContain('saveDeviceIdentityCache(result.cache)');
     expect(source).toContain('loadDeviceSessionScheduleIndex(deviceId, invoke)');
     expect(source).toContain('replaceSessionScheduleIndexEntries(');
-    expect(source).toContain("invoke<unknown[]>(device.deviceId, 'maker:list-active', [])");
+    expect(source).toContain("invoke<unknown[]>(device.deviceId, 'maker:list-active', [");
+    expect(source).toContain("{ summary: true }");
     expect(source).toContain('if (isOptionalActiveSessionSnapshotError(err)) return null;');
     expect(source).toContain('function isOptionalActiveSessionSnapshotError(error: unknown): boolean');
     expect(source).toContain('if (isAccessRevokedError(error) || isDeviceOfflineError(error)) return false;');
     expect(source).toContain("if (text.includes('REMOTE_DISABLED')) return false;");
     expect(source).toContain('return true;');
-    expect(source).toMatch(/const \[\s*list,\s*activeSessions,\s*activeSessionSnapshotEpoch,/);
+    expect(source).toContain('await runIndependentSnapshotReads([');
     expect(source).toContain('remoteSessionStore.captureActiveSessionSnapshotEpoch()');
-    expect(source).toMatch(/return \[\s*list,\s*activeSessions,\s*activeSessionSnapshotEpoch,/);
+    expect(source).toContain('return [active, epoch] as const;');
     expect(source).toContain('activeSessionSnapshotEpoch,');
     expect(source).toContain('remoteScheduleEventStore.subscribe(() => {');
     expect(source).toContain('const snapshot = remoteScheduleEventStore.getSnapshot(deviceId)');
@@ -357,23 +361,21 @@ describe('mobile home desktop-first surface', () => {
     expect(source).not.toContain("const testID = item.deviceId ? 'home.deviceChip' : 'home.deviceChip.all';");
     expect(localSmokeSource).toContain('process.env.XDT_MOBILE_E2E_HOST_DEVICE_CHIP_ID = mockHostDeviceChipId;');
     expect(maestroSource).toContain('XDT_MOBILE_E2E_HOST_DEVICE_CHIP_ID=${hostDeviceChipId}');
-    expect(deviceDetailFlow).toContain('id: "${XDT_MOBILE_E2E_HOST_DEVICE_CHIP_ID}"');
+    expect(deviceDetailFlow).toContain('id: "deviceManagement.open.${XDT_MOBILE_E2E_HOST_DEVICE_ID}"');
   });
 
-  it('lets mobile rename account devices through the authoritative device-link API', () => {
-    const source = readSource('app/devices/index.tsx');
+  it('keeps device management in the drawer and scope selection direct', () => {
+    const home = readSource('app/devices/index.tsx');
+    const drawer = readSource('src/session/HomeChromeDrawer.tsx');
+    const management = readSource('app/devices/manage.tsx');
 
-    expect(source).toContain('const [renameTarget, setRenameTarget]');
-    expect(source).toContain('function RenameDeviceModal');
-    expect(source).toContain('onRenameDevice={openRenameDevice}');
-    expect(source).toContain('testID={testID ? `${testID}.rename` : undefined}');
-    expect(source).toContain('testID="home.renameDevice.input"');
-    expect(source).toContain("testID: 'home.renameDevice.save'");
-    expect(source).toContain('`/api/device-link/devices/${encodeURIComponent(target.deviceId)}`');
-    expect(source).toContain("method: 'PATCH'");
-    expect(source).toContain('body: { name }');
-    expect(source).toContain('remoteSessionStore.renameDevice(target.deviceId, nextName)');
-    expect(source).not.toContain('clearManualName');
+    expect(drawer).toContain('testID="home.chromeDrawer.devices"');
+    expect(home).toContain("guardedPush('/devices/manage')");
+    expect(home).not.toContain('onRenameDevice=');
+    expect(home).not.toContain('onOpenDevice=');
+    expect(management).toContain('key={accountGeneration}');
+    expect(management).toContain("pathname: '/devices/manage/[deviceId]'");
+    expect(management).toContain('onRename={manager.openRename}');
   });
 
   it('scopes multi-device connection feedback to the affected device chip', () => {
@@ -432,7 +434,8 @@ describe('mobile home desktop-first surface', () => {
     expect(sessionRowSource).toContain('`home.sessionRowTitle.${item.session.id}`');
     expect(sessionRowSource).toContain('ellipsizeMode="tail"');
     expect(sessionRowSource).toContain('numberOfLines={1}');
-    expect(sessionRowSource).toContain('buildRemoteSessionCardPreview(item, { running })');
+    expect(sessionRowSource).toContain('buildRemoteSessionCardPreview(');
+    expect(sessionRowSource).toContain('useRemoteSessionMessagePreview(item.session.id)');
     expect(sessionRowSource).toContain('testID={`home.sessionRowPreview.${item.session.id}`}');
     expect(sessionRowSource).toContain('const showPreviewLine = !!preview?.trim() || showSchedule || showPinned;');
     expect(sessionRowSource).toContain('!showPreviewLine && styles.sessionListRowSingleLine');
@@ -496,7 +499,8 @@ describe('mobile home desktop-first surface', () => {
     // 只影响首次触发顺序(缓存先画、fresh 后覆盖),不会挡掉任何一次重连刷新。
     expect(source).not.toContain('homeSessionHydratedRef');
     expect(source).toContain('!homeViewPreferencesHydrated');
-    expect(source).toContain('}, [connectionEpoch, deviceIdentityCacheReady, homeListCacheHydrated, homeViewPreferencesHydrated, loadHome]);');
+    expect(source).toContain('const startSilentHomeSync = useCallback(() => {');
+    expect(source).toContain('}, [connectionEpoch, startSilentHomeSync]);');
     expect(source).toContain('resolveHomeDeviceSyncIds(');
     expect(source).toContain('reconcileHomeDeviceSyncScope(syncDeviceIds);');
     expect(source).toContain('runHomeDeviceSyncBatch(syncRows');
@@ -532,6 +536,24 @@ describe('mobile home desktop-first surface', () => {
     expect(source).toContain('syncInFlightRef');
     expect(source).not.toContain('presenceVersion');
     expect(source).not.toContain('refreshControl={<RefreshControl refreshing={loading}');
+  });
+
+  it('starts the silent list sync on Home focus and Android foreground activation', () => {
+    const source = readSource('app/devices/index.tsx');
+    const silentSync = source.slice(
+      source.indexOf('const startSilentHomeSync = useCallback'),
+      source.indexOf('// 把当前权威设备列表注入 remoteSessionStore'),
+    );
+
+    expect(silentSync).toContain('!deviceIdentityCacheReady');
+    expect(silentSync).toContain('!homeListCacheHydrated');
+    expect(silentSync).toContain('!homeViewPreferencesHydrated');
+    expect(silentSync).toContain('void loadHome({ visible: false });');
+    expect(silentSync).toContain('useFocusEffect(');
+    expect(silentSync).toContain('startSilentHomeSync();');
+    expect(silentSync).toContain("AppState.addEventListener('change'");
+    expect(silentSync).toContain("if (nextState === 'active') startSilentHomeSync();");
+    expect(silentSync).toContain('}, [connectionEpoch, startSilentHomeSync]);');
   });
 
   it('binds every Home device projection and async continuation to the active account generation', () => {

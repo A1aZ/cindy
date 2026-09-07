@@ -10,6 +10,7 @@
 | [`DESIGN.md`](./DESIGN.md) | 权威视觉规范全文：视觉语言（§1）、颜色（§2）、排版（§3）、组件（§4）、布局（§5）、交互约定与 Motion token（§14）、主题系统与 Token 参考（§10）、CINDY 皮肤族（§15）、登录链路（§16） | **权威正本**（原仓库根文件，根目录 `DESIGN.md` 保留为跳转入口） |
 | [`design-governance.md`](./design-governance.md) | 设计系统治理合同：管道与记账（§1.1）、四种真相边界、Token 层级与现行 §10 三档的映射、兼容红线、工具单选、两级证据合同、PR 风险分类、治理接线纪律、待裁决登记、存量门禁处置表、实施路线图、已知边界（§13） | **治理正本**（管流程；视觉规则仍以 `DESIGN.md` 为准） |
 | [`design-inventory.md`](./design-inventory.md) | Cindy Desktop 生产可达 UI 台账：GENERATED 机器事实（稳定 ID / 入口 / 组件 / 样式来源 / Token 与裸值统计）+ 人工迁移状态 | **台账正本**（schema 见 [`design-governance.md`](./design-governance.md) §2.1；生成 `pnpm design:inventory`，校验 `pnpm check:design-inventory`） |
+| [Token README](../../packages/design-tokens/README.md) | 当前影子层边界、DS-8 / DS-10 生产接管、双端真实语义样本与平台覆盖唯一来源 | **Token 合同入口**（当前无生产消费者，不是另一份数值表） |
 | [`figma-component-spec.md`](./figma-component-spec.md) | 登录链路 Figma 组件与色彩速查手册：全组件逐态参数、nodeId 溯源、wave1–wave6 读取记录 | 权威（登录域逐参数） |
 | [`token-decision-table.md`](./token-decision-table.md) | 登录链路色值 / 尺寸 → token 决策记录（新增 / 复用 / 豁免的判定理由 + 各 wave 增补台账） | 决策记录（现行 token 清单与值以 `DESIGN.md §16.1` + `colors.ts` 为准） |
 | [`design-decision-log.md`](./design-decision-log.md) | 全局设计决策史台账：被推翻的方案、勘误过程、backlog（已收录原 `DESIGN.md §13` G1–G4 归档与 §15 决策史全量） | 决策台账（只增不改；与 `DESIGN.md` 冲突时以 `DESIGN.md` 为准） |
@@ -17,9 +18,31 @@
 | [`gamepad-silhouette-authoring.md`](./gamepad-silhouette-authoring.md) | 设置页手柄线稿交稿约定：画板网格、长弧画法、外壳/按键分家、热区与按下填充；附 Xbox Series 现稿 | 作者交稿约定 |
 | [`xbox-series-gamepad.silhouette.svg`](./xbox-series-gamepad.silhouette.svg) | 设置页 Xbox Series 线稿现稿（与 `XboxGamepadLayout.tsx` 同坐标） | 样板图 |
 | [`playstation-dualsense-gamepad.silhouette.svg`](./playstation-dualsense-gamepad.silhouette.svg) | 设置页 DualSense 线稿现稿（与 `PlayStationGamepadLayout.tsx` 同坐标） | 样板图 |
+| [`gamepads/nintendo-switch-pro/`](./gamepads/nintendo-switch-pro/) | 设置页 Switch Pro 交稿包（SVG / PNG / 热区 / 键位表） | 交稿包 |
+| [`gamepads/switch-joy-con/`](./gamepads/switch-joy-con/) | 设置页 Joy-Con 交稿包（SVG / PNG / 热区 / 键位表） | 交稿包 |
+| [`gamepads/ultimate-c1/`](./gamepads/ultimate-c1/) | 设置页 Ultimate C1 / 通用手柄交稿包（SVG / PNG / 热区 / 键位表） | 交稿包 |
+
+## 新贡献者从这里开始
+
+1. 先读 [DESIGN.md](./DESIGN.md) 的适用视觉/组件规则，再读 [治理合同](./design-governance.md) §4 兼容、§6 证据、§7/8 风险与门禁；当前顺序及目标验收见 §12。
+2. 在 [inventory](./design-inventory.md) 找实际入口、保护合同与人工下一动作；没认领的 owner 仍是 unassigned，按实际工作认领，不能把共享组件已被引用当成整页迁移完成。
+3. 复用现有 [Button](../../apps/desktop/src/renderer/components/ui/button.tsx)、[Input / Textarea](../../apps/desktop/src/renderer/components/ui/input.tsx)；设置旧局部覆盖使用 [SettingsTextInput](../../apps/desktop/src/renderer/components/settings/SettingsTextInput.tsx)。FormField 与 Button loading API **尚未提供**，DS-6 随真实表单需求建立并补使用说明。
+4. 需要改设计值时读 [Token README](../../packages/design-tokens/README.md)：当前影子层不被产品消费；双端语义样本与未来生成合同都在该处。Desktop / Mobile 分别在 DS-8 / DS-10 接管；新观感先查治理 §10 待决项，不因数值相同而删除局部主题覆盖。
+
+以上仓内入口即可开始贡献；无需访问个人桌面记录。此阅读路径检查不代替 G2 的独立贡献者试用。
 
 ## 版本记录
 
+- **2026-09-07（DS-5 路线与双端设计合同）**：治理 §12 将未开始批次对齐为 DS-5—12（9=聊天、10=Mobile），以 G1—G4 分别验收；补 DS-4b / #4010 已合入及其局部兼容边界。Token README 登记当前数值权威、未来接管与两端真实消费样本；inventory 及生成器仅同步下一动作与静态说明，不改变迁移状态、发现能力或产品界面。此前日期记录中的旧编号保留为历史。
+
+- **2026-09-06（DS-4 旧设置输入主题兼容收口）**：`SettingsTextInput` 复用标准 Input 并保留既有局部主题 alias；AgentResource / Collaboration 的四个数字框走同一封装。通用 Input 的 Tier-1 默认、错误态、焦点环及主题磁盘文件保持原合同。新增真实主题加载到组件消费的回归验证；DS-4 主线回填 #3920。
+
+- **2026-09-04（DS-4 Button 与 Input 标准组件）**：`components/ui/button.tsx` / `input.tsx` 落地；§4 回写高度 / hover 换色 / pressed / 字号字重 / secondary 绑 Tier-1 / ivory 登记债（拍板人 = 用户/设计师，2026-09-03）。影子包新建 component 层。路线图 DS-3 已是 #3798；DS-4 号待本张合入后回填。 同日 self-review 收口三处：hover / pressed 改为从本变体 rest 底色朝前景 color-mix 派生（初版 alias 到 `--surface-hover` 在四个暗色主题里状态不可区分，违反 §10 双模式门槛；字面量 pressed 不跟主题），新增守卫 `themes/__tests__/buttonStateContrast.test.ts` 锁 11 主题每档 ΔRGB ≥ 8；按钮 hover / active 加 `enabled:` 前缀，修禁用态仍会 hover 换色的行为回归；§4 单行输入 focus 环还原为 `--focus-ring-soft`，spec 与实现的偏差改为登记进 [`design-governance.md`](./design-governance.md) §10 待裁决表，不擅自统一。
+
+- **2026-09-02（Desktop 登录成功回调页 UX 覆盖）**：成功态移除返回 Cindy 按钮，改为 560×500 紧凑内容流卡片，底部显示本地化 3 秒倒计时并在结束时先移除文字再调用 `window.close()`；失败 / Warning 继续使用 680×680 卡片与返回操作。同步更新 `DESIGN.md §16`、`figma-component-spec.md §6`、`token-decision-table.md §4` 与客户端模板测试。
+
+- **2026-09-02（DS-3 最小语义 Token 影子层）**：新建 `packages/design-tokens`（标准 DTCG JSON，reference → semantic 两层）。数据源为 DS-2b 冻结快照，零运行时接线；弃坑复查日期 2026-11-01。不改台账、不改产品代码。路线图 DS-2b 回填为 #3700。
+- **2026-08-31（Switch / 通用手柄交稿包入仓）**：登记 `gamepads/nintendo-switch-pro/`、`gamepads/switch-joy-con/`、`gamepads/ultimate-c1/` 三组同事线稿，设置页 Nintendo 默认 Switch Pro、接上 Joy-Con 时换 Joy-Con 图，通用手柄用 Ultimate C1。零视觉规范改写。
 - **2026-08-30（治理合同修订：管道/记账、已知边界、路线图勘误；同日按 review 收口）**：[`design-governance.md`](./design-governance.md) 新增 §1.1「管道与记账」（守卫红灯不是禁令——管道规则不许绕、记账值走「同 PR 更新快照/台账 + 设计师批」的合法路径改，消灭的是「没人决定过的变化」；**保护值例外**：CINDY 皮肤族 / U2 二级信息色 / `annotation-accent` 不适用通用路径，须按 `DESIGN.md` 各自的用户裁决或冻结条款；正式豁免登记是合法路径，只禁未经裁决为消红灯加豁免）与 §13「已知边界」（正则扫描边界——内联样式字面量会被 `hardcoded-color-audit` 发现、真正扫不到的是动态值与 canvas/xterm 自绘；复用道路唯一靠 review 不靠机器；**新代码默认走语义层**、保留 §3.3/§3.4 既有准入、仅存量渐进），两节自
   mivo-canvas-plugin 仓 4/7 张 PR 实战沉淀移植。勘误三处：§2 旧编号「PR-8」→「DS-8」；§12 依赖行 DS-6 前置由已关闭的圆角裁决改为「Permission 迁移余项」并补 DS-7 受 `radius` 覆盖裁决约束；§12 路线图回填 DS-1 = #3609（合入日期修正为 2026-08-30）。零视觉，非 DS 序号。
 - **2026-08-30（生产 UI 台账）**：新建 [`design-inventory.md`](./design-inventory.md)，登记 Desktop 生产可达 surface（生成器 `pnpm design:inventory` / 校验 `pnpm check:design-inventory`）。首轮全部 `legacy`；Mobile 待 DS-9 增量。本条目仅登记台账与生成器；产品代码零改动。

@@ -23,6 +23,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { app } from 'electron';
 
+import { readModelContextLimit } from './model-context-limit-store.js';
+
 import {
   PiAgent,
   PiNativeProviderProxyNotReadyError,
@@ -503,6 +505,23 @@ function catalogCostForPiNative(cost: {
 }
 
 /**
+ * CatalogModel 只保存 Cindy 可选择的 effort 档位，Pi 原生目录还可能把档位映射到
+ * 另一条 wire 值（例如 minimal -> low）。叠加服务端能力时保留同源 bundled 映射；
+ * 服务端新增的档位没有原生映射才按同名值发送。
+ */
+function catalogThinkingLevelMap(
+  efforts: readonly string[],
+  bundled: PiNativeModelSpec['thinkingLevelMap'] | undefined,
+): NonNullable<PiNativeModelSpec['thinkingLevelMap']> {
+  return Object.fromEntries(
+    PI_REASONING_EFFORTS.map((effort) => [
+      effort,
+      efforts.includes(effort) ? (bundled?.[effort] ?? effort) : null,
+    ]),
+  );
+}
+
+/**
  * Overlay Cindy's host-managed subscription endpoints onto PI's bundled
  * provider catalog. Registry metadata is authoritative for OpenAI subscription
  * models; the version-matched PI binary remains authoritative for native API and
@@ -518,6 +537,9 @@ export function buildPiSubscriptionNativeProviders(
   const providers: PiNativeProviderSpec[] = [];
   const officialXaiById = new Map(
     (officialPiModels('xai') ?? []).map((model) => [model.id, model]),
+  );
+  const officialOpenAiById = new Map(
+    (officialPiModels('openai-codex') ?? []).map((model) => [model.id, model]),
   );
   const env: Record<string, string> = {
     [PI_OPENAI_PROXY_KEY_ENV]: piOpenaiProxyPlaceholderJwt(),
@@ -608,6 +630,16 @@ export function buildPiSubscriptionNativeProviders(
         const listedIds =
           listedModelIdsByProvider?.get(piProviderId)
           ?? listedPiModelIds(bundledModelsByProvider)?.get(piProviderId);
+        const officialOpenAi = officialOpenAiById.get(wireId);
+        if (sourceProviderId === 'openai' && !bundledModel && !listedIds?.has(wireId)
+          && officialOpenAi?.api === 'openai-codex-responses') {
+          return {
+            ...structuredClone(officialOpenAi),
+            id: model.id,
+            wireId,
+            catalogAddition: true,
+          };
+        }
         const isKnownMissingXaiModel =
           wireId === 'grok-4.6' || model.id === 'grok-4.6' || model.id.endsWith('/grok-4.6');
         const isXaiCatalogAddition =
@@ -656,11 +688,9 @@ export function buildPiSubscriptionNativeProviders(
             maxTokens: model.maxOutput ?? bundledModel.maxTokens,
             reasoning: model.efforts.length > 0,
             input,
-            thinkingLevelMap: Object.fromEntries(
-              PI_REASONING_EFFORTS.map((effort) => [
-                effort,
-                model.efforts.includes(effort) ? effort : null,
-              ]),
+            thinkingLevelMap: catalogThinkingLevelMap(
+              model.efforts,
+              bundledModel.thinkingLevelMap,
             ),
             ...(cost ? { cost: { ...cost } } : {}),
             ...(bundledModel.headers ? { headers: { ...bundledModel.headers } } : {}),
@@ -924,6 +954,7 @@ export interface BuildPiAgentOpts {
   getRemotePiTransport?: AgentDeps['getRemotePiTransport'];
   /** SSH remote pi 会话的 agentHome 文件操作原语(host 装配;缺省 = 远端 fs 走本地,错误语义)。 */
   getRemotePiFileOps?: AgentDeps['getRemotePiFileOps'];
+  getRemoteAgentFileOps?: AgentDeps['getRemoteAgentFileOps'];
   /** 远端 pi 二进制解析(host probe;缺省 = 回落本地路径)。 */
   resolveRemotePiBinaryPath?: AgentDeps['resolveRemotePiBinaryPath'];
   /** 远端会话是否跳过 in-process MCP bridge(Phase 1 不桥 orca/memory/ghost)。 */
@@ -1232,19 +1263,32 @@ export function buildPiNativeProvidersFromConfigs(
     // strictly same-origin PI bundled knowledge, then an explicitly matched official
     // PI catalog. Missing protocol is not Chat: one unresolved model makes the whole
     // provider unusable so PI cannot silently send it to a guessed endpoint shape.
-    const bundledModels = rt.models.map((model) =>
-      !model.piApi && !runtimeApi
-        ? resolvePiBundledModelById(bundledModelsByProvider, model.id, rt.baseUrl)
-        : undefined,
-    );
+    const bundledModels = rt.models.map((model) => {
+      // 显式 runtime 协议决定端点形状，但不应阻止同源 Pi 目录补齐图片、输出上限等能力。
+      // 只有 per-model piApi 明确改写协议时才不借用；协议冲突也必须隔离。
+      if (model.piApi) return undefined;
+      const bundled = resolvePiBundledModelById(bundledModelsByProvider, model.id, rt.baseUrl);
+      if (!bundled || !runtimeApi || bundled.api === runtimeApi) return bundled;
+      return undefined;
+    });
     const official =
       rt.piCatalogProviderId &&
       officialPiRouteMatches(rt.piCatalogProviderId, rt.baseUrl, rt.wireProtocol)
         ? officialPiModels(rt.piCatalogProviderId)
         : null;
     const officialById = new Map((official ?? []).map((model) => [model.id, model]));
+    // The pinned binary predates Astra. Exact public API endpoint/protocol matches
+    // may use our catalog addition even when the user entered the endpoint by hand.
+    // Never lend subscription capabilities to an API key or another endpoint.
+    const openaiAddition = !rt.piCatalogProviderId &&
+      runtimeApi === 'openai-responses' &&
+      officialPiRouteMatches('openai', rt.baseUrl, rt.wireProtocol)
+        ? officialPiModels('openai')?.find((model) => model.id === 'gpt-6-astra')
+        : undefined;
     const metadataModels = rt.models.map(
-      (model, index) => bundledModels[index] ?? officialById.get(model.id),
+      (model, index) => bundledModels[index] ?? officialById.get(model.id) ??
+        (model.id === openaiAddition?.id && !model.route &&
+          (!model.piApi || model.piApi === openaiAddition.api) ? openaiAddition : undefined),
     );
     const modelApis = rt.models.map(
       (model, index) =>
@@ -1306,18 +1350,18 @@ export function buildPiNativeProvidersFromConfigs(
         const explicitRouteApi = explicitRoute
           ? wireProtocolToPiApi(explicitRoute.wireProtocol)
           : undefined;
+        // bundled/official rows may lend protocol-compatible capabilities, but never routing.
+        // A same-origin URL is not the same endpoint: replacing /proxy/v1 with /v1 can bypass
+        // the user's proxy. Only the model's own explicit route may create a model-level baseUrl.
         const modelBaseUrl =
-          explicitRouteApi === modelApi
-            ? explicitRoute?.baseUrl
-            : bundledModel?.api === modelApi
-              ? bundledModel.baseUrl
-              : undefined;
+          m.route && explicitRouteApi === modelApi ? explicitRoute?.baseUrl : undefined;
         const spec = {
           id: m.id,
           ...(m.piApi || modelApi !== providerApi ? { api: modelApi } : {}),
           ...(modelBaseUrl && modelBaseUrl !== rt.baseUrl ? { baseUrl: modelBaseUrl } : {}),
           name: bundledModel?.name ?? m.name,
-          contextWindow: bundledModel?.contextWindow ?? m.contextWindow,
+          // 下发文件明确写出的上下文优先；本地 Pi 目录只补缺失值。
+          contextWindow: m.contextWindow ?? bundledModel?.contextWindow,
           ...(bundledModel?.maxTokens ? { maxTokens: bundledModel.maxTokens } : {}),
           ...(bundledModel?.input
             ? { input: [...bundledModel.input] }
@@ -1344,7 +1388,17 @@ export function buildPiNativeProvidersFromConfigs(
               : {}),
           ...(bundledModel?.cost ? { cost: { ...bundledModel.cost } } : {}),
           ...(bundledModel?.headers ? { headers: { ...bundledModel.headers } } : {}),
-          ...(bundledModel?.compat ? { compat: structuredClone(bundledModel.compat) } : {}),
+          ...(bundledModel?.compat
+            ? { compat: structuredClone(bundledModel.compat) }
+            : !bundledModel && modelApi === 'openai-completions'
+              ? // 未知自定义 Chat Completions 端点保守回落(#3832):火山引擎等
+                // OpenAI 兼容网关只接受 system/assistant/user/tool,而 Pi 的
+                // detectCompat 对陌生端点默认 supportsDeveloperRole=true,会把
+                // system 指令按 role=developer 发出 → 整个模型不可用。system
+                // role 在所有 OpenAI 兼容端点均可用,故无同源 bundled 元数据时
+                // 默认收敛为 system;有 bundled 元数据的端点维持 Pi 原生判定。
+                { compat: { supportsDeveloperRole: false } }
+              : {}),
           ...(bundledModel?.samplingParams
             ? { samplingParams: structuredClone(bundledModel.samplingParams) }
             : {}),
@@ -1752,6 +1806,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   }
   log.info('pi agent enabled', { binaryPath });
   return new PiAgent({
+    resolveModelContextLimit: (providerId, modelId) => providerId
+      ? readModelContextLimit('pi', providerId, modelId) : null,
     auth: desktopPiAuthAdapter,
     runtimeConfig: buildDesktopPiRuntimeConfig(),
     binaryPath,
@@ -1889,6 +1945,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     resolvePiVisionBridgeEnv: opts.resolvePiVisionBridgeEnv,
     getRemotePiTransport: opts.getRemotePiTransport,
     getRemotePiFileOps: opts.getRemotePiFileOps,
+    getRemoteAgentFileOps: opts.getRemoteAgentFileOps,
     resolveRemotePiBinaryPath: opts.resolveRemotePiBinaryPath,
     remotePiSkipMcpBridge: opts.remotePiSkipMcpBridge,
     getRemotePiAgentProxyEnv: opts.getRemotePiAgentProxyEnv,

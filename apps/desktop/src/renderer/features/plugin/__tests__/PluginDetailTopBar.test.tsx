@@ -74,6 +74,32 @@ describe('PluginDetailTopBar', () => {
     expect(onBack).not.toHaveBeenCalled();
   });
 
+  it.each(['altKey', 'ctrlKey', 'metaKey', 'shiftKey', 'isComposing'])(
+    'does not navigate back when Escape carries %s',
+    (flag) => {
+      const onBack = vi.fn();
+      render(<Harness onBack={onBack} />);
+
+      fireEvent.keyDown(window, { key: 'Escape', [flag]: true });
+
+      expect(onBack).not.toHaveBeenCalled();
+    },
+  );
+
+  it('lets a nested surface stop Escape before it reaches the detail listener', () => {
+    const onBack = vi.fn();
+    render(
+      <div onKeyDown={(event) => event.stopPropagation()}>
+        <Harness onBack={onBack} />
+        <button>Nested surface</button>
+      </div>,
+    );
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Nested surface' }), { key: 'Escape' });
+
+    expect(onBack).not.toHaveBeenCalled();
+  });
+
   it('carries the window drag region on macOS and keeps the back button clickable', () => {
     stubPlatform('darwin');
     const onBack = vi.fn();

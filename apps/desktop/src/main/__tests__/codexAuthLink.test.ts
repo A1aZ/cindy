@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  copyCodexAuthSnapshot,
   inspectCodexAuthLink,
   relinkSharedCodexAuth,
   recoverCodexAuth,
@@ -194,6 +195,30 @@ describe('relinkSharedCodexAuth', () => {
   });
 });
 
+describe('copyCodexAuthSnapshot', () => {
+  it('publishes an independent snapshot so child writes cannot mutate the source', async () => {
+    fs.writeFileSync(systemAuth, SYSTEM_CONTENT);
+
+    const out = await copyCodexAuthSnapshot(systemAuth, myAuth, process.platform);
+
+    expect(out.kind).toBe('copied');
+    expect(fs.readFileSync(myAuth, 'utf8')).toBe(SYSTEM_CONTENT);
+    expect(sameInode(systemAuth, myAuth)).toBe(false);
+
+    fs.writeFileSync(myAuth, JSON.stringify({ tokens: { access_token: 'child-refresh' } }));
+    expect(fs.readFileSync(systemAuth, 'utf8')).toBe(SYSTEM_CONTENT);
+  });
+
+  it('leaves the existing local credential intact when the source cannot be copied', async () => {
+    fs.writeFileSync(myAuth, MY_CONTENT);
+
+    const out = await copyCodexAuthSnapshot(path.join(tmpRoot, 'missing-auth.json'), myAuth);
+
+    expect(out.kind).toBe('copy-unsupported');
+    expect(fs.readFileSync(myAuth, 'utf8')).toBe(MY_CONTENT);
+  });
+});
+
 describe('recoverCodexAuth', () => {
   it('systemAuth 存在 → 重建 myAuth 并返回 true', async () => {
     fs.writeFileSync(systemAuth, SYSTEM_CONTENT);
@@ -273,5 +298,79 @@ describe('inspectCodexAuthLink', () => {
       linkType: 'file',
       healthy: false,
     });
+  });
+});
+
+describe('Windows 死 SID ACL 自愈 (#3469)', () => {
+  // 迁移来的 auth.json 只带旧账户单条 ACE 时,当前账户 unlink 必 EPERM;
+  // 此前 reconcile 只能永久 swap-failed-intact,登录卡在最后一步。
+  function epermRmOnce(target: string): { calls: () => number } {
+    const originalRm = fs.promises.rm.bind(fs.promises);
+    let denied = false;
+    let targetCalls = 0;
+    vi.spyOn(fs.promises, 'rm').mockImplementation(async (p, opts) => {
+      if (String(p) === target) {
+        targetCalls += 1;
+        if (!denied) {
+          denied = true;
+          const err = new Error('EPERM: operation not permitted, unlink') as NodeJS.ErrnoException;
+          err.code = 'EPERM';
+          throw err;
+        }
+      }
+      return originalRm(p as never, opts as never);
+    });
+    return { calls: () => targetCalls };
+  }
+
+  it('unlink EPERM → icacls 自愈成功 → 重试完成替换 (linked)', async () => {
+    fs.writeFileSync(systemAuth, SYSTEM_CONTENT);
+    fs.writeFileSync(myAuth, MY_CONTENT);
+    const { calls } = epermRmOnce(myAuth);
+    const execFileImpl = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+
+    const out = await relinkSharedCodexAuth(systemAuth, myAuth, 'win32', execFileImpl as never);
+
+    expect(out.kind).toBe('linked');
+    expect(execFileImpl).toHaveBeenCalledWith('icacls', [myAuth, '/reset']);
+    expect(calls()).toBe(2); // 首次 EPERM + 自愈后重试
+    expect(sameInode(systemAuth, myAuth)).toBe(true);
+  });
+
+  it('自愈两步都失败 → 按原路径 swap-failed-intact,myAuth 原样保留', async () => {
+    fs.writeFileSync(systemAuth, SYSTEM_CONTENT);
+    fs.writeFileSync(myAuth, MY_CONTENT);
+    epermRmOnce(myAuth);
+    const execFileImpl = vi.fn().mockRejectedValue(new Error('icacls denied'));
+
+    const out = await relinkSharedCodexAuth(systemAuth, myAuth, 'win32', execFileImpl as never);
+
+    expect(out.kind).toBe('swap-failed-intact');
+    expect((out.error as NodeJS.ErrnoException).code).toBe('EPERM');
+    // reset 与 grant 两步都试过。
+    expect(execFileImpl).toHaveBeenCalledTimes(2);
+    expect(fs.readFileSync(myAuth, 'utf8')).toBe(MY_CONTENT);
+  });
+
+  it('非 ACL 类失败(EBUSY)不触发自愈,行为与修复前一致', async () => {
+    fs.writeFileSync(systemAuth, SYSTEM_CONTENT);
+    fs.writeFileSync(myAuth, MY_CONTENT);
+    const originalRm = fs.promises.rm.bind(fs.promises);
+    let denied = false;
+    vi.spyOn(fs.promises, 'rm').mockImplementation(async (p, opts) => {
+      if (String(p) === myAuth && !denied) {
+        denied = true;
+        const err = new Error('EBUSY: resource busy') as NodeJS.ErrnoException;
+        err.code = 'EBUSY';
+        throw err;
+      }
+      return originalRm(p as never, opts as never);
+    });
+    const execFileImpl = vi.fn();
+
+    const out = await relinkSharedCodexAuth(systemAuth, myAuth, 'win32', execFileImpl as never);
+
+    expect(out.kind).toBe('swap-failed-intact');
+    expect(execFileImpl).not.toHaveBeenCalled();
   });
 });

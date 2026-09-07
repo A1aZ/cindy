@@ -10,6 +10,13 @@ import { LIVE_TASK_PRIORITY, liveTaskPriorityRank } from '../../shared/liveTaskP
 import { stripTrailingPathSeparators } from '../../shared/pathText';
 
 import { formatIslandToolDetail } from './toolDetail.js';
+import {
+  appendActivityTextStream,
+  cloneActivityTextStreamState,
+  createActivityTextStreamState,
+  normalizeActivityText,
+  type ActivityTextStreamState,
+} from './activityTextStream.js';
 
 import {
   createDefaultAgentIslandDisplayConfig,
@@ -51,6 +58,7 @@ export const AGENT_ISLAND_HOVER_SHORT_COOLDOWN_MS = 300;
 export const AGENT_ISLAND_TOOL_DETAIL_LINGER_MS = 2_000;
 export const AGENT_ISLAND_MESSAGE_PREVIEW_MIN_DWELL_MS = 1_600;
 export const AGENT_ISLAND_FOCUS_VERIFY_TIMEOUT_MS = 1_500;
+const AGENT_ISLAND_FOCUS_NAVIGATION_TIMEOUT_MS = 60_000;
 // 未读的 completed / error 在**灵动岛浮窗**里驻留的上限;超过后即便用户没 ack,
 // 也不再占用展开列表。岛 state 会按 TTL prune;远程绿/红点改订独立的
 // remoteUnreadTerminals 账本,不跟完整会话(含活动文本)一起留下。
@@ -58,7 +66,6 @@ export const AGENT_ISLAND_UNREAD_TRANSIENT_TTL_MS = 4 * 60 * 60 * 1_000;
 const AGENT_ISLAND_COMPACT_CURRENT_MIN_DWELL_MS = 1_200;
 const AGENT_ISLAND_MEASURED_HEIGHT_MAX = 2_000;
 const AGENT_ISLAND_ACTIVITY_MAX_LINES = 3;
-const AGENT_ISLAND_ACTIVITY_TEXT_MAX_LENGTH = 280;
 const AGENT_ISLAND_COMPACT_TITLE_MAX_LENGTH = 28;
 const AGENT_ISLAND_COMPACT_DETAIL_MAX_LENGTH = 120;
 
@@ -137,7 +144,7 @@ interface AgentIslandSessionState {
   activityLines: AgentIslandActivityLine[];
   activitySeq: number;
   assistantStreamLineId: string | null;
-  assistantStreamRawText: string;
+  assistantStream: ActivityTextStreamState;
   messagePreview: {
     line: AgentIslandActivityLine;
     until: number;
@@ -181,6 +188,9 @@ export interface AgentIslandState {
   activeTransientSessionId: string | null;
   transientRevealQueue: string[];
   pendingFocusSessionId: string | null;
+  // Short grace for a renderer ack before OS focus settles. Navigation itself
+  // may take longer (for example a renderer reload); its bounded deadline is
+  // derived from this timestamp by pendingFocusNavigationExpiresAt.
   pendingFocusUntil: number | null;
   lastDisplayMode: AgentIslandDisplayState['mode'] | null;
   lastDisplayPolicy: AgentIslandDisplayPolicy | null;
@@ -1083,8 +1093,9 @@ export function requestAgentIslandSessionFocus(
 export function isAgentIslandPendingFocusAck(
   state: AgentIslandState,
   sessionId: string | readonly string[] | null,
+  now = Date.now(),
 ): boolean {
-  if (!state.pendingFocusSessionId) return false;
+  if (!state.pendingFocusSessionId || !state.pendingFocusUntil || state.pendingFocusUntil <= now) return false;
   return normalizeVisibleSessionIds(sessionId).includes(state.pendingFocusSessionId);
 }
 
@@ -1247,7 +1258,7 @@ export function getNextAgentIslandTimerAt(state: AgentIslandState, now: number):
     state.hoverIntentAt,
     state.collapseAt,
     state.hoverCooldownUntil && isPointerInsideIsland(state) ? state.hoverCooldownUntil : null,
-    state.pendingFocusUntil,
+    pendingFocusNavigationExpiresAt(state),
     state.expandedProtectUntil && state.protectedDismissPending ? state.expandedProtectUntil : null,
   ]) {
     if (value && value > now && (next === null || value < next)) {
@@ -1374,8 +1385,17 @@ function completionRevealDwellMs(session: AgentIslandSessionState, now: number):
   return Math.max(AGENT_ISLAND_COMPLETION_REVEAL_DWELL_MS, remainingPreviewMs + AGENT_ISLAND_REVEAL_DWELL_MS);
 }
 
+function pendingFocusNavigationExpiresAt(state: AgentIslandState): number | null {
+  return state.pendingFocusUntil === null
+    ? null
+    : state.pendingFocusUntil - AGENT_ISLAND_FOCUS_VERIFY_TIMEOUT_MS + AGENT_ISLAND_FOCUS_NAVIGATION_TIMEOUT_MS;
+}
+
 function updateFocusVerificationLifecycle(state: AgentIslandState, now: number): void {
-  if (!state.pendingFocusUntil || state.pendingFocusUntil > now) return;
+  const expiresAt = pendingFocusNavigationExpiresAt(state);
+  if (expiresAt === null || expiresAt > now) return;
+  // Allow slow renderer loading, but do not let an abandoned navigation turn a
+  // much later ordinary visit into an acknowledgement of the old island click.
   state.pendingFocusSessionId = null;
   state.pendingFocusUntil = null;
 }
@@ -1943,6 +1963,8 @@ function applyVerifiedFocusIfMatched(
   state: AgentIslandState,
   now: number,
 ): boolean {
+  // A route report can arrive before the expiry timer gets a chance to run.
+  updateFocusVerificationLifecycle(state, now);
   const focusedSessionId = state.pendingFocusSessionId;
   if (!focusedSessionId || !state.visibleSessionIds.has(focusedSessionId)) return false;
   state.pendingFocusSessionId = null;
@@ -2171,7 +2193,7 @@ function getOrCreateSession(
     activityLines: [],
     activitySeq: 0,
     assistantStreamLineId: null,
-    assistantStreamRawText: '',
+    assistantStream: createActivityTextStreamState(),
     messagePreview: null,
     messagePreviewQueue: [],
     startedAt: now,
@@ -2190,6 +2212,7 @@ function cloneSession(session: AgentIslandSessionState): AgentIslandSessionState
     pendingInteractionDetails: new Map(session.pendingInteractionDetails),
     pendingPermissionCanAllowForSession: new Map(session.pendingPermissionCanAllowForSession),
     activityLines: session.activityLines.map((line) => ({ ...line })),
+    assistantStream: cloneActivityTextStreamState(session.assistantStream),
     messagePreview: session.messagePreview
       ? {
           line: { ...session.messagePreview.line },
@@ -2516,15 +2539,12 @@ function applyAssistantTextLine(
   rawText: string,
   isFinal: boolean,
 ): AgentIslandActivityLine | null {
-  const nextRawText = isFinal
-    ? rawText
-    : `${session.assistantStreamRawText}${rawText}`;
-  const text = normalizeActivityText(nextRawText);
+  const text = isFinal
+    ? normalizeActivityText(rawText)
+    : appendActivityTextStream(session.assistantStream, rawText);
   if (!text) {
     if (isFinal) {
       clearAssistantStream(session);
-    } else {
-      session.assistantStreamRawText = nextRawText;
     }
     return null;
   }
@@ -2542,8 +2562,6 @@ function applyAssistantTextLine(
       replaceMessagePreviewLine(session, line);
       if (isFinal) {
         clearAssistantStream(session);
-      } else {
-        session.assistantStreamRawText = nextRawText;
       }
       return line;
     }
@@ -2555,7 +2573,6 @@ function applyAssistantTextLine(
     clearAssistantStream(session);
   } else {
     session.assistantStreamLineId = line.id;
-    session.assistantStreamRawText = nextRawText;
   }
   return line;
 }
@@ -2571,7 +2588,7 @@ function replaceMessagePreviewLine(session: AgentIslandSessionState, line: Agent
 
 function clearAssistantStream(session: AgentIslandSessionState): void {
   session.assistantStreamLineId = null;
-  session.assistantStreamRawText = '';
+  session.assistantStream = createActivityTextStreamState();
 }
 
 function enqueueMessagePreview(
@@ -2599,17 +2616,6 @@ function assistantTextFromEvent(event: AgentEvent): string | null {
   return typeof data?.text === 'string' ? data.text : null;
 }
 
-function normalizeActivityText(text: string): string {
-  return extractActivityDisplayText(text)
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .slice(0, AGENT_ISLAND_ACTIVITY_TEXT_MAX_LENGTH)
-    .trim();
-}
-
 function normalizeInlineText(text: string): string {
   return text
     .trim()
@@ -2627,41 +2633,6 @@ function truncateInlineText(text: string, maxLength: number): string {
   const chars = Array.from(normalized);
   if (chars.length <= maxLength) return normalized;
   return `${chars.slice(0, Math.max(0, maxLength - 3)).join('')}...`;
-}
-
-function extractActivityDisplayText(rawText: string): string {
-  const trimmed = rawText.trim();
-  if (!trimmed || !/^[{[]/.test(trimmed)) return rawText;
-
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return extractTextFromStructuredContent(parsed) ?? rawText;
-  } catch {
-    return rawText;
-  }
-}
-
-function extractTextFromStructuredContent(value: unknown): string | null {
-  if (typeof value === 'string') return value.trim() || null;
-
-  if (Array.isArray(value)) {
-    const parts = value
-      .map(extractTextFromStructuredContent)
-      .filter((part): part is string => Boolean(part));
-    return parts.length > 0 ? parts.join(' ') : null;
-  }
-
-  const record = asRecord(value);
-  if (!record) return null;
-
-  for (const key of ['text', 'message', 'prompt']) {
-    const text = record[key];
-    if (typeof text === 'string' && text.trim()) return text.trim();
-  }
-
-  const content = record.content;
-  if (typeof content === 'string' && content.trim()) return content.trim();
-  return extractTextFromStructuredContent(content);
 }
 
 function projectNameFromWorkingDir(workingDir: string | null | undefined, workspaceKind?: string | null): string | null {

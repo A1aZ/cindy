@@ -332,6 +332,43 @@ describe('model access catalog contract', () => {
     }
   });
 
+  it('v4/v5 允许 provider-level embedding 模型使用空 agents 且省略 contextWindow', () => {
+    const embeddingModel = {
+      id: 'voyage/voyage-4',
+      name: 'Voyage 4',
+      mode: 'embedding',
+      currency: 'CNY',
+      agents: [],
+    } as const;
+
+    expect(
+      parseListModelsResponse({
+        schemaVersion: MODEL_ACCESS_CATALOG_SCHEMA_VERSION,
+        models: [embeddingModel],
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseListModelsResponse({
+        schemaVersion: MODEL_ACCESS_CATALOG_V5_SCHEMA_VERSION,
+        accountTier: 'paid',
+        models: [{ ...embeddingModel, availability: 'available' }],
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseListModelsResponse({
+        schemaVersion: MODEL_ACCESS_CATALOG_V3_SCHEMA_VERSION,
+        models: [embeddingModel],
+      }).ok,
+    ).toBe(false);
+    expectReject(
+      {
+        schemaVersion: MODEL_ACCESS_CATALOG_SCHEMA_VERSION,
+        models: [{ ...embeddingModel, agents: ['codex'] }],
+      },
+      'response.models[0].agents must be empty',
+    );
+  });
+
   it.each(['CNY', 'USD'] as const)('accepts the supported %s currency', (currency) => {
     const result = parseListModelsResponse({
       ...VALID_RESPONSE,
@@ -748,7 +785,7 @@ describe('public model registry contract', () => {
   });
 
   it('rejects unsupported versions, duplicate canonical ids, and duplicate routes', () => {
-    expectRegistryReject({ ...VALID_REGISTRY, schemaVersion: 3 }, 'modelRegistry.schemaVersion');
+    expectRegistryReject({ ...VALID_REGISTRY, schemaVersion: 4 }, 'modelRegistry.schemaVersion');
     expectRegistryReject(
       {
         ...VALID_REGISTRY,

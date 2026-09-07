@@ -82,6 +82,24 @@ interface AssistantBlock {
 }
 
 const assistantBlocks = new Map<string, AssistantBlock>();
+
+/** Read the in-flight block without flushing or changing its persistence identity. */
+export function getSessionTextSnapshot(sessionId: string) {
+  const block = assistantBlocks.get(sessionId);
+  if (!block?.text) return null;
+  return {
+    sessionId,
+    persistId: block.persistId,
+    event: {
+      type: 'text',
+      data: {
+        text: block.text, isFinal: false, isFullText: true,
+        createdAt: new Date(block.createdAt).toISOString(),
+      },
+      agentMeta: block.agentMeta,
+    },
+  };
+}
 interface SealedAssistantLateFinalCandidate {
   persistId: string;
   text: string;
@@ -343,10 +361,12 @@ function markAssistantTurnBoundary(
   sessionId: string,
   clientId: string | undefined,
   completed: boolean,
+  metaPatch?: Pick<AgentMeta, 'nativeForkAnchor'>,
 ): Promise<boolean> {
   if (!sessionId || !clientId) return Promise.resolve(false);
   return enqueueDurableWrite(`turn-boundary:${sessionId}:${clientId}:${completed}`, async (ownerScope) => {
     const patched = await patchMessageAgentMetaWithResult(sessionId, clientId, {
+      ...metaPatch,
       turnCompleted: completed,
     });
     if (!patched) return false;
@@ -362,8 +382,9 @@ function markAssistantTurnBoundary(
 export function markAssistantTurnCompleted(
   sessionId: string,
   clientId: string | undefined,
+  metaPatch?: Pick<AgentMeta, 'nativeForkAnchor'>,
 ): Promise<boolean> {
-  return markAssistantTurnBoundary(sessionId, clientId, true);
+  return markAssistantTurnBoundary(sessionId, clientId, true, metaPatch);
 }
 
 /**

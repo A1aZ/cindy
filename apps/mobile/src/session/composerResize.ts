@@ -47,6 +47,24 @@ export const COMPOSER_RESIZE_AUTO_SNAP_THRESHOLD = 24;
 /** manual 模式上边界之上保留的屏幕空间（顶部导航 + 至少一部分消息内容可见）。 */
 export const COMPOSER_RESIZE_TOP_RESERVED_HEIGHT = 220;
 
+// Worklets' Babel transform lowers function declarations with a `worklet`
+// directive into initialization expressions. Keep helpers before every
+// worklet that captures them, otherwise the caller's closure is initialized
+// with `undefined` during module evaluation.
+function normalizeBounds(bounds: ComposerResizeBounds): ComposerResizeBounds {
+  'worklet';
+  const minContentHeight = Math.max(1, Math.round(bounds.minContentHeight));
+  return {
+    minContentHeight,
+    maxContentHeight: Math.max(minContentHeight, Math.round(bounds.maxContentHeight)),
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  'worklet';
+  return Math.min(Math.max(value, min), max);
+}
+
 export interface ResolveComposerInputHeightInput {
   /** TextInput 上报的内容高度（页面 state）。 */
   contentHeight: number;
@@ -295,24 +313,10 @@ export function computeComposerResizeBounds(
   };
 }
 
-function normalizeBounds(bounds: ComposerResizeBounds): ComposerResizeBounds {
-  'worklet';
-  const minContentHeight = Math.max(1, Math.round(bounds.minContentHeight));
-  return {
-    minContentHeight,
-    maxContentHeight: Math.max(minContentHeight, Math.round(bounds.maxContentHeight)),
-  };
-}
-
 function normalizePositiveDimension(value: number, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function normalizeNonNegativeDimension(value: number, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  'worklet';
-  return Math.min(Math.max(value, min), max);
 }

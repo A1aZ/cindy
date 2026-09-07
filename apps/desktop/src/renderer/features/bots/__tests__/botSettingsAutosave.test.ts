@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   botCapabilitiesEqual,
+  botSettingsChanges,
   botSettingsPayloadEqual,
   createBotSettingsAutosave,
   normalizeBotSettingsPayload,
@@ -376,5 +377,15 @@ describe('createBotSettingsAutosave flush & failure', () => {
     h.autosave.cancel();
     await vi.advanceTimersByTimeAsync(2000);
     expect(h.commits).toHaveLength(0);
+  });
+});
+
+
+describe('settings changes preserve independently joined capabilities', () => {
+  it('does not resend capability selections when only the name changes', () => {
+    expect(botSettingsChanges(payload(), payload({ name: 'Updated' }))).toEqual({ name: 'Updated' });
+  });
+  it('updates only the selected capability group', () => {
+    expect(botSettingsChanges(payload(), payload({ capabilities: capabilities({ mcpServers: ['docs'] }) }))).toEqual({ capabilities: { mcpServers: ['docs'] } });
   });
 });

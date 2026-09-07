@@ -6509,7 +6509,7 @@ interface ElectronAPI {
     };
 
     plugins: {
-      list: (workingDir?: string) => Promise<PluginListItem[]>;
+      list: (workingDir?: string, includeHidden?: boolean) => Promise<PluginListItem[]>;
       getState: (
         id: string,
         workingDir?: string,

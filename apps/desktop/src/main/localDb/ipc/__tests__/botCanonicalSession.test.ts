@@ -6,6 +6,7 @@ import { rmSync } from 'node:fs';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOT_TEMPLATE_PRESET_IDENTITIES } from '../../../../shared/botTemplatePreset';
+import { findBotCapabilities, selectBotCapability } from '../../../maker-ipc/botCapabilityService';
 
 import {
   botDelegations,
@@ -92,7 +93,12 @@ vi.mock('../../../git-snapshot/projectGitBootstrap.js', () => ({
 vi.mock('../../../maker-host/git-safety-settings-store.js', () => ({
   readGitSafetySettings: () => ({ autoSnapshotEnabled: true }),
 }));
+vi.mock('../../../maker-host/custom-mcp-store.js', () => ({
+  listCustomMcpServers: async () => [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.invalid/private', headers: { Authorization: 'FAKE_SECRET' } }],
+}));
 vi.mock('../../../maker-host/index.js', () => ({
+  getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
+  getPluginRegistry: () => ({ getPlugins: () => [], getEnableState: async () => ({ effectiveEnabled: true }) }),
   getMakerIfReady: () => ({
     isSessionAlive: h.isSessionAlive,
     closeSession: h.closeSession,
@@ -1587,6 +1593,40 @@ describe('Bot canonical Session lifecycle', () => {
     });
   });
 
+  it('discovers and joins existing capabilities without copying connection secrets or changing another Bot', async () => {
+    const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1 });
+    const callerSessionId = created.session.id;
+    const discovered = await findBotCapabilities({ callerSessionId, kind: 'mcp' });
+    expect(discovered).toMatchObject({ ok: true, capabilities: [{ id: 'shared-docs', joined: false, available: true }] });
+    expect(JSON.stringify(discovered)).not.toMatch(/FAKE_SECRET|example.invalid|Authorization/);
+    await expect(selectBotCapability({ callerSessionId, kind: 'mcp', id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: true, effective: 'next-turn' });
+    await expect(findBotCapabilities({ callerSessionId, kind: 'mcp' })).resolves.toMatchObject({ capabilities: [{ id: 'shared-docs', joined: true }] });
+    expect(h.requestRuntimeRefresh).toHaveBeenCalledWith(callerSessionId, 'profile');
+    await expect(selectBotCapability({ callerSessionId, kind: 'skill', id: 'release-check', joined: true })).resolves.toMatchObject({ ok: true });
+    await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
+    await expect(selectBotCapability({ callerSessionId, kind: 'mcp', id: 'shared-docs', joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+    await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
+  });
+
+  it('refuses absent capabilities and callers without an active canonical Bot', async () => {
+    const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1 });
+    await expect(selectBotCapability({ callerSessionId: created.session.id, kind: 'mcp', id: 'missing', joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    await expect(selectBotCapability({ callerSessionId: 'unknown', kind: 'mcp', id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: false });
+    h.sqlite!.prepare("UPDATE bot_profiles SET status = 'paused' WHERE id = 'bot-1'").run();
+    await expect(selectBotCapability({ callerSessionId: created.session.id, kind: 'mcp', id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: false });
+  });
+
+  it.each([['browser', 'cindy_browser'], ['scheduler', 'cindy_scheduler'], ['contacts', 'cindy_contacts']])('mounts the selected %s toolset into the actual MCP policy', async (toolset, server) => {
+    await invoke('local-db:bots:update', { id: 'bot-1', capabilities: { toolsets: [toolset], toolsetMode: 'allowlist' } });
+    const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2 });
+    const opts: MakerSessionCreateOpts = { id: created.session.id, agentKind: 'codex', workingDir: created.session.workingDir, workspaceKind: 'dialogue', model: 'test-model', permissionMode: 'auto' };
+    await hydrateBotProfileRuntime(opts, {
+      listMcpServers: async () => [{ name: server, source: 'builtin', available: true }],
+      listToolsets: async () => [{ id: toolset, name: toolset, essential: toolset === 'scheduler', available: true }],
+    });
+    expect(opts.botRuntimeProfile?.mcpPolicy.configured).toContain(server);
+  });
+
   it('refreshes canonical MCP generations and Toolset versions in place', async () => {
     await invoke('local-db:bots:update', {
       id: 'bot-1',
@@ -2415,6 +2455,7 @@ describe('Bot Session task end-to-end runtime', () => {
 
   function createDelegationRuntime(options: {
     readCallerRuntime?: Parameters<typeof createBotDelegationService>[0]['readCallerRuntime'];
+    readCallerPermission?: Parameters<typeof createBotDelegationService>[0]['readCallerPermission'];
     accountReady?: () => boolean;
     transientUnavailable?: () => boolean;
     replyFor?: (sessionId: string) => string;
@@ -2555,6 +2596,7 @@ describe('Bot Session task end-to-end runtime', () => {
     const abortSession = vi.fn(async () => undefined);
     const delegation = createBotDelegationService({
       readCallerRuntime: options.readCallerRuntime,
+      readCallerPermission: options.readCallerPermission,
       dispatch,
       abortSession,
       closeSession: vi.fn(async () => undefined),
@@ -2758,6 +2800,31 @@ describe('Bot Session task end-to-end runtime', () => {
       });
     } finally {
       runtime.delegation.dispose();
+    }
+  });
+
+  it.each(['ask', 'auto', 'bypassPermissions'])('inherits the live %s permission in the child task', async (mode) => {
+    await seedPair();
+    const runtime = createDelegationRuntime({ readCallerPermission: () => mode });
+    try {
+      const result = await runtime.delegation.startSessionTask({ callerSessionId: 'session-1', objective: 'Run the requested checks.' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.message);
+      expect(h.sqlite!.prepare('SELECT permission_mode FROM sessions WHERE id = ?').pluck().get(result.childSessionId)).toBe(mode);
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  it('does not start a child with stale permissions during a live permission change', async () => {
+    await seedPair();
+    const runtime = createDelegationRuntime({ readCallerPermission: () => null });
+    try {
+      const result = await runtime.delegation.startSessionTask({ callerSessionId: 'session-1', objective: 'Run the requested checks.' });
+      expect(result).toMatchObject({ ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE' });
+      expect(runtime.started).toEqual([]);
+    } finally {
+      runtime.dispose();
     }
   });
 

@@ -1,3 +1,4 @@
+import { registerBotCapabilityTools, type BotCapabilityCallbacks } from './xdt-helper/bot_capabilities.js';
 /**
  * lizi_xdtHelperMcpServer.ts
  * ---------------------------------------------------------------------------
@@ -548,6 +549,7 @@ export interface XdtHelperMcpDeps {
    * the caller Session.
    */
   botSkills?: BotSkillCallbacks;
+  botCapabilities?: BotCapabilityCallbacks;
   /**
    * 官方反馈 issue 提交回调(弹确认卡片 → 用户确认 → POST server)。host 注入后,
    * feedback 类工具 submit_github_issue 会被注册; 不注入则不出现在 list_tools 里。
@@ -684,6 +686,12 @@ export function createXdtHelperMcpServer(
     });
   }
 
+  if (deps.botCapabilities) {
+    registerBotCapabilityTools(registry, {
+      getSessionContext: () => resolveLiziMcpSessionContext(sessionCtx),
+      callbacks: deps.botCapabilities,
+    });
+  }
   registerStartSessionTaskEntry(registry, deps, sessionCtx);
   registerSendToAgentEntry(registry, deps, sessionCtx);
   registerSessionTaskControlEntries(registry, deps, sessionCtx);

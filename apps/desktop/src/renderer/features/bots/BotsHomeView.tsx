@@ -31,7 +31,8 @@ import {
 import { BotLifecycleSettings } from './BotLifecycleSettings';
 import { BotInvitationWelcome } from './BotInvitationWelcome';
 import { BotModelChainEditor } from './BotModelChainEditor';
-import type { BotSettingsPayload } from './botSettingsAutosave';
+import { BotCapabilitySettings } from './BotCapabilitySettings';
+import { botSettingsChanges, normalizeBotSettingsPayload, type BotSettingsPayload } from './botSettingsAutosave';
 import { useBotSettingsAutosave } from './useBotSettingsAutosave';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -102,11 +103,14 @@ export function BotSettings({
     setAvatarColor(bot.avatarColor);
     setSelectedSkills(bot.skills);
     setCapabilities(bot.capabilities);
+    savedSettingsRef.current = normalizeBotSettingsPayload({ name: bot.name, description: bot.description, identitySource: bot.identitySource ?? '', userContextSource: bot.userContextSource ?? '', avatar: bot.avatar, avatarColor: bot.avatarColor, capabilities: bot.capabilities, skills: bot.skills }, bot.name);
   }, [bot]);
 
+  const savedSettingsRef = useRef(normalizeBotSettingsPayload({ name, description, identitySource, userContextSource, avatar, avatarColor, capabilities, skills: selectedSkills }, bot.name));
   const commitProfile = useCallback(
     async (payload: BotSettingsPayload) => {
-      await updateBotProfile(bot.id, payload);
+      await updateBotProfile(bot.id, botSettingsChanges(savedSettingsRef.current, payload));
+      savedSettingsRef.current = payload;
     },
     [bot.id],
   );
@@ -316,6 +320,22 @@ export function BotSettings({
             />
           </div>
         </section>
+
+        <BotCapabilitySettings
+          bot={bot}
+          capabilities={{ ...bot.capabilities, ...botSettingsChanges(savedSettingsRef.current, { ...savedSettingsRef.current, capabilities }).capabilities }}
+          skills={JSON.stringify(selectedSkills) === JSON.stringify(savedSettingsRef.current.skills) ? bot.skills : selectedSkills}
+          onChange={(kind, values) => {
+            if (kind === 'skill') setSelectedSkills(values);
+            setCapabilities((current) => ({
+              ...current,
+              ...(kind === 'skill' ? { skillMode: 'allowlist' as const }
+                : kind === 'mcp' ? { mcpMode: 'allowlist' as const, mcpServers: values }
+                  : { toolsetMode: 'allowlist' as const, toolsets: values }),
+            }));
+            autosave.onEdit('instant');
+          }}
+        />
 
         <details className="group rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
           <summary className="cursor-pointer list-none px-4 py-3 text-12 font-medium text-[var(--text-secondary)] marker:content-none">

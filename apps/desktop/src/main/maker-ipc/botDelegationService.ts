@@ -21,6 +21,7 @@ import {
 } from '../localDb/schema.js';
 import { readGitSafetySettings } from '../maker-host/git-safety-settings-store.js';
 import type { InteractionDecision, InteractionRequest } from '@cindy/maker-core';
+import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
 import { createLogger } from '../logger.js';
 import { resolveBusinessSessionId } from '../sessionIds.js';
@@ -110,6 +111,8 @@ export interface BotDelegationServiceDeps {
     typeof sessions.$inferSelect,
     'model' | 'agentKind' | 'providerId' | 'fastMode'
   > & { effort?: (typeof sessions.$inferSelect)['effort'] }) | null;
+  /** null means the live permission is changing or the caller is closing. */
+  readCallerPermission?: (sessionId: string) => string | null;
   now?: () => number;
   createId?: () => string;
   maxActiveChildren?: number;
@@ -1678,8 +1681,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     const createdAt = now();
     const deadlineAt = createdAt + timeoutMs;
 
-    // 子任务沿用发起方会话当前的模型与 harness,但权限从 ask 开始。需要授权时
-    // 统一回到发起伙伴代答,不能因为伙伴本身是 trusted 就让完整任务静默越权。
+    // 子任务承接发起伙伴的实际路由与权限档；一次性工具批准仍只属于原请求。
     const [callerSession] = await db
       .select({
         model: sessions.model,
@@ -1718,7 +1720,13 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
         app.getPath('userData'),
       );
     }
-    const permissionMode = 'ask';
+    const callerPermission = deps.readCallerPermission
+      ? deps.readCallerPermission(input.callerSessionId)
+      : caller.permissionMode;
+    if (callerPermission === null) {
+      return { ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE', message: '伙伴权限正在切换或任务正在关闭，请稍后重试' };
+    }
+    const permissionMode = permissionModeOrAsk(callerPermission);
     const plan: BotDelegationPlanSnapshot = {
       version: 1,
       createdAt,
@@ -1728,7 +1736,8 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       limits: { maxDepth: DEFAULT_MAX_DEPTH, timeoutMs, deadlineAt },
       permission: {
         mode: permissionMode,
-        requesterMode: caller.permissionMode ?? null,
+        requesterMode: permissionMode,
+        // Legacy target-profile field; the effective child permission is mode.
         targetConfigured: 'ask',
       },
     };

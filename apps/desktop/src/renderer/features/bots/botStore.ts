@@ -919,11 +919,10 @@ export type BotProfileUpdatePatch = Partial<
     | 'avatarColor'
     | 'enabled'
     | 'skills'
-    | 'capabilities'
     | 'canonicalSessionId'
     | 'sessions'
   >
-> & { avatarUploadToken?: string };
+> & { avatarUploadToken?: string; capabilities?: Partial<BotCapabilities> };
 
 export function updateBotProfile(id: string, patch: BotProfileUpdatePatch): Promise<BotProfile> {
   ensureProfileOwner();
@@ -937,9 +936,13 @@ export function updateBotProfile(id: string, patch: BotProfileUpdatePatch): Prom
   const owner = getDataOwnerGeneration();
   const isLatestWrite = () => isDataOwnerGenerationCurrent(owner)
     && profileWriteGenerations.get(id) === generation;
-  profiles = profiles.map((bot) => (bot.id === id ? { ...bot, ...profilePatch } : bot));
+  const applyPatch = (bot: BotProfile): BotProfile => ({
+    ...bot, ...profilePatch,
+    capabilities: { ...bot.capabilities, ...profilePatch.capabilities },
+  });
+  profiles = profiles.map((bot) => (bot.id === id ? applyPatch(bot) : bot));
   emit();
-  const optimistic = profiles.find((bot) => bot.id === id) ?? { ...before, ...profilePatch };
+  const optimistic = profiles.find((bot) => bot.id === id) ?? applyPatch(before);
   const api = botsApi();
   if (!api) return Promise.resolve(optimistic);
   return api

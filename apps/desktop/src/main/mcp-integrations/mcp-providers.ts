@@ -1,3 +1,4 @@
+import { findBotCapabilities, selectBotCapability } from '../maker-ipc/botCapabilityService.js';
 import { join as pathJoin } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 
@@ -599,6 +600,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         },
       },
       // 伙伴自己沉淀的真技能。归属同样由 callerSessionId 反查,工具面不收 botId。
+      botCapabilities: { list: findBotCapabilities, select: selectBotCapability },
       botSkills: {
         save: (params) => saveBotSkillForSession(params),
         list: (params) => listBotSkillsForSession(params),

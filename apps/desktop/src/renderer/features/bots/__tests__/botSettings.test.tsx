@@ -232,11 +232,10 @@ describe('Bot settings unified autosave', () => {
       await vi.advanceTimersByTimeAsync(1600);
     });
     expect(mocks.updateBotProfile).toHaveBeenCalledTimes(1);
-    expect(mocks.updateBotProfile.mock.calls[0]?.[1]).toMatchObject({
+    // Unedited identity and capabilities must not overwrite concurrent Bot updates.
+    expect(mocks.updateBotProfile.mock.calls[0]?.[1]).toEqual({
       name: 'Release buddy',
       description: 'Own releases',
-      identitySource: 'Persistent role',
-      userContextSource: 'Call me Chris',
     });
   });
 

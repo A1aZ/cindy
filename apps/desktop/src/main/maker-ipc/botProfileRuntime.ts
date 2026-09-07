@@ -22,6 +22,7 @@ import {
 } from '../localDb/schema.js';
 import { clearBotAttention, noteBotAttention } from './botAttentionService.js';
 import { createLogger } from '../logger.js';
+import { PROVIDER_NAME_TO_PLUGIN_ID } from '../maker-host/plugins/builtin-plugins.js';
 
 const log = createLogger('maker-ipc:bot-profile-runtime');
 
@@ -299,7 +300,7 @@ export function buildBotCapabilityContextPrompt(
     '## Cindy Bot Runtime',
     'You are running as a Cindy Bot with a durable Profile. This task is one active runtime of that Bot, not an ordinary standalone task.',
     ...(helperAvailable ? [
-      'Use direct Bot tools named in this prompt without inventorying Cindy. Only when the user asks for an explicitly mounted external capability and its exact tool is unknown, perform one scoped discovery for that capability; do not repeatedly list the whole tool surface.',
+      'Use direct Bot tools for your own memory, Skills and teammates. When work needs another capability, use `find_bot_capabilities` in the helper bots category to search existing Skills, MCP connections or built-in tools, then `set_bot_capability` to join it. References reuse Cindy installations and authorization; do not copy credentials or edit shared sources. New mounts take effect next turn in this same task. Installed plugins are available on demand through `cindy` (`ghost_list`, `ghost_info`, `ghost_call`) under their existing permissions. Discover only what the work needs; do not repeatedly list the whole tool surface.',
           "A real Cindy background task is a standalone Session in the user's task list. Start it with `start_session_task` when the user explicitly asks for a task, Session, or background task, or when development and deliverable work needs independent execution and verification. Use `check_session_task`, `message_session_task`, and `stop_session_task` to control that same task when needed. Completion returns automatically.",
           'Use `send_to_agent` only to send one bounded asynchronous message to a named teammate. It is not a task and has no progress or cancellation. Never use a teammate named Cindy as a substitute for `start_session_task`.',
           "A teammate message does not rewrite another Bot's identity or make that Bot obey. If the user asks for obedience or control, explain this boundary and offer either a message or a tracked Session task, whichever matches the work.",
@@ -454,7 +455,9 @@ export function resolveBotToolsetReferences(input: {
   unavailable: string[];
   disabled: string[];
 } {
-  const configurable = input.catalog.filter((item) => !item.essential);
+  // Host essentials (for example scheduler) are not necessarily Bot baseline
+  // tools. An explicit per-Bot selection must remain mountable.
+  const configurable = input.catalog.filter((item) => !item.essential || input.configured.includes(item.id));
   const available = new Set(
     configurable.filter((item) => item.available !== false).map((item) => item.id),
   );
@@ -545,7 +548,10 @@ export async function hydrateBotProfileRuntime(
           : 'inherit';
   const rawToolsets = readStringList(config.toolsets ?? config.tools);
   const legacyToolPlaceholders = new Set(['files', 'browser', 'mcp']);
+  // Explicit modern grants can legitimately contain only browser. Only legacy
+  // profiles without an allowlist mode used these names as display placeholders.
   const hasOnlyLegacyToolPlaceholders =
+    config.toolsetMode !== 'allowlist' &&
     rawToolsets.length > 0 && rawToolsets.every((item) => legacyToolPlaceholders.has(item));
   const configuredToolsets = hasOnlyLegacyToolPlaceholders ? [] : rawToolsets;
   const toolsetMode =
@@ -771,13 +777,11 @@ export async function hydrateBotProfileRuntime(
   }
   const runtimeConfiguredToolsets =
     toolsetMode === 'inherit' ? [...resolvedToolsets] : [...configuredToolsets];
-  // 工具集 → 内置 MCP 服务器。显式挂载 docs 的伙伴,提示词会承诺文档能力
-  // (DOCS_GUIDANCE),对应服务器必须同轮进入 MCP allowlist —— 否则就是本文件
+  // 工具集与内置 MCP 共用宿主映射；已选择的能力必须同轮进入 MCP allowlist。
+  // 显式挂载 docs 时提示词会承诺文档能力，其他工具集同样需要真正挂载。
   // 开头记录的那类事故:「提示词说有,运行时够不到」。
-  const TOOLSET_MCP_SERVERS: Record<string, string> = { docs: 'cindy_docs' };
-  for (const toolsetId of resolvedToolsets) {
-    const serverName = TOOLSET_MCP_SERVERS[toolsetId];
-    if (!serverName || runtimeConfiguredMcpServers.includes(serverName)) continue;
+  for (const [serverName, toolsetId] of Object.entries(PROVIDER_NAME_TO_PLUGIN_ID)) {
+    if (toolsetId === 'collab' || !resolvedToolsets.includes(toolsetId) || runtimeConfiguredMcpServers.includes(serverName)) continue;
     if (mcpCatalog.some((item) => item.name === serverName && item.available !== false)) {
       runtimeConfiguredMcpServers.push(serverName);
     }

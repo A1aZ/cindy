@@ -7255,6 +7255,16 @@
       "thisDevice": "这台电脑",
       "offlineDescription": "{{name}} 暂时离线，{{device}} 重新联网后就能继续聊。",
       "preparing": "正在等伙伴准备好…"
+    },
+    "capabilities": {
+      "title": "能力",
+      "search": "搜索能力",
+      "loading": "加载中…",
+      "skill": "技能",
+      "mcp": "MCP",
+      "toolset": "内置工具",
+      "unavailable": "不可用",
+      "empty": "没有匹配的能力"
     }
   },
   "common": {

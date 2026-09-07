@@ -8987,6 +8987,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
   botDelegationServiceHolder?.dispose();
   botDelegationServiceHolder = createBotDelegationService({
+    readCallerPermission: (sessionId) =>
+      maker.getSession(sessionId)?.stablePermissionModeState?.mode ?? null,
     readCallerRuntime: (sessionId) => {
       const session = maker.getSession(sessionId);
       return session ? {
@@ -16828,9 +16830,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   // ── Plugin system (Phase 1) ──────────────────────────────────────────────
-  ipcMain.handle(MAKER_INVOKE.PLUGINS_LIST, async (_e, workingDir: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.PLUGINS_LIST, async (_e, workingDir: unknown, includeHidden: unknown) => {
     const wd = typeof workingDir === 'string' ? workingDir : undefined;
-    return getPluginRegistry().listPlugins(wd);
+    return getPluginRegistry().listPlugins(wd, includeHidden === true);
   });
 
   // Read one plugin's enable state by id. Unlike PLUGINS_LIST this does NOT skip

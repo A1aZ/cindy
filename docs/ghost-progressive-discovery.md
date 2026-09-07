@@ -91,6 +91,10 @@ frontmatter `name + description` 的召回作用；`manual.items` 只是插件�
 - 纯格式化函数下沉在 `packages/cindy-tools`，主进程与 MCP server 共用，避免两处
   实现漂移。
 
+伙伴仅保留插件发现网关，不默认注入全量花名册；按需调用 `ghost_list` / `ghost_info`
+复用同账号已有插件。伙伴内置工具集的冻结名单不适用于插件 ID，插件仍由 §4 的实时可见性与
+调用授权守门。
+
 ### 3.3 快照语义
 
 - 花名册在**会话装配时求值一次，会话内恒定**——这是 prompt 前缀缓存安全的前提，

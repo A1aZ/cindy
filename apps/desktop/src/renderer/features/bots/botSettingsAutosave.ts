@@ -22,7 +22,7 @@
  *    回调(组件已经不在了)。
  */
 
-import type { BotCapabilities } from './botStore';
+import type { BotCapabilities, BotProfileUpdatePatch } from './botStore';
 
 /** 提交给 `updateBotProfile` 的字段集合(与手动保存时的载荷完全一致)。 */
 export interface BotSettingsPayload {
@@ -128,6 +128,16 @@ export function botSettingsPayloadEqual(a: BotSettingsPayload, b: BotSettingsPay
     stringListEqual(a.skills, b.skills) &&
     botCapabilitiesEqual(a.capabilities, b.capabilities)
   );
+}
+
+/** Send only edited fields, preserving capabilities joined concurrently by the companion. */
+export function botSettingsChanges(previous: BotSettingsPayload, next: BotSettingsPayload): BotProfileUpdatePatch {
+  const { capabilities, ...values } = next;
+  const changed = Object.fromEntries(Object.entries(values).filter(([key, value]) =>
+    !capabilityValueEqual(value, previous[key as keyof typeof values])));
+  const capabilityChanges = Object.fromEntries(Object.entries(capabilities).filter(([key, value]) =>
+    !capabilityValueEqual(value, previous.capabilities[key as keyof BotCapabilities])));
+  return { ...changed, ...(Object.keys(capabilityChanges).length ? { capabilities: capabilityChanges } : {}) };
 }
 
 /** 自动保存对用户可见的状态。`saved` 由 UI 侧短暂显示后淡出,不常驻。 */

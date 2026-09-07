@@ -17,6 +17,11 @@
  *
  * 双层校验:控制端发送前(快速失败)+ 被控端执行前(权威)。
  * 新增 channel 不进表即天然不可远程调用(代码保证确定性)。
+ *
+ * 远程桌面专用例外: device-link:remote-desktop:v1 的 permissions/guide 只能
+ * 显示 Cindy 自己的权限引导,需同账号鉴权、远控与远程桌面两个本机 opt-in、未撤销。
+ * 不接受 URL、不直接打开系统设置/请求 OS 授权、不修改开关;系统权限按钮仅本机可信
+ * Renderer 可调用。它由业务 dispatch 拦截,绝不放行通用 UI / shell IPC。
  */
 import { SESSION_ACTIVITY_CHANNEL, SESSION_SYNC_CHANNEL } from './topics.js';
 import {
@@ -560,6 +565,7 @@ export const REMOTE_REVIEW_EXTERNAL_INPUT_CHANNELS: ReadonlySet<string> = new Se
 
 /** 远程可调用的 invoke channel 全集(被控端 dispatch 前的权威校验依据) */
 export const REMOTE_INVOKE_ALLOWLIST: ReadonlySet<string> = new Set([
+  'device-link:remote-desktop:v1',
   ...CORE_INVOKE_CHANNELS,
   ...EXTENDED_INVOKE_CHANNELS,
 ]);

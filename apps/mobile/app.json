@@ -119,6 +119,7 @@
           }
         }
       ],
+      "./plugins/with-remote-desktop-presentation",
       "./plugins/with-foreground-only-audio",
       [
         "expo-audio",

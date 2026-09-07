@@ -3753,6 +3753,7 @@ interface ElectronAPI {
   fetchReleaseNotesIndex: () => Promise<string[] | null>;
 
   // ── Device Link (设备互联/跨设备远程控制) ─────────────────────────────
+  remoteDesktop: import('../shared/remoteDesktop').RemoteDesktopApi;
   deviceLink: {
     getState: () => Promise<{
       remoteControlEnabled: boolean;

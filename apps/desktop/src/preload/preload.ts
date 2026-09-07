@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { DESKTOP_LOCAL, type RemoteDesktopApi, type DesktopHostCommand } from '../shared/remoteDesktop';
 import { DEVICE_LINK_PUSH } from '../shared/deviceLinkIpc';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
@@ -4176,6 +4177,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Device Link (设备互联/跨设备远程控制) ─────────────────────────────
   // 同账号设备经 server relay 互联;此处只暴露开关 + 设备列表管理面,
   // 隧道(远程会话控制)在 M3 接入。
+  remoteDesktop: {
+    state: () => ipcRenderer.invoke(DESKTOP_LOCAL.STATE),
+    permissions: () => ipcRenderer.invoke(DESKTOP_LOCAL.PERMISSIONS),
+    openPermission: (permission) => ipcRenderer.invoke(DESKTOP_LOCAL.OPEN_PERMISSION, permission),
+    dismissPermissionGuide: () => ipcRenderer.invoke(DESKTOP_LOCAL.DISMISS_GUIDE),
+    enable: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.ENABLE, enabled),
+    windowsSupport: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.WINDOWS_SUPPORT, enabled),
+    stop: () => ipcRenderer.invoke(DESKTOP_LOCAL.STOP),
+    registerHost: () => ipcRenderer.invoke(DESKTOP_LOCAL.REGISTER),
+    onCommand: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, command: DesktopHostCommand) => listener(command);
+      ipcRenderer.on(DESKTOP_LOCAL.COMMAND, wrapped);
+      return () => { ipcRenderer.removeListener(DESKTOP_LOCAL.COMMAND, wrapped); };
+    },
+    reply: (id, sdp) => ipcRenderer.invoke(DESKTOP_LOCAL.REPLY, id, sdp),
+    input: (lease, sequence, events) => ipcRenderer.invoke(DESKTOP_LOCAL.INPUT, lease, sequence, events),
+    viewHeartbeat: (lease) => ipcRenderer.invoke(DESKTOP_LOCAL.VIEW_HEARTBEAT, lease),
+    nativeFrame: (lease) => ipcRenderer.invoke(DESKTOP_LOCAL.NATIVE_FRAME, lease),
+  } satisfies RemoteDesktopApi,
   deviceLink: {
     getState: (): Promise<{
       remoteControlEnabled: boolean;

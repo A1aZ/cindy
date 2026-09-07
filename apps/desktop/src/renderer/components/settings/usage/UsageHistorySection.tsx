@@ -29,6 +29,7 @@ import { UsageHeatmap } from '@/components/new-chat/UsageHeatmap';
 import { USAGE_TOP_MODELS, usageModelKey } from '@/components/new-chat/usagePalette';
 import { UsageStatRow } from './UsageStatRow';
 import { UsageTokenBars } from './UsageTokenBars';
+import { UsageDateFilter } from './UsageDateFilter';
 import { UsageAgentTable, UsageModelTable } from './UsageBreakdownTables';
 import { UsageTaskTable, useTopTokenSessions } from './UsageTaskTable';
 import {
@@ -92,12 +93,11 @@ export function UsageHistorySection(): React.JSX.Element {
   const selectedDay = usageRangeDay(range, history?.todayKey);
   const rangeLabel = useMemo(() => {
     if (selectedDay) {
-      const [year, month, day] = selectedDay.split('-').map(Number);
       return new Intl.DateTimeFormat(i18n.language, {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
-      }).format(new Date(year, (month ?? 1) - 1, day ?? 1));
+      }).format(new Date(`${selectedDay}T12:00:00`));
     }
     return t(`usageHistory.range.${range}`);
   }, [i18n.language, range, selectedDay, t]);
@@ -149,7 +149,7 @@ export function UsageHistorySection(): React.JSX.Element {
         {t('usageHistory.description')}
       </p>
 
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
         <span className="text-12 font-medium text-[var(--text-secondary)]">
           {t('usageHistory.range.label')}
         </span>
@@ -199,6 +199,14 @@ export function UsageHistorySection(): React.JSX.Element {
             </Select.Content>
           </Select.Portal>
         </Select.Root>
+      </div>
+
+      <div className="mb-4">
+        <UsageDateFilter
+          selectedDay={selectedDay}
+          todayKey={history?.todayKey ?? ''}
+          onSelectDay={handleDayClick}
+        />
       </div>
 
       {loading ? (

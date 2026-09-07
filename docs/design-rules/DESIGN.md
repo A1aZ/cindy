@@ -303,6 +303,10 @@ Reference implementation: `apps/desktop/src/renderer/components/ui/confirm-dialo
 - Active: Light Gray bg (`--surface-chip`); Inactive: transparent
 - All pill-shaped (9999px)
 
+### Usage History Charts
+
+The usage heatmap, daily-token bars, their separate interaction indicators and the equivalent single-day selection control follow [the Usage History component specification](./usage-history-charts.md). Corner treatment is assigned through the registered member IDs in §5; ordinary button geometry does not classify the marks.
+
 ## 5. Layout Principles
 
 ### Spacing System

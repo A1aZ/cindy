@@ -82,19 +82,20 @@ describe('HomeUsageDashboard source contract', () => {
   it('keeps selected usage chart days flat without ad-hoc shadows', () => {
     expect(heatmapSource).not.toContain('boxShadow');
     expect(tokenBarsSource).not.toContain('boxShadow');
-    expect(heatmapSource).toContain("'2px solid var(--focus-ring-soft)'");
-    expect(tokenBarsSource).toContain("'2px solid var(--focus-ring-soft)'");
+    expect(heatmapSource).toContain('group-aria-pressed:outline-2');
+    expect(tokenBarsSource).toContain('group-aria-pressed:outline-2');
   });
 
-  it('keeps chart visuals small while giving interactive controls a stable hit target', () => {
-    expect(heatmapSource).toContain('const INTERACTIVE_CELL_PX = 24;');
-    expect(heatmapSource).toContain('const cellSize = onDayClick ? INTERACTIVE_CELL_PX : CELL_PX;');
-    expect(heatmapSource).toContain('style={{ width: cellSize, height: cellSize }}');
+  it('keeps registered chart geometry dense with a same-page equivalent date control', () => {
+    expect(heatmapSource).not.toContain('INTERACTIVE_CELL_PX');
+    expect(heatmapSource).toContain('const cellSize = CELL_PX;');
+    expect(heatmapSource).toContain('data-usage-mark="usage-heatmap-day"');
     expect(tokenBarsSource).toContain('const hitHeight = Math.max(24, visualHeight);');
-    expect(tokenBarsSource).toContain('height: visualHeight');
-    expect(tokenBarsSource).toContain('minWidth: bars.list.length * 24');
-    expect(tokenBarsSource).toContain('minWidth: 24');
-    expect(tokenBarsSource).toContain('overflow-x-auto');
+    expect(tokenBarsSource).toContain('data-usage-mark="usage-token-bar"');
+    expect(tokenBarsSource).not.toContain('minWidth: bars.list.length * 24');
+    expect(tokenBarsSource).not.toContain('minWidth: 24');
+    expect(tokenBarsSource).not.toContain('overflow-x-auto');
+    expect(usageHistorySectionSource).toContain('onSelectDay={handleDayClick}');
   });
 
   it('keeps the home heatmap non-interactive when no day callback is supplied', () => {

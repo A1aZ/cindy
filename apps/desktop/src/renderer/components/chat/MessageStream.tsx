@@ -2739,6 +2739,7 @@ export function MessageStream({
       const items = renderHistoryView<HistoryChatMessage, RenderItem>({
         view: historyView, snapshot: historySnapshot, liveMessages, streaming: isSessionStreaming,
         isLive: (row) => row.isStreaming === true,
+        isLocalUser: (row) => row.role === 'user' && (row.isPendingPersist === true || !!row.blockedByGhost),
         build: (rows) => {
           const chunk = buildRenderItems([...rows], taskUpdates, ghostCardSnapshot, {
             historyWindowIncomplete: true, workingDir,

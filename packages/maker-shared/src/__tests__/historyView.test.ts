@@ -256,6 +256,31 @@ describe('shared history view lifecycle', () => {
     expect(rendered).toEqual(['c1']);
   });
 
+  it('preserves current local user bubbles, source authority and store order despite clock skew', async () => {
+    type Message = HistoryMessageSource & { isPendingPersist?: boolean; blockedByGhost?: boolean };
+    const source = [row(1, 'user', 'kept'), row(10, 'assistant', 'answer'), row(11, 'user', 'persisted rewrite')];
+    const view = new HistoryViewController<Message>({
+      page: async () => ({ version: 1, items: projectHistoryView(source, false), hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    const blocked = { ...row(2, 'user', 'blocked'), blockedByGhost: true };
+    const pending = { ...row(3, 'user', 'pending'), isPendingPersist: true };
+    const render = (liveMessages: Message[]) => renderHistoryView({
+      view, snapshot: view.getSnapshot(), liveMessages, streaming: false,
+      isLive: () => false,
+      isLocalUser: (message) => message.isPendingPersist === true || !!message.blockedByGhost,
+      build: (rows) => rows.map((message) => message.content), structure: ungroupedStructure,
+    });
+    expect(render([source[0], blocked, source[1],
+      { ...source[2], content: 'stale optimistic body', isPendingPersist: true }, pending,
+      row(12, 'user', 'rewound durable user'), row(13, 'assistant', 'rewound answer')]))
+      .toEqual(['kept', 'blocked', 'answer', 'persisted rewrite', 'pending']);
+    // Clearing the existing store removes local bubbles; no renderer-owned cache revives them.
+    expect(render(source)).toEqual(['kept', 'answer', 'persisted rewrite']);
+  });
+
   it.each([false, true])('uses refreshed work details after collapse despite stale streaming rows (active=%s)', async (active) => {
     let thinking = { ...row(1, 'thinking', 'partial'), isStreaming: true };
     const prose = row(2, 'assistant', 'answer');

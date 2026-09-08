@@ -9,6 +9,7 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   build(messages: readonly T[], streaming: boolean): TItem[];
   streaming: boolean;
   isLive?(message: T): boolean;
+  isLocalUser?(message: T): boolean;
   structure: {
     placeholder(summary: HistoryWorkSummary): T;
     children(item: TItem): readonly TItem[] | undefined;
@@ -61,6 +62,21 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   for (const row of options.liveMessages) {
     if (options.isLive?.(row) && !seen.has(row.clientId) && (row.role === 'assistant' || row.role === 'user')
       && Date.parse(row.createdAt) >= endMs) rows.push(row);
+  }
+  // Local pending/blocked user bubbles belong to the current UI store, not
+  // persisted history. Keep their store order without trusting device clocks.
+  const renderedIds = new Set(rows.map((row) => row.clientId));
+  let beforeClientId: string | undefined;
+  for (let index = options.liveMessages.length - 1; index >= 0; index--) {
+    const row = options.liveMessages[index];
+    if (renderedIds.has(row.clientId)) {
+      beforeClientId = row.clientId;
+    } else if (row.role === 'user' && options.isLocalUser?.(row)) {
+      const before = beforeClientId === undefined ? -1 : rows.findIndex((item) => item.clientId === beforeClientId);
+      rows.splice(before < 0 ? rows.length : before, 0, row);
+      renderedIds.add(row.clientId);
+      beforeClientId = row.clientId;
+    }
   }
   const bind = (item: TItem): TItem => {
     const children = structure.children(item);

@@ -48,20 +48,20 @@ const rememberedTopicsByController = new Map<string, Set<StoredTopic>>();
  * 新控制端误判成 legacy，否则 set-model 的显式 provider null 会被当成占位。
  */
 const rememberedCapabilitiesByController = new Map<string, Set<string>>();
-const historyViewsByController = new Map<string, Map<string, { ready: boolean; liveKey: string | null; expanded: Set<string> }>>();
+const historyViewsByController = new Map<string, Map<string, { ready: boolean; liveKeys: readonly string[]; expanded: Set<string> }>>();
 
 /** Capture this subscription before reading; only its successful result may enable filtering. */
 export function prepareHistoryView(deviceId: string, sessionId: string) {
   if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return undefined;
   const views = historyViewsByController.get(deviceId) ?? new Map();
-  const view = views.get(sessionId) ?? { ready: false, liveKey: null, expanded: new Set<string>() };
+  const view = views.get(sessionId) ?? { ready: false, liveKeys: [], expanded: new Set<string>() };
   views.set(sessionId, view);
   historyViewsByController.set(deviceId, views);
   const isCurrent = () => historyViewsByController.get(deviceId)?.get(sessionId) === view;
   return {
-    update(liveKey: string | null): void {
+    update(liveKeys: readonly string[]): void {
       if (!isCurrent()) return;
-      view.liveKey = liveKey;
+      view.liveKeys = [...liveKeys];
       view.ready = true;
     },
     setExpanded(keys: readonly string[]): void {
@@ -83,7 +83,7 @@ export function hasHistoryView(deviceId: string, sessionId: string): boolean {
 
 export function projectsHistoryDetails(deviceId: string, sessionId: string): boolean {
   const view = historyViewsByController.get(deviceId)?.get(sessionId);
-  return !!view?.ready && (!view.liveKey || !view.expanded.has(view.liveKey));
+  return !!view?.ready && !view.liveKeys.some((key) => view.expanded.has(key));
 }
 
 /**

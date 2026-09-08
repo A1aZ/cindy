@@ -382,8 +382,9 @@ export function registerMessageIpc(
     const before = (opts as { before?: unknown } | null)?.before;
     const page = await historyView.page(sid, before == null ? undefined : requireString(before, 'before'));
     if (before == null) {
-      const live = historyViewLeaves(page.items).find((item) => item.type === 'work' && item.summary.isStreaming);
-      getDeviceLinkInvokeContext()?.historyView?.update(live?.key ?? null);
+      const liveKeys = historyViewLeaves(page.items)
+        .filter((item) => item.type === 'work' && item.summary.isStreaming).map((item) => item.key);
+      getDeviceLinkInvokeContext()?.historyView?.update(liveKeys);
     }
     return page;
   });

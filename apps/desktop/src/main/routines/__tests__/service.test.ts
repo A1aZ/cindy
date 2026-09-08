@@ -4,6 +4,9 @@ const mock = vi.hoisted(() => ({
   scope: 'owner-a',
   boundaryPending: false,
   schedulerReady: true,
+  dbReady: true,
+  dbOwner: null as string | null,
+  readProfiles: vi.fn(),
   load: vi.fn<() => Promise<RoutineState | null>>(async () => null),
   profiles: [] as Array<{ id: string; status: string }>,
   save: vi.fn<(state: RoutineState) => Promise<void>>(async () => {}),
@@ -41,7 +44,10 @@ vi.mock('../../security/trustedAppRenderer.js', () => ({ assertTrustedAppRendere
 vi.mock('../../utils/ipcValidate.js', () => ({ throwIpcError: vi.fn() }));
 vi.mock('../../logger.js', () => ({ createLogger: () => ({ warn: vi.fn() }) }));
 vi.mock('../../localDb/client/current.js', () => ({
-  getDbClient: () => ({ drizzle: { select: () => ({ from: async () => mock.profiles }) } }),
+  getCurrentDbClientSnapshot: () => mock.dbReady ? {
+    userId: mock.dbOwner ?? mock.scope,
+    client: { drizzle: { select: () => ({ from: mock.readProfiles }) } },
+  } : null,
 }));
 vi.mock('../store.js', () => ({
   RoutineFileStore: class {
@@ -50,6 +56,9 @@ vi.mock('../store.js', () => ({
   },
 }));
 import { configureRoutineHost, getRoutineEngine, routineTools, stopRoutines, updateBotRoutineLifecycle } from '../service.js';
+import { handleRoutineRequest } from '../../cindy-brain/routineSlot.js';
+import type { InstalledGhost } from '../../../shared/ghost.js';
+beforeEach(() => { mock.readProfiles.mockImplementation(async () => mock.profiles); });
 beforeEach(() => configureRoutineHost({
   getBot: mock.getBot,
   getScheduler: () => mock.schedulerReady ? mock.scheduler : null,
@@ -61,6 +70,8 @@ afterEach(async () => {
   mock.scope = 'owner-a';
   mock.boundaryPending = false;
   mock.schedulerReady = true;
+  mock.dbReady = true;
+  mock.dbOwner = null;
   mock.load.mockResolvedValue(null);
   mock.storage.get.mockResolvedValue(null);
   mock.profiles = [];
@@ -329,4 +340,115 @@ it('does not classify an actual backing storage failure as scheduler cold start'
   await routineTools.runNow('bot', routine.id);
   await vi.waitFor(async () => expect((await routineTools.history('bot', routine.id))[0]).toMatchObject({ status: 'failed', error: 'storage unavailable' }));
   expect(mock.scheduler.runNow).not.toHaveBeenCalled();
+});
+
+async function restoreEventRoutine() {
+  const ghost: InstalledGhost = {
+    enabled: true,
+    dir: '/mock/plugins/mail',
+    approval: { state: 'approved', revision: 'test-revision' },
+    manifest: {
+      schemaVersion: 3, id: 'mail', name: 'Mail', version: '1.0.0', kind: 'chip', entry: 'index.js',
+      routineEvents: { events: [{ type: 'mail', name: 'Mail', fields: [] }] },
+    },
+  };
+  const engine = await getRoutineEngine();
+  engine.registerSource({ id: 'plugin:mail', name: 'Mail', status: 'listening', events: ghost.manifest.routineEvents!.events });
+  const routine = await engine.put('bot', {
+    name: 'Read mail', prompt: 'Summarize mail', enabled: true,
+    triggers: [{ id: 'mail', kind: 'event', sourceId: 'plugin:mail', eventType: 'mail', filters: [] }],
+  });
+  const saved = structuredClone(mock.save.mock.calls.at(-1)![0]);
+  await stopRoutines();
+  mock.load.mockResolvedValue(saved);
+  mock.profiles = [{ id: 'bot', status: 'active' }];
+  return {
+    routine,
+    request: (payload: unknown) => handleRoutineRequest(ghost, payload, getRoutineEngine, () => mock.scope === 'owner-a'),
+  };
+}
+
+it('retains the first plugin status until the owner database is ready and receives events without re-registration', async () => {
+  const f = await restoreEventRoutine();
+  mock.dbReady = false;
+  mock.schedulerReady = false;
+  let settled = false;
+  const status = f.request({ action: 'status', status: 'listening' }).then((value) => { settled = true; return value; });
+  await vi.waitFor(() => expect(mock.load).toHaveBeenCalledTimes(2));
+  expect(settled).toBe(false);
+  expect(mock.readProfiles).not.toHaveBeenCalled();
+  mock.dbReady = true;
+  await expect(status).resolves.toEqual({ ok: true });
+  const engine = await getRoutineEngine();
+  expect(engine.listSources()).toEqual([expect.objectContaining({ id: 'plugin:mail', status: 'listening' })]);
+  mock.schedulerReady = true;
+  expect(await getRoutineEngine()).toBe(engine);
+  await expect(f.request({ action: 'publish', event: { id: 'new-mail', type: 'mail', occurredAt: 1, data: {} } }))
+    .resolves.toMatchObject({ ok: true, accepted: 1 });
+  await vi.waitFor(() => expect(engine.history(f.routine.id)[0].status).toBe('success'));
+  expect(mock.scheduler.runNow).toHaveBeenCalledOnce();
+});
+
+it.each(['paused', 'deleted'] as const)('waits for scheduler readiness to recover a %s owner before accepting the first status', async (state) => {
+  const f = await restoreEventRoutine();
+  mock.profiles = state === 'paused' ? [{ id: 'bot', status: 'paused' }] : [];
+  mock.storage.get.mockImplementation(async (id) => ({ id, source: 'bot' } as Schedule));
+  mock.schedulerReady = false;
+  let settled = false;
+  const status = f.request({ action: 'status', status: 'listening' }).then((value) => { settled = true; return value; });
+  await vi.waitFor(() => expect(mock.readProfiles).toHaveBeenCalledOnce());
+  expect(settled).toBe(false);
+  mock.schedulerReady = true;
+  await expect(status).resolves.toEqual({ ok: true });
+  expect(state === 'paused' ? mock.scheduler.pause : mock.scheduler.delete).toHaveBeenCalledOnce();
+  expect(mock.scheduler.runNow).not.toHaveBeenCalled();
+  expect((await getRoutineEngine()).listSources()[0].status).toBe('listening');
+});
+
+it.each(['stop', 'switch'] as const)('cancels database startup waiting on %s without carrying the old status into a replacement engine', async (action) => {
+  const f = await restoreEventRoutine();
+  mock.dbReady = false;
+  const status = f.request({ action: 'status', status: 'listening' });
+  await vi.waitFor(() => expect(mock.load).toHaveBeenCalledTimes(2));
+  if (action === 'stop') await stopRoutines();
+  else mock.scope = 'owner-b';
+  await expect(status).resolves.toMatchObject({ ok: false });
+  expect(mock.readProfiles).not.toHaveBeenCalled();
+  mock.dbReady = true;
+  mock.load.mockResolvedValue(null);
+  expect((await getRoutineEngine()).listSources()).toEqual([]);
+});
+
+it('does not query another owner database while waiting for the current owner', async () => {
+  const f = await restoreEventRoutine();
+  mock.dbOwner = 'owner-b';
+  const status = f.request({ action: 'status', status: 'listening' });
+  await vi.waitFor(() => expect(mock.load).toHaveBeenCalledTimes(2));
+  expect(mock.readProfiles).not.toHaveBeenCalled();
+  mock.dbOwner = 'owner-a';
+  await expect(status).resolves.toEqual({ ok: true });
+  expect(mock.readProfiles).toHaveBeenCalledOnce();
+});
+
+it('lets a new owner start while the previous owner database wait is being cancelled', async () => {
+  const f = await restoreEventRoutine();
+  mock.dbReady = false;
+  const oldStatus = f.request({ action: 'status', status: 'listening' });
+  await vi.waitFor(() => expect(mock.load).toHaveBeenCalledTimes(2));
+  mock.scope = 'owner-b';
+  mock.load.mockResolvedValue(null);
+  const replacement = getRoutineEngine();
+  await expect(oldStatus).resolves.toMatchObject({ ok: false });
+  const engine = await replacement;
+  expect(engine.listSources()).toEqual([]);
+  expect(engine.list('bot')).toEqual([]);
+  expect(mock.readProfiles).not.toHaveBeenCalled();
+});
+
+it('reports real database failures instead of waiting indefinitely and allows a later retry', async () => {
+  const f = await restoreEventRoutine();
+  mock.readProfiles.mockRejectedValueOnce(new Error('database query failed'));
+  await expect(f.request({ action: 'status', status: 'listening' }))
+    .resolves.toMatchObject({ ok: false, message: 'database query failed' });
+  await expect(f.request({ action: 'status', status: 'listening' })).resolves.toEqual({ ok: true });
 });

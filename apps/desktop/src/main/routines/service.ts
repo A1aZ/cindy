@@ -1,6 +1,7 @@
 import { REMOTE_RESOURCE_CHANGED_CHANNEL } from '@cindy/device-link';
 import { tapWindowBroadcast, getSafeDataOwnerPushStamp } from '../device-link/broadcast-tap.js';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import {
   RoutineEngine,
@@ -22,7 +23,7 @@ import { throwIpcError } from '../utils/ipcValidate.js';
 import { createLogger } from '../logger.js';
 import { RoutineFileStore } from './store.js';
 import { untrustedJsonBlock } from '../../shared/untrustedPrompt.js';
-import { getDbClient } from '../localDb/client/current.js';
+import { getCurrentDbClientSnapshot } from '../localDb/client/current.js';
 import { botProfiles } from '../localDb/schema.js';
 
 /** Bootstrap supplies live getters without a service -> scheduler -> IPC dependency cycle. */
@@ -47,6 +48,8 @@ const log = createLogger('routines');
 let current:
   { scope: string; engine: RoutineEngine; timer: ReturnType<typeof setInterval> } | undefined;
 let starting: Promise<RoutineEngine> | undefined;
+let startingScope: string | undefined;
+let startupAbort: AbortController | undefined;
 let stopping: Promise<void> | undefined;
 let generation = 0;
 
@@ -57,6 +60,27 @@ function assertScope(scope: string): void {
     activeOwnerScopeKey() !== scope
   ) {
     throw new Error('Routine account is no longer active');
+  }
+}
+
+/** One shared startup wait keeps first plugin reports pending across host readiness gaps. */
+async function waitForStartupDependency<T>(
+  scope: string,
+  epoch: number,
+  signal: AbortSignal,
+  read: () => T | null,
+): Promise<T> {
+  for (;;) {
+    assertScope(scope);
+    if (epoch !== generation || signal.aborted) throw new Error('Routine service was reset');
+    const ready = read();
+    if (ready !== null) return ready;
+    try {
+      await delay(100, undefined, { signal, ref: false });
+    } catch (error) {
+      if (signal.aborted) throw new Error('Routine service was reset');
+      throw error;
+    }
   }
 }
 
@@ -139,11 +163,22 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
   const scope = activeOwnerScopeKey();
   assertScope(scope);
   if (starting) {
-    await starting;
+    const pendingScope = startingScope;
+    try {
+      await starting;
+    } catch (error) {
+      assertScope(scope);
+      // A new owner's first request must not inherit cancellation of the old owner's startup.
+      if (pendingScope === scope) throw error;
+    }
     return getRoutineEngine();
   }
   if (current?.scope === scope) return current.engine;
   const epoch = generation;
+  const ownerId = getActiveAppSession().dataOwnerId;
+  const controller = new AbortController();
+  startupAbort = controller;
+  startingScope = scope;
   starting = (async () => {
     if (current) {
       clearInterval(current.timer);
@@ -156,8 +191,12 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
     if (epoch !== generation) throw new Error('Routine service was reset');
     const botStates = new Map<string, 'active' | 'paused' | 'deleted'>();
     if (saved?.routines.length) {
+      const database = await waitForStartupDependency(scope, epoch, controller.signal, () => {
+        const snapshot = getCurrentDbClientSnapshot();
+        return snapshot?.userId === ownerId ? snapshot.client : null;
+      });
       assertScope(scope);
-      const profiles = await getDbClient().drizzle
+      const profiles = await database.drizzle
         .select({ id: botProfiles.id, status: botProfiles.status }).from(botProfiles);
       assertScope(scope);
       for (const routine of saved.routines) {
@@ -167,7 +206,10 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
       // Recover an interrupted lifecycle before the first queued run can be dispatched.
       for (const routine of saved.routines) {
         const status = botStates.get(routine.botId);
-        if (status !== 'active') await cleanBackingSchedules(scope, [routine.id], status === 'deleted');
+        if (status !== 'active') {
+          await waitForStartupDependency(scope, epoch, controller.signal, () => getRoutineHost().getScheduler());
+          await cleanBackingSchedules(scope, [routine.id], status === 'deleted');
+        }
       }
     }
     const engine = new RoutineEngine({
@@ -223,12 +265,15 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
     return await starting;
   } finally {
     starting = undefined;
+    startingScope = undefined;
+    if (startupAbort === controller) startupAbort = undefined;
   }
 }
 
 export async function stopRoutines(): Promise<void> {
   if (stopping) return stopping;
   generation += 1;
+  startupAbort?.abort();
   const stop = (async () => {
     if (starting) {
       try {

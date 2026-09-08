@@ -209,8 +209,9 @@ describe('skillhub/installService', () => {
     expect(isCindySkillEnabled(source)).toBe(false);
   });
 
-  it('removes only an external import link and leaves its source untouched', async () => {
-    const source = path.join(TEST_ROOT, 'external', 'shared');
+  it.each(['ordinary', 'skill-shaped'])('removes only an external import link and leaves its source untouched (%s)', async (layout) => {
+    const source = layout === 'ordinary' ? path.join(TEST_ROOT, 'external', 'shared')
+      : path.join(TEST_ROOT, 'checkout', '.agents', 'skills', 'shared');
     const alias = path.join(TEST_ROOT, '.agents', 'skills', 'shared');
     fs.mkdirSync(source, { recursive: true });
     fs.writeFileSync(path.join(source, 'SKILL.md'), 'external content');
@@ -227,6 +228,40 @@ describe('skillhub/installService', () => {
     expect(shell.trashItem).toHaveBeenCalledWith(alias);
     expect(fs.existsSync(alias)).toBe(false);
     expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
+  });
+
+  it.each(['complete', 'retry'])('preserves shared disabled state after removing one external scope (%s)', async (outcome) => {
+    const source = path.join(TEST_ROOT, 'external', 'shared');
+    const alias = path.join(TEST_ROOT, '.agents', 'skills', 'global-import');
+    const otherAlias = path.join(TEST_ROOT, 'project', '.agents', 'skills', 'project-import');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'external content');
+    for (const entry of [alias, otherAlias]) makeDirectoryLink(entry, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const target = inspectLocalSkillTarget(source, [alias])!;
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    const { setCindySkillEnabled, isCindySkillEnabled } = await import('../activationPreferences');
+    await setCindySkillEnabled(source, false);
+    const { shell } = await import('electron');
+    let cleanupBlocked = false;
+    vi.mocked(shell.trashItem).mockImplementationOnce(async (entry) => {
+      await fs.promises.rename(entry, path.join(TEST_ROOT, 'removed-import'));
+      cleanupBlocked = outcome === 'retry';
+    });
+    const { uninstall, retryUninstallCleanup } = await import('../installService');
+    const result = await uninstall(source, target, () => !cleanupBlocked);
+    expect(result).toMatchObject({ success: true });
+    if (outcome === 'retry') {
+      expect(result).toHaveProperty('cleanupToken');
+      if (result.success && result.cleanupToken) {
+        expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+      }
+    }
+    expect(fs.lstatSync(alias, { throwIfNoEntry: false })).toBeUndefined();
+    expect(fs.readFileSync(path.join(otherAlias, 'SKILL.md'), 'utf8')).toBe('external content');
+    expect(isCindySkillEnabled(otherAlias)).toBe(false);
   });
 
   it('cleans cross-scope aliases after physical removal and preserves a retargeted link', async () => {

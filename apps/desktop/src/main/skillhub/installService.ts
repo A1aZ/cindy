@@ -1083,7 +1083,7 @@ async function uninstallLocked(
 
   const cleanup: UninstallCleanup = {
     skillName, resolved, operationPath: target?.operationPath ?? resolved, absolutePath,
-    registryMatch, links,
+    registryMatch, links, linkOnly: target?.linkOnly ?? false,
   };
   const complete = await finishUninstallCleanup(cleanup, canMutate);
   const cleanupToken = complete ? undefined : crypto.randomUUID();
@@ -1099,6 +1099,7 @@ interface UninstallCleanup {
   skillName: string;
   resolved: string;
   operationPath: string;
+  linkOnly: boolean;
   absolutePath: string;
   registryMatch: RegistryInstallMatch | null;
   links: Array<{ path: string; value: string; ino: number }>;
@@ -1145,7 +1146,9 @@ async function finishUninstallCleanup(cleanup: UninstallCleanup, canMutate: () =
       }
     }
   }
-  if (!isCindySkillEnabled(resolved)) {
+  // Unlinking an import does not remove the physical Skill or the user's shared
+  // preference. Other scopes (and later reimports) must keep that explicit state.
+  if (!cleanup.linkOnly && !isCindySkillEnabled(resolved)) {
     await setCindySkillEnabled(resolved, true, canMutate).catch((err) => {
       complete = false;
       log.warn('[skillInstall] activation cleanup failed:', err);

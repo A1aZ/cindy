@@ -654,6 +654,7 @@ describe('registerSkillhubIpc usage handlers', () => {
       discoveredPath: alias, discoveryPaths: [alias],
       ...(index > 0 ? { projectRoot: projects[index - 1] } : {}),
     }));
+    if (physicalProjectSkill) records[1]!.discoveryPaths.push(source);
     getAllowedProjectRoots.mockResolvedValue(projects);
     scanAllSkills.mockResolvedValue({ skills: records, sources: [] });
     const event = { sender: { id: 71, on: vi.fn(), once: vi.fn() } };

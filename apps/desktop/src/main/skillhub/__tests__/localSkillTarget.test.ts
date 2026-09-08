@@ -43,6 +43,21 @@ describe('local Skill removal targets', () => {
     expect(inspectLocalSkillTarget(system, [system])).toBeNull();
   });
 
+  it.each([
+    ['.agents', 'skills'], ['.claude', 'skills'], ['.pi', 'agent', 'skills'], ['codex-home', 'skills'],
+  ])('treats a linked source under a Skill-shaped checkout as an import (%s)', (...segments) => {
+    const key = segments.join('-');
+    const source = directory(`checkout-${key}`, ...segments, 'source');
+    const alias = path.join(root, '.agents', 'skills', `import-${key}`);
+    fs.mkdirSync(path.dirname(alias), { recursive: true });
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(inspectLocalSkillTarget(source, [alias])).toMatchObject({ operationPath: alias, linkOnly: true });
+    // Ownership is established only when this group also discovers the direct entry.
+    expect(inspectLocalSkillTarget(source, [alias, source])).toMatchObject({
+      operationPath: fs.realpathSync.native(source), linkOnly: false,
+    });
+  });
+
   it('detects replacement of a directory after the confirmation snapshot', () => {
     const dir = directory('.claude', 'skills', 'replace');
     const target = inspectLocalSkillTarget(dir, [dir])!;

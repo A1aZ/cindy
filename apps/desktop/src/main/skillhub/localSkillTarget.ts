@@ -51,8 +51,10 @@ export function inspectLocalSkillTarget(source: string, discoveryPaths: readonly
     });
     let operationPath = sourcePath;
     let linkOnly = false;
-    if (!isStandaloneSkillPath(sourcePath)) {
+    const hasDirectEntry = aliases.some((value) => !fs.lstatSync(value).isSymbolicLink());
+    if (!isStandaloneSkillPath(sourcePath) || !hasDirectEntry) {
       // A link into an external checkout is an import reference, not ownership of that checkout.
+      // The checkout's own directory layout does not establish local ownership.
       const externalLink = aliases.find((value) => fs.lstatSync(value).isSymbolicLink());
       if (!externalLink) return null;
       operationPath = externalLink;

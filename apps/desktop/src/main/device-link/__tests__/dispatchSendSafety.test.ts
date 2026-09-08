@@ -122,6 +122,25 @@ describe('negotiated mobile tool projection', () => {
 });
 
 describe('history detail interest', () => {
+  it('sanitizes and bounds nested history prose without mutating the Host rows', () => {
+    const message = { id: 'prose', clientId: 'prose', role: 'assistant', createdAt: '2026-09-08T00:00:00Z',
+      content: 'x'.repeat(MAX_FRAME_BYTES * 2), agentMeta: { recoveryCheckpoint: { secret: 'local-only' }, turnCompleted: false } };
+    const page = { version: 1, items: [{ type: 'work', key: 'outer', summary: {}, children: [
+      { type: 'messages', key: 'prose', messages: [message] },
+    ] }], hasMore: false, nextCursor: null };
+    const client = mkClient();
+    client.sendInvokeResult.mockImplementation((dst, requestId, payload) => {
+      if (invokeResultFrameBytes(dst, requestId, payload) > MAX_FRAME_BYTES) throw tooLarge();
+    });
+    __testing.sendInvokeResultSafe(client as never, 'ctrl', 'nested-history', { ok: true, result: page }, 'local-db:messages:view');
+    const payload = client.sendInvokeResult.mock.calls.at(-1)![2];
+    expect(payload.ok).toBe(true);
+    expect(JSON.stringify(payload)).not.toContain('local-only');
+    expect(invokeResultFrameBytes('ctrl', 'nested-history', payload)).toBeLessThan(MAX_FRAME_BYTES);
+    expect(message.agentMeta.recoveryCheckpoint.secret).toBe('local-only');
+    expect(message.content.length).toBe(MAX_FRAME_BYTES * 2);
+  });
+
   it.each(['local-db:messages:view', 'local-db:messages:view-intent'])('binds %s before asynchronous authorization', async (channel) => {
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });

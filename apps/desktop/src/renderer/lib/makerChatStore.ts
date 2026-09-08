@@ -21,7 +21,7 @@
  * - User-initiated stopSession (NOT called on session switch anymore)
  */
 
-import { HistoryViewController, isHistoryViewUnavailable, type HistoryViewPage, type HistoryDetailPage } from '@cindy/maker-shared/message-window';
+import { HistoryViewController, isHistoryViewUnavailable, mapHistoryViewMessages, historyViewLeaves, type HistoryViewPage, type HistoryDetailPage } from '@cindy/maker-shared/message-window';
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
 import { parseMessageToolUse } from '@cindy/maker-shared/message-normalize';
 import {
@@ -3417,8 +3417,7 @@ function _purgeSession(sessionId: string): void {
   backgroundTaskStaleRetrySessions.delete(sessionId);
   // 代际递增(bump 而非 delete,原因见 _messagesEpoch 注释):作废 in-flight 翻页,
   // 避免其提交把旧窗口 merge 进 purge 后重建的空 slice。
-  getRemoteHistoryView(sessionId)?.setActive(false);
-  remoteHistoryViews.delete(sessionId);
+  releaseRemoteHistoryView(sessionId);
   invalidateMessageHistoryWindow(sessionId);
   invalidateInputProjectionRequests(sessionId);
   // 删除 / 归档 / LRU 都是 renderer owner 边界。作废仍在附件物化或 composer
@@ -4053,8 +4052,7 @@ function _demoteIdleSessions(): void {
     cancelIdlePlanDiscovery(sessionId);
     // Discard the view with its message slice. Resetting an active prefetch would
     // start another read and immediately repopulate the cache being evicted.
-    getRemoteHistoryView(sessionId)?.setActive(false);
-    remoteHistoryViews.delete(sessionId);
+    releaseRemoteHistoryView(sessionId);
     invalidateMessageHistoryWindow(sessionId);
     setState(sessionId, (s) => ({
       ...s,
@@ -10646,40 +10644,84 @@ function releaseCacheHydrationAfterFailure(sessionId: string): void {
 }
 
 export type HistoryChatMessage = ChatMessage & { id: string; createdAt: string };
-const remoteHistoryViews = new Map<string, HistoryViewController<HistoryChatMessage>>();
-export function getRemoteHistoryView(sessionId: string) { return remoteHistoryViews.get(sessionId); }
+const remoteHistoryViews = new Map<string, {
+  view: HistoryViewController<HistoryChatMessage> | undefined;
+  intentQueue: { tail: Promise<void> };
+  isCurrent(): boolean;
+}>();
+function releaseRemoteHistoryView(sessionId: string, expected?: HistoryViewController<HistoryChatMessage>): void {
+  const entry = remoteHistoryViews.get(sessionId);
+  if (!entry?.view || (expected && entry.view !== expected)) return;
+  // Detach before publishing inactivity; the old subscriber cannot refill the slice.
+  const view = entry.view;
+  entry.view = undefined;
+  view.setActive(false);
+  // Keep the ordering through an immediate A -> B -> A replacement. Remove
+  // an unused slot only after its final release has reached the old Host.
+  const tail = entry.intentQueue.tail;
+  void tail.finally(() => {
+    if (remoteHistoryViews.get(sessionId) === entry && !entry.view && entry.intentQueue.tail === tail) {
+      remoteHistoryViews.delete(sessionId);
+    }
+  });
+}
+export function getRemoteHistoryView(sessionId: string) {
+  const entry = remoteHistoryViews.get(sessionId);
+  if (entry?.view && !entry.isCurrent()) {
+    releaseRemoteHistoryView(sessionId, entry.view);
+    return undefined;
+  }
+  return entry?.view;
+}
 function createRemoteHistoryView(sessionId: string) {
+  const existing = getRemoteHistoryView(sessionId);
   const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
   if (!deviceId) return undefined;
-  const existing = remoteHistoryViews.get(sessionId);
   if (existing) return existing;
+  const entry = remoteHistoryViews.get(sessionId) ?? {
+    view: undefined, intentQueue: { tail: Promise.resolve() }, isCurrent: () => false,
+  };
   const owner = getDataOwnerGeneration();
+  const isCurrent = (): boolean => isDataOwnerGenerationCurrent(owner)
+    && remoteProjectsStore.getSessionDeviceId(sessionId) === deviceId
+    && remoteHistoryViews.get(sessionId)?.view === view;
   const mapRows = (rows: Message[]): HistoryChatMessage[] => mapServerMessages(rows).map((row) => ({
     ...row, id: row.id ?? row.clientId, createdAt: row.createdAt ?? '',
   }));
   const call = async <T,>(channel: string, args: unknown[]): Promise<T> => {
+    if (!isCurrent()) throw new Error('History source changed');
     const value = await window.electronAPI.deviceLink.invoke(deviceId, channel, args);
-    if (!isDataOwnerGenerationCurrent(owner) || remoteProjectsStore.getSessionDeviceId(sessionId) !== deviceId) throw new Error('History source changed');
+    if (!isCurrent()) throw new Error('History source changed');
     return value as T;
   };
   const view = new HistoryViewController<HistoryChatMessage>({
     page: async (before) => {
       const page = await call<HistoryViewPage<Message>>('local-db:messages:view', [sessionId, { before }]);
       if (page == null) throw new Error('[CHANNEL_NOT_ALLOWED] History view is unavailable');
-      return { ...page, items: page.items.map((item) => item.type === 'work' ? item : { ...item, messages: mapRows(item.messages) }) };
+      return { ...page, items: mapHistoryViewMessages(page.items, mapRows) };
     },
     details: async (ref, after) => {
       const page = await call<HistoryDetailPage<Message>>('local-db:messages:work-details', [sessionId, ref, { after }]);
       return { ...page, messages: mapRows(page.messages) };
     },
-    expanded: (refs) => call<void>('local-db:messages:view-intent', [sessionId, refs]),
-  });
-  remoteHistoryViews.set(sessionId, view);
+    expanded: async (refs) => {
+      // Releasing an old view must still clear its original Host's interest.
+      // The existing intent queue orders this after any in-flight expand.
+      if (!refs.length) {
+        if (isDataOwnerGenerationCurrent(owner)) {
+          await window.electronAPI.deviceLink.invoke(deviceId, 'local-db:messages:view-intent', [sessionId, []]);
+        }
+      } else await call<void>('local-db:messages:view-intent', [sessionId, refs]);
+    },
+  }, entry.intentQueue);
+  entry.view = view;
+  entry.isCurrent = isCurrent;
+  remoteHistoryViews.set(sessionId, entry);
   view.subscribe(() => {
-    if (remoteHistoryViews.get(sessionId) !== view || !sessions.has(sessionId)) return;
+    if (!isCurrent() || !sessions.has(sessionId)) return;
     const snapshot = view.getSnapshot();
     if (!snapshot.ready) return;
-    const available = snapshot.items.flatMap((item) => item.type === 'messages' ? item.messages : []);
+    const available = historyViewLeaves(snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
     for (const detail of snapshot.details.values()) available.push(...detail.messages);
     setState(sessionId, (state) => ({ ...state, historyLoaded: true,
       messages: mergeMessages(available, state.messages.filter((message) => !message.cacheHydrated), { addOnly: true }),
@@ -10819,6 +10861,10 @@ function ensureInitialMessages(sessionId: string): void {
     const view = createRemoteHistoryView(sessionId);
     if (view) {
       await view.refresh();
+      if (!isCurrentHistoryLoad() || getRemoteHistoryView(sessionId) !== view) {
+        retryInvalidatedInitialHistoryFetchIfNeeded(sessionId, historyFetchToken, historyOriginAtStart, historyEpochAtStart);
+        return null;
+      }
       const snapshot = view.getSnapshot();
       if (!snapshot.error && snapshot.ready) {
         if (isCurrentHistoryLoad()) {
@@ -10833,8 +10879,7 @@ function ensureInitialMessages(sessionId: string): void {
         return null;
       }
       if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
-      view.setActive(false);
-      remoteHistoryViews.delete(sessionId);
+      releaseRemoteHistoryView(sessionId, view);
     }
     return listMessagesFor(sessionId);
   })()
@@ -11428,6 +11473,7 @@ function reconcileOpenSessionOrigins(): void {
     // 最初按 A 发起的旧查询在来源恢复后重新通过检查,覆盖恢复后的权威投影。
     const originChange = noteInputProjectionOrigin(sessionId, current);
     if (originChange.changed) {
+      releaseRemoteHistoryView(sessionId);
       bumpInteractionReconcileEpoch(sessionId);
       // 来源变更后旧设备的 owner / capability 都失效。在新来源 projection 回来前
       // fail closed，不能让 B 的历史沿用 A 的精确 owner 或 legacy 兜底。
@@ -11440,7 +11486,7 @@ function reconcileOpenSessionOrigins(): void {
     }
     if (current === undefined) continue;
     const loaded = _historyLoadOrigin.get(sessionId);
-    if (current === loaded) continue;
+    if (current === loaded && !originChange.changed) continue;
     // undefined → deviceId 是启动竞速的**首次解析**(上一次首拉命中的是本机空库),
     // 缓存并未因此过期 → 放开 hydrate,让被控端离线时也能看到上次的最近一页。
     // 设备之间真的换了 origin(string → 另一个 string)时不放开:那是另一台机器的历史。
@@ -11491,9 +11537,9 @@ const _remoteReconcileInFlight = new Map<
 function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
   const view = getRemoteHistoryView(sessionId);
   if (view?.getSnapshot().ready) return Promise.all([view.refresh(), reconcilePendingInteractions(sessionId)]).then(() => {
+    if (getRemoteHistoryView(sessionId) !== view) return false;
     if (isHistoryViewUnavailable(view.getSnapshot().error)) {
-      view.setActive(false);
-      remoteHistoryViews.delete(sessionId);
+      releaseRemoteHistoryView(sessionId, view);
       return reconcileRemoteMessages(sessionId, { force: true });
     }
     if (view.getSnapshot().error) throw view.getSnapshot().error;
@@ -11816,9 +11862,9 @@ function loadOlderMessages(
     const before = view.getSnapshot().nextCursor;
     const epoch = _messagesEpoch.get(sessionId) ?? 0;
     return view.refresh(true).then(() => {
+      if (getRemoteHistoryView(sessionId) !== view) return false;
       if (isHistoryViewUnavailable(view.getSnapshot().error)) {
-        view.setActive(false);
-        remoteHistoryViews.delete(sessionId);
+        releaseRemoteHistoryView(sessionId, view);
         return reconcileRemoteMessages(sessionId, { force: true }).then(() => loadOlderMessages(sessionId, automatic, maxPages));
       }
       if (view.getSnapshot().error) throw view.getSnapshot().error;

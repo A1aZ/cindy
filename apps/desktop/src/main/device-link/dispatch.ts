@@ -68,6 +68,7 @@ import {
 import { app } from 'electron';
 import type { DeviceLinkClient } from '@cindy/device-link';
 import { isDeferredHistoryPush, deferredToolBoundary } from './historyViewPush';
+import { mapHistoryViewMessages, type HistoryMessageSource, type HistoryViewItem } from '@cindy/maker-shared/message-window';
 import { createLogger } from '../logger';
 import { projectMobileMessagePage, projectMobileToolPush } from './mobileToolProjection';
 import { normalizeSessionProviderId } from '../maker-host/session-provider-store.js';
@@ -2629,8 +2630,8 @@ function sanitizeMessageInvokeResult(
       ? stripRecoveryCheckpointFromMessage(message as Record<string, unknown>) : message;
     return { ok: true, result: { ...page,
       ...(page.messages ? { messages: page.messages.map(sanitize) } : {}),
-      ...(page.items ? { items: page.items.map((item) => item.messages
-        ? { ...item, messages: item.messages.map(sanitize) } : item) } : {}),
+      ...(page.items ? { items: mapHistoryViewMessages(page.items as HistoryViewItem<HistoryMessageSource>[],
+        (rows) => rows.map(sanitize) as HistoryMessageSource[]) } : {}),
     } };
   }
   if (!channel || !REMOTE_MESSAGE_CHANNELS.has(channel)) return result;
@@ -2963,11 +2964,8 @@ function compactInvokeResultForDeviceLink(
     const mapPage = (map: (row: unknown) => unknown): InvokeResultPayload => ({ ok: true, result: {
       ...page,
       ...(Array.isArray(page.messages) ? { messages: page.messages.map(map) } : {}),
-      ...(Array.isArray(page.items) ? { items: page.items.map((item) => {
-        const value = item as Record<string, unknown>;
-        return value.type === 'messages' && Array.isArray(value.messages)
-          ? { ...value, messages: value.messages.map(map) } : item;
-      }) } : {}),
+      ...(Array.isArray(page.items) ? { items: mapHistoryViewMessages(page.items as HistoryViewItem<HistoryMessageSource>[],
+        (rows) => rows.map(map) as HistoryMessageSource[]) } : {}),
     } });
     const compact = mapPage(compactRemoteMessageForDeviceLink);
     if (fitsInvokeResultFrame(frame, compact)) return compact;

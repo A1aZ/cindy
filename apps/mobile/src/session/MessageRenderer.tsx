@@ -4103,7 +4103,14 @@ function WorkGroupCard({
   const header = presentation.header;
   const isStreaming = item.isStreaming === true;
   const [rememberedExpanded, toggleExpanded] = useFoldableExpandedState(item.key, false);
-  const expanded = item.deferred?.expanded ?? rememberedExpanded;
+  const expanded = item.deferred?.setVisible ? rememberedExpanded : item.deferred?.expanded ?? rememberedExpanded;
+  const deferredRef = useRef(item.deferred);
+  deferredRef.current = item.deferred;
+  useEffect(() => {
+    const current = deferredRef.current;
+    current?.setVisible?.(expanded, false);
+    return () => current?.setVisible?.(false, false);
+  }, [item.deferred?.owner, item.deferred?.key, expanded]);
   const layout = useMemo(() => buildMessageHierarchyLayout({
     screenWidth: actions.screenWidth,
     summaryCount: header.summaryCount,
@@ -4144,7 +4151,7 @@ function WorkGroupCard({
     presentation.title,
     explorationSummary,
   ].filter(Boolean).join(' · ');
-  const onToggle = item.deferred?.toggle ?? toggleExpanded;
+  const onToggle = item.deferred?.setVisible ? toggleExpanded : item.deferred?.toggle ?? toggleExpanded;
   return (
     <FoldablePanel
       chevronPosition={header.chevronPosition}

@@ -8,12 +8,13 @@ function row(id: number, role: string, content: unknown): HistoryMessageSource {
 }
 
 describe('history reading projection', () => {
-  it.each(['<tool_use_error>Permission denied</tool_use_error>', { isError: true, text: 'Failed' }])('keeps failed tools visible with their originating call', (content) => {
+  it.each(['<tool_use_error>Permission denied</tool_use_error>', { isError: true, text: 'Failed' }])('keeps ordinary tool failures in the same recoverable activity range', (content) => {
     const rows = [row(0, 'user', 'Work'), row(1, 'thinking', 'reasoning'),
       { ...row(2, 'tool_use', { toolName: 'Read', input: {} }), toolUseId: 't' },
       { ...row(3, 'tool_result', content), toolUseId: 't' }];
     const visible = projectHistoryView(rows, true).flatMap((item) => item.type === 'messages' ? item.messages : []);
-    expect(visible.map((item) => item.id)).toEqual(['0', '2', '3']);
+    expect(visible.map((item) => item.id)).toEqual(['0']);
+    expect(projectHistoryView(rows, true)[1]).toMatchObject({ summary: { firstMessageId: '1', lastMessageId: '3' } });
   });
   it('reaches the preceding visible conversation without transmitting hundreds of hidden bodies', () => {
     const rows = [row(0, 'user', 'Inspect this problem')];
@@ -85,6 +86,13 @@ describe('automatic process detail reading', () => {
 import { HistoryViewController } from '../historyViewController.js';
 import { renderHistoryView } from '../historyViewRender.js';
 import type { HistoryViewPage } from '../historyView.js';
+const ungroupedStructure = {
+  placeholder: (summary: import('../historyView.js').HistoryWorkSummary) => ({ ...row(1, 'thinking', ''),
+    clientId: summary.anchorClientId ?? summary.key.slice(5) }),
+  children: () => undefined,
+  sourceIds: () => [],
+  rebuild: (item: unknown) => item,
+};
 
 describe('shared history view lifecycle', () => {
   it.each(['reset', 'reset twice', 'reactivate'])('awaits the current read after %s, including a late failure', async (transition) => {
@@ -242,7 +250,7 @@ describe('shared history view lifecycle', () => {
     await view.refresh();
     const rendered = renderHistoryView({
       view, snapshot: view.getSnapshot(), liveMessages: [row(2, 'assistant', 'rewound')], streaming: false,
-      build: (rows) => rows.map((item) => item.clientId), work: () => 'work',
+      build: (rows) => rows.map((item) => item.clientId), structure: ungroupedStructure,
       isLive: () => false,
     });
     expect(rendered).toEqual(['c1']);
@@ -268,7 +276,7 @@ describe('shared history view lifecycle', () => {
     await new Promise((done) => setTimeout(done, 0));
     const rendered = renderHistoryView({ view, snapshot: view.getSnapshot(),
       liveMessages: [stale, { ...prose, content: 'latest answer' }], streaming: active,
-      isLive: () => true, build: (rows) => rows.map((item) => item.content), work: (_summary, details) => details[0] });
+      isLive: () => true, build: (rows) => rows.map((item) => item.content), structure: ungroupedStructure });
     expect(rendered).toEqual(['complete thinking', 'latest answer']);
   });
 });

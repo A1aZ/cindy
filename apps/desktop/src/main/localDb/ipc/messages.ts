@@ -23,6 +23,7 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
+import { historyViewLeaves } from '@cindy/maker-shared/message-window';
 
 import { getDbClient } from '../client/current';
 import type { ContextRebuildArgs } from '../client/tx/types';
@@ -381,7 +382,7 @@ export function registerMessageIpc(
     const before = (opts as { before?: unknown } | null)?.before;
     const page = await historyView.page(sid, before == null ? undefined : requireString(before, 'before'));
     if (before == null) {
-      const live = page.items.find((item) => item.type === 'work' && item.summary.isStreaming);
+      const live = historyViewLeaves(page.items).find((item) => item.type === 'work' && item.summary.isStreaming);
       getDeviceLinkInvokeContext()?.historyView?.update(live?.key ?? null);
     }
     return page;
@@ -390,7 +391,7 @@ export function registerMessageIpc(
     if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
     requireString(sessionId, 'sessionId');
     if (!Array.isArray(refs) || refs.length > 100) throwIpcError('INVALID_PARAMS', 'Invalid expanded work groups');
-    const keys = refs.map((ref) => requireString(ref?.key, 'key'));
+    const keys = refs.map((ref) => requireString(ref?.key, 'key').replace(/^preview-work-/, 'work-'));
     getDeviceLinkInvokeContext()?.historyView?.setExpanded(keys);
   });
   ipcMain.handle('local-db:messages:work-details', async (event, sessionId: unknown, ref: unknown, opts: unknown) => {

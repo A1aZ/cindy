@@ -1,5 +1,5 @@
 import {
-  readHistoryWorkDetails, isHistoryViewUnavailable, type HistoryDetailPage, type HistoryMessageSource,
+  readHistoryWorkDetails, isHistoryViewUnavailable, historyWorkSummaries, historyViewLeaves, type HistoryDetailPage, type HistoryMessageSource,
   type HistoryViewItem, type HistoryViewPage, type HistoryWorkSummary,
 } from './historyView.js';
 
@@ -42,14 +42,18 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   private listeners = new Set<() => void>();
   private generation = 0;
   private detailRuns = new Map<string, object>();
-  private intentQueue: Promise<void> = Promise.resolve();
   private active = true;
   private pagePromise: Promise<void> | null = null;
   private pageOlder = false;
   private pageGeneration = 0;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly transport: HistoryViewTransport<T>) {}
+  constructor(
+    private readonly transport: HistoryViewTransport<T>,
+    // A replacement controller can inherit the same ordering without waiting
+    // for the old source's page/detail requests.
+    private readonly intentQueue = { tail: Promise.resolve() as Promise<void> },
+  ) {}
   isActive = (): boolean => this.active;
   getSnapshot = (): HistoryViewSnapshot<T> => this.state;
   subscribe = (listener: () => void): (() => void) => {
@@ -112,8 +116,8 @@ export class HistoryViewController<T extends HistoryMessageSource> {
       this.publish({ items, ready: true, loading: false,
         hasMore: retainedPrefix ? this.state.hasMore : page.hasMore,
         nextCursor: retainedPrefix ? this.state.nextCursor : page.nextCursor });
-      for (const item of items) {
-        if (item.type === 'work' && this.state.expanded.has(item.key)) void this.loadDetails(item.summary);
+      for (const summary of historyWorkSummaries(items)) {
+        if (this.state.expanded.has(summary.key)) void this.loadDetails(summary);
       }
       this.sendIntent();
     } catch (error) {
@@ -133,23 +137,23 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   setExpanded(key: string, expanded: boolean): void {
+    if (this.state.expanded.has(key) === expanded) return;
     const next = new Set(this.state.expanded);
     if (expanded) next.add(key); else next.delete(key);
     if (!expanded) this.detailRuns.delete(key);
     this.publish({ expanded: next });
     this.sendIntent();
-    const item = this.state.items.find((value) => value.key === key);
-    if (expanded && item?.type === 'work') void this.loadDetails(item.summary);
+    const summary = historyWorkSummaries(this.state.items).find((value) => value.key === key);
+    if (expanded && summary) void this.loadDetails(summary);
   }
 
   private sendIntent(): void {
     // Serialize replacement intents: a late expand ACK can never win over collapse.
     const generation = this.generation;
-    this.intentQueue = this.intentQueue.catch(() => undefined).then(async () => {
+    this.intentQueue.tail = this.intentQueue.tail.catch(() => undefined).then(async () => {
       if (generation !== this.generation) return;
       if (!this.state.ready) return;
-      const summaries = this.active ? this.state.items.flatMap((item) =>
-        item.type === 'work' && this.state.expanded.has(item.key) ? [item.summary] : []) : [];
+      const summaries = this.active ? historyWorkSummaries(this.state.items).filter((item) => this.state.expanded.has(item.key)) : [];
       await this.transport.expanded(summaries);
     }).catch(() => {
       // Detail interest is advisory; a transient ACK failure must not poison a successful page.
@@ -193,8 +197,8 @@ export class HistoryViewController<T extends HistoryMessageSource> {
       if (this.detailRuns.get(summary.key) === token) {
         const stillCurrent = current();
         this.detailRuns.delete(summary.key);
-        const latest = this.state.items.find((item) => item.key === summary.key);
-        if (stillCurrent && latest?.type === 'work' && latest.summary.revision !== summary.revision) void this.loadDetails(latest.summary);
+        const latest = historyWorkSummaries(this.state.items).find((item) => item.key === summary.key);
+        if (stillCurrent && latest && latest.revision !== summary.revision) void this.loadDetails(latest);
       }
     }
   }
@@ -205,7 +209,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     const targetMs = Date.parse(createdAt);
     const tried = new Set<string>();
     while (this.active && generation === this.generation) {
-      for (const item of this.state.items) {
+      for (const item of historyViewLeaves(this.state.items)) {
         if (item.type === 'messages') {
           const found = item.messages.find((row) => row.clientId === clientId);
           if (found) return found;

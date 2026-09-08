@@ -110,7 +110,8 @@ import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
-import { renderHistoryView, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
+import { isHistoryViewUnavailable, historyViewLeaves } from '@cindy/maker-shared/message-window';
+import { buildMobileHistoryRenderItems } from '@/session/mobileHistoryRender';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
@@ -490,8 +491,6 @@ import {
 } from '@/session/historyWindowGap';
 import {
   insertMobileForkOriginItem,
-  buildMobileMessageRenderItems,
-  type MobileWorkChildItem,
   type MobileMessageRenderItem,
 } from '@/session/messageRenderModel';
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
@@ -1025,7 +1024,7 @@ export default function SessionScreen() {
   const rawMessages = useSessionMessages(sessionId, deviceId);
   const messages = useMemo(() => {
     if (!historyView.snapshot.ready) return rawMessages;
-    const available = historyView.snapshot.items.flatMap((item) => item.type === 'messages' ? item.messages : []);
+    const available = historyViewLeaves(historyView.snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
     for (const detail of historyView.snapshot.details.values()) available.push(...detail.messages);
     const byId = new Map(available.map((row) => [row.clientId, row]));
     for (const row of rawMessages) {
@@ -4182,18 +4181,9 @@ export default function SessionScreen() {
         prefixCache: streamingRenderPrefixRef,
         taskUpdates,
       });
-      const historyItems = historyView.snapshot.ready ? renderHistoryView({
-        view: historyView.view, snapshot: historyView.snapshot, liveMessages: projectedMessages,
-        isLive: (row) => row.agentMeta?.isStreaming === true,
-        streaming: isMessageListStreaming,
-        build: (rows, streaming) => buildMobileMessageRenderItems(rows, { isSessionStreaming: streaming, sessionId }, taskUpdates),
-        work: (summary, details, deferred): MobileMessageRenderItem => ({
-          type: 'work_group', key: summary.key, deferred,
-          isStreaming: summary.isStreaming, startedAtMs: summary.startedAtMs,
-          durationMs: Math.max(0, summary.endedAtMs - summary.startedAtMs),
-          children: details.flatMap((item): MobileWorkChildItem[] => item.type === 'work_group' ? item.children
-            : ['message', 'thinking', 'tool_group', 'agent_task', 'todo'].includes(item.type) ? [item as MobileWorkChildItem] : []),
-        }),
+      const historyItems = historyView.snapshot.ready ? buildMobileHistoryRenderItems({
+        view: historyView.view, snapshot: historyView.snapshot, messages: projectedMessages,
+        streaming: isMessageListStreaming, sessionId, taskUpdates,
       }) : builtWindow.items;
       let items = insertMobileForkOriginItem(
         // 孤儿 agent_task 兜底用 maker status 驱动的权威 turn 边界 gate,与 store 的

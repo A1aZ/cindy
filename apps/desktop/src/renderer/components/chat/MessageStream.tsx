@@ -2745,14 +2745,22 @@ export function MessageStream({
             markdownImageTargetCache: markdownImageTargetCacheRef.current,
           });
           for (const [key, value] of chunk.singleResultMap) results.set(key, value);
-          return chunk.items;
+          return groupWorkRuns(chunk.items, isSessionStreaming);
         },
-        work: (summary, details, deferred) => ({ type: 'work_group', key: summary.key,
-          children: details.filter((item): item is WorkChildItem => item.type === 'message'
-            || item.type === 'tool_segment' || item.type === 'agent_task'),
-          deferred, isStreaming: summary.isStreaming, startedAtMs: summary.startedAtMs,
-          durationMs: Math.max(0, summary.endedAtMs - summary.startedAtMs),
-        }),
+        structure: {
+          placeholder: (summary) => ({ id: summary.firstMessageId,
+            clientId: summary.anchorClientId ?? summary.key.slice('work-'.length),
+            role: 'thinking', content: '', createdAt: new Date(summary.startedAtMs).toISOString(),
+            thinkingDurationMs: Math.max(0, summary.endedAtMs - summary.startedAtMs),
+            thinkingRedacted: true, isStreaming: summary.isStreaming,
+          }),
+          children: (item) => item.type === 'work_group' ? item.children : undefined,
+          sourceIds: (item) => item.type === 'message' ? [item.message.clientId]
+            : item.type === 'tool_segment' ? item.toolCalls.map((tool) => tool.clientId)
+            : item.type === 'agent_task' && item.toolCall ? [item.toolCall.clientId] : [],
+          rebuild: (item, children, deferred) => item.type === 'work_group'
+            ? { ...item, children: children as WorkGroupChildItem[], deferred } : item,
+        },
       });
       const keys = new Set<string>();
       const unique = items.filter((item) => { if (keys.has(item.key)) return false; keys.add(item.key); return true; });
@@ -5547,6 +5555,7 @@ export function MessageStream({
                             durationMs: child.durationMs,
                             isStreaming: child.isStreaming,
                             startedAtMs: child.startedAtMs,
+                            deferred: child.deferred,
                             childItems: child.children.map(toWorkGroupChild),
                           };
                         }

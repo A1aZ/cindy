@@ -73,6 +73,7 @@ export type WorkGroupChild =
       isStreaming: boolean;
       startedAtMs?: number;
       childItems: WorkGroupChild[];
+      deferred?: import('@cindy/maker-shared/message-window').DeferredHistoryWork;
     }
   | { kind: 'rendered'; key: string; renderNode: () => ReactNode };
 
@@ -262,6 +263,7 @@ function ExpandedWorkGroupChild({
         isStreaming={child.isStreaming}
         startedAtMs={child.startedAtMs}
         childItems={child.childItems}
+        deferred={child.deferred}
       />
     );
   }
@@ -278,7 +280,14 @@ export function WorkGroupBlock({
 }: WorkGroupBlockProps) {
   const { t } = useTranslation();
   const { expanded: rememberedExpanded, setExpanded } = useExpandedBlockMemory(blockId);
-  const expanded = deferred?.expanded ?? rememberedExpanded;
+  const expanded = deferred?.setVisible ? rememberedExpanded : deferred?.expanded ?? rememberedExpanded;
+  const deferredRef = useRef(deferred);
+  deferredRef.current = deferred;
+  useEffect(() => {
+    const current = deferredRef.current;
+    current?.setVisible?.(expanded, isStreaming);
+    return () => current?.setVisible?.(false, false);
+  }, [deferred?.owner, deferred?.key, expanded, isStreaming]);
   const [elapsedMs, setElapsedMs] = useState(0);
 
   useEffect(() => {
@@ -313,12 +322,12 @@ export function WorkGroupBlock({
   );
   // 运行中预览已经等于全部内容时，折叠/展开是视觉空操作 — 组头不提供交互。
   const canToggle =
-    !!deferred || !isStreaming
+    (!!deferred && !deferred.previewComplete) || !isStreaming
     || hasBeyondPreviewChild
     || recentActivities.length > MAX_LIVE_WORK_ACTIVITIES;
   const effectiveExpanded = expanded && canToggle;
   const isLivePreviewVisible =
-    !deferred && isStreaming && !effectiveExpanded && liveActivities.length > 0;
+    isStreaming && !effectiveExpanded && liveActivities.length > 0;
   // 完成态只计算一次完整摘要；运行态保持折叠时走上面的反向 latest-five
   // 热路径，用户主动展开后才投影全部历史。
   const activityProjection = useMemo(
@@ -332,7 +341,7 @@ export function WorkGroupBlock({
   // 外层完成态组展开成文字 + 内层动作组;内层动作组与运行态组复用本组件,
   // 展开后直接渲染 thinking /工具行,不再多套一层子卡摘要。
   const onToggle = useCallback(() => {
-    if (deferred) { deferred.toggle(); return; }
+    if (deferred && !deferred.setVisible) { deferred.toggle(); return; }
     setExpanded((v) => !v);
   }, [deferred, setExpanded]);
 

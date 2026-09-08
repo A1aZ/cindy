@@ -52,8 +52,8 @@ describe('per-controller deferred history', () => {
     expect(isDeferredHistoryPush('maker:event', push('tool_use', { toolName: 'AskUserQuestion' }), names)).toBe(false);
     expect(isDeferredHistoryPush('maker:event', push('tool_result_full', { toolUseId: 't', fullText: 'error', isError: true }), names)).toBe(false);
     const error = '<tool_use_error>Permission denied</tool_use_error>';
-    expect(isDeferredHistoryPush('maker:event', push('tool_result_full', { toolUseId: 't', fullText: error }), names)).toBe(false);
-    expect(isDeferredHistoryPush('local-db:messages:created', { sessionId: 's', message: { role: 'tool_result', toolUseId: 't', content: error } }, names)).toBe(false);
+    expect(isDeferredHistoryPush('maker:event', push('tool_result_full', { toolUseId: 't', fullText: error }), names)).toBe(true);
+    expect(isDeferredHistoryPush('local-db:messages:created', { sessionId: 's', message: { role: 'tool_result', toolUseId: 't', content: error } }, names)).toBe(true);
     expect(isDeferredHistoryPush('maker:event', push('tool_result_full', { toolUseId: 't', fullText: 'cindy-media://result.png' }), names)).toBe(false);
     const start = push('tool_use', { toolUseId: 't', toolName: 'Read', input: 'x'.repeat(100000) });
     expect(isDeferredHistoryPush('maker:event', start, names)).toBe(true);

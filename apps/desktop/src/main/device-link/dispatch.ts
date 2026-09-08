@@ -2346,6 +2346,7 @@ async function handleInvoke(
   const releaseBusyLease = shouldAcquireRemoteInvokeBusyLease(src, payload)
     ? acquireRemoteInvokeBusyLease()
     : () => undefined;
+  const handlerStartedAt = Date.now();
   const executionPromise = Promise.resolve()
     .then(() => executeInvoke(src, payload))
     .catch((err): InvokeResultPayload => {
@@ -2375,6 +2376,12 @@ async function handleInvoke(
   let result: InvokeResultPayload;
   try {
     result = normalizeInvokeResultForWire(await resultPromise);
+    const executionWaitMs = Date.now() - handlerStartedAt;
+    if (executionWaitMs >= 1_000) {
+      log.debug(`remote invoke slow execution request=${shortId(requestId)} from=${shortId(src)}`
+        + ` channel=${payload && REMOTE_INVOKE_ALLOWLIST.has(payload.channel) ? payload.channel : 'unknown'}`
+        + ` executionWaitMs=${executionWaitMs} ok=${result.ok}`);
+    }
     if ((remoteInvokeLinkEpoch.get(src) ?? 0) !== invokeLinkEpoch) return;
   } finally {
     if (inFlightRemoteInvokeResults.get(cacheKey) === inFlightEntry) {
@@ -2638,7 +2645,7 @@ function sendInvokeResultSafe(
     rememberRemoteInvokeResult(key, fingerprint, attempt.result);
   }
   if (attempt.sent) {
-    removeRemoteInvokeResultOutboxEntry(key);
+    removeRemoteInvokeResultOutboxEntry(key, true);
     return true;
   }
   return enqueueRemoteInvokeResult({
@@ -2754,15 +2761,20 @@ function enqueueRemoteInvokeResult(entry: QueuedRemoteInvokeResult): boolean {
   remoteInvokeResultOutboxBytes += entry.bytes;
   log.warn(
     `queued invoke-result after local send backpressure for ${entry.channel ?? '?'} ` +
-    `to ${shortId(entry.src)}`,
+    `to ${shortId(entry.src)} request=${shortId(entry.requestId)}` +
+    ` queueMessages=${remoteInvokeResultOutbox.size} queueBytes=${remoteInvokeResultOutboxBytes}`,
   );
   scheduleRemoteInvokeResultOutboxFlush();
   return true;
 }
 
-function removeRemoteInvokeResultOutboxEntry(key: string): void {
+function removeRemoteInvokeResultOutboxEntry(key: string, sent = false): void {
   const queued = remoteInvokeResultOutbox.get(key);
   if (!queued) return;
+  if (sent) {
+    log.info(`flushed queued invoke-result for ${queued.channel ?? '?'} to ${shortId(queued.src)}`
+      + ` request=${shortId(queued.requestId)} queuedMs=${Math.max(0, Date.now() - queued.queuedAt)}`);
+  }
   remoteInvokeResultOutbox.delete(key);
   remoteInvokeResultOutboxBytes -= queued.bytes;
   if (remoteInvokeResultOutbox.size === 0) clearRemoteInvokeResultOutboxTimer();
@@ -2837,7 +2849,7 @@ function flushRemoteInvokeResultOutbox(onlySrc?: string): void {
     if (now - queued.queuedAt >= outboxEntryMaxAgeMs(queued.channel)) {
       log.warn(
         `dropping expired invoke-result outbox entry for ${queued.channel ?? '?'} ` +
-        `to ${shortId(queued.src)}`,
+        `to ${shortId(queued.src)} request=${shortId(queued.requestId)} queuedMs=${now - queued.queuedAt}`,
       );
       removeRemoteInvokeResultOutboxEntry(key);
       continue;
@@ -2877,10 +2889,7 @@ function flushRemoteInvokeResultOutbox(onlySrc?: string): void {
       }
       continue;
     }
-    removeRemoteInvokeResultOutboxEntry(key);
-    log.info(
-      `flushed queued invoke-result for ${queued.channel ?? '?'} to ${shortId(queued.src)}`,
-    );
+    removeRemoteInvokeResultOutboxEntry(key, true);
   }
   if (remoteInvokeResultOutbox.size > 0) scheduleRemoteInvokeResultOutboxFlush();
 }

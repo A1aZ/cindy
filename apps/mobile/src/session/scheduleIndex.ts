@@ -1,7 +1,7 @@
 import { isDeviceUnresponsiveRemoteError } from '@cindy/maker-shared/device-link-contract';
 import { createMobileMakerTransport, type MobileMakerTransport, type RemoteInvoke } from '@/device-link/mobileMakerTransport';
 import { unresponsiveDevicesStore } from '@/device-link/unresponsiveDevicesStore';
-import { isTransientRemoteError } from '@/device-link/remoteRetry';
+import { isTransientRemoteError, withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { normalizeScheduleList, normalizeScheduleRuns } from '@/scheduler/scheduleModel';
 import type { RemoteScheduleRun } from '@/scheduler/types';
 import { buildSessionScheduleIndex, type RemoteSessionScheduleInfo } from '@/session/sessionList';
@@ -70,6 +70,8 @@ export const SCHEDULE_INDEX_FAILURE_TTL_MS = 30_000;
 interface ScheduleIndexThrottleEntry {
   at: number;
   promise: Promise<Map<string, RemoteSessionScheduleInfo>>;
+  pending: boolean;
+  invalidated: boolean;
   /** 该轮加载失败的时刻;非 null 表示条目处于负缓存态。 */
   failedAt: number | null;
   /** 失败原因是 DEVICE_UNRESPONSIVE(熔断快速失败);恢复旁路判定用。 */
@@ -127,6 +129,14 @@ export function loadSessionScheduleIndexThrottled(
   const ttlMs = options.ttlMs ?? SCHEDULE_INDEX_THROTTLE_TTL_MS;
   const failureTtlMs = options.failureTtlMs ?? SCHEDULE_INDEX_FAILURE_TTL_MS;
   const existing = scheduleIndexThrottleEntries.get(key);
+  if (existing?.pending) {
+    if (options.force) existing.invalidated = true;
+    if (!existing.invalidated) return existing.promise;
+    // An authoritative change needs a post-event snapshot, but must not start
+    // another 1+N scan beside the old one. All waiters re-enter the same cache.
+    const reload = () => loadSessionScheduleIndexThrottled(key, load, { ...options, force: false });
+    return existing.promise.then(reload, reload);
+  }
   if (!options.force && existing) {
     // 熔断恢复旁路(review P1):DEVICE_UNRESPONSIVE 负缓存的存在意义是「open
     // 期间别再压请求」,设备一旦恢复(移出 unresponsive 集合)就立刻失效——
@@ -146,6 +156,8 @@ export function loadSessionScheduleIndexThrottled(
   const entry: ScheduleIndexThrottleEntry = {
     at: now(),
     promise,
+    pending: true,
+    invalidated: false,
     failedAt: null,
     failedUnresponsive: false,
     failedTransient: false,
@@ -154,12 +166,22 @@ export function loadSessionScheduleIndexThrottled(
   scheduleIndexThrottleEntries.set(key, entry);
   promise.then(
     () => {
+      entry.pending = false;
+      if (entry.invalidated) {
+        if (scheduleIndexThrottleEntries.get(key) === entry) scheduleIndexThrottleEntries.delete(key);
+        return;
+      }
       // TTL 语义是「完成后 TTL 内复用」:一轮 load 本身耗时较长(1+N 串行)时,
       // 若从启动时刻起算,可复用窗口会被吃掉大半甚至直接过期(review 反馈)。
       // 成功落定时把基准挪到 resolve 时刻;在途期间的复用由单飞(同一 promise)保证。
       if (scheduleIndexThrottleEntries.get(key) === entry) entry.at = now();
     },
     (error) => {
+      entry.pending = false;
+      if (entry.invalidated) {
+        if (scheduleIndexThrottleEntries.get(key) === entry) scheduleIndexThrottleEntries.delete(key);
+        return;
+      }
       if (scheduleIndexThrottleEntries.get(key) === entry) {
         entry.failedAt = now();
         // 末项竞态下抛出的是原始 INVOKE_TIMEOUT(见 loadSessionScheduleIndex
@@ -217,7 +239,9 @@ export function invalidateOfflineScheduleIndexFailureFor(deviceId: string): void
 
 export function invalidateScheduleIndexForDevice(deviceId: string): void {
   if (!deviceId) return;
-  scheduleIndexThrottleEntries.delete(deviceId);
+  const entry = scheduleIndexThrottleEntries.get(deviceId);
+  if (entry?.pending) entry.invalidated = true;
+  else scheduleIndexThrottleEntries.delete(deviceId);
   scheduleIndexInvalidationVersions.set(
     deviceId,
     (scheduleIndexInvalidationVersions.get(deviceId) ?? 0) + 1,
@@ -243,9 +267,25 @@ export function resetScheduleIndexThrottleForTesting(): void {
 export function loadDeviceSessionScheduleIndex(
   deviceId: string,
   invoke: RemoteInvoke,
+  canStart?: () => boolean,
 ): Promise<Map<string, RemoteSessionScheduleInfo>> {
-  return loadSessionScheduleIndex(createMobileMakerTransport({ deviceId, invoke }), {
-    isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId),
+  return loadSharedSessionScheduleIndex(deviceId, createMobileMakerTransport({ deviceId, invoke }), canStart);
+}
+
+/** Every screen shares the strict load and its bounded retry, before negative caching. */
+export async function loadSharedSessionScheduleIndex(
+  deviceId: string,
+  maker: Pick<MobileMakerTransport, 'schedule'>,
+  canStart: () => boolean = () => true,
+): Promise<Map<string, RemoteSessionScheduleInfo>> {
+  return loadSessionScheduleIndexThrottled(deviceId, () => {
+    // Check again when an invalidated in-flight scan finishes. Throw before
+    // creating an entry so an abandoned waiter cannot poison active consumers.
+    if (!canStart()) throw new Error('Schedule index consumer inactive');
+    return withTransientRemoteRetry(() => loadSessionScheduleIndex(maker, {
+      throwOnTransientRunListError: true,
+      isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId),
+    }));
   });
 }
 

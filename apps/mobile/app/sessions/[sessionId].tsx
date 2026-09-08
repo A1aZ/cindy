@@ -2062,21 +2062,9 @@ export default function SessionScreen() {
   // 只能靠 index 探测。无 schedule 的用户只多一次轻量 schedule.list;延后是避开首开关键读抢 WS 管道(#324)。
   // 瞬态失败兜底:短暂抖动走 withTransientRemoteRetry 原地重试;冷启动首开时 device-link 可能尚未
   // 就绪且失败被吞,依赖 connectionEpoch 在重连后重跑一次探测,用户停在会话里红点也能自愈。
-  // unreadVersion 依赖:store 只存最近一条事件投影,completed 被紧随的事件覆盖时下面的快路径会漏;
-  // 任何影响未读的事件都 bump unreadVersion(累计计数不丢),据此重跑延后探测兜底。标已读后广播回来的
-  // read 事件会再触发一轮探测,发现无未读即收敛;800ms defer + effect cleanup 会把连续事件合并成一次。
-  useEffect(() => {
-    if (!sessionId) return;
-    return deferScheduleIndexHydration(() => {
-      void withTransientRemoteRetry(() => markSessionScheduleRunsRead(maker, sessionId))
-        .catch(() => undefined);
-    });
-  }, [connectionEpoch, maker, scheduleEventSnapshot.unreadVersion, sessionId]);
-  // 会话开着时报告刚完成:事件投影直接给出绑定到本会话的 runId,单次标已读、免拉 index。
-  useEffect(() => {
-    if (!completedRunId) return;
-    void maker.schedule.markRunRead(completedRunId).catch(() => undefined);
-  }, [completedRunId, maker]);
+  // Keep completed/failed events even when a following read replaces lastProjection,
+  // without treating our own read acknowledgement as another reason to scan.
+  const scheduleUnreadAddedVersion = scheduleEventSnapshot.unreadVersion - scheduleEventSnapshot.unreadClearVersion;
   // —— 会话未读「真实展示即已读」回执 ——
   // 手机端打开会话且**本次连接代已完成整窗同步**后,驻留满 dwell 把被控端该会话的
   // 未读态(灵动岛 / Dock 角标 / 桌面侧栏红绿点)清掉;被控端清完经 sessions relay
@@ -2119,6 +2107,21 @@ export default function SessionScreen() {
     });
     return () => subscription.remove();
   }, []);
+  useFocusEffect(useCallback(() => {
+    if (!appStateActive || !deviceId || !sessionId) return;
+    let active = true;
+    const isActive = () => active && AppState.currentState === 'active' && navigation.isFocused();
+    const cancel = deferScheduleIndexHydration(() => {
+      void withTransientRemoteRetry(() => markSessionScheduleRunsRead(maker, sessionId, deviceId, isActive))
+        .catch(() => undefined);
+    });
+    return () => { active = false; cancel(); };
+  }, [appStateActive, connectionEpoch, deviceId, maker, navigation, scheduleUnreadAddedVersion, sessionId]));
+  // The event fast path also belongs only to the task actually being viewed.
+  useFocusEffect(useCallback(() => {
+    if (!appStateActive || !completedRunId) return;
+    void maker.schedule.markRunRead(completedRunId).catch(() => undefined);
+  }, [appStateActive, completedRunId, maker]));
   useFocusEffect(
     useCallback(() => {
       if (!appStateActive || !deviceId || !sessionId || !hasRenderedMessages) return undefined;

@@ -303,6 +303,41 @@ describe('scheduleIndex', () => {
 });
 
 describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
+  it('shares an in-flight scan even when network delay exceeds the success TTL', async () => {
+    resetScheduleIndexThrottleForTesting();
+    let finish!: (index: Map<string, RemoteSessionScheduleInfo>) => void;
+    const load = vi.fn(() => new Promise<Map<string, RemoteSessionScheduleInfo>>((resolve) => { finish = resolve; }));
+    let at = 0;
+    const options = { now: () => at };
+    const first = loadSessionScheduleIndexThrottled('dev-1', load, options);
+    at += SCHEDULE_INDEX_THROTTLE_TTL_MS * 2;
+    expect(loadSessionScheduleIndexThrottled('dev-1', load, options)).toBe(first);
+    expect(load).toHaveBeenCalledTimes(1);
+    finish(new Map());
+    await first;
+    expect(loadSessionScheduleIndexThrottled('dev-1', load, options)).toBe(first);
+  });
+
+  it.each([false, true])('coalesces invalidated scans after the old scan settles (rejected=%s)', async (rejected) => {
+    resetScheduleIndexThrottleForTesting();
+    let finish!: (index: Map<string, RemoteSessionScheduleInfo>) => void;
+    let fail!: (error: Error) => void;
+    const fresh = new Map<string, RemoteSessionScheduleInfo>();
+    const load = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
+      .mockResolvedValue(fresh);
+    const old = loadSessionScheduleIndexThrottled('dev-1', load).catch(() => undefined);
+    invalidateScheduleIndexForDevice('dev-1');
+    const home = loadSessionScheduleIndexThrottled('dev-1', load);
+    const task = loadSessionScheduleIndexThrottled('dev-1', load);
+    expect(load).toHaveBeenCalledTimes(1);
+    if (rejected) fail(new Error('old request failed')); else finish(new Map());
+    await old;
+    expect(await home).toBe(fresh);
+    expect(await task).toBe(fresh);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it('TTL 内的重复触发复用同一在途/已完成 promise,不重复加载', async () => {
     resetScheduleIndexThrottleForTesting();
     const load = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());

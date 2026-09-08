@@ -1,7 +1,7 @@
 import type { ScheduleEventProjection } from '@cindy/maker-shared/schedule-events';
 import { isTransientRemoteError } from '@/device-link/remoteRetry';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
-import { loadSessionScheduleIndex } from '@/session/scheduleIndex';
+import { loadSharedSessionScheduleIndex } from '@/session/scheduleIndex';
 
 /**
  * 会话维度的自动化 run「已读」编排(对齐桌面端 CCAgentSidebarUpper 的「激活即已读」语义)。
@@ -23,9 +23,12 @@ type ScheduleReadTransport = Pick<MobileMakerTransport, 'schedule'>;
 export async function markSessionScheduleRunsRead(
   maker: ScheduleReadTransport,
   sessionId: string,
+  deviceId: string,
+  isActive: () => boolean = () => true,
 ): Promise<string[]> {
-  if (!sessionId) return [];
-  const index = await loadSessionScheduleIndex(maker, { throwOnTransientRunListError: true });
+  if (!sessionId || !deviceId || !isActive()) return [];
+  const index = await loadSharedSessionScheduleIndex(deviceId, maker, isActive);
+  if (!isActive()) return [];
   const unreadRunIds = index.get(sessionId)?.unreadRunIds ?? [];
   if (unreadRunIds.length === 0) return [];
   // 单个永久失败不阻塞其它 run;瞬态失败需要抛出,让外层 retry 重新探测并补标。

@@ -7212,6 +7212,9 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
       const current = getOrCreateState(sessionId);
       if (current.sdkSessionId === sdkSessionId) return;
       setState(sessionId, (s) => ({ ...s, sdkSessionId }));
+      // The sidebar observes the same event through a read-only preload. The
+      // primary window owns persistence; the observer only updates its mirror.
+      if (isSidebarWindow()) return;
       if (!isDataOwnerGenerationCurrent(dataOwnerAtIngress)) return;
       sessionService
         .update(sessionId, { sdkSessionId })

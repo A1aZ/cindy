@@ -543,6 +543,21 @@ describe('makerChatStore text delta batching', () => {
     vi.useRealTimers();
   });
 
+  it.each([false, true])('updates the SDK id mirror but persists only in the primary window (sidebar=%s)', async (sidebar) => {
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { search: sidebar ? '?sidebarWindow=1' : '' },
+    });
+    const event = { sessionId: SESSION_ID, event: { type: 'session_id', source: 'claude-code', data: 'sdk-live-1' } };
+    onEvent?.(event);
+    await flushPromises();
+    expect(makerChatStore.getSnapshot(SESSION_ID).sdkSessionId).toBe('sdk-live-1');
+    onEvent?.(event);
+    await flushPromises();
+    expect(sessionService.update).toHaveBeenCalledTimes(sidebar ? 0 : 1);
+    if (!sidebar) expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, { sdkSessionId: 'sdk-live-1' });
+  });
+
   it('coalesces consecutive text deltas into one store notification', () => {
     let notifyCount = 0;
     const unsubscribe = makerChatStore.subscribe(SESSION_ID, () => {

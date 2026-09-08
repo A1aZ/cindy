@@ -41,19 +41,22 @@ export function useShowConnectionBanner(
   deviceUnresponsive = false,
   recovery?: 'syncing' | 'recovered',
 ): boolean {
-  const offline = status !== 'online' || recovery === 'syncing';
+  const offline = status !== 'online';
   const showRecovered = recovery !== undefined;
   const [offlineLongEnough, setOfflineLongEnough] = useState(false);
   useEffect(() => {
     if (!offline) {
+      // Opening a task is content loading, not a lost connection. Only keep a
+      // banner that was already shown for a real outage until content catches up.
+      if (recovery === 'syncing') return;
       if (!showRecovered) { setOfflineLongEnough(false); return; }
       const timer = setTimeout(() => setOfflineLongEnough(false), 2_000);
       return () => clearTimeout(timer);
     }
     const timer = setTimeout(() => setOfflineLongEnough(true), OFFLINE_BANNER_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [offline, showRecovered]);
-  return (recovery === 'recovered' && offlineLongEnough) || resolveConnectionBannerVisibility({
+  }, [offline, showRecovered, recovery]);
+  return (recovery !== undefined && offlineLongEnough) || resolveConnectionBannerVisibility({
     offline,
     offlineLongEnough,
     // 熔断已关后屏幕残留的 DEVICE_UNRESPONSIVE 错误按陈旧丢弃(review P1),

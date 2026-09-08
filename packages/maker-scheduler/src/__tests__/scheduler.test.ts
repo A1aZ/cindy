@@ -4424,15 +4424,18 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
 
 describe('caller-owned deferred dispatch', () => {
   it('returns deferred without arming a manual schedule or recording a failure', async () => {
+    const canDispatch = vi.fn(() => false);
     const h = makeHarness({ runnerImpl: async (_schedule, ctx) => {
       expect(ctx.deferToCaller).toBe(true);
+      expect(ctx.canDispatch).toBe(canDispatch);
+      expect(ctx.canDispatch?.()).toBe(false);
       return { sessionId: 'bot-task', deferred: true, deferRetryMs: 1000 };
     } });
     const schedule = await h.scheduler.create({ ...baseInput, manual: true });
     await h.scheduler.start();
     const failed = vi.fn();
     h.scheduler.on('failed', failed);
-    const result = await h.scheduler.runNow(schedule.id, { deferToCaller: true });
+    const result = await h.scheduler.runNow(schedule.id, { deferToCaller: true, canDispatch });
     expect(result.deferred).toBe(true);
     expect(await h.storage.listRuns(schedule.id)).toEqual([]);
     expect(await h.storage.get(schedule.id)).toMatchObject({

@@ -46,6 +46,8 @@ export interface RoutineEngineDeps {
     routine: Routine,
     run: RoutineRun,
     signal: AbortSignal,
+    /** Recheck immediately before vendor dispatch, including after an internal queue wait. */
+    canDispatch: () => boolean,
   ): Promise<{
     scheduleRunId?: string;
     error?: string;
@@ -537,6 +539,11 @@ export class RoutineEngine {
         claimed.routine,
         claimed.run,
         controller.signal,
+        () => !this.stopped && !controller.signal.aborted && this.state.routines.some(
+          // A disabled routine may still be run manually. Disabling/editing an
+          // existing attempt changes its revision (and disabling also aborts it).
+          (routine) => routine.id === claimed.routine.id && routine.revision === claimed.routine.revision,
+        ),
       );
     } catch (error) {
       result.error = error instanceof Error ? error.message : String(error);

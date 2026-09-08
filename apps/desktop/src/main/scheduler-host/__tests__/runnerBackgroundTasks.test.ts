@@ -282,6 +282,30 @@ describe('MakerScheduleRunner background subagent task tracking', () => {
     expect(notifier.notify).not.toHaveBeenCalled();
   });
 
+  it('rechecks the routine revision after accepted-side preparation before direct vendor dispatch', async () => {
+    let valid = true;
+    const vendor = vi.fn();
+    const h = createSessionHarness(async (_message, opts) => {
+      await opts?.onAccepted?.();
+      vendor();
+      return { accepted: true };
+    });
+    Object.assign(h.session, { stablePermissionModeState: { mode: 'ask', generation: 0 } });
+    const { runner, maker, notifier } = createRunnerHarness(h.session, {
+      beforeDispatchUserTurn: async () => { valid = false; },
+    });
+    vi.mocked(h.session.abort).mockImplementation(() => new Promise(() => undefined));
+    vi.mocked(maker.getSessionMeta).mockResolvedValue({ id: 'bot-session', agentKind: 'claude-code', model: 'claude-sonnet-4-6', workDir: '/repo/project' } as never);
+    mocks.getSessionFsSnapshot.mockResolvedValue({ permissionMode: 'ask', planModeEnabled: true });
+    const result = await runner.fire(baseSchedule({ source: 'bot', targetSessionId: 'bot-session' }), {
+      ...createFireContext(), deferToCaller: true, canDispatch: () => valid,
+    });
+    expect(result).toMatchObject({ deferred: true });
+    expect(vendor).not.toHaveBeenCalled();
+    expect(h.session.abort).toHaveBeenCalledOnce();
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+
   it.each(['before create', 'before send'])('rechecks routine permission changes %s after async preparation', async (stage) => {
     const h = createSessionHarness(acceptingSend());
     Object.assign(h.session, { stablePermissionModeState: { mode: 'bypassPermissions', generation: 0 } });

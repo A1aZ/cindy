@@ -64,6 +64,57 @@ async function fixture(
 }
 
 describe("Routine event admission and execution", () => {
+  it('still dispatches an explicit manual run of a disabled routine', async () => {
+    const execute = vi.fn<RoutineEngineDeps['execute']>(async (_routine, _run, _signal, canDispatch) => {
+      expect(canDispatch()).toBe(true);
+      return {};
+    });
+    const f = await fixture(execute);
+    try {
+      const routine = await f.engine.put('bot', { ...input, enabled: false });
+      await f.engine.runNow('bot', routine.id);
+      await vi.waitFor(() => expect(f.engine.history(routine.id)[0].status).toBe('success'));
+      expect(execute).toHaveBeenCalledOnce();
+      expect(f.engine.list('bot')[0].enabled).toBe(false);
+    } finally {
+      await f.engine.stop();
+    }
+  });
+
+  it.each(['name', 'prompt', 'triggers'] as const)('rejects the old revision after an enabled routine changes %s during host queue wait', async (field) => {
+    let accept!: () => void;
+    let canDispatch!: () => boolean;
+    const dispatched: string[] = [];
+    const execute: RoutineEngineDeps['execute'] = async (routine, _run, _signal, guard) => {
+      canDispatch = guard;
+      await new Promise<void>((resolve) => { accept = resolve; });
+      if (!guard()) return { deferred: true };
+      dispatched.push(routine.prompt);
+      return {};
+    };
+    const f = await fixture(execute);
+    try {
+      const routine = await f.engine.put('bot', input);
+      await f.engine.runNow('bot', routine.id);
+      await vi.waitFor(() => expect(canDispatch).toBeTypeOf('function'));
+      expect(canDispatch()).toBe(true);
+      const edited = { ...input, [field]: field === 'triggers' ? [input.triggers[1]] : 'Edited' };
+      await f.engine.put('bot', edited, routine.id);
+      expect(canDispatch()).toBe(false);
+      accept();
+      await vi.waitFor(() => expect(f.engine.history(routine.id)[0].status).toBe('cancelled'));
+      expect(dispatched).toEqual([]);
+      await f.engine.runNow('bot', routine.id);
+      await vi.waitFor(() => expect(canDispatch()).toBe(true));
+      accept();
+      await vi.waitFor(() => expect(f.engine.history(routine.id)[0].status).toBe('success'));
+      expect(dispatched).toEqual([edited.prompt]);
+    } finally {
+      accept?.();
+      await f.engine.stop();
+    }
+  });
+
   it("filters scope before execution and deduplicates a redelivered event", async () => {
     const { engine, execute } = await fixture();
     const routine = await engine.put("bot", input);

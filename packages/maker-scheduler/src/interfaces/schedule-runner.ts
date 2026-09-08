@@ -12,6 +12,8 @@ export interface FireContext {
   firedAt: number;
   /** Host caller owns deferred retries; never schedule a cron replay for this attempt. */
   deferToCaller?: boolean;
+  /** Internal caller validity, checked at the accepted -> vendor-dispatch boundary. Never persisted. */
+  canDispatch?: () => boolean;
   /**
    * 由 Scheduler 创建并 own 的 AbortSignal。当用户在 UI 上 delete/pause 这条 schedule 时,
    * Scheduler 会对所有 in-flight 的 runner.fire() 触发 abort。

@@ -85,7 +85,7 @@ async function waitForStartupDependency<T>(
 }
 
 /** Resolve the current canonical task at dispatch time, preserving its actual model and permissions. */
-async function execute(scope: string, routine: Routine, run: RoutineRun, signal: AbortSignal) {
+async function execute(scope: string, routine: Routine, run: RoutineRun, signal: AbortSignal, canDispatch: () => boolean) {
   assertScope(scope);
   const scheduler = getRoutineHost().getScheduler();
   if (!scheduler) return { deferred: true };
@@ -131,7 +131,7 @@ async function execute(scope: string, routine: Routine, run: RoutineRun, signal:
   };
   signal.addEventListener('abort', abort, { once: true });
   try {
-    const result = await scheduler.runNow(id, { deferToCaller: true, internalRoutine: true });
+    const result = await scheduler.runNow(id, { deferToCaller: true, internalRoutine: true, canDispatch });
     assertScope(scope);
     // The routine queue owns this batch and its retry delay, not the backing schedule.
     if (result.deferred) return { deferred: true };
@@ -220,9 +220,9 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
         await store.save(state);
         assertScope(scope);
       },
-      execute: (routine, run, signal) => {
+      execute: (routine, run, signal, canDispatch) => {
         if (epoch !== generation) throw new Error('Routine service was reset');
-        return execute(scope, routine, run, signal);
+        return execute(scope, routine, run, signal, canDispatch);
       },
       id: randomUUID,
       now: Date.now,

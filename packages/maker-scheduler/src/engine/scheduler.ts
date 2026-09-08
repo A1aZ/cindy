@@ -1008,7 +1008,7 @@ export class Scheduler extends EventEmitter {
   //   这反而更贴合"Once"语义：用户手动跑过一次就视作用完。
   // Internal callers with their own durable queue may own the deferred retry.
   // This option is not exposed through schedule CRUD or public MCP arguments.
-  async runNow(id: string, options?: { deferToCaller?: boolean; internalRoutine?: true }): Promise<{ runId: string; deferred?: boolean }> {
+  async runNow(id: string, options?: { deferToCaller?: boolean; internalRoutine?: true; canDispatch?: () => boolean }): Promise<{ runId: string; deferred?: boolean }> {
     // 手动触发不受并发闸门拦截(用户显式动作要即时响应),但计入 in-flight 占用,
     // 会挤压后续自动触发的槽位。
     const runId = this.generateId();
@@ -1025,7 +1025,7 @@ export class Scheduler extends EventEmitter {
     }
   }
 
-  private async runNowInner(id: string, runId: string, options?: { deferToCaller?: boolean; internalRoutine?: true }): Promise<{ runId: string; deferred?: boolean }> {
+  private async runNowInner(id: string, runId: string, options?: { deferToCaller?: boolean; internalRoutine?: true; canDispatch?: () => boolean }): Promise<{ runId: string; deferred?: boolean }> {
     const schedule = await this.storage.get(id);
     if (!schedule || (schedule.source === 'bot' && !options?.internalRoutine))
       throw new Error(`Schedule not found: ${id}`);
@@ -1087,6 +1087,7 @@ export class Scheduler extends EventEmitter {
         runId,
         firedAt,
         deferToCaller: options?.deferToCaller,
+        canDispatch: options?.canDispatch,
         signal: controller.signal,
         onSessionBound: this.buildOnSessionBound(schedule.id, runId),
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),

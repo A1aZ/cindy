@@ -209,7 +209,7 @@ export interface SchedulerQueueDeps {
     persistedContent: string;
     inheritTargetPlanMode?: boolean;
     origin: { kind: 'scheduler'; scheduleId: string; scheduleName: string; runId: string };
-    onAccepted: () => void | Promise<void>;
+    onAccepted: (queuedPermissions?: { permissionMode?: string; planMode?: boolean }) => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
     onDiscarded?: () => void;
   }): Promise<{ clientId: string } | { duplicate: true } | { retry: true }>;
@@ -330,6 +330,8 @@ class QueuedDispatchTimeoutError extends Error {}
  */
 class QueuedSlotUnavailableError extends Error {}
 
+class RoutineDispatchDeferredError extends Error {}
+
 /** createTurnCompletionWaiter 的返回:turn 终态等待 + 文本缓冲 + 幂等摘除。 */
 interface TurnCompletionWaiter {
   turnFinished: Promise<void>;
@@ -441,6 +443,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       | 'already-queued'
       | 'queue-restore-pending'
       | 'routine-permission-unavailable'
+      | 'routine-dispatch-invalidated'
       | 'queue-wait-timeout',
   ): FireResult {
     this.deps.logger.info?.(
@@ -1492,6 +1495,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
         }
         throwIfFireAborted(ctx.signal, 'agent turn dispatch');
       }
+      if (ctx.canDispatch && !ctx.canDispatch()) {
+        waiter.stopListening();
+        ctx.signal.removeEventListener('abort', onAbort);
+        return this.deferFire(schedule, session.id, 'routine-dispatch-invalidated');
+      }
       const sendResult = await session.send(outgoingMessage as never, {
         origin,
         planMode: routinePermissions?.planMode ?? false,
@@ -1534,6 +1542,14 @@ export class MakerScheduleRunner implements ScheduleRunner {
           if (this.deps.beforeDispatchUserTurn) {
             await this.deps.beforeDispatchUserTurn(session.id);
             baselineStarted = true;
+          }
+          if (ctx.canDispatch && !ctx.canDispatch()) {
+            // abort synchronously cancels the send reservation; do not wait for
+            // a potentially stalled provider interrupt before deferring the run.
+            void session.abort().catch((err) => {
+              this.deps.logger.warn?.('[runner] obsolete routine turn abort failed', err);
+            });
+            throw new RoutineDispatchDeferredError('Routine revision changed before dispatch');
           }
           // bump userSendAt:侧栏排序主键已切到 userSendAt ?? updatedAt,自动化任务
           // fire 属"这个会话有了新一轮输入",与用户按下发送同权重,让 fire 出来的会话
@@ -1591,6 +1607,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
         throw err;
       }
       const normalized = normalizeSchedulerSendError(err);
+      if (err instanceof RoutineDispatchDeferredError) {
+        waiter.stopListening();
+        ctx.signal.removeEventListener('abort', onAbort);
+        return this.deferFire(schedule, session.id, 'routine-dispatch-invalidated');
+      }
       // B2 撞忙顺延:仅 heartbeat(复用 session)场景 —— session 正跑别的 turn
       // (用户远程控制 / 上轮心跳未完)→ 不记失败,顺延重排。非 heartbeat 是新建
       // session,SESSION_RUNNING 属异常,维持原 failed(可见)。先就近摘掉本轮挂
@@ -1887,7 +1908,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       ...(schedule.source === 'bot' ? { inheritTargetPlanMode: true } : {}),
       persistedContent: schedule.source === 'bot' ? `${UI_ACTION_TRIGGER_PREFIX}${schedule.prompt}` : schedule.prompt,
       origin,
-      onAccepted: async () => {
+      onAccepted: async (queuedPermissions) => {
         dispatched = true;
         // Queue admission happens while another (possibly user-driven)
         // Desktop turn still owns the session. Only the accepted scheduler
@@ -1941,9 +1962,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
           return;
         }
         if (!live) {
-          const unavailable = new Error(
-            'queued heartbeat live session unavailable before route sync and vendor dispatch',
-          );
+          const message = 'queued heartbeat live session unavailable before route sync and vendor dispatch';
+          const unavailable = schedule.source === 'bot'
+            ? new RoutineDispatchDeferredError(message)
+            : new Error(message);
           failAfterAccept(unavailable);
           failDispatch(unavailable);
           blockAcceptedDispatch(undefined, 'session unavailable for queued route sync');
@@ -1986,6 +2008,26 @@ export class MakerScheduleRunner implements ScheduleRunner {
             return;
           }
           this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);
+        }
+        if (schedule.source === 'bot') {
+          const permissions = await this.readRoutinePermissions(sessionId, live);
+          if (!permissions || this.deps.maker.getSession(sessionId) !== live ||
+            live.stablePermissionModeState?.mode !== permissions.permissionMode ||
+            queuedPermissions?.permissionMode !== permissions.permissionMode ||
+            queuedPermissions?.planMode !== permissions.planMode) {
+            const error = new RoutineDispatchDeferredError('Queued routine permissions changed before dispatch');
+            failAfterAccept(error);
+            failDispatch(error);
+            blockAcceptedDispatch(live, 'routine permissions changed');
+            return;
+          }
+        }
+        if (ctx.canDispatch && !ctx.canDispatch()) {
+          const error = new RoutineDispatchDeferredError('Routine revision changed before dispatch');
+          failAfterAccept(error);
+          failDispatch(error);
+          blockAcceptedDispatch(live, 'routine revision changed');
+          return;
         }
         if (live) {
           waiterSlot.current = this.createTurnCompletionWaiter(live, {
@@ -2157,6 +2199,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 同语义:撤销预插的 running run、不通知不亮红点,下次到点重新排队(会话届时
       // 若空闲就直发,槽位届时也可能腾出来)。
       // 不能顺延的(一次性 / manual / 已 paused)退回可见失败,否则任务静默消失。
+      if (err instanceof RoutineDispatchDeferredError) {
+        return this.deferFire(schedule, sessionId, 'routine-dispatch-invalidated');
+      }
       if (err instanceof QueuedDispatchTimeoutError || err instanceof QueuedSlotUnavailableError) {
         if (this.canDefer(schedule, ctx)) {
           return this.deferFire(schedule, sessionId, 'queue-wait-timeout');

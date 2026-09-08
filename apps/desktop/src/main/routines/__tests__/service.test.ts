@@ -136,7 +136,7 @@ it('keeps a busy batch queued for 30 seconds and then executes it once', async (
   await vi.advanceTimersByTimeAsync(0);
   const pending = (await routineTools.history('bot', routine.id))[0];
   expect(pending.status).toBe('queued');
-  expect(mock.scheduler.runNow).toHaveBeenCalledWith(`routine-${routine.id}`, { deferToCaller: true, internalRoutine: true });
+  expect(mock.scheduler.runNow).toHaveBeenCalledWith(`routine-${routine.id}`, { deferToCaller: true, internalRoutine: true, canDispatch: expect.any(Function) });
   expect(mock.scheduler.pause).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(29000);
   expect(mock.scheduler.runNow).toHaveBeenCalledTimes(1);

@@ -173,6 +173,34 @@ describe('ingestMedia(主路径)', () => {
 });
 
 describe('ingestMedia(全局去重)', () => {
+  it('Host 文件分块入库，沿用相同指纹、去重和引用账本，不整体读入内存', async () => {
+    const sourcePath = path.join(tmpUserData, 'download-fixture.png');
+    fs.writeFileSync(sourcePath, PNG_BYTES);
+    const fsp = await import('node:fs/promises');
+    const readFile = vi.spyOn(fsp.default, 'readFile');
+    const concat = vi.spyOn(Buffer, 'concat');
+    try {
+      const first = await ingest.ingestMedia({
+        filePath: sourcePath, mimeType: 'image/png',
+        refs: [{ refKind: 'message', refId: 'download-message', originSessionId: 'download-session' }],
+      }, db);
+      const second = await ingest.ingestMedia({ buffer: PNG_BYTES, mimeType: 'image/png', refs: [] }, db);
+      expect(first.hash).toBe(PNG_HASH);
+      expect(first.bytes).toBe(PNG_BYTES.length);
+      expect(first.url).toBe(second.url);
+      expect(second.deduplicated).toBe(true);
+      expect(db.select().from(schema.mediaBlobs).all()).toHaveLength(1);
+      expect(db.select().from(schema.mediaRefs).all()).toHaveLength(1);
+      expect(readFile).not.toHaveBeenCalled();
+      expect(concat).not.toHaveBeenCalled();
+      expect(fs.readFileSync(sourcePath)).toEqual(PNG_BYTES);
+    } finally {
+      readFile.mockRestore();
+      concat.mockRestore();
+      fs.rmSync(sourcePath, { force: true });
+    }
+  });
+
   it('cache 先入、非 cache 后到:去重命中时 isCache 降为 false(只降不升)', async () => {
     await ingest.ingestMedia(
       { buffer: PNG_BYTES, mimeType: 'image/png', isCache: true, refs: [] },

@@ -327,3 +327,92 @@ describe('shared history view lifecycle', () => {
     expect(rendered).toEqual(['complete thinking', 'latest answer']);
   });
 });
+
+
+describe('locating folded history preserves display expansion', () => {
+  it.each(['mounted', 'older-page', 'inactive', 'changed'])('reads only the target range without opening groups: %s', async (mode) => {
+    const target = row(1, 'thinking', 'target');
+    const items = projectHistoryView([target], false);
+    let pages = 0;
+    let finish!: (page: import('../historyView.js').HistoryDetailPage<HistoryMessageSource>) => void;
+    const expanded = vi.fn(async (_summaries: readonly unknown[]) => undefined);
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items: mode === 'older-page' && pages++ === 0 ? [] : items,
+        hasMore: mode === 'older-page' && pages === 1, nextCursor: 'older' }),
+      details: () => new Promise(resolve => { finish = resolve; }), expanded,
+    });
+    await view.refresh();
+    const pending = view.locate(target.clientId, target.createdAt);
+    await new Promise(done => setTimeout(done, 0));
+    view.setExpanded(items[0].key, false); // a newly mounted folded group
+    if (mode === 'inactive') view.setActive(false);
+    if (mode === 'changed' && items[0].type === 'work') items[0].summary = { ...items[0].summary, revision: 'changed' };
+    finish({ version: 1, messages: [target], hasMore: false, nextCursor: null });
+    expect(await pending).toEqual(mode === 'inactive' || mode === 'changed' ? null : target);
+    expect(view.getSnapshot().expanded.size).toBe(0);
+    expect(expanded.mock.calls.every(([summaries]) => !summaries?.length)).toBe(true);
+    if (mode === 'inactive' || mode === 'changed') expect(view.getSnapshot().details.size).toBe(0);
+    else expect(view.getSnapshot().details.get(items[0].key)?.complete).toBe(true);
+    view.setActive(false);
+  });
+  it('keeps a located full range visible to the builder while a running preview is subscribed', async () => {
+    const rows = Array.from({ length: 8 }, (_, i) => row(i + 1, 'thinking', `detail-${i}`));
+    const items = projectHistoryView(rows, true);
+    if (items[0].type !== 'work') throw new Error('missing work');
+    const summary = items[0].summary;
+    summary.preview = { ...summary, key: 'preview', firstMessageId: rows[3].id };
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items, hasMore: false, nextCursor: null }),
+      details: async (ref) => ({ version: 1, messages: ref.key === 'preview' ? rows.slice(3) : rows, hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    view.setExpanded('preview', true);
+    await new Promise(done => setTimeout(done, 0));
+    expect(await view.locate(rows[0].clientId, rows[0].createdAt)).toEqual(rows[0]);
+    const rendered = renderHistoryView({ view, snapshot: view.getSnapshot(), liveMessages: [], streaming: true,
+      build: messages => messages.map(message => message.clientId), structure: ungroupedStructure });
+    expect(rendered).toContain(rows[0].clientId);
+    expect([...view.getSnapshot().expanded]).toEqual(['preview']);
+    view.setActive(false);
+  });
+
+  it('does not replace a located complete range with an in-flight partial expansion', async () => {
+    const rows = [row(1, 'thinking', 'one'), row(2, 'thinking', 'two')];
+    const items = projectHistoryView(rows, false);
+    let read = 0;
+    let finish!: (page: import('../historyView.js').HistoryDetailPage<HistoryMessageSource>) => void;
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items, hasMore: false, nextCursor: null }),
+      details: () => ++read === 1 ? new Promise(resolve => { finish = resolve; })
+        : Promise.resolve({ version: 1, messages: rows, hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    view.setExpanded(items[0].key, true);
+    expect(await view.locate(rows[1].clientId, rows[1].createdAt)).toEqual(rows[1]);
+    const observed: number[] = [];
+    const stop = view.subscribe(() => observed.push(view.getSnapshot().details.get(items[0].key)?.messages.length ?? 0));
+    finish({ version: 1, messages: [rows[0]], hasMore: true, nextCursor: rows[0].id });
+    await new Promise(done => setTimeout(done, 0));
+    expect(observed.every(count => count === 2)).toBe(true);
+    stop(); view.setActive(false);
+  });
+
+  it.each([false, true])('only propagates errors from a current locate request (inactive=%s)', async (inactive) => {
+    const target = row(1, 'thinking', 'target');
+    let fail!: (error: Error) => void;
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items: projectHistoryView([target], false), hasMore: false, nextCursor: null }),
+      details: () => new Promise((_, reject) => { fail = reject; }), expanded: async () => undefined,
+    });
+    await view.refresh();
+    const request = view.locate(target.clientId, target.createdAt);
+    if (inactive) view.setActive(false);
+    fail(new Error('read failed'));
+    if (inactive) expect(await request).toBeNull();
+    else await expect(request).rejects.toThrow('read failed');
+    view.setActive(false);
+  });
+
+});

@@ -174,6 +174,8 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     // when its endpoint also advances. Keep the old display while rereading.
     let collected: T[] = [];
     const update = (patch: Partial<HistoryWorkDetailState<T>>) => {
+      const completed = this.state.details.get(summary.key);
+      if (completed?.complete && completed.revision === summary.revision && !patch.complete) return;
       const details = new Map(this.state.details);
       details.set(summary.key, { messages: collected.length ? collected : (existing?.messages ?? []), revision: summary.revision,
         lastMessageId: summary.lastMessageId, loading: true, complete: false, error: null, ...patch });
@@ -203,7 +205,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     }
   }
 
-  /** Locate by visible pages; only the work range containing the target is opened. */
+  /** Locate by visible pages, preserving the original folded aggregate focus behavior. */
   async locate(clientId: string, createdAt: string): Promise<T | null> {
     const generation = this.generation;
     const targetMs = Date.parse(createdAt);
@@ -215,17 +217,33 @@ export class HistoryViewController<T extends HistoryMessageSource> {
           if (found) return found;
         } else if (!tried.has(item.key) && targetMs >= item.summary.startedAtMs && targetMs <= item.summary.endedAtMs) {
           tried.add(item.key);
-          this.setExpanded(item.key, true);
-          // setExpanded starts a read synchronously; wait for its published completion.
-          await new Promise<void>((resolve) => {
-            const done = () => !this.active || generation !== this.generation
-              || !this.state.expanded.has(item.key) || !this.state.details.get(item.key)?.loading;
-            if (done()) { resolve(); return; }
-            const unsubscribe = this.subscribe(() => { if (done()) { unsubscribe(); resolve(); } });
-          });
-          const detail = this.state.details.get(item.key);
-          if (detail?.error) throw detail.error;
-          const found = detail?.messages.find((row) => row.clientId === clientId);
+          const summary = item.summary;
+          const current = () => this.active && generation === this.generation
+            && historyWorkSummaries(this.state.items).some((value) => value.key === summary.key && value.revision === summary.revision
+              && value.firstMessageId === summary.firstMessageId && value.lastMessageId === summary.lastMessageId);
+          const cached = this.state.details.get(item.key);
+          let messages = cached?.complete && cached.revision === summary.revision ? [...cached.messages] : [];
+          if (!messages.length) {
+            // Search reads the bounded range without changing user expansion memory
+            // or subscribing to hidden activity. Mount/collapse cannot cancel it.
+            try {
+              await readHistoryWorkDetails({
+                readPage: (cursor) => this.transport.details(summary, cursor ?? undefined),
+                isCurrent: current,
+                onPage: (rows) => { messages.push(...rows); },
+              });
+            } catch (error) {
+              if (!current()) return null;
+              throw error;
+            }
+            if (!current()) return null;
+            const details = new Map(this.state.details);
+            details.set(item.key, { messages, revision: summary.revision, lastMessageId: summary.lastMessageId,
+              loading: false, complete: true, error: null });
+            this.publish({ details });
+          }
+          if (!current()) return null;
+          const found = messages.find((row) => row.clientId === clientId);
           if (found) return found;
         }
       }

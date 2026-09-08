@@ -40,7 +40,9 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
       continue;
     }
     const summary = item.summary;
-    const preview = summary.preview && snapshot.expanded.has(summary.preview.key);
+    const full = snapshot.details.get(summary.key);
+    const preview = !(full?.complete && full.revision === summary.revision)
+      && summary.preview && snapshot.expanded.has(summary.preview.key);
     const range = preview ? summary.preview! : summary;
     const state = snapshot.details.get(range.key);
     const cached = state?.messages ?? [];

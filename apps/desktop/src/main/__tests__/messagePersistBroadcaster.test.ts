@@ -3163,3 +3163,24 @@ describe('ask_user persist first-write-wins', () => {
     );
   });
 });
+
+
+describe('resolved interactions publish authoritative history rows', () => {
+  it.each(['ask_user_question', 'plan_review'] as const)('broadcasts %s only after persistence completes', async (kind) => {
+    let finish!: (value: unknown) => void;
+    const updated = { id: 'resolved-row', clientId: 'resolved-row', role: kind };
+    vi.mocked(updateMessageContent).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }) as never);
+    onInteractionResolved(SESSION, `resolved-${kind}`, kind, { requestId: `request-${kind}`, plan: 'plan' }, { dismissed: true, behavior: 'deny' });
+    await flushWrites();
+    expect(broadcastMessageRow).not.toHaveBeenCalled();
+    finish(updated);
+    await flushWrites();
+    expect(broadcastMessageRow).toHaveBeenCalledWith(SESSION, updated, ownerScopeState.scope);
+  });
+  it('does not publish a row removed before its decision is persisted', async () => {
+    vi.mocked(updateMessageContent).mockResolvedValueOnce(null);
+    onInteractionResolved(SESSION, 'removed', 'plan_review', { requestId: 'removed' }, { dismissed: true });
+    await flushWrites();
+    expect(broadcastMessageRow).not.toHaveBeenCalled();
+  });
+});

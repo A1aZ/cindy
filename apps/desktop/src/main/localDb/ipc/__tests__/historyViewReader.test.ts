@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { throwIpcError } from '../../../utils/ipcValidate';
 import { createHistoryViewReader } from '../historyViewReader';
 import type { HistoryMessageSource } from '@cindy/maker-shared/message-window';
 function row(n: number, role = 'thinking'): HistoryMessageSource {
@@ -13,7 +14,7 @@ function reader(source: HistoryMessageSource[]) {
   });
   const anchor = async (_sid: string, id: string) => {
     const found = source.find((r) => r.id === id);
-    if (!found) throw new Error('History range changed');
+    if (!found) throwIpcError('NOT_FOUND', 'History range changed');
     return found;
   };
   return { list, api: createHistoryViewReader({ list, anchor, running: () => false }) };
@@ -80,8 +81,8 @@ describe('host history view', () => {
   it('rejects same-millisecond backwards ranges and detail cursors beyond the upper rowid', async () => {
     const source = [row(1), row(2), row(3)].map((r) => ({ ...r, createdAt: row(0).createdAt }));
     const { api } = reader(source);
-    await expect(api.details('s', { key: 'w', firstMessageId: '2', lastMessageId: '1' })).rejects.toThrow('Invalid history range');
-    await expect(api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: '2' }, '3')).rejects.toThrow('Invalid detail cursor');
+    await expect(api.details('s', { key: 'w', firstMessageId: '2', lastMessageId: '1' })).rejects.toMatchObject({ code: 'INVALID_PARAMS', message: '[INVALID_PARAMS] Invalid history range' });
+    await expect(api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: '2' }, '3')).rejects.toMatchObject({ code: 'INVALID_PARAMS', message: '[INVALID_PARAMS] Invalid detail cursor' });
     expect((await api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: '2' })).messages.map((r) => r.id)).toEqual(['1', '2']);
   });
   it('does not publish a snapshot when clear invalidates rows during scanning', async () => {
@@ -89,7 +90,7 @@ describe('host history view', () => {
     const { api, list } = reader(source);
     const implementation = list.getMockImplementation()!;
     list.mockImplementationOnce(async (...args) => { const result = await implementation(...args); source.length = 0; return result; });
-    await expect(api.page('s')).rejects.toThrow('History range changed');
+    await expect(api.page('s')).rejects.toMatchObject({ code: 'NOT_FOUND', message: '[NOT_FOUND] History range changed' });
   });
   it.each([1000, 200000])('rejects details cleared or rewound during a batch before returning (%i bytes)', async (size) => {
     for (const keep of [0, 1]) {
@@ -102,7 +103,16 @@ describe('host history view', () => {
         return result;
       });
       await expect(api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: '3' }))
-        .rejects.toThrow('History range changed');
+        .rejects.toMatchObject({ code: 'NOT_FOUND', message: '[NOT_FOUND] History range changed' });
     }
   });
+  it.each(['page', 'detail', 'empty', 'overshoot'])('preserves stable IPC codes when a scan cannot complete: %s', async (kind) => {
+    const { api, list } = reader([row(1), row(2)]);
+    list.mockResolvedValue(kind === 'empty' ? [] : [row(kind === 'overshoot' ? 3 : 1)]);
+    const request = kind === 'page' ? api.page('s', '1')
+      : api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: '2' });
+    const code = kind === 'page' || kind === 'detail' ? 'INTERNAL' : 'NOT_FOUND';
+    await expect(request).rejects.toMatchObject({ code, message: expect.stringContaining(`[${code}]`) });
+  });
+
 });

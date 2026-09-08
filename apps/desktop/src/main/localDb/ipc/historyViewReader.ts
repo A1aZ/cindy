@@ -1,3 +1,4 @@
+import { throwIpcError } from '../../utils/ipcValidate';
 import {
   HISTORY_VIEW_PAGE_BYTES, HISTORY_VIEW_PAGE_ITEMS, HISTORY_DETAIL_PAGE_BYTES,
   projectHistoryView, type HistoryMessageSource, type HistoryViewItem,
@@ -36,7 +37,7 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
         const rows = await deps.list(sessionId, { limit: 100, ...(cursor ? { before: cursor } : {}) }, scan > 0);
         if (rows.length === 0) { exhausted = true; break; }
         const next = rows[rows.length - 1].id;
-        if (next === cursor) throw new Error('History cursor did not advance');
+        if (next === cursor) throwIpcError('INTERNAL', 'History cursor did not advance');
         cursor = next;
         chunks.push(rows.slice().reverse());
         exhausted = rows.length < 100;
@@ -100,7 +101,7 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
       }
       const first = await deps.anchor(sessionId, ref.firstMessageId);
       const last = await deps.anchor(sessionId, ref.lastMessageId);
-      if (compareRows(first, last) > 0) throw new Error('Invalid history range');
+      if (compareRows(first, last) > 0) throwIpcError('INVALID_PARAMS', 'Invalid history range');
       let cursor = after;
       const collected: T[] = [];
       let bytes = 1024;
@@ -110,24 +111,24 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
         cursor = first.id;
       } else {
         const anchor = await deps.anchor(sessionId, after);
-        if (compareRows(anchor, first) < 0 || compareRows(anchor, last) > 0) throw new Error('Invalid detail cursor');
+        if (compareRows(anchor, first) < 0 || compareRows(anchor, last) > 0) throwIpcError('INVALID_PARAMS', 'Invalid detail cursor');
       }
       if (cursor === last.id) return finalize({ version: 1, messages: collected, nextCursor: null, hasMore: false });
       for (;;) {
         const rows = (await deps.list(sessionId, { limit: 100, after: cursor }, true)).slice().reverse();
-        if (rows.length === 0) throw new Error('History range changed');
+        if (rows.length === 0) throwIpcError('NOT_FOUND', 'History range changed');
         for (const row of rows) {
-          if (compareRows(row, last) > 0) throw new Error('History range changed');
+          if (compareRows(row, last) > 0) throwIpcError('NOT_FOUND', 'History range changed');
           const size = Buffer.byteLength(JSON.stringify(row), 'utf8');
           if (collected.length > 0 && bytes + size > HISTORY_DETAIL_PAGE_BYTES) {
             return finalize({ version: 1, messages: collected, nextCursor: cursor ?? null, hasMore: true });
           }
-          if (row.id === cursor) throw new Error('History detail cursor did not advance');
+          if (row.id === cursor) throwIpcError('INTERNAL', 'History detail cursor did not advance');
           collected.push(row);
           bytes += size;
           cursor = row.id;
           if (cursor === last.id) return finalize({ version: 1, messages: collected, nextCursor: null, hasMore: false });
-          if (Date.parse(row.createdAt) > Date.parse(last.createdAt)) throw new Error('History range changed');
+          if (Date.parse(row.createdAt) > Date.parse(last.createdAt)) throwIpcError('NOT_FOUND', 'History range changed');
         }
       }
     },

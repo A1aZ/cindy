@@ -128,6 +128,7 @@
     "test:unit": "pnpm test:runner && node scripts/test-workspaces.mjs --tier unit",
     "test:unit:related": "node scripts/test-workspaces.mjs --tier unit --related",
     "test:integration": "pnpm test:runner && node scripts/test-workspaces.mjs --tier integration",
+    "test:e2e": "pnpm test:runner && node scripts/test-workspaces.mjs --tier e2e",
     "test:all": "pnpm test:runner && node scripts/test-workspaces.mjs --all",
     "test:git-integration": "pnpm test:runner && node scripts/test-workspaces.mjs --tier git-integration",
     "test:db": "pnpm test:runner && node scripts/test-workspaces.mjs --tier db",

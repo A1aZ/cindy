@@ -101,6 +101,12 @@ test("root unit and all scripts run runner self-tests before workspace sweep", (
 
 test("root db and guard delegate to the workspace runner", () => {
 	const scripts = readRootScripts();
+	for (const tier of ["integration", "e2e"]) {
+		assert.equal(
+			scripts[`test:${tier}`],
+			`pnpm test:runner && node scripts/test-workspaces.mjs --tier ${tier}`,
+		);
+	}
 	assert.equal(
 		scripts["test:git-integration"],
 		"pnpm test:runner && node scripts/test-workspaces.mjs --tier git-integration",

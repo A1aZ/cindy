@@ -37,6 +37,48 @@ describe('bounded Pi disabled Skill alias discovery', () => {
     expect(scan).not.toHaveBeenCalled();
   });
 
+  it.each(['entries', 'time'])('resolves direct aliases before an unrelated subtree exhausts %s', (budget) => {
+    const discovery = path.join(root, 'skills');
+    const large = path.join(discovery, 'a-large');
+    const source = path.join(root, 'source');
+    const alias = path.join(discovery, 'z-alias');
+    const secondRoot = path.join(root, 'other-skills');
+    const secondAlias = path.join(secondRoot, 'alias');
+    fs.mkdirSync(large, { recursive: true });
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'fixture');
+    link(source, alias);
+    link(source, secondAlias);
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const open = fs.opendirSync.bind(fs);
+    let largeReads = 0;
+    const closed = vi.fn();
+    vi.spyOn(fs, 'opendirSync').mockImplementation((entry, options) => {
+      if (entry === discovery) {
+        // Force the pathological ordering independently of filesystem order.
+        const entries = fs.readdirSync(entry, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+        return { readSync: () => entries.shift() ?? null, closeSync: vi.fn() } as unknown as fs.Dir;
+      }
+      if (entry === large) {
+        // A directory stream with arbitrarily many irrelevant entries.
+        return {
+          readSync: () => {
+            largeReads += 1;
+            if (budget === 'time') elapsed = 101;
+            return { name: '.ignored' };
+          },
+          closeSync: closed,
+        } as unknown as fs.Dir;
+      }
+      return open(entry, options);
+    });
+    expect(piDisabledDiscoveryPaths([source], [discovery, secondRoot])).toEqual([source, alias, secondAlias]);
+    expect(largeReads).toBeGreaterThan(0);
+    expect(largeReads).toBeLessThanOrEqual(2048);
+    expect(closed).toHaveBeenCalledOnce();
+  });
+
   it('caps traversal through a linked deep directory while retaining the disabled source', () => {
     const deepest = deepTree();
     const alias = path.join(root, 'alias');

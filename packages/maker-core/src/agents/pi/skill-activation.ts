@@ -32,6 +32,7 @@ export function piDisabledDiscoveryPaths(disabled: readonly string[], roots: rea
   const disabledKeys = new Set(disabled.map(canonicalSkillPath));
   let remainingEntries = 2048;
   const exhausted = () => remainingEntries <= 0 || performance.now() >= deadline;
+  const pending: Array<{ entry: string; ancestors: Set<string>; depth: number }> = [];
   const visit = (entry: string, ancestors: Set<string>, depth: number) => {
     if (depth > 16 || exhausted()) return;
     try {
@@ -39,24 +40,31 @@ export function piDisabledDiscoveryPaths(disabled: readonly string[], roots: rea
       if (disabledKeys.has(key)) { result.add(entry); return; }
       if (!fs.statSync(entry).isDirectory() || ancestors.has(key)) return;
       if (fs.existsSync(path.join(entry, 'SKILL.md')) || fs.existsSync(path.join(entry, 'skill.md'))) return;
-      const next = new Set([...ancestors, key]);
-      const directory = fs.opendirSync(entry);
-      try {
-        while (!exhausted()) {
-          const child = directory.readSync();
-          if (!child) break;
-          remainingEntries -= 1;
-          if (!child.name.startsWith('.')) visit(path.join(entry, child.name), next, depth + 1);
-        }
-      } finally {
-        directory.closeSync();
-      }
+      if (depth < 16) pending.push({ entry, ancestors: new Set([...ancestors, key]), depth });
     } catch { /* Missing/unreadable discovery roots are handled by native Pi. */ }
   };
   for (const root of roots) {
     if (exhausted()) break;
     remainingEntries -= 1;
     visit(root, new Set(), 0);
+  }
+  // Inspect every root's direct candidates before descending into any subtree.
+  // FIFO preserves this priority at subsequent levels within the shared budget.
+  for (let index = 0; index < pending.length && !exhausted(); index += 1) {
+    const { entry, ancestors, depth } = pending[index]!;
+    try {
+      const directory = fs.opendirSync(entry);
+      try {
+        while (!exhausted()) {
+          const child = directory.readSync();
+          if (!child) break;
+          remainingEntries -= 1;
+          if (!child.name.startsWith('.')) visit(path.join(entry, child.name), ancestors, depth + 1);
+        }
+      } finally {
+        directory.closeSync();
+      }
+    } catch { /* Missing/unreadable discovery roots are handled by native Pi. */ }
   }
   return [...result];
 }

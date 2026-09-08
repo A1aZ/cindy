@@ -1256,6 +1256,7 @@ const PROTECTED_TAGS = {
   'desktop.settings': [
     'DESIGN.md §10 语义豁免色族消费者',
     '外部主题导入保护 token（资源用量类别色在独立窗）',
+    'DESIGN.md §5 登记成员 usage-heatmap-day / usage-token-bar',
   ],
   'desktop.window.resource-usage': ['外部主题导入保护 token（进程类别色）'],
 };

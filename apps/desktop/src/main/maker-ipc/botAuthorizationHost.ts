@@ -36,7 +36,7 @@ import { toReauthInteractionAssessment } from '../cindy-brain/ghostSetupCoordina
 import { initBotAuthorizationService } from './botAuthorizationService.js';
 import { readBotAuthorizationCard } from '../../shared/botAuthorization.js';
 import type { BotAuthorizationCard } from '../../shared/botAuthorization.js';
-import { sanitizeGhostSetupSnapshotForRemote } from '../cindy-brain/ghostSetupInteractionBridge.js';
+import { sanitizeGhostSetupSnapshotForDesktop } from '../cindy-brain/ghostSetupInteractionBridge.js';
 import { createLogger } from '../logger.js';
 const log = createLogger('bot-authorization');
 
@@ -259,7 +259,7 @@ export function initializeBotAuthorizationHost(
       card = {
         ...card,
         snapshot: {
-          ...sanitizeGhostSetupSnapshotForRemote(card.snapshot),
+          ...sanitizeGhostSetupSnapshotForDesktop(card.snapshot),
           ...(card.snapshot.reopenActionId ? { reopenActionId: card.snapshot.reopenActionId } : {}),
         },
       };

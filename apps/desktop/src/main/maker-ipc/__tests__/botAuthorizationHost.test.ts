@@ -3,6 +3,7 @@ import type { BotAuthorizationCard } from '../../../shared/botAuthorization';
 import type { initBotAuthorizationService } from '../botAuthorizationService';
 
 const state = vi.hoisted(() => ({
+  save: vi.fn(),
   profileStatus: 'active',
   login: vi.fn(async () => ({ ok: true })),
   continued: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock('../../localDb/client/current.js', () => ({
   } } }),
 }));
 vi.mock('../../localDb/ipc/messages.js', () => ({
-  createMessage: vi.fn(), patchMessageAgentMeta: vi.fn(),
+  createMessage: state.save, patchMessageAgentMeta: vi.fn(),
   broadcastMessageAgentMetaUpdate: vi.fn(), updateMessageContent: vi.fn(),
 }));
 vi.mock('../../device-link/broadcast-tap.js', () => ({
@@ -49,7 +50,6 @@ vi.mock('../../cindy-brain/ghostSetupChangeBus.js', () => ({
   getGhostSetupChangeBus: () => ({ subscribe: () => () => {}, currentRevision: () => 1 }),
 }));
 vi.mock('../../cindy-brain/ghostSetupCoordinator.js', () => ({ toReauthInteractionAssessment: () => null }));
-vi.mock('../../cindy-brain/ghostSetupInteractionBridge.js', () => ({ sanitizeGhostSetupSnapshotForRemote: (v: unknown) => v }));
 vi.mock('../../maker-host/grok-oauth-login.js', () => ({
   getGrokAccessToken: vi.fn(), hasGrokOAuthLogin: () => false, runGrokOAuthLogin: state.login,
   getGrokOAuthCredentialGeneration: () => 0, cancelGrokOAuthLogin: vi.fn(),
@@ -60,6 +60,7 @@ const target = { kind: 'plugin' as const, id: 'art' };
 describe('authorization Host frozen plugin policy', () => {
   beforeEach(() => {
     state.policy = JSON.stringify({ toolsets: ['art'] });
+    state.save.mockClear();
     state.profileStatus = 'active';
     state.login.mockClear();
     state.continued.mockClear();
@@ -68,6 +69,18 @@ describe('authorization Host frozen plugin policy', () => {
       await validate();
       state.continued();
     });
+  });
+
+  it('persists the validated credential-page link for the Desktop card', async () => {
+    await state.deps.adapter('session', target);
+    const card: BotAuthorizationCard = { v: 1, sessionId: 'session', target, createdAt: 1,
+      snapshot: { kind: 'plugin_setup', requestId: 'r', revision: 1, ghost: { id: 'art', name: 'Art' },
+        steps: [{ id: 'step', groupId: 'group', groupMode: 'any_of', title: 'Key', description: '', phase: 'pending',
+          action: { id: 'inline', kind: 'inline_form', form: { fields: [{ id: 'value', type: 'secret', label: 'Key',
+            required: true, maxLength: 4096, externalLink: { url: 'https://example.com/keys' } }] } } }] } };
+    await state.deps.save(card);
+    expect(state.save.mock.calls[0][1].agentMeta.botAuthorization.snapshot.steps[0].action.form.fields[0].externalLink)
+      .toEqual({ url: 'https://example.com/keys' });
   });
 
   it.each(['paused', 'archived', 'deleting', 'error'])('rejects old plugin and Host cards when the Profile is %s', async (status) => {

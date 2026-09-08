@@ -581,6 +581,9 @@ export default function RemoteDesktopScreen() {
       heartbeatBusy = current.lease;
       void request({ op: "heartbeat", lease: current.lease })
         .catch((cause) => {
+          // A missing reply does not prove renewal failed; the next interval
+          // retries within the lease. Explicit host revocation still stops us.
+          if (cause && typeof cause === "object" && cause.code === "INVOKE_TIMEOUT") return;
           if (active.current === current && !presentation.current) fail(cause);
         })
         .finally(() => {

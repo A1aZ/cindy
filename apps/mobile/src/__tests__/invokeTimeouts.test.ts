@@ -12,6 +12,8 @@ describe("resolveMobileInvokeTimeoutMs", () => {
       59_000,
     );
     expect(resolveMobileInvokeTimeoutMs("device-link:state")).toBeUndefined();
+    expect(resolveMobileInvokeTimeoutMs("device-link:remote-desktop:v1", [{ op: "heartbeat" }])).toBe(5_000);
+    expect(resolveMobileInvokeTimeoutMs("device-link:remote-desktop:v1", [{ op: "offer" }])).toBe(59_000);
   });
   it("allows a large history row to finish on a slow link without widening small status reads", () => {
     expect(resolveMobileInvokeTimeoutMs("local-db:messages:list")).toBe(30_000);

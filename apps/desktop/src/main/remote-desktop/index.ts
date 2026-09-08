@@ -314,6 +314,9 @@ export const remoteDesktop = new RemoteDesktopController({
     return permissions.read();
   },
   frame: async (displayId, cursorOverlay) => {
+    // offer() cancels the previous read before acquiring the capture owner.
+    // Leave its required first frame uncontested; relay polling resumes afterwards.
+    if (preparingOffer) return null;
     // Compatibility viewers must also wake/capture without waiting for
     // Chromium's thumbnail enumeration, which may hang on a sleeping display.
     if (process.platform === 'darwin' || windowsAvailable) {

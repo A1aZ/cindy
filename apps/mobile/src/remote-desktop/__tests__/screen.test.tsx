@@ -568,6 +568,21 @@ describe("remote desktop controls", () => {
     expect(fixture.invoke).toHaveBeenCalledTimes(1);
     expect(requests().some((r) => r.op === "start")).toBe(false);
   });
+  it("renews again after a lost heartbeat reply without replacing the live lease", async () => {
+    await connect();
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "heartbeat"
+        ? new Promise((_resolve, reject) => setTimeout(() => reject(
+            Object.assign(new Error("INVOKE_TIMEOUT"), { code: "INVOKE_TIMEOUT" }),
+          ), 5000))
+        : original(...args),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(21_000));
+    expect(requests().filter((r) => r.op === "heartbeat")).toHaveLength(4);
+    expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+  });
   it.each([
     ["ACCESS_REVOKED", "accessRevoked"],
     ["REMOTE_DISABLED", "remoteDisabled"],

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   dispose: vi.fn(),
   stop: vi.fn(),
   nativeStop: vi.fn(),
+  nativeFrame: vi.fn(async () => 'frame'),
 }));
 vi.mock('electron', () => ({
   app: { on: vi.fn() },
@@ -93,7 +94,7 @@ vi.mock('../controller', () => ({
 vi.mock('../nativeCapture', () => ({
   NativeDesktopCapture: class {
     stop = h.nativeStop;
-    frame = vi.fn(async () => 'frame');
+    frame = h.nativeFrame;
   },
 }));
 vi.mock('../inputHost', () => ({
@@ -150,12 +151,41 @@ beforeEach(() => {
   h.dispose.mockClear();
   h.stop.mockClear();
   h.nativeStop.mockClear();
+  h.nativeFrame.mockClear();
   registerRemoteDesktopIpc();
 });
 afterEach(() => {
   h.deps.stopVideo();
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+it.each(['success', 'timeout'])('keeps relay polls out of native preparation and resumes after %s', async (outcome) => {
+  vi.stubGlobal('process', { ...process, platform: 'darwin' });
+  let sourcesReady!: (sources: any[]) => void;
+  h.source = new Promise((resolve) => { sourcesReady = resolve; });
+  const pending = offer();
+  const settled = outcome === 'success'
+    ? expect(pending).resolves.toBe('answer')
+    : expect(pending).rejects.toThrow('DESKTOP_VIDEO_TIMEOUT');
+  expect(h.nativeStop).toHaveBeenCalled();
+  await expect(h.deps.frame('1', true)).resolves.toBeNull();
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  await expect(h.deps.frame('1', true)).resolves.toBeNull();
+  sourcesReady([{ id: 'screen:1', display_id: '1' }]);
+  await flush();
+  await expect(h.deps.frame('1', true)).resolves.toBeNull();
+  expect(h.nativeFrame).not.toHaveBeenCalled();
+  await expect(h.handlers.get(DESKTOP_LOCAL.NATIVE_FRAME)(event(), 'lease')).resolves.toBe('frame');
+  if (outcome === 'success') {
+    const id = h.owner.send.mock.calls[0][1].id;
+    h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), id, 'answer');
+  } else await vi.advanceTimersByTimeAsync(18_000);
+  await settled;
+  await h.deps.frame('1', true);
+  expect(h.nativeFrame).toHaveBeenCalledTimes(2);
 });
 
 it.each(['ready', 'sources'])(

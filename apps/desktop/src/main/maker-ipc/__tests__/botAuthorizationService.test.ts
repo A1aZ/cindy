@@ -418,3 +418,24 @@ describe('durable authorization card deduplication', () => {
     await h.service.dispose();
   });
 });
+
+it('retires an OAuth waiter when the card is rewound during completion persistence', async () => {
+  const h = harness();
+  await h.service.request('s', { kind: 'plugin', id: 'p' });
+  await h.click();
+  await flush();
+  h.deps.save.mockImplementationOnce(async (card) => {
+    h.stored.set(card.snapshot.requestId, structuredClone(card));
+    // The Host load predicate now excludes the row through rewindAt.
+    h.deps.load.mockResolvedValue(null);
+  });
+  h.complete();
+  await flush();
+  expect(h.deps.resume).not.toHaveBeenCalled();
+  expect(h.listeners.size).toBe(0);
+  expect(h.card().snapshot.terminal).not.toBe(true);
+  h.complete();
+  await flush();
+  expect(h.deps.resume).not.toHaveBeenCalled();
+  await h.service.dispose();
+});

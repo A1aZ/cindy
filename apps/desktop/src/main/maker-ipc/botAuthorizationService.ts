@@ -459,6 +459,12 @@ export class BotAuthorizationService {
         entry.card.completionPending = true;
         await this.save(entry);
         if (entry.closed || entry.cancelled) return;
+        // Rewind can hide the card while its OAuth action or persistence is awaiting.
+        if (!(await this.deps.load(entry.card.snapshot.requestId))) {
+          this.close(entry);
+          return;
+        }
+        if (entry.closed || entry.cancelled) return;
         await this.deps.resume(entry.card);
         if (entry.closed || entry.cancelled) return;
         entry.card.snapshot = completedSnapshot;

@@ -309,12 +309,20 @@ export function initializeBotAuthorizationHost(
     async resume(card) {
       await assertSession(card.sessionId);
       const [row] = await getDbClient()
-        .drizzle.select({ clearedAt: sessions.clearedAt })
-        .from(sessions)
-        .where(eq(sessions.id, card.sessionId))
+        .drizzle.select({ id: messages.id })
+        .from(messages)
+        .innerJoin(sessions, eq(sessions.id, messages.sessionId))
+        .where(
+          and(
+            eq(messages.sessionId, card.sessionId),
+            eq(messages.clientId, `bot-authorization:${card.snapshot.requestId}`),
+            isNull(messages.rewindAt),
+            or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)),
+          ),
+        )
         .limit(1);
-      if (!row || (row.clearedAt !== null && row.clearedAt >= card.createdAt))
-        throw new Error('Authorization card was cleared');
+      if (!row) throw new Error('Authorization card is no longer visible');
+      await assertSession(card.sessionId);
       await resume(card);
     },
     onDisposing: () => cancelGrokOAuthLogin(),

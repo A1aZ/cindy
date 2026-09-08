@@ -32,8 +32,10 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
       flush(false);
       const state = snapshot.details.get(item.key);
       const expanded = snapshot.expanded.has(item.key);
+      // Collapsing stops work deltas, so a local streaming row may stay stale.
+      // Expanded details are refreshed from Host snapshots through invalidations.
       out.push(options.work(item.summary,
-        expanded && state ? options.build(state.messages.map((row) => liveById.get(row.clientId) ?? row), item.summary.isStreaming) : [], {
+        expanded && state ? options.build(state.messages, item.summary.isStreaming) : [], {
           expanded, loading: state?.loading ?? expanded, failed: !!state?.error,
           toggle: () => view.setExpanded(item.key, !expanded),
           retry: () => { void view.loadDetails(item.summary); },

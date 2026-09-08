@@ -87,6 +87,56 @@ import { renderHistoryView } from '../historyViewRender.js';
 import type { HistoryViewPage } from '../historyView.js';
 
 describe('shared history view lifecycle', () => {
+  it.each(['reset', 'reset twice', 'reactivate'])('awaits the current read after %s, including a late failure', async (transition) => {
+    for (const oldFailure of [false, true]) {
+      const reads: Array<{ resolve(page: HistoryViewPage<HistoryMessageSource>): void; reject(error: Error): void }> = [];
+      const page = { version: 1 as const, items: projectHistoryView([row(1, 'user', 'current')], false), hasMore: false, nextCursor: null };
+      const view = new HistoryViewController<HistoryMessageSource>({
+        page: () => new Promise((resolve, reject) => { reads.push({ resolve, reject }); }),
+        details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined,
+      });
+      const old = view.refresh();
+      if (transition === 'reactivate') { view.setActive(false); view.setActive(true); }
+      else view.reset();
+      const intermediate = view.refresh();
+      if (transition === 'reset twice') view.reset();
+      let settled = false;
+      const current = view.refresh().then(() => { settled = true; });
+      const repeated = view.refresh();
+      if (oldFailure) reads[0].reject(new Error('timeout'));
+      else reads[0].resolve({ ...page, items: [] });
+      await old;
+      await new Promise((done) => setTimeout(done, 0));
+      expect(reads).toHaveLength(2);
+      expect(settled).toBe(false);
+      expect(view.getSnapshot()).toMatchObject({ ready: false, error: null });
+      reads[1].resolve(page);
+      await Promise.all([intermediate, current, repeated]);
+      expect(view.getSnapshot()).toMatchObject({ ready: true, items: page.items, error: null });
+      expect(reads).toHaveLength(2);
+    }
+  });
+
+  it('cancels a queued reset read on blur and exposes a subsequent current failure', async () => {
+    let resolve!: (page: HistoryViewPage<HistoryMessageSource>) => void;
+    const read = vi.fn(() => new Promise<HistoryViewPage<HistoryMessageSource>>((done) => { resolve = done; }));
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    const old = view.refresh();
+    view.reset();
+    const queued = view.refresh();
+    view.setActive(false);
+    resolve({ version: 1, items: [], hasMore: false, nextCursor: null });
+    await Promise.all([old, queued]);
+    expect(read).toHaveBeenCalledTimes(1);
+    const failure = new Error('timeout');
+    read.mockRejectedValueOnce(failure);
+    view.setActive(true);
+    await view.refresh();
+    expect(view.getSnapshot()).toMatchObject({ ready: false, loading: false, error: failure });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])('preserves an opposite-direction request during a pending page (older=%s)', async (older) => {
     let resolve!: (page: HistoryViewPage<HistoryMessageSource>) => void;
     const page = { version: 1 as const, items: projectHistoryView([row(2, 'user', 'current')], false), hasMore: true, nextCursor: '2' };
@@ -196,5 +246,29 @@ describe('shared history view lifecycle', () => {
       isLive: () => false,
     });
     expect(rendered).toEqual(['c1']);
+  });
+
+  it.each([false, true])('uses refreshed work details after collapse despite stale streaming rows (active=%s)', async (active) => {
+    let thinking = { ...row(1, 'thinking', 'partial'), isStreaming: true };
+    const prose = row(2, 'assistant', 'answer');
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items: projectHistoryView([thinking, prose], active), hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: [thinking], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    const key = view.getSnapshot().items[0].key;
+    view.setExpanded(key, true);
+    await new Promise((done) => setTimeout(done, 0));
+    const stale = thinking;
+    view.setExpanded(key, false);
+    thinking = { ...thinking, content: 'complete thinking', isStreaming: false };
+    await view.refresh();
+    view.setExpanded(key, true);
+    await new Promise((done) => setTimeout(done, 0));
+    const rendered = renderHistoryView({ view, snapshot: view.getSnapshot(),
+      liveMessages: [stale, { ...prose, content: 'latest answer' }], streaming: active,
+      isLive: () => true, build: (rows) => rows.map((item) => item.content), work: (_summary, details) => details[0] });
+    expect(rendered).toEqual(['complete thinking', 'latest answer']);
   });
 });

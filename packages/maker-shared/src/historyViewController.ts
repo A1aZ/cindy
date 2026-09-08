@@ -46,6 +46,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   private active = true;
   private pagePromise: Promise<void> | null = null;
   private pageOlder = false;
+  private pageGeneration = 0;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly transport: HistoryViewTransport<T>) {}
@@ -62,13 +63,16 @@ export class HistoryViewController<T extends HistoryMessageSource> {
 
   refresh(older = false): Promise<void> {
     if (this.pagePromise) {
-      if (older === this.pageOlder) return this.pagePromise;
+      // A caller after reset/reactivation must await its own generation's read,
+      // even when the invalidated request happened to have the same direction.
+      if (older === this.pageOlder && this.pageGeneration === this.generation) return this.pagePromise;
       const generation = this.generation;
       return this.pagePromise.then(() => {
         if (this.active && generation === this.generation && !this.state.error) return this.refresh(older);
       });
     }
     this.pageOlder = older;
+    this.pageGeneration = this.generation;
     const promise = this.readPage(older);
     this.pagePromise = promise;
     void promise.finally(() => { if (this.pagePromise === promise) this.pagePromise = null; });
@@ -238,10 +242,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     this.detailRuns.clear();
     this.publish({ loading: false });
     this.sendIntent();
-    if (active) {
-      if (this.pagePromise) void this.pagePromise.then(() => this.refresh());
-      else void this.refresh();
-    }
+    if (active) void this.refresh();
   }
   reset(): void {
     this.generation++;
@@ -249,9 +250,6 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     this.publish({ items: [], details: new Map(), expanded: new Set(), ready: false,
       nextCursor: null, hasMore: false, loading: false, error: null });
     this.sendIntent();
-    if (this.active) {
-      if (this.pagePromise) void this.pagePromise.then(() => this.refresh());
-      else void this.refresh();
-    }
+    if (this.active) void this.refresh();
   }
 }

@@ -9,6 +9,7 @@
  */
 
 import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
+import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease } from '../worktree/runtimeLeases';
 import { readCodexContextWindowInfo } from './codex-context-window.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
@@ -2414,6 +2415,9 @@ export function getMaker(): Maker {
           const createOpts = opts as MakerSessionCreateOpts;
           createOpts.id ??= sessionId;
           await prepareBotWorkspaceRuntime(createOpts);
+          if (!createOpts.remoteHostId && createOpts.workingDir) {
+            await acquireWorktreeRuntimeLease(sessionId, createOpts.workingDir);
+          }
           let skillLinksChanged = false;
           if (!createOpts.remoteHostId && createOpts.workingDir) {
             const result = await prepareSharedProjectSkillLinks({
@@ -2510,6 +2514,9 @@ export function getMaker(): Maker {
           }
         },
         onStartFailed: async ({ sessionId, stage, error }) => {
+          await releaseWorktreeRuntimeLease(sessionId).catch((error) => {
+            desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+          });
           const snapshot = pendingBotRuntimeSnapshots.get(sessionId);
           if (!snapshot) return;
           try {
@@ -2530,6 +2537,9 @@ export function getMaker(): Maker {
           await writeCodexHistoryHasProductPrompt(sessionId, historyHasProductPrompt);
         },
         onClose: async (sessionId) => {
+          await releaseWorktreeRuntimeLease(sessionId).catch((error) => {
+            desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+          });
           // rehydrate close suppression 只跳过 worktree / temp file 这类重副作用;
           // registry 必须先清,后续 resume 会在首个 /responses 前重新登记,避免旧 thread prompt 驻留。
           unregisterCodexProxyPrompt(sessionId);

@@ -1,3 +1,15 @@
+const checkpointMock = vi.hoisted(() => vi.fn());
+const recyclePoolMock = vi.hoisted(() => vi.fn());
+vi.mock('../worktree/managedRecycle', () => ({
+  checkpointWorktreeForReuse: checkpointMock,
+  recycleManagedWorktree: recyclePoolMock,
+}));
+vi.mock('../worktree/legacyRuntimeGuard', () => ({
+  withLegacyWorktreeRuntimeGuard: (task: (isHeld: () => boolean) => Promise<unknown>) => task(() => true),
+}));
+vi.mock('../worktree/runtimeLeases', () => ({
+  readWorktreeRuntimePaths: async () => new Set(liveSessionRows.filter((row) => row.status === 'archived').flatMap((row) => [row.workingDir, row.worktreePath].filter(Boolean))),
+}));
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import path from 'node:path';
 import fsSync from 'node:fs';
@@ -32,7 +44,7 @@ vi.mock('../worktree/worktreeStore', () => ({
   get: (sessionId: string) => storeMap.get(sessionId) ?? null,
   getAll: () => [...storeMap.values()],
   getAllPaths: () => [...storeMap.values()].map((m) => m.path),
-  set: vi.fn(),
+  set: async (id: string, meta: WorktreeMeta) => { storeMap.set(id, meta); },
   del: (sessionId: string) => storeMap.delete(sessionId),
 }));
 
@@ -44,6 +56,15 @@ vi.mock('../worktree/WorktreeManager', () => ({
 
 vi.mock('../localDb/client/current', () => ({
   getDbClient: () => ({
+    readLocalWorktreeReferences: async () => {
+      liveSessionQueryCount += 1;
+      if (liveSessionLookupError) throw liveSessionLookupError;
+      return [
+        ...liveSessionRows.map((row) => ({ ...row, source: 'desktop', currentDatabase: true })),
+        ...[...storeMap.values()].filter((meta) => !liveSessionRows.some((row) => row.id === meta.sessionId))
+          .map((meta) => ({ id: meta.sessionId, status: 'deleted', source: 'desktop', currentDatabase: true, workingDir: meta.path, worktreePath: meta.path })),
+      ];
+    },
     drizzle: {
       select: () => ({
         from: () => ({
@@ -103,6 +124,14 @@ describe('WorktreePool safety', () => {
       .mockReset()
       .mockImplementation(async (_baseRepo: string, requestedName: string) => requestedName);
     createWorktreeMock.mockReset();
+    checkpointMock.mockReset().mockResolvedValue(undefined);
+    recyclePoolMock.mockReset().mockImplementation(async (meta: WorktreeMeta, options: { canRemove: () => Promise<boolean> }) => {
+      if (!(await options.canRemove())) return false;
+      if (path.dirname(meta.path) !== path.join(meta.baseRepo, '.xdt-worktrees')) return false;
+      await gitExecMock(['worktree', 'remove', '--force', meta.path], meta.baseRepo);
+      storeMap.delete(meta.sessionId);
+      return true;
+    });
     rmSpy = vi.spyOn(fs, 'rm');
 
     pool = await import('../worktree/WorktreePool');
@@ -147,7 +176,7 @@ describe('WorktreePool safety', () => {
       ['worktree', 'remove', '--force', evictableMeta.path],
       baseRepo,
     );
-    expect(liveSessionQueryCount).toBe(1);
+    expect(liveSessionQueryCount).toBeGreaterThanOrEqual(2);
   });
 
   it('does not return a live session worktree to the reusable pool', async () => {
@@ -243,7 +272,7 @@ describe('WorktreePool safety', () => {
     gitExecMock.mockRejectedValueOnce(new Error('git remove failed'));
 
     await expect(pool.releaseWorktree(meta.sessionId)).resolves.toBe('pooled');
-    await expect(pool.drainOne(baseRepo)).rejects.toThrow('git remove failed');
+    await expect(pool.drainOne(baseRepo)).rejects.toThrow('pooled worktree was preserved');
 
     expect(rmSpy).not.toHaveBeenCalled();
     expect(storeMap.has(meta.sessionId)).toBe(true);
@@ -393,5 +422,35 @@ describe('WorktreePool safety', () => {
 
     expect(gitExecMock).not.toHaveBeenCalled();
     expect(storeMap.has(meta.sessionId)).toBe(true);
+  });
+
+  it('checkpoints before reset and replaces the old registration with one new generation', async () => {
+    const meta = makeMeta(baseRepo, 'previous', '2026-05-26T00:00:00.000Z');
+    fsSync.mkdirSync(meta.path, { recursive: true });
+    storeMap.set(meta.sessionId, meta);
+    expect(await pool.releaseWorktree(meta.sessionId)).toBe('pooled');
+    const order: string[] = [];
+    checkpointMock.mockImplementation(async () => { order.push('checkpoint'); });
+    gitExecMock.mockImplementation(async (args: string[]) => { order.push(args[0]); return { stdout: '', stderr: '' }; });
+    const result = await pool.acquireWorktree({ sessionId: 'next', name: 'next', baseRepo, sourceBranch: 'main', ephemeral: true });
+    expect(result.ok).toBe(true);
+    expect(order.slice(0, 4)).toEqual(['checkpoint', 'checkout', 'reset', 'clean']);
+    expect(storeMap.has(meta.sessionId)).toBe(false);
+    expect(storeMap.get('next')).toMatchObject({ path: meta.path, generation: expect.any(String) });
+    expect(storeMap.size).toBe(1);
+  });
+
+  it('leaves a pooled directory intact when a task references it before reuse', async () => {
+    const meta = makeMeta(baseRepo, 'previous', '2026-05-26T00:00:00.000Z');
+    fsSync.mkdirSync(meta.path, { recursive: true });
+    storeMap.set(meta.sessionId, meta);
+    expect(await pool.releaseWorktree(meta.sessionId)).toBe('pooled');
+    liveSessionRows.push({ id: 'late-borrower', status: 'active', workingDir: meta.path, worktreePath: null });
+    const req = { sessionId: 'next', name: 'next', baseRepo, sourceBranch: 'main', ephemeral: true };
+    await pool.acquireWorktree(req);
+    expect(checkpointMock).not.toHaveBeenCalled();
+    expect(gitExecMock).not.toHaveBeenCalled();
+    expect(storeMap.get(meta.sessionId)).toEqual(meta);
+    expect(createWorktreeMock).toHaveBeenCalledWith(req);
   });
 });

@@ -9,6 +9,11 @@
  * 淘汰策略：不使用 idle timeout，改为全局数量上限（MAX_WORKTREES）按 createdAt 淘汰 clean 条目。
  */
 
+import { randomUUID } from 'node:crypto';
+import { checkpointWorktreeForReuse, recycleManagedWorktree } from './managedRecycle';
+import { withWorktreeResourceLock } from './resourceLock';
+import { readRecycleRecord } from './recycleJournal';
+import { withLegacyWorktreeRuntimeGuard } from './legacyRuntimeGuard';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
@@ -24,7 +29,7 @@ import {
   type LiveSessionPathKeys,
 } from './liveSessionRefs';
 import { getBranchName } from './nameGenerator';
-import { hasKeepSentinel, isManagedWorktreePath } from './safety';
+import { hasKeepSentinel } from './safety';
 import * as store from './worktreeStore';
 import { createLogger } from '../logger';
 
@@ -77,44 +82,44 @@ export async function acquireWorktree(
           req.name,
         );
         const newBranch = getBranchName(resolvedName);
-        await resetWorktree(
-          entry.meta.path,
-          entry.meta.baseRepo,
-          req.sourceBranch,
-          newBranch,
-          opts,
-        );
+        return await withWorktreeResourceLock(entry.meta.path, () => withLegacyWorktreeRuntimeGuard(async (legacyGuardHeld) => {
+          const refs = await loadLiveSessionPathKeys({ contextPath: entry.meta.path });
+          if (hasKeepSentinel(entry.meta.path) || hasLiveSessionReference(entry.meta, refs)) throw new Error('pooled worktree is in use');
+          await resetWorktree(
+            entry.meta.path,
+            entry.meta.baseRepo,
+            req.sourceBranch,
+            newBranch,
+            opts,
+            async () => {
+              await checkpointWorktreeForReuse(entry.meta);
+              if (!legacyGuardHeld()) throw new Error('runtime evidence unavailable');
+            },
+          );
 
-        const meta: WorktreeMeta = {
-          ...entry.meta,
-          sessionId: req.sessionId,
-          name: resolvedName,
-          branch: newBranch,
-          sourceBranch: req.sourceBranch,
-          createdAt: new Date().toISOString(),
-        };
-        await store.set(req.sessionId, meta);
+          const meta: WorktreeMeta = {
+            ...entry.meta,
+            sessionId: req.sessionId,
+            name: resolvedName,
+            branch: newBranch,
+            sourceBranch: req.sourceBranch,
+            createdAt: new Date().toISOString(),
+            generation: randomUUID(),
+          };
+          await store.set(req.sessionId, meta);
+          if (entry.meta.sessionId !== req.sessionId) await store.del(entry.meta.sessionId);
 
-        log.info(
-          `[WorktreePool] reusing pooled worktree at ${meta.path} for session ${req.sessionId}`,
-        );
-        return { ok: true, meta };
+          log.info(
+            `[WorktreePool] reusing pooled worktree at ${meta.path} for session ${req.sessionId}`,
+          );
+          return { ok: true as const, meta };
+        }));
       } catch (err) {
         log.warn(
           '[WorktreePool] resetWorktree failed, falling back to fresh creation:',
           err instanceof Error ? err.message : String(err),
         );
-        if (await isWorktreeDirty(entry.meta.path)) {
-          log.warn(`[WorktreePool] dirty worktree preserved at ${entry.meta.path}`);
-        } else {
-          const drained = await drainEntry(entry.meta)
-            .then(() => true)
-            .catch(async () => {
-              await gitExec(['worktree', 'prune'], entry.meta.baseRepo).catch(() => {});
-              return false;
-            });
-          if (drained) store.del(entry.meta.sessionId);
-        }
+        log.warn('[WorktreePool] preserving failed reuse for recovery', { sessionId: entry.meta.sessionId });
       }
     }
 
@@ -136,6 +141,7 @@ async function resetWorktree(
   sourceBranch: string,
   newBranch: string,
   opts?: { sourceFetchAlreadyAttempted?: boolean },
+  beforeReset?: () => Promise<void>,
 ): Promise<void> {
   // 防御性断言：池中 worktree 理论上必定 clean
   if (await isWorktreeDirty(worktreePath)) {
@@ -164,6 +170,9 @@ async function resetWorktree(
       );
     }
   }
+
+  // Network refresh may take seconds; capture and recheck only after it completes.
+  await beforeReset?.();
 
   // 2. 非覆盖式创建并切换分支。查重后的 TOCTOU 竞态会让 -b 安全失败，
   //    绝不能用 -B 重置一个不属于池条目的已有分支。
@@ -243,7 +252,7 @@ export async function releaseWorktree(sessionId: string): Promise<'pooled' | 'pr
         .then(() => true)
         .catch(() => false);
       if (drained) {
-        store.del(existing.meta.sessionId);
+        await store.del(existing.meta.sessionId);
       }
     }
   }
@@ -281,7 +290,7 @@ async function evictIfOverLimit(liveSessionPathKeys?: LiveSessionPathKeys): Prom
     const drained = await drainEntry(candidate)
       .then(() => true)
       .catch(() => false);
-    if (drained) store.del(candidate.sessionId);
+    if (drained) await store.del(candidate.sessionId);
     else break;
   }
 }
@@ -307,9 +316,10 @@ async function findOldestCleanCandidate(
     // 路径不存在直接清 store，视为本轮淘汰成功
     try {
       await fs.access(meta.path);
-    } catch {
-      store.del(meta.sessionId);
-      return null; // store 已缩减，让外层 while 重新检查
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue;
+      // The removal core rechecks registration and references under the resource lock.
+      return meta;
     }
 
     // 哨兵: 用户声明保留，永不淘汰
@@ -326,32 +336,19 @@ async function findOldestCleanCandidate(
 // ── drain ────────────────────────────────────────────────────────────────────
 
 async function drainEntry(meta: WorktreeMeta): Promise<void> {
-  try {
-    await gitExec(['worktree', 'remove', '--force', meta.path], meta.baseRepo);
-    log.info(`[WorktreePool] drained worktree at ${meta.path}`);
-  } catch (err) {
-    log.warn(
-      `[WorktreePool] git worktree remove failed for ${meta.path}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    if (!isManagedWorktreePath(meta.path, meta.baseRepo, store.getAllPaths())) {
-      log.warn(`[WorktreePool] fs.rm fallback skipped for unmanaged path: ${meta.path}`);
-      throw err;
-    }
-
-    // 兜底：只允许删除 Cindy 已登记的托管 worktree 目录
-    try {
-      await fs.rm(meta.path, { recursive: true, force: true });
-      await gitExec(['worktree', 'prune'], meta.baseRepo).catch(() => {});
-      log.info(`[WorktreePool] drained worktree via fs.rm at ${meta.path}`);
-    } catch (rmErr) {
-      log.error(
-        `[WorktreePool] fs.rm fallback failed for ${meta.path}:`,
-        rmErr instanceof Error ? rmErr.message : String(rmErr),
-      );
-      throw rmErr;
-    }
-  }
+  const removed = await recycleManagedWorktree(meta, {
+    canRemove: async () => {
+      if (!meta.ephemeral || hasLiveSessionReference(meta, await loadLiveSessionPathKeys({ contextPath: meta.path }))) return false;
+      try { await fs.lstat(meta.path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+        return false;
+      }
+      const recovery = await readRecycleRecord(meta.path);
+      return recovery?.phase === 'removing' && Boolean(recovery.archive && recovery.snapshot)
+        || !(await isWorktreeDirty(meta.path));
+    },
+  });
+  if (!removed) throw new Error('pooled worktree was preserved');
 }
 
 // pathKey / loadLiveSessionPathKeys / hasLiveSessionReference 已抽到 liveSessionRefs.ts
@@ -370,7 +367,7 @@ export async function drainOne(baseRepo: string): Promise<void> {
   if (!entry) return;
   pool.delete(key);
   await drainEntry(entry.meta);
-  store.del(entry.meta.sessionId);
+  await store.del(entry.meta.sessionId);
 }
 
 // ── park / recover ──────────────────────────────────────────────────────────
@@ -395,12 +392,14 @@ export async function recoverPool(): Promise<void> {
   const sorted = all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   for (const meta of sorted) {
+    if (!meta.ephemeral || hasLiveSessionReference(meta, liveSessionPathKeys)) continue;
     // 1. 路径是否还存在
     try {
       await fs.access(meta.path);
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue;
       log.info(`[WorktreePool] stale store entry removed: ${meta.path}`);
-      store.del(meta.sessionId);
+      await drainEntry(meta).catch(() => undefined);
       continue;
     }
 
@@ -438,7 +437,7 @@ export async function recoverPool(): Promise<void> {
           const drained = await drainEntry(meta)
             .then(() => true)
             .catch(() => false);
-          if (drained) store.del(meta.sessionId);
+          if (drained) await store.del(meta.sessionId);
         }
       }
     }

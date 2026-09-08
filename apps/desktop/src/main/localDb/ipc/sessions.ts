@@ -5,6 +5,8 @@
  * 失败时 throw `Error("[CODE] message")`，service 层包装回 `ApiError`。
  */
 
+import { withWorktreeResourceLocks } from '../../worktree/resourceLock';
+import { managedWorktreeRoot } from '../../worktree/runtimeLeases';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -174,13 +176,55 @@ function isOwnerScopeCurrent(scope: OwnerScope): boolean {
 }
 
 async function withStatusWriteLock<T>(
+  db: DbClient['drizzle'],
   sessionId: string,
   status: unknown,
   task: () => Promise<T>,
   alreadyLocked = false,
 ): Promise<T> {
-  if (status === undefined || alreadyLocked) return task();
-  return withSessionRouteLock(sessionId, task);
+  const write = async () => {
+    const resources = status === undefined ? [] : await readSessionWorktreeResources(db, sessionId);
+    const mutate = async () => {
+      if (status === 'archived' || status === 'deleted') await requestWorktreeRecycle(sessionId, resources);
+      return task();
+    };
+    return withWorktreeMutation(resources, mutate);
+  };
+  if (status === undefined || alreadyLocked) return write();
+  return withSessionRouteLock(sessionId, write);
+}
+
+async function requestWorktreeRecycle(sessionId: string, resources: readonly string[] = []): Promise<void> {
+  // Keep the existing localDb -> worktreeStore -> localDb dependency lazy.
+  const recycle = await import('../../worktree/managedRecycle');
+  await recycle.requestWorktreeRecycle(sessionId, resources);
+}
+
+/** Read from the same captured database that will receive the status/path update. */
+async function readSessionWorktreeResources(db: DbClient['drizzle'], sessionId: string): Promise<string[]> {
+  try {
+    const [row] = await db.select({
+      workingDir: sessions.workingDir, worktreePath: sessions.worktreePath, remoteHostId: sessions.remoteHostId,
+    }).from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+    if (!row || row.remoteHostId) return [];
+    return [row.workingDir, row.worktreePath].flatMap((value) => {
+      const root = value ? managedWorktreeRoot(value) : null;
+      return root ? [root] : [];
+    });
+  } catch {
+    throwIpcError('PRECONDITION_FAILED', 'Worktree references are temporarily unavailable');
+  }
+}
+
+async function withWorktreeMutation<T>(resources: string[], task: () => Promise<T>): Promise<T> {
+  try {
+    return await withWorktreeResourceLocks(resources, task);
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    if (code && error instanceof Error && error.message.startsWith(`[${code}]`)) throw error;
+    log.warn('worktree mutation postponed', { code: code ?? 'unavailable' });
+    throwIpcError('PRECONDITION_FAILED', 'Worktree is busy or its recovery record could not be saved');
+  }
 }
 
 async function writeSessionPatch(
@@ -1272,7 +1316,11 @@ export function registerSessionIpc(
       autoSnapshotEnabled: readGitSafetySettings().autoSnapshotEnabled,
       source: 'local-db:sessions:create',
     });
-    await db.insert(sessions).values(insertRow);
+    const resource = !insertRow.remoteHostId && insertRow.workingDir
+      ? managedWorktreeRoot(insertRow.workingDir) : null;
+    const insert = async () => { await db.insert(sessions).values(insertRow); };
+    if (resource) await withWorktreeMutation([resource], insert);
+    else await insert();
     const [row] = await db.select().from(sessions).where(eq(sessions.id, id));
     if (!row) throwIpcError('NOT_FOUND', 'Session 创建后查询失败');
     // recent-workdirs: 项目目录走 sidebar 分组,要进"最近"列表;dialogue 目录是
@@ -1655,6 +1703,7 @@ export function registerSessionIpc(
       // 按下过保存,这个方向的偏差是安全的。
       if (typeof p.title === 'string') noteUserTitleWritten(sid);
       await withStatusWriteLock(
+        db,
         sid,
         p.status,
         async () => {
@@ -1784,7 +1833,15 @@ export function registerSessionIpc(
       compactTerminalSessionToolResults(dbClient, sid, p.status);
       return updated;
     };
-    return p.workingDir === undefined ? update() : withSessionRouteLock(sid, update);
+    if (p.workingDir === undefined) return update();
+    return withSessionRouteLock(sid, async () => {
+      const [binding] = await db.select({ remoteHostId: sessions.remoteHostId }).from(sessions).where(eq(sessions.id, sid)).limit(1);
+      const resource = !binding?.remoteHostId && typeof p.workingDir === 'string'
+        ? managedWorktreeRoot(p.workingDir) : null;
+      const resources = await readSessionWorktreeResources(db, sid);
+      if (resource) resources.push(resource);
+      return withWorktreeMutation(resources, update);
+    });
   });
 
   // 窄口径会话元数据编辑(status / title / pinnedAt)。专为 device-link 控制端**远程**
@@ -1864,7 +1921,7 @@ export async function patchSessionMetaInDb(
   const setObj = sessionPatchToRow(patch, { bumpUpdatedAt: false });
   // 控制端远程改名走这条,与本机改名同口径(同样先记号后写库)。
   if (patch.title !== undefined) noteUserTitleWritten(sessionId);
-  const updated = await withStatusWriteLock(sessionId, patch.status, async () => {
+  const updated = await withStatusWriteLock(db, sessionId, patch.status, async () => {
     if (patch.status !== undefined) await assertGenericSessionLifecycleAllowed(db, sessionId);
     await writeSessionPatch(db, sessionId, setObj, patch.status);
     const row = await selectSessionWithCount(db, sessionId);
@@ -2050,18 +2107,30 @@ export async function setSessionsStatusInDb(
   const ownerScope = captureOwnerScope();
   const dbClient = getDbClient();
   const applied = await withSessionRouteLocks(sessionIds, async () => {
-    const rows = await dbClient.tx('sessions.setStatus', { sessionIds, status }).catch((err) => {
-      const code = (err as { code?: string }).code;
-      const message = err instanceof Error ? err.message : String(err);
-      if (code === 'NOT_FOUND' || code === 'INVALID_PARAMS' || code === 'PRECONDITION_FAILED') {
-        throwIpcError(code, message);
+    const resources: string[] = [];
+    const perSession = new Map<string, string[]>();
+    for (const id of sessionIds) {
+      const paths = await readSessionWorktreeResources(dbClient.drizzle, id);
+      perSession.set(id, paths);
+      resources.push(...paths);
+    }
+    return withWorktreeMutation(resources, async () => {
+      if (status === 'archived') {
+        for (const id of sessionIds) await requestWorktreeRecycle(id, perSession.get(id));
       }
-      throw err;
+      const rows = await dbClient.tx('sessions.setStatus', { sessionIds, status }).catch((err) => {
+        const code = (err as { code?: string }).code;
+        const message = err instanceof Error ? err.message : String(err);
+        if (code === 'NOT_FOUND' || code === 'INVALID_PARAMS' || code === 'PRECONDITION_FAILED') {
+          throwIpcError(code, message);
+        }
+        throw err;
     });
     for (const item of rows) {
       cleanupSessionRuntimeForTerminalStatus(item.sessionId, item.status);
     }
     return rows;
+    });
   });
   for (const item of applied) {
     compactTerminalSessionToolResults(dbClient, item.sessionId, item.status);

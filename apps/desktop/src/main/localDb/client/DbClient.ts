@@ -11,8 +11,11 @@ import { WorkerThreadTransport } from './WorkerThreadTransport.js';
 import { createDrizzleProxy } from './drizzleProxy.js';
 import type { DbTxArgsByName, DbTxName, DbTxResultByName } from './tx/types.js';
 import { tx as runInprocTx } from '../worker/opHandlers/tx.js';
+import type { LocalWorktreeReference } from '../worker/worktreeReferences.js';
 
 export interface DbClient {
+  /** Optional only for legacy transports; callers must preserve on absence. */
+  readLocalWorktreeReferences?(): Promise<LocalWorktreeReference[]>;
   query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]>;
   queryOne<T = unknown>(sql: string, params?: unknown[]): Promise<T | undefined>;
   exec(
@@ -80,6 +83,8 @@ export async function createDbClient(opts: CreateDbClientOptions = {}): Promise<
   rebindTerminationHandler();
 
   const client: DbClient = {
+    readLocalWorktreeReferences: () =>
+      withTransport('worktreeReferences', () => transport.send('worktreeReferences')),
     query: (sql, params) =>
       withTransport('query', () => transport.send('query', { sql, params: params ?? [] })),
     queryOne: (sql, params) =>

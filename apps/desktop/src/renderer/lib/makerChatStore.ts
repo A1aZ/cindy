@@ -11542,16 +11542,16 @@ const _remoteReconcileInFlight = new Map<
   { run: Promise<boolean>; rerun: boolean; rerunForce: boolean }
 >();
 
-function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
+function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean; freshHistory?: boolean }): Promise<boolean> {
   const view = getRemoteHistoryView(sessionId);
-  if (view?.getSnapshot().ready) return Promise.all([view.refresh(), reconcilePendingInteractions(sessionId)]).then(() => {
-    if (getRemoteHistoryView(sessionId) !== view) return false;
+  if (view && (view.getSnapshot().ready || opts?.freshHistory)) return Promise.all([view.refresh(false, opts?.freshHistory), reconcilePendingInteractions(sessionId)]).then(() => {
+    if (getRemoteHistoryView(sessionId) !== view || !view.isActive()) return false;
     if (isHistoryViewUnavailable(view.getSnapshot().error)) {
       releaseRemoteHistoryView(sessionId, view);
       return reconcileRemoteMessages(sessionId, { force: true });
     }
     if (view.getSnapshot().error) throw view.getSnapshot().error;
-    return true;
+    return view.getSnapshot().ready;
   });
   // 返回完成 promise 供调用方需要时等待;既有调用方均按 fire-and-forget 使用。
   if (!sessionId || !isRemoteSession(sessionId)) return Promise.resolve(false);

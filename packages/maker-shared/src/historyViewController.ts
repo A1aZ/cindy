@@ -74,17 +74,19 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     this.publish({ ...cached, loading: this.state.loading, error: this.state.error });
   }
 
-  refresh(older = false): Promise<void> {
+  refresh(older = false, fresh = false): Promise<void> {
     // Keep the existing raw fallback until an explicit reset; a later latest
     // page must not re-enable projection after an oversized older-page read.
     if (/UNSUPPORTED_CAPABILITY/.test(String(this.state.error))) return Promise.resolve();
     if (this.pagePromise) {
+      // Subscription recovery must read after its ACK, not reuse a pre-ACK page.
+      // Reuse the same wait queue and preserve expansion; no parallel read is needed.
       // A caller after reset/reactivation must await its own generation's read,
       // even when the invalidated request happened to have the same direction.
-      if (older === this.pageOlder && this.pageGeneration === this.generation) return this.pagePromise;
+      if (!fresh && older === this.pageOlder && this.pageGeneration === this.generation) return this.pagePromise;
       const generation = this.generation;
       return this.pagePromise.then(() => {
-        if (this.active && generation === this.generation && !this.state.error) return this.refresh(older);
+        if (this.active && generation === this.generation && (fresh || !this.state.error)) return this.refresh(older);
       });
     }
     this.pageOlder = older;
@@ -120,7 +122,14 @@ export class HistoryViewController<T extends HistoryMessageSource> {
         const keys = new Set(items.map((item) => item.key));
         items = [...items, ...this.state.items.filter((item) => !keys.has(item.key))];
       } else if (page.hasMore && this.state.items.length) {
-        const boundary = this.state.items.findIndex((item) => item.key === page.items[0]?.key);
+        const firstSourceId = (item: HistoryViewItem<T> | undefined) => item?.type === 'work'
+          ? item.summary.firstMessageId : item?.messages[0]?.id;
+        const first = page.items[0];
+        const sourceId = firstSourceId(first);
+        const boundary = this.state.items.findIndex((item) => item.key === first?.key
+          || (sourceId !== undefined && firstSourceId(item) === sourceId));
+        // Completed outer groups can replace the running top-level key while
+        // retaining its exact source start. Never infer a prefix from a later overlap.
         // Only retain a prefix with a proven overlap. Reset/rewind cannot leave an island.
         if (boundary > 0) items = [...this.state.items.slice(0, boundary), ...items];
       }

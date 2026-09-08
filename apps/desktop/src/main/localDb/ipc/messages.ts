@@ -67,7 +67,7 @@ import { maybeUpgradeCodexHistoryOversizedError } from '../codexHistoryOversized
 import type { Message, MessageRole, AgentMeta } from '../../../renderer/lib/ccAgent.types';
 import { scheduleBotRemoteResourceChangedForSession } from '../../maker-ipc/botRemoteResourceInvalidation';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer';
-import { createHistoryViewReader } from './historyViewReader';
+import { createHistoryViewReader, MAX_HISTORY_SCAN_ROWS } from './historyViewReader';
 
 const log = createLogger('localDb/messages');
 
@@ -403,7 +403,7 @@ export function registerMessageIpc(
     const sid = requireString(sessionId, 'sessionId');
     const value = ref as { key?: unknown; firstMessageId?: unknown; lastMessageId?: unknown; firstStoredMessageId?: unknown; lastStoredMessageId?: unknown; liveMessageIds?: unknown } | null;
     const after = (opts as { after?: unknown } | null)?.after;
-    if (value?.liveMessageIds != null && (!Array.isArray(value.liveMessageIds) || value.liveMessageIds.length > 100)) throwIpcError('INVALID_PARAMS', 'Invalid live work range');
+    if (value?.liveMessageIds != null && (!Array.isArray(value.liveMessageIds) || value.liveMessageIds.length > MAX_HISTORY_SCAN_ROWS)) throwIpcError('INVALID_PARAMS', 'Invalid live work range');
     return historyView.details(sid, {
       key: requireString(value?.key, 'key'),
       firstMessageId: requireString(value?.firstMessageId, 'firstMessageId'),

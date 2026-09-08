@@ -52,6 +52,7 @@ it('requires a fresh ACK and snapshot after peer-only resets without invalidatin
     await vi.advanceTimersByTimeAsync(0);
   });
   expect(affected.result.current.contentState).toBe('ready');
+  expect(mocks.reconcile).toHaveBeenCalledWith('session', { freshHistory: true });
   expect(neighbor.result.current.contentState).toBe('ready');
 
   let ack!: () => void;

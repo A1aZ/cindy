@@ -95,6 +95,56 @@ const ungroupedStructure = {
 };
 
 describe('shared history view lifecycle', () => {
+  it.each([true, false])('retains loaded history only when regrouping proves the same source start (%s)', async (overlap) => {
+    const prefix = projectHistoryView([row(0, 'user', 'Earlier')], false);
+    const rows = [row(1, 'assistant', 'Looking into it'), row(2, 'thinking', 'details'),
+      row(3, 'assistant', 'Checking another part'), row(4, 'thinking', 'more')];
+    const running = projectHistoryView(rows, true);
+    const completed = projectHistoryView([...rows, row(5, 'assistant', 'Done')], false);
+    expect(completed[0].key).not.toBe(running[0].key);
+    const replacement = overlap ? completed : projectHistoryView([row(9, 'user', 'Replaced')], false);
+    const read = vi.fn(async () => ({ version: 1 as const, items: running, hasMore: true, nextCursor: 'latest' }));
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    await view.refresh();
+    read.mockResolvedValueOnce({ version: 1, items: prefix, hasMore: true, nextCursor: 'older' });
+    await view.refresh(true);
+    read.mockResolvedValueOnce({ version: 1, items: replacement, hasMore: true, nextCursor: 'new' });
+    await view.refresh();
+    expect(view.getSnapshot().items).toEqual(overlap ? [...prefix, ...completed] : replacement);
+    expect(view.getSnapshot().nextCursor).toBe(overlap ? 'older' : 'new');
+    expect(view.getSnapshot().hasMore).toBe(true);
+  });
+
+  it.each(['success', 'failure', 'blur', 'unavailable'])('reads again after an ACK over an in-flight %s without changing expansion', async (outcome) => {
+    const page = { version: 1 as const, items: projectHistoryView([row(1, 'thinking', 'detail')], true), hasMore: false, nextCursor: null };
+    let resolve!: (value: typeof page) => void;
+    let reject!: (error: Error) => void;
+    const read = vi.fn(() => Promise.resolve(page));
+    const expanded = vi.fn(async () => undefined);
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [row(1, 'thinking', 'detail')], hasMore: false, nextCursor: null }), expanded });
+    await view.refresh();
+    const work = page.items.find(item => item.type === 'work')!;
+    view.setExpanded(work.key, true);
+    read.mockImplementationOnce(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    const old = view.refresh();
+    const ack = view.refresh(false, true);
+    const repeated = view.refresh(false, true);
+    if (outcome === 'blur') view.setActive(false);
+    if (outcome === 'failure') reject(new Error('temporary timeout'));
+    else if (outcome === 'unavailable') reject(new Error('[UNSUPPORTED_CAPABILITY] oversized'));
+    else resolve(page);
+    await Promise.all([old, ack, repeated]);
+    expect(read).toHaveBeenCalledTimes(outcome === 'blur' || outcome === 'unavailable' ? 2 : 3);
+    if (outcome === 'success' || outcome === 'failure') {
+      expect(view.getSnapshot().expanded.has(work.key)).toBe(true);
+      expect(view.getSnapshot().error).toBeNull();
+      await new Promise(done => setTimeout(done, 0));
+      expect(expanded).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ key: work.key })]));
+    }
+  });
+
   it.each(['reset', 'reset twice', 'reactivate'])('awaits the current read after %s, including a late failure', async (transition) => {
     for (const oldFailure of [false, true]) {
       const reads: Array<{ resolve(page: HistoryViewPage<HistoryMessageSource>): void; reject(error: Error): void }> = [];

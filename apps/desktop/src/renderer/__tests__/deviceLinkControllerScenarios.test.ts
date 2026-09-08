@@ -635,6 +635,34 @@ describe('device-link controller mirror — end-to-end scenarios', () => {
     expect(host.invoke).toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
     expect(makerChatStore.getSnapshot(s).messages.map((row) => row.clientId)).toEqual(['client-old', 'client-new']);
   });
+  it.each([false, true])('registers a fresh history page after ACK; reset during wait=%s', async (reset) => {
+    const s = sid();
+    host.enableHistoryView();
+    host.seedSession(s, {}, [dbMessage(s, 'answer', 'answer', '2026-06-15T00:00:00.000Z')]);
+    const original = host.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    let finishReset!: () => void;
+    let pageReads = 0;
+    host.invoke.mockImplementation(async (device, channel, args) => {
+      const value = await original(device, channel, args);
+      if (channel === 'local-db:messages:view' && ++pageReads === 1) await new Promise<void>(done => { finish = done; });
+      else if (reset && channel === 'local-db:messages:view') await new Promise<void>(done => { finishReset = done; });
+      return value;
+    });
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+    const view = getRemoteHistoryView(s)!;
+    expect(view.getSnapshot().ready).toBe(false);
+    const recovered = makerChatStore.reconcileRemoteMessages(s, { freshHistory: true });
+    if (reset) { view.reset(); await flush(); }
+    finish();
+    expect(await recovered).toBe(!reset);
+    expect(pageReads).toBe(2);
+    expect(view.getSnapshot().ready).toBe(!reset);
+    if (reset) { finishReset(); await flush(); }
+    view.setActive(false);
+  });
   it('reads visible history first and fetches a collapsed work range only after expansion', async () => {
     const s = sid();
     host.enableHistoryView();

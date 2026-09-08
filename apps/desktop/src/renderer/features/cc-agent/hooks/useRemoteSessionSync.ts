@@ -375,7 +375,7 @@ export function useRemoteSessionSync(
     setContent({ sessionId, deviceId, state: 'syncing' });
     const recovery = createRemoteContentRecovery({
       subscribe: () => window.electronAPI.deviceLink.subscribe(deviceId, [`session:${sessionId}`]),
-      reconcile: () => makerChatStore.reconcileRemoteMessages(sessionId),
+      reconcile: () => makerChatStore.reconcileRemoteMessages(sessionId, { freshHistory: true }),
       changed: (state) => setContent({ sessionId, deviceId, state }),
       completed: (elapsedMs) => log.info('remote content recovered', { elapsedMs }),
       phaseCompleted: (phase, elapsedMs) => log.debug('remote recovery phase completed', { phase, elapsedMs }),

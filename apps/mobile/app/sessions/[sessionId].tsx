@@ -3343,11 +3343,11 @@ export default function SessionScreen() {
         readMetadata: () => retryRead(fetchSessionMetadata),
         isReopen,
         storedSession: storedSessionAtStart,
-        eager: !isReopen || pushRefresh || historyView.snapshot.ready,
+        eager: !isReopen || pushRefresh || ackAtReadStart !== null || historyView.view.getSnapshot().ready,
         isWindowSynced: (sessionMeta) => remoteSessionStore.isSessionMessageWindowSynced(sessionId, sessionMeta),
         readLatest: async () => {
           if (options.replaceMessages && historyView.view.getSnapshot().ready) historyView.view.reset();
-          await historyView.view.refresh();
+          await historyView.view.refresh(false, ackAtReadStart !== null);
           const viewState = historyView.view.getSnapshot();
           if (!viewState.error && viewState.ready) {
             usedHistoryView = true;

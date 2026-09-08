@@ -118,6 +118,18 @@ describe('host history view', () => {
 });
 
 describe('history scan budget', () => {
+  it('returns a full visible page before scanning an older oversized work group', async () => {
+    const older = Array.from({ length: 2500 }, (_, i) => row(i));
+    const latest = Array.from({ length: 20 }, (_, i) => row(2500 + i, 'user'));
+    const { api, list } = reader([...older, ...latest]);
+    const page = await api.page('s');
+    expect(page.items.flatMap((item) => item.type === 'messages' ? item.messages.map((message) => message.id) : []))
+      .toEqual(latest.map((message) => message.id));
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).toBe('2500');
+    expect(list).toHaveBeenCalledTimes(1);
+    await expect(api.page('s', page.nextCursor!)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+  });
   it('stops a boundary-free history before a twenty-first query without returning partial groups', async () => {
     const { api, list } = reader(Array.from({ length: 2500 }, (_, i) => row(i)));
     await expect(api.page('s')).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });

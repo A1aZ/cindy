@@ -1541,7 +1541,7 @@ async function rebuildSessionSnapshot(
   const readHistory = async () => {
     if (historyView) {
       if (!historyView.isActive()) return false;
-      await historyView.refresh();
+      await historyView.refresh(false, opts?.subscriptionIdentity != null);
       if (!isCurrent() || !historyView.isActive()
         || findRemoteHistoryView(deviceId, sessionId) !== historyView) return false;
       const snapshot = historyView.getSnapshot();

@@ -96,7 +96,7 @@ function fixture(reopen = false) {
     listMessagesWithPayloadRetry: (read: (limit: number) => unknown) => read(20),
     withTransientRemoteRetry: (read: () => unknown) => read(),
     REOPEN_MESSAGE_WINDOW_LIMITS: [20],
-    getSubscriptionIdentity: () => null, notificationResponse: null,
+    getSubscriptionIdentity: (): number | null => null, notificationResponse: null,
     syncedNotificationResponseRef: { current: null },
     shouldKeepOlderMessagesAffordance, hasOlderMessagesAfterReopen,
     messageWindowReconciledRef: { current: false },
@@ -126,6 +126,43 @@ function fixture(reopen = false) {
 }
 
 describe('production session recovery callbacks', () => {
+  it('reads after ACK when restored history is ready but the captured snapshot is not', async () => {
+    const f = fixture(true);
+    f.store.isSessionMessageWindowSynced.mockReturnValue(true);
+    const read = vi.fn(async () => ({ version: 1 as const, items: [], hasMore: false, nextCursor: null }));
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    await view.refresh();
+    f.bindings.historyView.view = view;
+    f.bindings.getSubscriptionIdentity = () => 7;
+    const coordinator = createRemoteSyncCoordinator(pageCallback('syncSession', f.bindings));
+    coordinator.setContext('d1:s1:ack');
+    await coordinator.request({ reason: 'subscription-acked' });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(f.state.synced).not.toBeNull();
+  });
+
+  it('waits for a page begun after subscription ACK even when an initial page is pending', async () => {
+    const f = fixture();
+    const pending = deferred<{ version: 1; items: []; hasMore: false; nextCursor: null }>();
+    const read = vi.fn(async () => ({ version: 1 as const, items: [], hasMore: false, nextCursor: null }));
+    read.mockImplementationOnce(() => pending.promise);
+    const view = new HistoryViewController({ page: read,
+      details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+    const initial = view.refresh();
+    f.bindings.historyView.view = view;
+    f.bindings.getSubscriptionIdentity = () => 7;
+    const coordinator = createRemoteSyncCoordinator(pageCallback('syncSession', f.bindings));
+    coordinator.setContext('d1:s1:ack');
+    const recovery = coordinator.request({ reason: 'subscription-acked' });
+    await tick();
+    expect(read).toHaveBeenCalledTimes(1);
+    pending.resolve({ version: 1, items: [], hasMore: false, nextCursor: null });
+    await Promise.all([initial, recovery]);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(f.state.synced).not.toBeNull();
+  });
+
   it('commits raw history after a previously ready projection loses Host support', async () => {
     const f = fixture(true);
     const read = vi.fn(async () => ({ version: 1 as const, items: projectHistoryView([

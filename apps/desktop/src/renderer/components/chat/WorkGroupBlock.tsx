@@ -37,6 +37,7 @@ import type { ChatMessage } from '@/lib/makerChatStore';
 import { useExpandedBlockMemory } from '@/hooks/useExpandedBlockMemory';
 import { Collapse } from '@/components/ui/collapse';
 import { Spinner } from '@/components/ui/spinner';
+import { Button } from '@/components/ui/button';
 
 import {
   ACTIVITY_ROW_CHEVRON_SLOT_CLASS,
@@ -463,9 +464,9 @@ export function WorkGroupBlock({
             ))}
             {deferred?.loading && <Spinner size={14} />}
             {deferred?.failed && (
-              <button type="button" onClick={deferred.retry} className="text-muted-foreground hover:text-foreground text-sm">
+              <Button variant="secondary" disabled={deferred.loading} onClick={deferred.retry}>
                 {t('chat.errorBanner.retry')}
-              </button>
+              </Button>
             )}
           </div>
         </Collapse>

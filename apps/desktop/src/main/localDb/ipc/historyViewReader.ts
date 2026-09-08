@@ -5,7 +5,7 @@ import {
   type HistoryViewPage, type HistoryDetailPage, type HistoryWorkReference,
 } from '@cindy/maker-shared/message-window';
 
-const MAX_HISTORY_SCAN_ROWS = 2000;
+export const MAX_HISTORY_SCAN_ROWS = 2000;
 const MAX_HISTORY_SCAN_BYTES = 8 * 1024 * 1024;
 
 interface ReadOptions { limit: number; before?: string; after?: string }
@@ -72,7 +72,7 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
         const live = liveRows(raw);
         const boundary = exhausted ? 0 : raw.findIndex((row) => row.role === 'user' || row.role === 'system');
         items = boundary < 0 ? [] : projectHistoryView([...raw.slice(boundary), ...live], !before && deps.running(sessionId));
-        if (exhausted || items.length > HISTORY_VIEW_PAGE_ITEMS) break;
+        if (exhausted || items.length >= HISTORY_VIEW_PAGE_ITEMS) break;
       }
       raw = chunks.slice().reverse().flat();
       const live = liveRows(raw);

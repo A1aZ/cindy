@@ -90,6 +90,28 @@ export interface CcRemoteHttpMcpServerConfig {
   headers: Record<string, string>;
 }
 
+/** Query startup may degrade optional MCPs, but a Bot must have its task tools. */
+export async function prepareCcRemoteQueryMcp(
+  args: Parameters<typeof buildCcRemoteHttpMcpServers>[0],
+  deps: CcRemoteHttpMcpDeps & { onOptionalInjectionError?: (error: unknown) => void },
+): Promise<Awaited<ReturnType<typeof buildCcRemoteHttpMcpServers>>> {
+  let injected: Awaited<ReturnType<typeof buildCcRemoteHttpMcpServers>> | undefined;
+  try {
+    injected = await buildCcRemoteHttpMcpServers(args, deps);
+    if (args.botSession && !injected.servers.cindy_helper) {
+      throw new Error('Remote Claude Code Bot tools are not ready: cindy_helper was not injected.');
+    }
+    return injected;
+  } catch (error) {
+    // A partial injection can register memory/collab without the required helper.
+    // Do not leave that context behind when no query will own its cleanup.
+    try { injected?.cleanup(); } catch { /* Preserve the startup failure. */ }
+    if (args.botSession) throw error;
+    deps.onOptionalInjectionError?.(error);
+    return { servers: {}, cleanup: () => {} };
+  }
+}
+
 /**
  * 为远端 cc query 构建 http 形态的 MCP server 配置。返回的 cleanup 必须在
  * query close 时调用,注销 session ctx (detach 不清,重建时重新注册覆盖)。

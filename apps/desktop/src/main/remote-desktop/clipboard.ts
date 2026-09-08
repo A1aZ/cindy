@@ -67,17 +67,20 @@ export async function transferDesktopClipboardContent(
     const before = await readDesktopClipboardVersion(true);
     check();
     const formats = clipboard.availableFormats();
-    // Paths represent files on this computer, not transferable content.
-    if (formats.some((format) => /file-url|filenames|hdrop|filecontents|filegroupdescriptor|uri-list/i.test(format)))
+    // A file-backed image may also expose a portable bitmap. Never read the
+    // file flavor or dereference its path; a file alone remains unsupported.
+    const fileBacked = formats.some((format) => /file-url|filenames|hdrop|filecontents|filegroupdescriptor|uri-list/i.test(format));
+    const image = clipboard.readImage();
+    if (fileBacked && image.isEmpty())
       throw new Error('CLIPBOARD_UNSUPPORTED');
     const snapshot: RemoteClipboardContent = {};
-    const text = clipboard.readText();
-    const html = clipboard.readHTML();
-    const rtf = clipboard.readRTF();
+    // File-manager text/HTML can be a local path rather than image content.
+    const text = fileBacked ? '' : clipboard.readText();
+    const html = fileBacked ? '' : clipboard.readHTML();
+    const rtf = fileBacked ? '' : clipboard.readRTF();
     if (text) snapshot.text = text;
     if (html) snapshot.html = html;
     if (rtf) snapshot.rtf = rtf;
-    const image = clipboard.readImage();
     if (!image.isEmpty()) {
       const size = image.getSize();
       if (size.width * size.height > 64_000_000) throw new Error('CLIPBOARD_TOO_LONG');

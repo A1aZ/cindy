@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteDesktopController, type DesktopControllerDeps } from '../controller';
 import { acquireHumanDesktopInput, withAgentDesktopInput } from '../inputOwnership';
+import { enumerateDesktopSources } from '../captureSource';
 import type { RemoteDesktopIceReply, RemoteDesktopLease } from '@cindy/device-link';
 
 function harness() {
@@ -39,6 +40,27 @@ function harness() {
   };
 }
 describe('remote desktop authority and lifecycle', () => {
+  it('releases a stalled fallback frame for another peer without stopping its lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness(), first = await h.start();
+      let finish!: (value: string) => void;
+      h.deps.frame = () => enumerateDesktopSources(() => new Promise<string>(yes => { finish = yes; }), 5000);
+      const stalled = h.controller.request('phone', { op: 'frame', lease: first.lease });
+      const rejection = expect(stalled).rejects.toThrow('DESKTOP_VIDEO_TIMEOUT');
+      const next = await h.controller.request('other', { op: 'start', displayId: '1', takeover: true }) as RemoteDesktopLease;
+      await vi.advanceTimersByTimeAsync(5000);
+      await rejection;
+      const stops = vi.mocked(h.deps.stopVideo).mock.calls.length;
+      h.advance(350);
+      h.deps.frame = async () => 'new frame';
+      await expect(h.controller.request('other', { op: 'frame', lease: next.lease })).resolves.toEqual({ jpeg: 'new frame' });
+      finish('stale frame');
+      await Promise.resolve();
+      expect(h.controller.hasLease(next.lease)).toBe(true);
+      expect(h.deps.stopVideo).toHaveBeenCalledTimes(stops);
+    } finally { vi.useRealTimers(); }
+  });
   it('keeps ICE and media retries inside their peer lease, including after takeover', async () => {
     const h = harness(),
       first = await h.start();

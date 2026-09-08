@@ -134,7 +134,7 @@ export function useSkillhubStoreSync(): void {
 
   const skillhubProjects = useMemo<SkillhubProject[] | null>(() => {
     if (sessionsLoading) return null;
-    const { projects } = groupSessions(sessions);
+    const { projects } = groupSessions(sessions, { includePinnedInProjects: true, includeDraftsInProjects: true });
     return projects
       .filter((p) => p.scope === 'local')
       .map((p) => ({

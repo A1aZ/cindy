@@ -478,6 +478,43 @@ describe('skillhub/installService', () => {
     }
   });
 
+  it.each(['success', 'registry-failure', 'owner-before-registry', 'owner-during-registry', 'preference-failure'])(
+    'preserves a missing installation’s disabled override until commit (%s)', async (outcome) => {
+      const skillName = 'stale-disabled';
+      const finalDir = path.join(fs.realpathSync.native(TEST_ROOT), 'skills', skillName);
+      const zipBuf = await makeZip({ 'SKILL.md': 'new content' });
+      await setupInstallDownload(skillName, zipBuf);
+      const activation = await import('../activationPreferences');
+      await activation.setCindySkillEnabled(finalDir, false);
+      const { getCurrentDataOwnerId } = await import('../../authManager');
+      vi.mocked(getCurrentDataOwnerId).mockReturnValue('owner-1');
+      const { registryService } = await import('../registry');
+      vi.mocked(registryService.addInstall).mockImplementation(async () => {
+        if (outcome === 'registry-failure') throw new Error('registry unavailable');
+        if (outcome === 'owner-during-registry') vi.mocked(getCurrentDataOwnerId).mockReturnValue('owner-2');
+      });
+      const reset = outcome === 'preference-failure'
+        ? vi.spyOn(activation, 'setCindySkillEnabled').mockRejectedValueOnce(new Error('settings unavailable'))
+        : undefined;
+      try {
+        const { install } = await import('../installService');
+        const result = await install({ name: skillName, installPath: finalDir, version: '1.0.0' }, (progress) => {
+          if (outcome === 'owner-before-registry' && progress.phase === 'registering') {
+            vi.mocked(getCurrentDataOwnerId).mockReturnValue('owner-2');
+          }
+        });
+        expect(result.success).toBe(outcome === 'success');
+        expect(fs.existsSync(finalDir)).toBe(outcome === 'success');
+        expect(activation.isCindySkillEnabled(finalDir)).toBe(outcome === 'success');
+        if (outcome === 'owner-during-registry' || outcome === 'preference-failure') {
+          expect(registryService.removeInstall).toHaveBeenCalledWith(skillName, finalDir);
+        }
+      } finally {
+        reset?.mockRestore();
+      }
+    },
+  );
+
   it('removes a fresh install directory when registry registration fails', async () => {
     const finalDir = path.join(TEST_ROOT, 'skills', 'registry-fail-skill');
     const zipBuf = await makeZip({ 'SKILL.md': 'new content' });
@@ -1057,6 +1094,28 @@ describe('skillhub/installService', () => {
       physicalRegistryPath,
       physicalEntry,
     );
+  });
+
+  it('refreshes the importing project when removing an external skill alias', async () => {
+    const projectRoot = path.join(TEST_ROOT, 'importing-project');
+    const alias = path.join(projectRoot, '.agents', 'skills', 'alias');
+    const source = path.join(TEST_ROOT, 'external', 'source');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'external content');
+    makeDirectoryLink(alias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const target = inspectLocalSkillTarget(source, [alias])!;
+    const sharedSkills = await import('../../maker-host/shared-global-skills.js');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(sharedSkills.projectWorkingDirFromSkillPath).mockImplementation((entry) => entry === alias ? projectRoot : null);
+    const { uninstall } = await import('../installService');
+    const result = await uninstall(target.sourcePath, target);
+    expect(result).toEqual({ success: true, projectWorkingDir: projectRoot });
+    expect(sharedSkills.prepareSharedProjectSkillLinks).toHaveBeenCalledWith({ workingDir: projectRoot });
+    expect(fs.existsSync(alias)).toBe(false);
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
   });
 
   it('returns the project cwd after uninstalling a project skill', async () => {

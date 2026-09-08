@@ -25,19 +25,39 @@ export function filterPiDisabledProjectSkills(
  */
 export function piDisabledDiscoveryPaths(disabled: readonly string[], roots: readonly string[]): string[] {
   const result = new Set(disabled);
-  const visit = (entry: string, ancestors: Set<string>) => {
+  if (disabled.length === 0) return [];
+  // Alias resolution is best-effort and must not hold up native Pi startup.
+  // Bound enumeration itself (including hidden entries), not just recursion.
+  const deadline = performance.now() + 100;
+  const disabledKeys = new Set(disabled.map(canonicalSkillPath));
+  let remainingEntries = 2048;
+  const exhausted = () => remainingEntries <= 0 || performance.now() >= deadline;
+  const visit = (entry: string, ancestors: Set<string>, depth: number) => {
+    if (depth > 16 || exhausted()) return;
     try {
       const key = canonicalSkillPath(entry);
-      if (isSkillDisabled(entry, disabled)) { result.add(entry); return; }
+      if (disabledKeys.has(key)) { result.add(entry); return; }
       if (!fs.statSync(entry).isDirectory() || ancestors.has(key)) return;
       if (fs.existsSync(path.join(entry, 'SKILL.md')) || fs.existsSync(path.join(entry, 'skill.md'))) return;
       const next = new Set([...ancestors, key]);
-      for (const child of fs.readdirSync(entry)) {
-        if (!child.startsWith('.')) visit(path.join(entry, child), next);
+      const directory = fs.opendirSync(entry);
+      try {
+        while (!exhausted()) {
+          const child = directory.readSync();
+          if (!child) break;
+          remainingEntries -= 1;
+          if (!child.name.startsWith('.')) visit(path.join(entry, child.name), next, depth + 1);
+        }
+      } finally {
+        directory.closeSync();
       }
     } catch { /* Missing/unreadable discovery roots are handled by native Pi. */ }
   };
-  if (disabled.length > 0) for (const root of roots) visit(root, new Set());
+  for (const root of roots) {
+    if (exhausted()) break;
+    remainingEntries -= 1;
+    visit(root, new Set(), 0);
+  }
   return [...result];
 }
 

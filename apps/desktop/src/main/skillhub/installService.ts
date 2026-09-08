@@ -719,14 +719,6 @@ export async function install(
       return { success: false, errorCode: 'CANCELLED', message: '已取消' };
     }
 
-    if (!rollbackState.backupDir && !isCindySkillEnabled(finalDir)) {
-      try { await setCindySkillEnabled(finalDir, true, () => !checkAbort()); }
-      catch {
-        await rollbackFinalSwitch(finalDir, rollbackState);
-        return { success: false, errorCode: 'WRITE_FAILED', message: 'Could not reset Skill state' };
-      }
-    }
-
     // 7) 同步 registry
     onProgress({ phase: 'registering', name: p.name });
     if (checkAbort()) {
@@ -803,6 +795,12 @@ export async function install(
       logicalRegistryWritten = true;
       for (const { installPath } of physicalRegistrySnapshots) {
         await registryService.removeInstall(p.name, installPath);
+      }
+      // Fresh installs reset a stale override only after registration succeeds.
+      // A failed reset uses the same file/registry rollback; existing installs
+      // keep their preference, including when a later backup step fails.
+      if (!rollbackState.backupDir && !isCindySkillEnabled(finalDir)) {
+        await setCindySkillEnabled(finalDir, true, () => !checkAbort());
       }
     } catch (err) {
       log.error('[skillInstall] registry sync failed:', err);
@@ -1090,7 +1088,9 @@ async function uninstallLocked(
   const complete = await finishUninstallCleanup(cleanup, canMutate);
   const cleanupToken = complete ? undefined : crypto.randomUUID();
   if (cleanupToken) pendingUninstallCleanup.set(cleanupToken, cleanup);
-  const projectWorkingDir = await reconcileProjectSkillLinksForPaths(resolved, absolutePath);
+  const projectWorkingDir = await reconcileProjectSkillLinksForPaths(
+    target?.operationPath ?? absolutePath, resolved, absolutePath,
+  );
   return { success: true, ...(cleanupToken ? { cleanupToken } : {}),
     ...(projectWorkingDir ? { projectWorkingDir } : {}) };
 }

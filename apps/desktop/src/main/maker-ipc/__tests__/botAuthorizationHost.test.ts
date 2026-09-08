@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { GhostSetupAssessment } from '../../../shared/ghost';
 import type { BotAuthorizationCard } from '../../../shared/botAuthorization';
 import type { initBotAuthorizationService } from '../botAuthorizationService';
 
 const state = vi.hoisted(() => ({
+  assessment: vi.fn<() => GhostSetupAssessment>(),
+  subscribe: vi.fn((_id: string, _listener: (event: { source: string; ref?: string }) => void) => () => {}),
   save: vi.fn(),
   profileStatus: 'active',
   login: vi.fn(async () => ({ ok: true })),
@@ -37,7 +40,7 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({
 }));
 vi.mock('../../cindy-brain/index.js', () => ({
   getGhostManager: () => ({ list: () => [] }),
-  getGhostSetupAssessment: () => ({ state: 'ready', revision: 1, groups: [] }),
+  getGhostSetupAssessment: state.assessment,
   executeGhostSetupAction: state.execute, executeGhostSetupInlineAction: state.execute,
   isGhostAvailableForActiveSession: () => true,
   acquireGhostMutationLeaseForMcp: () => () => {}, captureGhostMutationOwnerForMcp: () => ({}),
@@ -47,9 +50,8 @@ vi.mock('../../cindy-brain/ghostVisibility.js', () => ({
 }));
 vi.mock('../../cindy-brain/ghostWorkdirPrefs.js', () => ({ isGhostDisabledForWorkdir: () => false }));
 vi.mock('../../cindy-brain/ghostSetupChangeBus.js', () => ({
-  getGhostSetupChangeBus: () => ({ subscribe: () => () => {}, currentRevision: () => 1 }),
+  getGhostSetupChangeBus: () => ({ subscribe: state.subscribe, currentRevision: () => 1 }),
 }));
-vi.mock('../../cindy-brain/ghostSetupCoordinator.js', () => ({ toReauthInteractionAssessment: () => null }));
 vi.mock('../../maker-host/grok-oauth-login.js', () => ({
   getGrokAccessToken: vi.fn(), hasGrokOAuthLogin: () => false, runGrokOAuthLogin: state.login,
   getGrokOAuthCredentialGeneration: () => 0, cancelGrokOAuthLogin: vi.fn(),
@@ -59,6 +61,8 @@ import { initializeBotAuthorizationHost } from '../botAuthorizationHost';
 const target = { kind: 'plugin' as const, id: 'art' };
 describe('authorization Host frozen plugin policy', () => {
   beforeEach(() => {
+    state.assessment.mockReturnValue({ state: 'ready', revision: 1, groups: [] });
+    state.subscribe.mockClear();
     state.policy = JSON.stringify({ toolsets: ['art'] });
     state.save.mockClear();
     state.profileStatus = 'active';
@@ -69,6 +73,24 @@ describe('authorization Host frozen plugin policy', () => {
       await validate();
       state.continued();
     });
+  });
+
+  it('keeps credential A pending after credential B completes until A reauth is resolved', async () => {
+    const ready: GhostSetupAssessment = { state: 'ready', revision: 1, groups: [] };
+    state.assessment.mockReturnValue({ ...ready, reauthSuggest: {
+      ghostId: 'art', secretKey: 'A', missingScopes: ['write'], missingScopeCount: 1,
+      requirement: { ref: 'oauth:A', kind: 'oauth', label: 'Account A', action: { id: 'connect:A', kind: 'oauth_connect' } },
+    } });
+    const adapter = await state.deps.adapter('session', { ...target, reauthorize: true });
+    adapter.subscribe(vi.fn());
+    const callback = state.subscribe.mock.calls[0][1];
+    callback({ source: 'oauth', ref: 'B' });
+    await expect(adapter.assess()).resolves.toMatchObject({ state: 'required', groups: [{ id: 'reauth:A' }] });
+    // Even an action success is insufficient while the scope suggestion remains.
+    await adapter.execute({ id: 'connect:A', kind: 'oauth_connect' }, undefined);
+    await expect(adapter.assess()).resolves.toMatchObject({ state: 'required', groups: [{ id: 'reauth:A' }] });
+    state.assessment.mockReturnValue(ready);
+    await expect(adapter.assess()).resolves.toMatchObject({ state: 'ready' });
   });
 
   it('persists the validated credential-page link for the Desktop card', async () => {

@@ -198,9 +198,12 @@ export function initializeBotAuthorizationHost(
         async assess() {
           await validate();
           const assessment = getGhostSetupAssessment(target.id);
-          if (!target.reauthorize || reconnected) return assessment;
+          if (!target.reauthorize) return assessment;
           const suggested = toReauthInteractionAssessment(assessment);
+          // A plugin-wide OAuth event (or successful action) cannot satisfy a
+          // credential whose authoritative scope/reauth requirement still exists.
           if (suggested) return suggested;
+          if (reconnected) return assessment;
           if (assessment.state !== 'ready') return assessment;
           const groups = assessment.groups.flatMap((group) => {
             const items = group.items

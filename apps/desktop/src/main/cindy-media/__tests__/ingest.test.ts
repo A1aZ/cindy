@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vites
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -268,6 +269,38 @@ describe('ingestMedia(全局去重)', () => {
       link?.restore();
       fs.rmSync(dest, { force: true });
       fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+  it('注入 symlink 元数据后仍拒绝,字节和账本零副作用', async () => {
+    const dest = blobPathOf(PNG_HASH, '.png');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, PNG_BYTES);
+    const originalLstat = fsp.lstat.bind(fsp);
+    const lstat = vi.spyOn(fsp, 'lstat').mockImplementation(async (target, opts) => {
+      const st = await originalLstat(target, opts);
+      return path.resolve(String(target)) === path.resolve(dest)
+        ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { isSymbolicLink: () => true })
+        : st;
+    });
+    const open = vi.spyOn(fsp, 'open');
+    const rename = vi.spyOn(fsp, 'rename');
+    try {
+      await expect(
+        ingest.ingestMedia(
+          { buffer: PNG_BYTES, mimeType: 'image/png', refs: [{ refKind: 'session-attachment', refId: 's-injected-symlink' }] },
+          db,
+        ),
+      ).rejects.toThrow(/symlink/);
+      expect(open).not.toHaveBeenCalled();
+      expect(rename).not.toHaveBeenCalled();
+      expect(fs.readFileSync(dest)).toEqual(PNG_BYTES);
+      expect(db.select().from(schema.mediaBlobs).all()).toHaveLength(0);
+      expect(db.select().from(schema.mediaRefs).all()).toHaveLength(0);
+      expect(fs.readdirSync(path.dirname(dest)).some((name) => name.startsWith('.tmp-'))).toBe(false);
+    } finally {
+      lstat.mockRestore();
+      open.mockRestore();
+      rename.mockRestore();
     }
   });
 });

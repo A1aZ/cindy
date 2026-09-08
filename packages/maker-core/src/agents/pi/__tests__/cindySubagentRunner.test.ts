@@ -1600,12 +1600,15 @@ describe('Cindy durable PI Subagent runner', () => {
       // have recorded its pid yet — the same spawn/write window that
       // `gateFinishOnPidCount` closes for the multi-lane cases. Wait for the
       // pid to land on disk instead of racing the first read, or this flakes
-      // as an ENOENT under a loaded CI runner.
+      // as an ENOENT under a loaded CI runner. The file must also carry a
+      // positive pid: an empty or newline-only file parses as 0, and
+      // `process.kill(0, 0)` probes the caller's process group, which stays
+      // alive for the whole suite and turns the race into a timeout.
       const childPid = await waitFor(
         async () => {
           try {
             const pid = Number((await readFile(fixture.pidsFile, 'utf8')).trim().split('\n')[0]);
-            return Number.isSafeInteger(pid) ? pid : null;
+            return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
           } catch {
             return null;
           }

@@ -29,6 +29,9 @@ it('keeps pinned and newly created local project directories in the scan catalog
   mocks.sessions = [
     session('pinned', '/repo/pinned', { pinnedAt: '2026-09-08T01:00:00Z' }),
     session('created', '/repo/created', { userSendAt: null }),
+    session('worktree', '/repo/base/.cindy-worktrees/task'),
+    session('legacy-worktree', '/repo/base/.xdt-worktrees/legacy'),
+    session('user-worktree', '/repo/base/.worktrees/custom'),
     session('ssh', '/remote', { remoteHostId: 'ssh-host', pinnedAt: '2026-09-08T01:00:00Z' }),
   ];
   const { rerender } = renderHook(useSkillhubStoreSync);
@@ -36,10 +39,14 @@ it('keeps pinned and newly created local project directories in the scan catalog
   mocks.loading = false;
   rerender();
   const projects = mocks.syncProjects.mock.lastCall![0];
-  expect(projects).toHaveLength(2);
+  expect(projects).toHaveLength(6);
   expect(projects).toEqual(expect.arrayContaining([
     expect.objectContaining({ projectRoot: '/repo/pinned', hash: projectHash('/repo/pinned') }),
     expect.objectContaining({ projectRoot: '/repo/created', hash: projectHash('/repo/created') }),
+    expect.objectContaining({ projectRoot: '/repo/base', hash: projectHash('/repo/base') }),
+    expect.objectContaining({ projectRoot: '/repo/base/.cindy-worktrees/task', hash: projectHash('/repo/base/.cindy-worktrees/task') }),
+    expect.objectContaining({ projectRoot: '/repo/base/.xdt-worktrees/legacy', hash: projectHash('/repo/base/.xdt-worktrees/legacy') }),
+    expect.objectContaining({ projectRoot: '/repo/base/.worktrees/custom', hash: projectHash('/repo/base/.worktrees/custom') }),
   ]));
   mocks.sessions = mocks.sessions.map((item) => ({ ...item, pinnedAt: null }));
   rerender();

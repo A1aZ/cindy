@@ -1,5 +1,6 @@
 import { isCindySkillEnabled, renameSkillWithActivation } from './activationPreferences';
 import { skillInstallLockKey, tryAcquireSkillInstallLock } from './installLock';
+import { acquireSharedSkillMutationLease, type SkillMutationRelease } from './sharedMutationLease';
 import { inspectLocalSkillTarget, isPluginManagedSkillPath } from './localSkillTarget';
 /**
  * SkillHub Scanner — 商店层 (registry / market) 视图组装。
@@ -889,7 +890,10 @@ export async function renameLocalSkill(params: {
   const backupPath = `${newSkillMd}.xdt-rename-${randomUUID()}`;
   let renamed = false;
   let backedUp = false;
+  let releaseShared: SkillMutationRelease | null = null;
   try {
+    releaseShared = await acquireSharedSkillMutationLease([oldName, newName]);
+    if (!releaseShared) return { success: false, error: 'Skill is busy; retry after the current operation' };
     await renameSkillWithActivation(absolutePath, newAbsolutePath, () => {
       if (!canMutate()) throw new Error('Skill mutation context changed');
       // Recheck after waiting for the preferences lock; never replace a new entity.
@@ -932,6 +936,7 @@ export async function renameLocalSkill(params: {
     }
     return { success: false, error: `Skill rename failed: ${String(err)}` };
   } finally {
+    await releaseShared?.();
     releases.forEach((unlock) => unlock());
   }
 }

@@ -65,7 +65,7 @@ describe('Skill activation preferences', () => {
     expect(reloaded.isCindySkillEnabled(source)).toBe(true);
   });
 
-  it.each(['success', 'enabled-source', 'backup-cleanup-failure', 'content-failure', 'preference-failure', 'owner-changed'])('migrates disabled state with a local rename (%s)', async (scenario) => {
+  it.each(['success', 'enabled-source', 'backup-cleanup-failure', 'content-failure', 'preference-failure', 'owner-changed', 'shared-busy'])('migrates disabled state with a local rename (%s)', async (scenario) => {
     const { renameLocalSkill } = await import('../scanner');
     const { setCindySkillEnabled, readDisabledSkillPaths, skillActivationKey } = await import('../activationPreferences');
     const source = path.join(root, scenario, '.agents', 'skills', 'old-name');
@@ -76,6 +76,8 @@ describe('Skill activation preferences', () => {
     await setCindySkillEnabled(scenario === 'enabled-source' ? destination : source, false);
     const before = [...readDisabledSkillPaths()];
     const oldKey = skillActivationKey(source);
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    const externalLease = scenario === 'shared-busy' ? await acquireSharedSkillMutationLease(['old-name']) : null;
     const realRename = fs.renameSync;
     const realUnlink = fs.unlinkSync;
     const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
@@ -127,13 +129,13 @@ describe('Skill activation preferences', () => {
           expect((await pack(destination)).sha256).toBe(packed.sha256);
         }
       } else {
-        expect(injected).toBe(scenario !== 'owner-changed');
+        expect(injected).toBe(scenario !== 'owner-changed' && scenario !== 'shared-busy');
         expect(result.success).toBe(false);
         expect(fs.existsSync(destination)).toBe(false);
         expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe(content);
         expect(readDisabledSkillPaths()).toEqual(before);
       }
-    } finally { spy.mockRestore(); unlinkSpy.mockRestore(); }
+    } finally { spy.mockRestore(); unlinkSpy.mockRestore(); await externalLease?.(); }
   });
 
 });

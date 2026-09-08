@@ -2104,6 +2104,25 @@ describe('skillhub/installService', () => {
 
   // ── 共享安装锁(与 learn apply 互斥) ───────────────────────────────────────
 
+  it('refuses installation and uninstall while another client holds the filesystem lease', async () => {
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    const { install, uninstall } = await import('../installService');
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { shell } = await import('electron');
+    const finalDir = path.join(TEST_ROOT, '.agents', 'skills', 'external-client');
+    fs.mkdirSync(finalDir, { recursive: true });
+    fs.writeFileSync(path.join(finalDir, 'SKILL.md'), 'original');
+    const target = inspectLocalSkillTarget(finalDir, [finalDir])!;
+    const release = await acquireSharedSkillMutationLease(['external-client']);
+    expect(release).not.toBeNull();
+    try {
+      expect((await uninstall(finalDir, target)).success).toBe(false);
+      expect((await install({ name: 'external-client', installPath: finalDir, version: '1.0.0' }, () => {})).success).toBe(false);
+      expect(shell.trashItem).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(finalDir, 'SKILL.md'), 'utf8')).toBe('original');
+    } finally { await release!(); }
+  });
+
   it('rejects install while a learn apply holds the shared lock; other names unaffected', async () => {
     const { net } = await import('electron');
     const { getCurrentUserId } = await import('../../authManager');
@@ -2283,6 +2302,9 @@ describe('skillhub/installService', () => {
     } else {
       let finishTrash: (() => void) | undefined;
       vi.mocked(shell.trashItem).mockImplementationOnce(async (entry) => {
+        const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+        expect(await acquireSharedSkillMutationLease([aliasName])).toBeNull();
+        expect(await acquireSharedSkillMutationLease([sourceName])).toBeNull();
         await new Promise<void>((resolve) => { finishTrash = resolve; });
         await fs.promises.rename(entry, path.join(TEST_ROOT, 'trashed-alias'));
       });

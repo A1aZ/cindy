@@ -14,7 +14,8 @@
  *     语义一致(市场侧返回"正在安装中"错误,learn 侧抛 LEARN_BUSY)。
  *   - 键为小写归一后的 skillName:自定义 installPath 同样按 name 互斥,
  *     大小写敏感卷上的不同大小写名称也保守串行,不凭 OS 猜测卷的大小写语义。
- *   - 进程内即可:市场安装与 learn 落盘都跑在 desktop main 进程。
+ *   - 文件变更还需 sharedMutationLease 的跨进程锁；本模块只提供本进程的
+ *     fail-fast 状态与持有方提示，不能单独保护正式版/dev/isolated 间的切换。
  */
 
 /** 锁持有方标识 —— 对端获取失败时据此生成可理解的错误文案。 */

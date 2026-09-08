@@ -34,6 +34,7 @@ import {
 } from '../../shared/learnTypes';
 import type { FileChange } from '../skillhub/snapshot';
 import { getSkillInstallLockOwner, tryAcquireSkillInstallLock } from '../skillhub/installLock';
+import { acquireSharedSkillMutationLease, type SkillMutationRelease } from '../skillhub/sharedMutationLease';
 import { prependHandoffToUserMessage } from '../maker-ipc/agentHandoff';
 import type { EvidenceSearchFn } from './evidence';
 import { collectEvidence } from './evidence';
@@ -896,6 +897,7 @@ export class LearnController {
     const pausedWatcher = await this.pauseRevisionWatcherForApply(runId);
     let frozenDir: string | null = null;
     let releaseSkillLock: (() => void) | null = null;
+    let releaseShared: SkillMutationRelease | null = null;
     let applied = false;
     try {
       this.assertNotDisposedForReview(runId);
@@ -942,6 +944,8 @@ export class LearnController {
         run = await this.update(run, { skillName: verdict.skillName });
       }
       releaseSkillLock = this.acquireSkillApplyLock(verdict.skillName);
+      releaseShared = await acquireSharedSkillMutationLease([verdict.skillName]);
+      if (!releaseShared) throw new LearnError('LEARN_BUSY', 'another client is changing this skill');
       // 必须先经 getProposalDiff 审查(reviewed 指纹已登记)且与当前提案一致。
       // 只查"已定义且不等"会留一个窗:重扫刚把 reviewed 清空、面板还没刷新完,
       // 这时点 apply 装的是没人看过的新内容(收严 Codex 的初版)。
@@ -984,6 +988,7 @@ export class LearnController {
       await this.update(run, { status: 'applied' });
       return result;
     } finally {
+      await releaseShared?.();
       releaseSkillLock?.();
       // 失败路径(校验拒绝 / applyProposal 抛错回滚到冻结位)把提案放回 staging。
       if (!applied) {

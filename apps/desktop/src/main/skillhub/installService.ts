@@ -41,6 +41,7 @@ import { registryService } from './registry';
 import type { StoredInstall } from './registry/types';
 import { computeFolderHash } from './folderHash';
 import { getSkillInstallLockOwner, skillInstallLockKey, tryAcquireSkillInstallLock } from './installLock';
+import { acquireSharedSkillMutationLease, type SkillMutationRelease } from './sharedMutationLease';
 import {
   prepareSharedGlobalSkillLinks,
   prepareSharedProjectSkillLinks,
@@ -517,7 +518,14 @@ export async function install(
     return false;
   };
 
+  let releaseShared: SkillMutationRelease | null = null;
   try {
+    releaseShared = await acquireSharedSkillMutationLease([p.name]);
+    if (!releaseShared) {
+      const message = skillLockBusyMessage(p.name);
+      onProgress({ phase: 'failed', name: p.name, errorCode: 'INTERNAL', message });
+      return { success: false, errorCode: 'INTERNAL', message };
+    }
     // 链接拓扑必须在持锁后读取，避免 install / learn final-switch 之间的 TOCTOU。
     const finalDir = await resolvePhysicalInstallDir(logicalFinalDir, p.name);
     const stagingDir = path.join(path.dirname(finalDir), `.xdt-installing-${p.name}-${rand()}`);
@@ -915,6 +923,7 @@ export async function install(
       ...(projectWorkingDir ? { projectWorkingDir } : {}),
     };
   } finally {
+    await releaseShared?.();
     inflight.delete(p.name);
     releaseLock();
   }
@@ -950,9 +959,10 @@ export async function uninstall(
   // 共享安装锁:同名 install / learn apply 的 final-switch 进行中时拒绝删除,
   // 避免 rm 掉对方刚切入的目录、registry 写入交错。
   const releaseLocks: Array<() => void> = [];
+  const lockNames = [...new Set([skillName, path.basename(target?.operationPath ?? absolutePath)].map(skillInstallLockKey))];
   // An imported discovery link can have a different name from its source. Install
   // replaces that entry under its discovery name, so hold both locks through trash.
-  for (const lockName of new Set([skillName, path.basename(target?.operationPath ?? absolutePath)].map(skillInstallLockKey))) {
+  for (const lockName of lockNames) {
     const release = tryAcquireSkillInstallLock(lockName, 'market-uninstall');
     if (!release) {
       for (const unlock of releaseLocks) unlock();
@@ -960,7 +970,10 @@ export async function uninstall(
     }
     releaseLocks.push(release);
   }
+  let releaseShared: SkillMutationRelease | null = null;
   try {
+    releaseShared = await acquireSharedSkillMutationLease(lockNames);
+    if (!releaseShared) return { success: false, errorCode: 'INTERNAL', message: skillLockBusyMessage(skillName) };
     // Keep the exact registry identity for metadata cleanup after trash succeeds.
     const registryMatch = target?.linkOnly
       ? (await registryService.listAllInstalls()).find((record) =>
@@ -985,6 +998,7 @@ export async function uninstall(
       canMutate,
     );
   } finally {
+    await releaseShared?.();
     for (const unlock of releaseLocks) unlock();
   }
 }
@@ -1175,11 +1189,14 @@ export async function retryUninstallCleanup(token: string, canMutate: () => bool
   if (!cleanup) return true;
   const release = tryAcquireSkillInstallLock(cleanup.skillName, 'market-uninstall');
   if (!release) return false;
+  let releaseShared: SkillMutationRelease | null = null;
   try {
+    releaseShared = await acquireSharedSkillMutationLease([cleanup.skillName, path.basename(cleanup.operationPath), path.basename(cleanup.resolved)]);
+    if (!releaseShared) return false;
     const complete = await finishUninstallCleanup(cleanup, canMutate);
     if (complete) pendingUninstallCleanup.delete(token);
     return complete;
-  } finally { release(); }
+  } finally { await releaseShared?.(); release(); }
 }
 
 async function shouldRecordAutoSyncIgnore(skillName: string, registryEntry: StoredInstall, userId?: string): Promise<boolean> {

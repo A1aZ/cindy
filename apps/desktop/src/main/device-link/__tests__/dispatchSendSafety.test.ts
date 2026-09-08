@@ -45,6 +45,7 @@ vi.mock('../settings-store', () => ({
 import { __testing, runInvoke, wireInboundDispatch } from '../dispatch';
 import { __testing as registry } from '../invoke-registry';
 import { setRemoteBotSessionLookup } from '../remoteBotSessionBoundary';
+import { getDeviceLinkInvokeContext } from '../invoke-context';
 import * as subscriptions from '../subscriptions';
 
 /** 最小 mock client:只实现被测路径用到的两个发送方法。 */
@@ -121,14 +122,68 @@ describe('negotiated mobile tool projection', () => {
 });
 
 describe('history detail interest', () => {
+  it.each(['local-db:messages:view', 'local-db:messages:view-intent'])('binds %s before asynchronous authorization', async (channel) => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    setRemoteBotSessionLookup(async () => { await pending; return 'ordinary'; });
+    subscriptions.subscribe('ctrl', ['session:s1']);
+    subscriptions.prepareHistoryView('ctrl', 's1')!.update('work');
+    registry.register(channel, () => {
+      const view = getDeviceLinkInvokeContext()?.historyView;
+      if (channel.endsWith(':view')) view?.update('stale');
+      else view?.setExpanded(['new']);
+      return {};
+    });
+    const request = runInvoke('ctrl', { channel, args: ['s1'] });
+    subscriptions.clearHistoryViews('ctrl');
+    const current = subscriptions.prepareHistoryView('ctrl', 's1')!;
+    current.update('new');
+    finish();
+    expect(await request).toMatchObject({ ok: true });
+    expect(subscriptions.projectsHistoryDetails('ctrl', 's1')).toBe(true);
+    current.setExpanded(['new']);
+    expect(subscriptions.projectsHistoryDetails('ctrl', 's1')).toBe(false);
+  });
+  it('does not clear working history when link acceptance fails', () => {
+    const client = mkClient();
+    subscriptions.subscribe('ctrl', ['session:s1']);
+    subscriptions.prepareHistoryView('ctrl', 's1')!.update('work');
+    client.sendLinkAccept.mockImplementation(() => { throw new Error('backpressure'); });
+    __testing.handleLinkOpen(client as never, 'ctrl', 'failed-open', undefined);
+    expect(subscriptions.hasHistoryView('ctrl', 's1')).toBe(true);
+    __testing.reset();
+  });
+  it.each([false, true])('restores full pushes on a replacement link (offline first=%s)', (offline) => {
+    const client = mkClient();
+    __testing.setActiveClient(client as never);
+    for (const peer of ['changed', 'untouched']) {
+      subscriptions.subscribe(peer, ['session:s1']);
+      subscriptions.prepareHistoryView(peer, 's1')!.update('work');
+    }
+    const old = subscriptions.prepareHistoryView('changed', 's1')!;
+    if (offline) subscriptions.clearController('changed');
+    __testing.handleLinkOpen(client as never, 'changed', 'new-link', undefined);
+    subscriptions.subscribe('changed', ['session:s1']);
+    old.update('work');
+    old.setExpanded(['work']);
+    client.sendPush.mockClear();
+    const payload = { sessionId: 's1', event: { type: 'thinking', data: { stage: 'delta', text: 'full detail' } } };
+    __testing.forwardPush('maker:event', payload);
+    expect(client.sendPush).toHaveBeenCalledWith('changed', 'maker:event', payload);
+    expect(client.sendPush.mock.calls.some(([peer]) => peer === 'untouched')).toBe(false);
+    subscriptions.prepareHistoryView('changed', 's1')!.update('work');
+    client.sendPush.mockClear();
+    __testing.forwardPush('maker:event', payload);
+    expect(client.sendPush.mock.calls.some(([peer]) => peer === 'changed')).toBe(false);
+  });
   it('sends full thinking only to expanded/legacy peers and coalesces folded summaries', async () => {
     vi.useFakeTimers();
     try {
       const client = mkClient();
       __testing.setActiveClient(client as never);
       for (const peer of ['folded', 'expanded', 'legacy']) subscriptions.subscribe(peer, ['session:s1']);
-      for (const peer of ['folded', 'expanded']) subscriptions.updateHistoryView(peer, 's1', 'work');
-      subscriptions.setHistoryExpanded('expanded', 's1', ['work']);
+      for (const peer of ['folded', 'expanded']) subscriptions.prepareHistoryView(peer, 's1')!.update('work');
+      subscriptions.prepareHistoryView('expanded', 's1')!.setExpanded(['work']);
       const push = (stage: string) => ({ sessionId: 's1', event: { type: 'thinking', data: { stage, blockId: 'b', text: 'private detail' } } });
       __testing.forwardPush('maker:event', push('start'));
       for (let n = 0; n < 100; n++) __testing.forwardPush('maker:event', push('delta'));

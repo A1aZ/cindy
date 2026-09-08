@@ -45,7 +45,6 @@ import {
 import { importExternalCodexMessagesForSession } from '../../maker-host/codex-local-sessions';
 import { importExternalClaudeCodeMessagesForSession } from '../../maker-host/claude-local-sessions';
 import { getDeviceLinkInvokeContext, isDeviceLinkInvoke } from '../../device-link/invoke-context';
-import { updateHistoryView, setHistoryExpanded } from '../../device-link/subscriptions';
 import { onMessageCreated as onChatMessageCreatedForEmbedding } from '../../embedders/chat-history-embedder';
 import { recomputePrRefsForSession, recordPrRefsForMessage } from '../../git-context/prRefsStore';
 import {
@@ -381,20 +380,18 @@ export function registerMessageIpc(
     const sid = requireString(sessionId, 'sessionId');
     const before = (opts as { before?: unknown } | null)?.before;
     const page = await historyView.page(sid, before == null ? undefined : requireString(before, 'before'));
-    const controller = getDeviceLinkInvokeContext()?.controllerDeviceId;
-    if (controller && before == null) {
+    if (before == null) {
       const live = page.items.find((item) => item.type === 'work' && item.summary.isStreaming);
-      updateHistoryView(controller, sid, live?.key ?? null);
+      getDeviceLinkInvokeContext()?.historyView?.update(live?.key ?? null);
     }
     return page;
   });
   ipcMain.handle('local-db:messages:view-intent', (event, sessionId: unknown, refs: unknown) => {
     if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
-    const sid = requireString(sessionId, 'sessionId');
+    requireString(sessionId, 'sessionId');
     if (!Array.isArray(refs) || refs.length > 100) throwIpcError('INVALID_PARAMS', 'Invalid expanded work groups');
     const keys = refs.map((ref) => requireString(ref?.key, 'key'));
-    const controller = getDeviceLinkInvokeContext()?.controllerDeviceId;
-    if (controller) setHistoryExpanded(controller, sid, keys);
+    getDeviceLinkInvokeContext()?.historyView?.setExpanded(keys);
   });
   ipcMain.handle('local-db:messages:work-details', async (event, sessionId: unknown, ref: unknown, opts: unknown) => {
     if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);

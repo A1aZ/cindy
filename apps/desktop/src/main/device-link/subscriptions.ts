@@ -48,34 +48,42 @@ const rememberedTopicsByController = new Map<string, Set<StoredTopic>>();
  * 新控制端误判成 legacy，否则 set-model 的显式 provider null 会被当成占位。
  */
 const rememberedCapabilitiesByController = new Map<string, Set<string>>();
-const historyViewsByController = new Map<string, Map<string, { liveKey: string | null; expanded: Set<string> }>>();
+const historyViewsByController = new Map<string, Map<string, { ready: boolean; liveKey: string | null; expanded: Set<string> }>>();
 
-export function updateHistoryView(deviceId: string, sessionId: string, liveKey: string | null): void {
-  if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return;
+/** Capture this subscription before reading; only its successful result may enable filtering. */
+export function prepareHistoryView(deviceId: string, sessionId: string) {
+  if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return undefined;
   const views = historyViewsByController.get(deviceId) ?? new Map();
-  const view = views.get(sessionId) ?? { liveKey: null, expanded: new Set<string>() };
-  view.liveKey = liveKey;
+  const view = views.get(sessionId) ?? { ready: false, liveKey: null, expanded: new Set<string>() };
   views.set(sessionId, view);
   historyViewsByController.set(deviceId, views);
+  const isCurrent = () => historyViewsByController.get(deviceId)?.get(sessionId) === view;
+  return {
+    update(liveKey: string | null): void {
+      if (!isCurrent()) return;
+      view.liveKey = liveKey;
+      view.ready = true;
+    },
+    setExpanded(keys: readonly string[]): void {
+      // Intent alone cannot opt a peer in or revive an old link/subscription.
+      if (!isCurrent() || !view.ready) return;
+      view.expanded = new Set(keys);
+    },
+  };
 }
 
-export function setHistoryExpanded(deviceId: string, sessionId: string, keys: readonly string[]): void {
-  // Do not recreate detail intent after an explicit session unsubscribe.
-  if (!controllerHasTopic(deviceId, `session:${sessionId}`)) return;
-  const views = historyViewsByController.get(deviceId) ?? new Map();
-  const view = views.get(sessionId) ?? { liveKey: null, expanded: new Set<string>() };
-  view.expanded = new Set(keys);
-  views.set(sessionId, view);
-  historyViewsByController.set(deviceId, views);
+/** History opt-in belongs to one accepted link, unlike remembered routing topics. */
+export function clearHistoryViews(deviceId: string): void {
+  historyViewsByController.delete(deviceId);
 }
 
 export function hasHistoryView(deviceId: string, sessionId: string): boolean {
-  return historyViewsByController.get(deviceId)?.has(sessionId) === true;
+  return historyViewsByController.get(deviceId)?.get(sessionId)?.ready === true;
 }
 
 export function projectsHistoryDetails(deviceId: string, sessionId: string): boolean {
   const view = historyViewsByController.get(deviceId)?.get(sessionId);
-  return !!view && (!view.liveKey || !view.expanded.has(view.liveKey));
+  return !!view?.ready && (!view.liveKey || !view.expanded.has(view.liveKey));
 }
 
 /**
@@ -214,6 +222,7 @@ export function unsubscribe(deviceId: string, topics: readonly string[]): void {
 
 /** 整条移除某控制端(link-close / presence-offline 兜底)。返回是否确实移除。 */
 export function clearController(deviceId: string): boolean {
+  clearHistoryViews(deviceId);
   const e = registry.get(deviceId);
   if (!e) return false;
   const held = [...e.topics];
@@ -224,7 +233,6 @@ export function clearController(deviceId: string): boolean {
 
 /** 显式撤销/账号边界使用：释放 active topics，并删除断线恢复状态。 */
 export function forgetKnownController(deviceId: string): void {
-  historyViewsByController.delete(deviceId);
   clearController(deviceId);
   knownControllerIds.delete(deviceId);
   rememberedTopicsByController.delete(deviceId);

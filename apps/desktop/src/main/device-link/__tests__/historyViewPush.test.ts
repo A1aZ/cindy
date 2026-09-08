@@ -5,15 +5,44 @@ afterEach(() => subscriptions.__testing.reset());
 describe('per-controller deferred history', () => {
   it('separates collapsed, expanded and legacy peers and refuses late intent after unsubscribe', () => {
     for (const peer of ['closed', 'open', 'old']) subscriptions.subscribe(peer, ['session:s']);
-    for (const peer of ['closed', 'open']) subscriptions.updateHistoryView(peer, 's', 'w');
-    subscriptions.setHistoryExpanded('open', 's', ['w']);
+    for (const peer of ['closed', 'open']) subscriptions.prepareHistoryView(peer, 's')!.update('w');
+    subscriptions.prepareHistoryView('open', 's')!.setExpanded(['w']);
     expect(subscriptions.projectsHistoryDetails('closed', 's')).toBe(true);
     expect(subscriptions.projectsHistoryDetails('open', 's')).toBe(false);
     expect(subscriptions.projectsHistoryDetails('old', 's')).toBe(false);
     subscriptions.unsubscribe('closed', ['session:s']);
-    subscriptions.updateHistoryView('closed', 's', 'w');
-    subscriptions.setHistoryExpanded('closed', 's', ['w']);
+    expect(subscriptions.prepareHistoryView('closed', 's')).toBeUndefined();
     expect(subscriptions.hasHistoryView('closed', 's')).toBe(false);
+  });
+  it.each(['disconnect', 'reopen', 'unsubscribe', 'revoke', 'clear-all'])('invalidates old reads and intents across %s, including re-subscription', (boundary) => {
+    for (const peer of ['a', 'b']) subscriptions.subscribe(peer, ['sessions', 'session:s', 'session:other']);
+    const old = subscriptions.prepareHistoryView('a', 's')!;
+    const other = subscriptions.prepareHistoryView('b', 's')!;
+    old.setExpanded(['w']);
+    expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+    expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(false);
+    old.update('w');
+    old.setExpanded(['w']);
+    if (boundary === 'disconnect') subscriptions.clearController('a');
+    if (boundary === 'reopen') subscriptions.clearHistoryViews('a');
+    if (boundary === 'unsubscribe') subscriptions.unsubscribe('a', ['session:s']);
+    if (boundary === 'revoke') subscriptions.forgetKnownController('a');
+    if (boundary === 'clear-all') subscriptions.clearAll();
+    subscriptions.subscribe('a', ['session:s']);
+    old.update('w');
+    old.setExpanded(['w']);
+    expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+    const current = subscriptions.prepareHistoryView('a', 's')!;
+    current.update('new');
+    old.update('old');
+    old.setExpanded(['new']);
+    expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(true);
+    current.setExpanded(['new']);
+    expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(false);
+    other.update('b-work');
+    other.setExpanded(['b-work']);
+    expect(subscriptions.hasHistoryView('b', 's')).toBe(boundary !== 'clear-all');
+    expect(subscriptions.projectsHistoryDetails('b', 's')).toBe(false);
   });
   it('defers thinking/tool bodies but retains prose, interactions, errors and artifacts', () => {
     const push = (type: string, data: unknown) => ({ sessionId: 's', event: { type, data } });

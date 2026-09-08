@@ -2249,6 +2249,7 @@ function handleLinkOpen(
     return;
   }
   markControllerLinkActive(client, src);
+  subscriptions.clearHistoryViews(src);
   acceptedLinkControllers.add(src);
   if (knownModernController) {
     subscriptions.updateControllerMetadata(src, name, capabilities);
@@ -3492,6 +3493,8 @@ export async function runInvoke(
   try {
     const args = payload.args ?? [];
     const invocationOwner = broadcastTap.captureDataOwnerBroadcastScope();
+    const historyView = (payload.channel === 'local-db:messages:view' || payload.channel === 'local-db:messages:view-intent')
+      && typeof args[0] === 'string' ? subscriptions.prepareHistoryView(src, args[0]) : undefined;
     if (hasRemoteBotSessionLookup()) await assertRemoteBotInvocationAllowed(args, payload.channel);
     const listingCapabilities = payload.channel === 'maker:provider:list'
       ? invokeControllerCapabilities(payload)
@@ -3503,6 +3506,7 @@ export async function runInvoke(
         // 平台按 server 盖章的 src 查本机 presence 登记表,不采信控制端自报的任何
         // 帧内字段(allowlist 只挡 channel 不挡 args,见下方 dispatchLocalInvoke 前的说明)。
         controllerPlatform: getControllerPlatform(src),
+        historyView,
       },
       // provider:list 的首参只承载隧道能力协商，不进入本机 IPC handler。
       () => dispatchLocalInvoke(

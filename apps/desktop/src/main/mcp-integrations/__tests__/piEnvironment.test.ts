@@ -22,6 +22,8 @@ vi.mock('electron', () => ({
 }));
 
 import type { Logger, McpProvider } from '@cindy/maker-core';
+import { CustomMcpProvider } from '../custom-mcp-provider.js';
+import { buildBotMcpCatalog } from '../../maker-host/botMcpCatalog.js';
 import {
   CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY,
   CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY,
@@ -720,6 +722,36 @@ describe('piEnvironment per-session identity', () => {
     expect(logs).not.toContain(logCanary);
     expect(logs).not.toContain('user:secret');
     config!.disposeSessionCtx!();
+  });
+
+  it('advertises only custom transports the Pi bridge can actually assemble', async () => {
+    const configs = [
+      { id: 'https', transport: 'http' as const, url: 'https://example.test/mcp' },
+      { id: 'sse', transport: 'sse' as const, url: 'https://example.test/events' },
+      { id: 'public-http', transport: 'http' as const, url: 'http://example.test/mcp' },
+      { id: 'local-http', transport: 'http' as const, url: 'http://localhost:4321/mcp' },
+      { id: 'ipv4', transport: 'http' as const, url: 'http://127.0.0.1:4321/mcp' },
+      { id: 'ipv6', transport: 'http' as const, url: 'http://[::1]:4321/mcp' },
+      { id: 'other-loopback', transport: 'http' as const, url: 'http://127.0.0.2:4321/mcp' },
+      { id: 'credentials', transport: 'http' as const, url: 'https://user:canary@example.test/mcp' },
+      { id: 'invalid-url', transport: 'http' as const, url: 'not a url' },
+    ].map((config) => ({ ...config, name: config.id, headers: {}, updatedAt: 1 }));
+    const builtin = makeProvider('cindy_memory');
+    const sdkFactory = vi.spyOn(builtin, 'toClaudeSdkConfig');
+    const providers = [builtin, ...configs.map((config) => new CustomMcpProvider(config, () => 'TOKEN_CANARY'))];
+    const catalog = buildBotMcpCatalog({ agentKind: 'pi', providers,
+      builtinNames: ['cindy_memory'], customServers: configs });
+    expect(sdkFactory).not.toHaveBeenCalled();
+    const available = catalog.filter((entry) => entry.available).map((entry) => entry.name);
+    expect(available).toEqual(['cindy_memory', 'https', 'local-http', 'ipv4', 'ipv6']);
+    expect(JSON.stringify(catalog)).not.toMatch(/TOKEN_CANARY|example.test|user:canary/);
+
+    const config = await getPiExtraSpawnConfig(providers, noopLogger(), { workingDir: '', memoryEnabled: true });
+    try {
+      expect(config?.mcpBridge?.servers.map((server) => server.name)).toEqual(available);
+    } finally {
+      config?.disposeSessionCtx?.();
+    }
   });
 
   it('snapshots remote MCP lifecycle changes for new sessions while old leases keep their startup config', async () => {

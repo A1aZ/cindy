@@ -90,6 +90,8 @@ describe('mcp:custom:* CRUD handlers', () => {
       const configs: CustomMcpConfig[] = [
         validConfig,
         { ...validConfig, id: 'events', transport: 'sse' },
+        { ...validConfig, id: 'public-http', url: 'http://example.test/mcp' },
+        { ...validConfig, id: 'local-http', url: 'http://localhost:4321/mcp' },
         { ...validConfig, id: 'cindy_memory' },
         { ...validConfig, id: '__proto__' },
         { ...validConfig, id: 'bad-headers', headers: { 'X-Test': 'line\nbreak' } },
@@ -118,7 +120,9 @@ describe('mcp:custom:* CRUD handlers', () => {
       const result = await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, { agentKind });
       expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind });
       expect(result).toEqual({ agentKind, servers: rawList.map((server) => ({
-        ...server, available: server.id === 'mytools' || (server.id === 'events' && agentKind !== 'codex'),
+        ...server, available: ['mytools', 'local-http'].includes(server.id)
+          || (server.id === 'events' && agentKind === 'claude-code')
+          || (server.id === 'public-http' && agentKind !== 'pi'),
       })) });
     },
   );

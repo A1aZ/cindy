@@ -57,6 +57,7 @@ import { pluginIdForKnownProviderName } from '../maker-host/plugins/builtin-plug
 // 直接取 plugins 模块的 registry 单例,不经 maker-host/index.ts —— 后者 import pi-host,
 // 从 mcp-integrations 反向 import 会成环。
 import { createPluginRegistry } from '../maker-host/plugins/index.js';
+import { isAllowedRemoteMcpUrl } from './piMcpTransport.js';
 
 interface StartedPiBridge {
   bridge: CodexHttpBridge | null;
@@ -110,22 +111,6 @@ function selectMcpEnvForServers(
   return Object.fromEntries(
     Object.entries(source).filter(([name]) => referenced.has(name)),
   );
-}
-
-function isLoopbackMcpHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  return (
-    normalized === 'localhost' ||
-    normalized === '127.0.0.1' ||
-    normalized === '::1' ||
-    normalized === '[::1]'
-  );
-}
-
-function isAllowedRemoteMcpUrl(url: URL): boolean {
-  if (url.username || url.password) return false;
-  if (url.protocol === 'https:') return true;
-  return url.protocol === 'http:' && isLoopbackMcpHostname(url.hostname);
 }
 
 function shutdownGeneration(started: StartedPiBridge): Promise<void> {

@@ -1680,14 +1680,39 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(selectBotCapability({ ...input, id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: true, joined: true });
   });
 
+  it.each([
+    { id: 'pi-sse', transport: 'sse' as const, url: 'https://example.invalid/mcp' },
+    { id: 'pi-public-http', transport: 'http' as const, url: 'http://example.invalid/mcp' },
+  ])('keeps Pi-incompatible $id discoverable but unjoinable and removable', async (config) => {
+    h.customMcpConfigs.push({ ...config, name: config.id, headers: {} });
+    await refreshCustomMcpProviders();
+    await invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: [config.id], mcpMode: 'allowlist' },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    expect(created.session.agentKind).toBe('pi');
+    const input = { callerSessionId: created.session.id, kind: 'mcp' as const, id: config.id };
+    await expect(findBotCapabilities(input)).resolves.toMatchObject({
+      capabilities: expect.arrayContaining([{ id: config.id, name: config.id,
+        description: config.transport, available: false, joined: true }]),
+    });
+    await expect(selectBotCapability({ ...input, joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    await expect(selectBotCapability({ ...input, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+  });
+
   it('revalidates saved MCP transports on fallback and restores them when switching back', async () => {
-    const configs = (['http', 'sse'] as const).map((transport) => ({
-      id: transport, name: transport, transport, url: `https://example.invalid/${transport}`,
-      headers: { Authorization: 'FAKE_SECRET' }, updatedAt: 1,
-    }));
+    const configs = [
+      { id: 'https', transport: 'http' as const, url: 'https://example.invalid/mcp' },
+      { id: 'sse', transport: 'sse' as const, url: 'https://example.invalid/sse' },
+      { id: 'public-http', transport: 'http' as const, url: 'http://example.invalid/mcp' },
+      { id: 'local-http', transport: 'http' as const, url: 'http://localhost:4321/mcp' },
+    ].map((config) => ({ ...config, name: config.id, headers: { Authorization: 'FAKE_SECRET' }, updatedAt: 1 }));
+    const configured = configs.map((config) => config.id);
     const providers = configs.map((config) => new CustomMcpProvider(config, () => 'FAKE_TOKEN'));
     await invoke('local-db:bots:update', {
-      id: 'bot-1', capabilities: { mcpServers: ['http', 'sse'], mcpMode: 'allowlist' },
+      id: 'bot-1', capabilities: { mcpServers: configured, mcpMode: 'allowlist' },
     });
     const created = await invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
@@ -1702,23 +1727,19 @@ describe('Bot canonical Session lifecycle', () => {
           const catalog = buildBotMcpCatalog({
             agentKind: actualRoute, providers, builtinNames: [], customServers: configs,
           });
-          for (const provider of providers) {
-            const context = { agentKind: actualRoute, workingDir: created.session.workingDir };
-            const serialized = actualRoute === 'codex'
-              ? provider.toCodexMcpConfig(context) : provider.toClaudeSdkConfig(context);
-            expect(catalog.find((entry) => entry.name === provider.name)?.available).toBe(serialized !== null);
-          }
           expect(JSON.stringify(catalog)).not.toMatch(/FAKE_SECRET|FAKE_TOKEN|example.invalid|Authorization/);
           return catalog;
         },
       });
       expect(snapshot).toMatchObject({
-        configuredMcpServers: ['http', 'sse'],
-        resolvedMcpServers: agentKind === 'codex' ? ['http'] : ['http', 'sse'],
-        unavailableMcpServers: agentKind === 'codex' ? ['sse'] : [],
+        configuredMcpServers: configured,
+        resolvedMcpServers: agentKind === 'pi' ? ['https', 'local-http']
+          : agentKind === 'codex' ? ['https', 'public-http', 'local-http'] : configured,
+        unavailableMcpServers: agentKind === 'pi' ? ['sse', 'public-http']
+          : agentKind === 'codex' ? ['sse'] : [],
       });
       expect(opts.botRuntimeProfile?.mcpPolicy.catalog).toContainEqual(expect.objectContaining({
-        name: 'sse', available: agentKind !== 'codex',
+        name: 'sse', available: agentKind === 'claude-code',
       }));
     }
   });

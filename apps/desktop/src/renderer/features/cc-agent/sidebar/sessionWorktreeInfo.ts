@@ -110,14 +110,15 @@ export function useTaskInfoWorktree(
   const managed = resolveManagedWorktree(official);
   const [observed, setObserved] = useState<SessionWorktreeInfo | null>(null);
   const initialOfficialStillLive = !observeTelemetry || liveOfficial !== null;
-  const [liveness, setLiveness] = useState({ sessionId: session.id, live: initialOfficialStillLive });
-  if (liveness.sessionId !== session.id) {
-    // The hook instance is reused when the route changes. Reset synchronously
-    // from the new snapshot so the previous task's state cannot leak for a
-    // render while the effect starts its probe.
-    setLiveness({ sessionId: session.id, live: initialOfficialStillLive });
+  const [liveness, setLiveness] = useState({ sessionId: session.id, official, live: initialOfficialStillLive });
+  const matchesSnapshot = liveness.sessionId === session.id && liveness.official === official;
+  if (!matchesSnapshot) {
+    // Route changes and same-path restoration both replace the snapshot that
+    // owns this result. Match Context's metadata identity guard so an old
+    // invalid result cannot override a new authoritative row while probing.
+    setLiveness({ sessionId: session.id, official, live: initialOfficialStillLive });
   }
-  const displayedOfficialStillLive = liveness.sessionId === session.id
+  const displayedOfficialStillLive = matchesSnapshot
     ? liveness.live
     : initialOfficialStillLive;
   const officialPath = official?.path ?? null;
@@ -141,14 +142,14 @@ export function useTaskInfoWorktree(
         const live = await probeIsInsideWorktree(officialPath, deviceId);
         if (cancelled || gen !== generation) return;
         if (live === null) return; // IPC 失败不代表目录已被删除，保留上次状态。
-        setLiveness({ sessionId: session.id, live });
+        setLiveness({ sessionId: session.id, official, live });
         if (official) reportLiveness(official, live);
         if (live) {
           setObserved(null);
           return;
         }
       } else if (gen === generation) {
-        setLiveness({ sessionId: session.id, live: false });
+        setLiveness({ sessionId: session.id, official, live: false });
       }
       if (isRemote) {
         if (!cancelled && gen === generation) setObserved(null);

@@ -154,6 +154,51 @@ describe('WorktreeContext recycle refresh', () => {
     expect(view.getByTestId('ids').textContent).toBe('open:/tmp/wt/open');
   });
 
+  it.each(['/tmp/wt/open', '/tmp/wt/restored'])(
+    'uses replacement metadata at %s while its probe is pending or fails, ignoring old results',
+    async (restoredPath) => {
+      const meta = { sessionId: 'open', path: '/tmp/wt/open' };
+      mocks.worktreeListAll.mockResolvedValue([meta]);
+      mocks.worktreeDetectCwd.mockResolvedValue({ isInsideWorktree: false });
+      let refresh!: (sessionId: string) => Promise<void>;
+      function Actions() {
+        refresh = useRefreshWorktreeForSession();
+        return <><Probe /><ActiveProbe /></>;
+      }
+      const view = render(<WorktreeProvider><Actions /></WorktreeProvider>);
+      await act(async () => {});
+      expect(view.getByTestId('active').textContent).toBe('');
+      expect(view.getByTestId('ids').textContent).toBe('');
+
+      let finishOld!: (value: { isInsideWorktree: boolean }) => void;
+      mocks.worktreeDetectCwd.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }));
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+
+      let rejectNew!: (reason: Error) => void;
+      mocks.worktreeGetForSession.mockResolvedValue({ ...meta, path: restoredPath });
+      mocks.worktreeDetectCwd.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectNew = reject; }));
+      await act(async () => { await refresh('open'); });
+      expect(view.getByTestId('ids').textContent).toBe(`open:${restoredPath}`);
+      expect(view.getByTestId('active').textContent).toBe(restoredPath);
+      expect(mocks.worktreeDetectCwd).toHaveBeenLastCalledWith({ cwd: restoredPath });
+
+      await act(async () => { finishOld({ isInsideWorktree: false }); });
+      expect(view.getByTestId('active').textContent).toBe(restoredPath);
+      expect(view.getByTestId('ids').textContent).toBe(`open:${restoredPath}`);
+      await act(async () => { rejectNew(new Error('[INTERNAL] Worktree directory probe failed')); });
+      expect(view.getByTestId('active').textContent).toBe(restoredPath);
+      expect(view.getByTestId('ids').textContent).toBe(`open:${restoredPath}`);
+
+      // A conclusive result for the new metadata must still update both views.
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      expect(view.getByTestId('active').textContent).toBe('');
+      expect(view.getByTestId('ids').textContent).toBe('');
+      expect(mocks.worktreeDetectCwd).toHaveBeenCalledTimes(4);
+      expect(mocks.worktreeListAll).toHaveBeenCalledOnce();
+      expect(mocks.worktreeGetForSession).toHaveBeenCalledExactlyOnceWith('open');
+    },
+  );
+
   it('ignores liveness reports captured before same-path restoration or recycling', async () => {
     const meta = { sessionId: 'open', path: '/tmp/wt/open' };
     mocks.worktreeListAll.mockResolvedValue([meta]);

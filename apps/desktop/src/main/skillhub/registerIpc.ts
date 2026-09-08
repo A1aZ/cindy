@@ -1,3 +1,8 @@
+import fs from 'node:fs';
+import { throwIpcError } from '../utils/ipcValidate';
+import { setCindySkillEnabled } from './activationPreferences';
+import { inspectLocalSkillTarget, isLocalSkillTargetCurrent, type LocalSkillTarget } from './localSkillTarget';
+import { tryAcquireSkillInstallLock } from './installLock';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { Maker } from '@cindy/maker-core';
@@ -109,7 +114,50 @@ async function validateRequestedProjects(
 export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   const marketService = options.marketService ?? new SkillhubMarketService();
   const localImportGrants = new Map<string, LocalImportGrant>();
+  const cleanupGrants = new Map<string, { ownerId: string | null; senderId: number }>();
   const scannedSkillRootsBySender = new Map<number, ScannedSkillGrant>();
+  const localSkillsBySender = new Map<number, Array<{
+    skill: import('./scanner').Skill;
+    target: LocalSkillTarget | null;
+    physicalIdentity: string;
+  }>>();
+  const physicalIdentity = (source: string): string => {
+    const st = fs.statSync(source);
+    return JSON.stringify([fs.realpathSync.native(source), st.dev, st.ino]);
+  };
+  const broadcastLocalChange = () => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        try { win.webContents.send('skillhub:local-state-changed'); } catch { /* Window closed. */ }
+      }
+    }
+  };
+  const requireLocalSkill = async (event: Electron.IpcMainInvokeEvent, source: string) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof source !== 'string' || !path.isAbsolute(source)) throwIpcError('INVALID_PARAMS', 'Invalid Skill');
+    const ownerId = getCurrentDataOwnerId();
+    const grant = scannedSkillRootsBySender.get(event.sender.id);
+    const record = localSkillsBySender.get(event.sender.id)?.find(({ skill }) => skill.absolutePath === source);
+    if (!record || !ownerId || grant?.ownerId !== ownerId || isAppSessionBoundaryPending()) {
+      throwIpcError('PRECONDITION_FAILED', 'Refresh the Skill list and retry');
+    }
+    if (record.skill.scope === 'project') {
+      const roots = await options.getAllowedProjectRoots();
+      if (!roots.some((root) => projectRootKey(root) === projectRootKey(record.skill.projectRoot))) {
+        throwIpcError('PERMISSION_DENIED', 'Project is no longer available');
+      }
+    }
+    if (getCurrentDataOwnerId() !== ownerId || isAppSessionBoundaryPending()) {
+      throwIpcError('PRECONDITION_FAILED', 'Account changed; refresh and retry');
+    }
+    try {
+      if (physicalIdentity(source) !== record.physicalIdentity) throw new Error('changed');
+      for (const alias of record.skill.discoveryPaths ?? [record.skill.discoveredPath]) {
+        if (physicalIdentity(alias) !== record.physicalIdentity) throw new Error('changed');
+      }
+    } catch { throwIpcError('PRECONDITION_FAILED', 'Skill source changed; refresh and retry'); }
+    return record;
+  };
   const scanGenerationBySender = new Map<number, number>();
   const scanGrantCleanupRegistered = new WeakSet<object>();
 
@@ -118,6 +166,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     scanGrantCleanupRegistered.add(event.sender);
     event.sender.once('destroyed', () => {
       scannedSkillRootsBySender.delete(event.sender.id);
+      localSkillsBySender.delete(event.sender.id);
       scanGenerationBySender.delete(event.sender.id);
     });
   };
@@ -152,6 +201,13 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       }
     }
     scannedSkillRootsBySender.set(event.sender.id, { ownerId, entries });
+    localSkillsBySender.set(event.sender.id, skills.flatMap((skill) => {
+      if (skill.kind !== 'skill') return [];
+      try {
+        return [{ skill, physicalIdentity: physicalIdentity(skill.absolutePath),
+          target: inspectLocalSkillTarget(skill.absolutePath, skill.discoveryPaths ?? [skill.discoveredPath]) }];
+      } catch { return []; }
+    }));
   };
 
   const hasScannedSkillGrant = (
@@ -885,16 +941,58 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     },
   );
 
-  // 卸载（删本地文件夹）—— service 内校验路径白名单
+  ipcMain.handle('skillhub:set-enabled', async (event, params: { absolutePath: string; enabled: boolean }) => {
+    if (typeof params?.enabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'Invalid Skill state');
+    const record = await requireLocalSkill(event, params.absolutePath);
+    const { skill } = record;
+    const ownerId = getCurrentDataOwnerId();
+    const canMutate = () => {
+      if (ownerId !== getCurrentDataOwnerId() || isAppSessionBoundaryPending()) return false;
+      try {
+        return physicalIdentity(skill.absolutePath) === record.physicalIdentity
+          && (skill.discoveryPaths ?? [skill.discoveredPath]).every((alias) => physicalIdentity(alias) === record.physicalIdentity);
+      } catch { return false; }
+    };
+    const release = tryAcquireSkillInstallLock(skill.name, 'market-uninstall');
+    if (!release) throwIpcError('PRECONDITION_FAILED', 'Skill is being changed; retry shortly');
+    try {
+      await setCindySkillEnabled(skill.absolutePath, params.enabled, canMutate);
+    } catch { throwIpcError('INTERNAL', 'Could not save Skill state; retry'); }
+    finally { release(); }
+    broadcastLocalChange();
+    return { cindyEnabled: params.enabled };
+  });
+
+  // Main resolves the exact scanned entity; no arbitrary renderer path deletion.
   ipcMain.handle(
     'skillhub:uninstall',
-    async (_event, { absolutePath }: { absolutePath: string }) => {
-      const result = await installService.uninstall(absolutePath);
-      if (!result.success) return result;
+    async (event, { absolutePath }: { absolutePath: string }) => {
+      const { target } = await requireLocalSkill(event, absolutePath);
+      if (!target || !isLocalSkillTargetCurrent(target)) {
+        throwIpcError('PRECONDITION_FAILED', 'Skill cannot be uninstalled; refresh and retry');
+      }
+      const ownerId = getCurrentDataOwnerId();
+      const result = await installService.uninstall(absolutePath, target,
+        () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending());
+      if (!result.success) throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
       await refreshCodexProjectSkillCache(result.projectWorkingDir);
-      return { success: true };
+      broadcastLocalChange();
+      if (result.cleanupToken) cleanupGrants.set(result.cleanupToken, { ownerId, senderId: event.sender.id });
+      return { success: true, ...(result.cleanupToken ? { cleanupToken: result.cleanupToken } : {}) };
     },
   );
+
+  ipcMain.handle('skillhub:retry-uninstall-cleanup', async (event, token: string) => {
+    assertTrustedAppRendererEvent(event);
+    const grant = cleanupGrants.get(token);
+    const canMutate = () => !!grant && grant.ownerId === getCurrentDataOwnerId()
+      && grant.senderId === event.sender.id && !isAppSessionBoundaryPending();
+    if (!canMutate()) throwIpcError('PRECONDITION_FAILED', 'Cleanup is no longer available');
+    const complete = await installService.retryUninstallCleanup(token, canMutate);
+    if (complete) cleanupGrants.delete(token);
+    broadcastLocalChange();
+    return { complete };
+  });
 
   // ── SkillHub Registry: 一次性回填 authorId 到本地 install 记录 ──
   // 历史遗留:之前的 publish 流程在源目录无 install 记录时不会主动新建,

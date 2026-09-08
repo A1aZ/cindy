@@ -7,6 +7,8 @@
  * - 持有依赖注入的 deps，但具体使用由子类决定
  */
 
+import { isSkillDisabled } from './shared/skill-activation.js';
+
 import type {
   AgentEvent,
   InteractionDecision,
@@ -575,6 +577,8 @@ export interface PiSubagentRunnerLaunchRequest {
 }
 
 export interface AgentDeps {
+  /** Cindy-only local Skill overrides. Freeze at native runtime startup; never apply to SSH. */
+  getDisabledSkillPaths?: () => readonly string[];
   /** Optional low-I/O, provider-neutral turn change recorder supplied by the host. */
   turnChangeCapture?: TurnChangeCaptureHooks;
   auth: AuthAdapter;
@@ -2317,6 +2321,14 @@ export abstract class BaseAgent {
     return [];
   }
 
+  /** Filter only the palette projection; management discovery retains disabled sources. */
+  filterActiveSkillCommands(result: ListAgentSkillsResult, remoteHostId?: string): ListAgentSkillsResult {
+    const disabled = remoteHostId ? [] : this.deps.getDisabledSkillPaths?.() ?? [];
+    if (disabled.length === 0) return result;
+    return { ...result, skills: result.skills.filter((skill) => !skill.path || !isSkillDisabled(skill.path, disabled)) };
+  }
+
+
   /**
    * Agent 用户/项目目录扫描出的 skill 列表 —— ChatInput `/` palette 的
    * 'agent-skill' 类目。
@@ -2325,6 +2337,7 @@ export abstract class BaseAgent {
    * app-server skills/list。子类自己负责缓存策略与未授权静默处理。
    * 默认无实现, 不暴露任何 skill。
    */
+
   async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
     void opts;
     return { skills: [] };

@@ -224,8 +224,12 @@ export function setSkillhubDataOwner(dataOwnerId: string | null): void {
 // ── Auth change listener — reset store on every data-owner boundary ─────────
 
 let authListenerUnsubscribe: (() => void) | null = null;
+let localStateListenerUnsubscribe: (() => void) | null = null;
 
 function ensureAuthListener(): void {
+  if (!localStateListenerUnsubscribe && window.electronAPI.skillhub.onLocalStateChanged) {
+    localStateListenerUnsubscribe = window.electronAPI.skillhub.onLocalStateChanged(() => { void refresh(); });
+  }
   if (authListenerUnsubscribe) return;
   authListenerUnsubscribe = window.electronAPI.onAuthStateChange((authState) => {
     setSkillhubDataOwner(authState.dataOwnerId);

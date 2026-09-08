@@ -129,6 +129,7 @@ import {
   toolAutoReviewAction,
   type AutoReviewDecision,
 } from '../shared/auto-review-decision.js';
+import { applyPiDisabledSkillSettings, filterPiDisabledProjectSkills, piDisabledDiscoveryPaths } from './skill-activation.js';
 import type { ReviewableAction } from '../shared/auto-review.js';
 import { buildMemoryScopeKey } from '../../memory/storage.js';
 import { MAKER_MEMORY_RULES } from '../../memory/system-prompt.js';
@@ -1675,7 +1676,20 @@ export class PiAgent extends BaseAgent {
         ? Promise.resolve(null)
         : readOrNull(stableUserSettingsPath),
     ]);
-    return mergePiUserSettingsPassthrough(built, sessionContent, stableContent);
+    const merged = mergePiUserSettingsPassthrough(built, sessionContent, stableContent);
+    // Preserve the session-frozen native Skill exclusions across model/settings rewrites.
+    // Never import controller/global Skill configuration into a remote runtime.
+    if (sessionContent) {
+      try {
+        const previous = JSON.parse(sessionContent) as { skills?: unknown };
+        if (Array.isArray(previous.skills)) {
+          return JSON.stringify(applyPiDisabledSkillSettings(JSON.parse(merged),
+            previous.skills.filter((item): item is string => typeof item === 'string' && item.startsWith('-')).map((item) => item.slice(1)),
+          ), null, 2) + '\n';
+        }
+      } catch { /* Malformed prior runtime settings do not replace the rebuilt settings. */ }
+    }
+    return merged;
   }
 
   private async writePiRuntimeSettings(
@@ -3031,6 +3045,8 @@ export class PiAgent extends BaseAgent {
     // snapshot. Freeze it once per new runtime, then assemble only its eligible
     // skills. Missing/throwing authorities and paths fail closed; never infer
     // approval from permission mode, MCP/plugin state, or caller vendor options.
+    const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
+      ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
     let projectResourceAssembly = unavailablePiProjectResourceAssembly(
       reviewMode ? 'review-mode-project-resources-disabled' : 'approval-resolver-unavailable',
     );
@@ -3042,6 +3058,7 @@ export class PiAgent extends BaseAgent {
           ...(opts.remoteHostId ? { remoteHostId: opts.remoteHostId } : {}),
         });
         projectResourceAssembly = await assembleApprovedPiProjectResources(trustInput, opts.workingDir);
+        projectResourceAssembly = filterPiDisabledProjectSkills(projectResourceAssembly, disabledSkillPaths);
         projectResourceAssembly = await stageApprovedPiProjectResources(projectResourceAssembly, configHome);
       } catch {
         projectResourceAssembly = unavailablePiProjectResourceAssembly('approval-resolver-failed');
@@ -3118,6 +3135,15 @@ export class PiAgent extends BaseAgent {
           });
         }
       }
+    }
+
+    if (disabledSkillPaths.length > 0) {
+      const settingsPath = path.join(configHome, 'settings.json');
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+      await fs.writeFile(settingsPath, JSON.stringify(applyPiDisabledSkillSettings(settings, piDisabledDiscoveryPaths(disabledSkillPaths, [
+        path.join(configHome, 'skills'), path.join(os.homedir(), '.agents', 'skills'),
+        ...managedPackageResources.skills.map((skill) => skill.path),
+      ])), null, 2) + '\n', { mode: 0o600 });
     }
 
     const nativePackageRoots = nativePackagePaths.map((entry) => (

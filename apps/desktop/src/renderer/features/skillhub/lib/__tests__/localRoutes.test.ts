@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildLocalSkillRoute,
+  buildLocalSkillPathRoute,
   findLocalSkillByPath,
   findLocalSkillRouteEntry,
 } from '../localRoutes';
@@ -22,6 +23,26 @@ function entry(overrides: Partial<Entry> = {}): Entry {
 }
 
 describe('local SkillHub routes', () => {
+  it('opens the exact source from a slash Skill entrypoint, including discovery aliases', () => {
+    const target = entry({ absolutePath: '/shared/a & b', discoveryPaths: ['/repo/.claude/skills/demo'] });
+    const other = entry({ scope: 'global', absolutePath: '/home/.agents/skills/demo' });
+    for (const path of ['/shared/a & b/SKILL.md', '/repo/.claude/skills/demo/skill.md']) {
+      const url = new URL(buildLocalSkillPathRoute(path), 'https://cindy.local');
+      expect(url.pathname).toBe('/skillhub/local/by-path');
+      expect(url.searchParams.get('path')).toBe(path);
+      expect(findLocalSkillRouteEntry([other, target], {}, url.searchParams)).toBe(target);
+    }
+  });
+
+  it('supports Windows entrypoints and standalone Skill files without guessing by name', () => {
+    const windows = entry({ absolutePath: 'C:\\Skills\\Demo' });
+    const standalone = entry({ absolutePath: '/package/skills', mdPath: '/package/skills/demo.md' });
+    const resolve = (path: string) => findLocalSkillRouteEntry([windows, standalone], {}, new URLSearchParams({ path }));
+    expect(resolve('c:/skills/demo/SKILL.md')).toBe(windows);
+    expect(resolve('/package/skills/demo.md')).toBe(standalone);
+    expect(resolve('/missing/demo/SKILL.md')).toBeNull();
+  });
+
   it('finds a renamed skill by its lexical discovered path when absolutePath is realpathed', () => {
     const renamed = entry({
       absolutePath: '/shared/skills/renamed',

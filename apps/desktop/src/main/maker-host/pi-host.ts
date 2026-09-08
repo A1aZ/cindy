@@ -1,3 +1,4 @@
+import { readDisabledSkillPaths } from '../skillhub/activationPreferences';
 /**
  * pi agent 的 desktop host 装配 —— auth / runtimeConfig / 二进制解析 / 构造,
  * 集中在本模块,maker-host/index.ts 只做一次 buildPiAgent() 调用。
@@ -1806,6 +1807,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   }
   log.info('pi agent enabled', { binaryPath });
   return new PiAgent({
+      getDisabledSkillPaths: readDisabledSkillPaths,
     resolveModelContextLimit: (providerId, modelId) => providerId
       ? readModelContextLimit('pi', providerId, modelId) : null,
     auth: desktopPiAuthAdapter,

@@ -23,6 +23,13 @@ vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => path.join(TEST_ROOT, 'userData')),
   },
+  shell: {
+    trashItem: vi.fn(async (source: string) => {
+      const trash = path.join(TEST_ROOT, 'trash', crypto.randomUUID());
+      fs.mkdirSync(path.dirname(trash), { recursive: true });
+      await fs.promises.rename(source, trash);
+    }),
+  },
   net: {
     fetch: vi.fn(),
   },
@@ -149,15 +156,128 @@ async function setupInstallDownload(skillName: string, zipBuf: Uint8Array) {
 }
 
 describe('skillhub/installService', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
     removeTestRoot();
     fs.mkdirSync(TEST_ROOT, { recursive: true });
+    const { projectWorkingDirFromSkillPath } = await import('../../maker-host/shared-global-skills.js');
+    vi.mocked(projectWorkingDirFromSkillPath).mockReturnValue(null);
+    const { getAppCapabilities } = await import('../../appCapabilities.js');
+    vi.mocked(getAppCapabilities).mockReturnValue({
+      canUseCindyAccountServices: true, canUseCindyGateway: true, canUseDeviceLink: true,
+      canUseSkillHubCloud: true, canUseCindyOAuthBroker: true, canUseCindyHeartbeat: true,
+    });
   });
 
   afterAll(() => {
     removeTestRoot();
+  });
+
+  async function localFixture(name: string) {
+    const source = path.join(TEST_ROOT, '.agents', 'skills', name);
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'fixture content');
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    return { source, target: inspectLocalSkillTarget(source, [source])! };
+  }
+
+  it('trashes an unregistered scanned skill and clears its Cindy override', async () => {
+    const { source, target } = await localFixture('unregistered');
+    const { setCindySkillEnabled, isCindySkillEnabled } = await import('../activationPreferences');
+    const { uninstall } = await import('../installService');
+    await setCindySkillEnabled(source, false);
+    expect(await uninstall(source, target)).toEqual({ success: true });
+    expect(fs.existsSync(source)).toBe(false);
+    expect(isCindySkillEnabled(source)).toBe(true);
+  });
+
+  it('preserves files, registry and disabled state when system trash fails', async () => {
+    const { source, target } = await localFixture('trash-failure');
+    const { shell } = await import('electron');
+    const { registryService } = await import('../registry');
+    const { setCindySkillEnabled, isCindySkillEnabled } = await import('../activationPreferences');
+    const { uninstall } = await import('../installService');
+    await setCindySkillEnabled(source, false);
+    vi.mocked(shell.trashItem).mockRejectedValueOnce(new Error('trash unavailable'));
+    expect((await uninstall(source, target)).success).toBe(false);
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('fixture content');
+    expect(registryService.removeInstall).not.toHaveBeenCalled();
+    expect(isCindySkillEnabled(source)).toBe(false);
+  });
+
+  it('removes only an external import link and leaves its source untouched', async () => {
+    const source = path.join(TEST_ROOT, 'external', 'shared');
+    const alias = path.join(TEST_ROOT, '.agents', 'skills', 'shared');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'external content');
+    makeDirectoryLink(alias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    const { uninstall } = await import('../installService');
+    const { shell } = await import('electron');
+    const target = inspectLocalSkillTarget(source, [alias])!;
+    expect(target.linkOnly).toBe(true);
+    expect(await uninstall(source, target)).toEqual({ success: true });
+    expect(shell.trashItem).toHaveBeenCalledWith(alias);
+    expect(fs.existsSync(alias)).toBe(false);
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
+  });
+
+  it('rejects a source replaced while registry inspection is pending', async () => {
+    const { source, target } = await localFixture('replaced');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockImplementationOnce(async () => {
+      fs.renameSync(source, source + '-old');
+      fs.mkdirSync(source);
+      fs.writeFileSync(path.join(source, 'SKILL.md'), 'replacement');
+      return null;
+    });
+    const { uninstall } = await import('../installService');
+    const { shell } = await import('electron');
+    expect((await uninstall(source, target)).success).toBe(false);
+    expect(shell.trashItem).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('replacement');
+  });
+
+  it('retries metadata cleanup without trashing a second time', async () => {
+    const { source, target } = await localFixture('cleanup-retry');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    vi.mocked(registryService.removeInstall).mockRejectedValueOnce(new Error('disk unavailable')).mockResolvedValue(undefined);
+    const { uninstall, retryUninstallCleanup } = await import('../installService');
+    const { shell } = await import('electron');
+    const result = await uninstall(source, target);
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error('uninstall failed');
+    expect(result.cleanupToken).toBeTruthy();
+    expect(await retryUninstallCleanup(result.cleanupToken!, () => true)).toBe(true);
+    expect(shell.trashItem).toHaveBeenCalledTimes(1);
+    expect(registryService.removeInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a restored installation untouched when retrying cleanup', async () => {
+    const { source, target } = await localFixture('cleanup-restored');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    vi.mocked(registryService.removeInstall).mockRejectedValueOnce(new Error('disk unavailable'));
+    const { uninstall, retryUninstallCleanup } = await import('../installService');
+    const result = await uninstall(source, target);
+    if (!result.success || !result.cleanupToken) throw new Error('expected retry receipt');
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'restored');
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(registryService.removeInstall).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('restored');
   });
 
   it('keeps the previous install intact when extraction fails during forced update', async () => {
@@ -204,7 +324,7 @@ describe('skillhub/installService', () => {
     expect(fs.readFileSync(path.join(finalDir, 'SKILL.md'), 'utf-8')).toBe('old content');
   });
 
-  it('rejects uninstall outside a cloud capability boundary for market installs', async () => {
+  it('trashes a market install without requiring cloud capabilities', async () => {
     const finalDir = path.join(TEST_ROOT, '.agents', 'skills', 'market-only');
     fs.mkdirSync(finalDir, { recursive: true });
     fs.writeFileSync(path.join(finalDir, 'SKILL.md'), 'content', 'utf-8');
@@ -220,7 +340,7 @@ describe('skillhub/installService', () => {
       updatedAt: 1,
       origin: 'installed',
     });
-    vi.mocked(getAppCapabilities).mockReturnValueOnce({
+    vi.mocked(getAppCapabilities).mockReturnValue({
       canUseCindyAccountServices: false,
       canUseCindyGateway: false,
       canUseDeviceLink: false,
@@ -229,12 +349,8 @@ describe('skillhub/installService', () => {
       canUseCindyHeartbeat: false,
     });
 
-    await expect(uninstall(finalDir)).resolves.toEqual({
-      success: false,
-      errorCode: 'AUTH_REQUIRED',
-      message: 'SkillHub 卸载需要 Cindy 云端账号',
-    });
-    expect(fs.existsSync(finalDir)).toBe(true);
+    await expect(uninstall(finalDir)).resolves.toEqual({ success: true });
+    expect(fs.existsSync(finalDir)).toBe(false);
   });
 
   it('allows uninstalling an imported skill without cloud login', async () => {
@@ -248,7 +364,7 @@ describe('skillhub/installService', () => {
     const { uninstall } = await import('../installService');
 
     vi.mocked(getCurrentUserId).mockReturnValueOnce(null);
-    vi.mocked(registryService.getInstall).mockResolvedValueOnce({
+    vi.mocked(registryService.getInstall).mockResolvedValue({
       version: '0.1.0',
       authorId: '',
       folderHash: 'hash',
@@ -957,7 +1073,7 @@ describe('skillhub/installService', () => {
     });
   });
 
-  it('rejects local mode uninstall of a market-installed skill while cloud is unavailable', async () => {
+  it('trashes a market install in local mode while cloud is unavailable', async () => {
     const finalDir = path.join(TEST_ROOT, 'local-project', '.agents', 'skills', 'local-skill');
     fs.mkdirSync(finalDir, { recursive: true });
     fs.writeFileSync(path.join(finalDir, 'SKILL.md'), 'content', 'utf-8');
@@ -976,7 +1092,7 @@ describe('skillhub/installService', () => {
       updatedAt: 1,
       origin: 'installed',
     });
-    vi.mocked(getAppCapabilities).mockReturnValueOnce({
+    vi.mocked(getAppCapabilities).mockReturnValue({
       canUseCindyAccountServices: false,
       canUseCindyGateway: false,
       canUseDeviceLink: false,
@@ -987,11 +1103,8 @@ describe('skillhub/installService', () => {
 
     const result = await uninstall(finalDir);
 
-    expect(result).toMatchObject({
-      success: false,
-      errorCode: 'AUTH_REQUIRED',
-    });
-    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(result).toEqual({ success: true });
+    expect(fs.existsSync(finalDir)).toBe(false);
     vi.mocked(getCurrentDataOwnerId).mockReturnValue('user-1');
   });
 
@@ -1016,7 +1129,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     const { uninstall } = await import('../installService');
     vi.mocked(getCurrentUserId).mockReturnValue('user-1');
-    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.getInstall).mockImplementation(async (_name, installPath) => installPath === logicalDir ? registryEntry : null);
     vi.mocked(registryService.readManifest).mockResolvedValue({
       schemaVersion: 1,
       skillName,

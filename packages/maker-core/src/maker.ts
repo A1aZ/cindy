@@ -1292,10 +1292,14 @@ export class Maker {
         && sessionMeta.reviewMode !== true
         && !sessionMeta.remoteHostId
       ));
-    const result = await this.requireAgent(agentKind).listAgentSkills({
+    const agent = this.requireAgent(agentKind);
+    const filter = (result: ListAgentSkillsResult) => agent.filterActiveSkillCommands(
+      result, agentOpts.remoteHostId ?? sessionMeta?.remoteHostId ?? undefined,
+    );
+    const result = filter(await agent.listAgentSkills({
       ...agentOpts,
       includeManagedPiPackages,
-    });
+    }));
     if (agentKind !== 'pi' || !sessionId) return result;
     const session = this.getSession(sessionId);
     if (
@@ -1305,7 +1309,7 @@ export class Maker {
     ) {
       return result;
     }
-    return mergePiRuntimeSkillStatuses(result, session.getRuntimeCapabilities());
+    return filter(await mergePiRuntimeSkillStatuses(result, session.getRuntimeCapabilities()));
   }
 
   /** ChatInput `@` palette entries, routed by agent kind. */

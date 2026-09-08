@@ -126,6 +126,7 @@ function createAgent(
       extraDirs: { supported: false },
     },
     startSession,
+    filterActiveSkillCommands: (result: unknown) => result,
     async dispose() {},
   } as unknown as BaseAgent;
 }

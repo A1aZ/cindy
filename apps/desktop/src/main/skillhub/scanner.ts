@@ -1,3 +1,5 @@
+import { isCindySkillEnabled } from './activationPreferences';
+import { inspectLocalSkillTarget } from './localSkillTarget';
 /**
  * SkillHub Scanner — 商店层 (registry / market) 视图组装。
  *
@@ -38,6 +40,12 @@ export interface SkillFileEntry {
 }
 
 export interface Skill {
+  /** Local Cindy override, independent of each engine's native availability. */
+  cindyEnabled?: boolean;
+  canUninstall?: boolean;
+  uninstallLinkOnly?: boolean;
+  /** All lexical discovery aliases; Main owns their validation. */
+  discoveryPaths?: string[];
   /**
    * Stable id — React key，含 engine 前缀防跨引擎同名冲突。同一 engine 下
    * 若 URL 基键重复，会再追加 canonical source path 的不可逆 hash。
@@ -324,6 +332,12 @@ export async function scanAllSkills(
       frontmatter: c.frontmatter,
       parseError: c.parseError,
       registryEntry: null,            // 下面 join 阶段填
+      ...(c.kind === 'skill' ? (() => {
+        const discoveryPaths = all.map((item) => item.absolutePath);
+        const target = inspectLocalSkillTarget(realPath, discoveryPaths);
+        return { cindyEnabled: isCindySkillEnabled(realPath), discoveryPaths,
+          canUninstall: target !== null, uninstallLinkOnly: target?.linkOnly ?? false };
+      })() : {}),
       ...(project ? { projectRoot: project.projectRoot } : {}),
       ...(projectHash ? { projectHash } : {}),
     };

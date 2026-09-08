@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skillhub-ipc-management-'));
+afterAll(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+const setCindySkillEnabled = vi.fn(async () => undefined);
+vi.mock('../activationPreferences', () => ({ setCindySkillEnabled }));
 
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
 const showOpenDialog = vi.fn();
@@ -603,22 +611,52 @@ describe('registerSkillhubIpc usage handlers', () => {
     });
   });
 
-  it('refreshes the Codex cwd cache after uninstalling a project skill', async () => {
-    installServiceMocks.uninstall.mockResolvedValueOnce({
-      success: true,
-      projectWorkingDir: '/project',
-    });
+  async function scanLocalFixture() {
+    const project = fs.mkdtempSync(path.join(fixtureRoot, 'project-'));
+    const source = path.join(project, '.agents', 'skills', 'local');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'local skill');
+    const absolutePath = fs.realpathSync.native(source);
+    getAllowedProjectRoots.mockResolvedValue([project]);
+    scanAllSkills.mockResolvedValue({ skills: [{
+      kind: 'skill', scope: 'project', name: 'local', absolutePath,
+      discoveredPath: source, projectRoot: project,
+    }], sources: [] });
+    const event = { sender: { id: 71, once: vi.fn() } };
+    await handlers.get('skillhub:scan')!(event, { projects: [{ projectRoot: project, hash: 'fixture' }] });
+    return { event, absolutePath, project };
+  }
+
+  it('refreshes the Codex cwd cache after uninstalling a granted project skill', async () => {
+    const { event, absolutePath, project } = await scanLocalFixture();
+    installServiceMocks.uninstall.mockResolvedValueOnce({ success: true, projectWorkingDir: project });
     listAgentSkills.mockResolvedValueOnce({ skills: [] });
-    const handler = handlers.get('skillhub:uninstall');
+    expect(await handlers.get('skillhub:uninstall')!(event, { absolutePath })).toEqual({ success: true });
+    expect(listAgentSkills).toHaveBeenCalledWith('codex', { workingDir: project, forceReload: true });
+    expect(installServiceMocks.uninstall).toHaveBeenCalledWith(absolutePath,
+      expect.objectContaining({ sourcePath: absolutePath, linkOnly: false }), expect.any(Function));
+  });
 
-    const result = await handler?.({}, {
-      absolutePath: '/project/.agents/skills/project-skill',
-    });
+  it('allows toggling an unregistered local Skill and rejects another renderer', async () => {
+    const { event, absolutePath } = await scanLocalFixture();
+    const handler = handlers.get('skillhub:set-enabled')!;
+    expect(await handler(event, { absolutePath, enabled: false })).toEqual({ cindyEnabled: false });
+    expect(setCindySkillEnabled).toHaveBeenCalledWith(absolutePath, false, expect.any(Function));
+    await expect(handler({ sender: { id: 72 } }, { absolutePath, enabled: false }))
+      .rejects.toThrow('PRECONDITION_FAILED');
+    expect(setCindySkillEnabled).toHaveBeenCalledTimes(1);
+  });
 
-    expect(result).toEqual({ success: true });
-    expect(listAgentSkills).toHaveBeenCalledWith('codex', {
-      workingDir: '/project',
-      forceReload: true,
-    });
+  it('rejects owner changes and replaced sources before mutation', async () => {
+    const { event, absolutePath } = await scanLocalFixture();
+    const uninstall = handlers.get('skillhub:uninstall')!;
+    getCurrentDataOwnerId.mockReturnValue('other-owner');
+    await expect(uninstall(event, { absolutePath })).rejects.toThrow('PRECONDITION_FAILED');
+    getCurrentDataOwnerId.mockReturnValue('local-v1');
+    fs.renameSync(absolutePath, `${absolutePath}-old`);
+    fs.mkdirSync(absolutePath);
+    fs.writeFileSync(path.join(absolutePath, 'SKILL.md'), 'replacement');
+    await expect(uninstall(event, { absolutePath })).rejects.toThrow('PRECONDITION_FAILED');
+    expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
   });
 });

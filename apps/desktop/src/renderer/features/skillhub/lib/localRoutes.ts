@@ -5,7 +5,9 @@ interface LocalSkillRouteEntry {
   scope: SkillhubScope;
   name: string;
   absolutePath: string;
+  mdPath?: string;
   discoveredPath?: string;
+  discoveryPaths?: string[];
   projectHash?: string;
   sourceKey?: string;
   requiresSourceKey?: boolean;
@@ -24,6 +26,18 @@ interface LocalSkillRouteParams {
   kind?: string;
   projectHash?: string;
   name?: string;
+}
+
+/** Resolve a palette's SKILL.md path after the SkillHub scanner has loaded. */
+export function buildLocalSkillPathRoute(path: string): string {
+  return `/skillhub/local/by-path?${new URLSearchParams({ path }).toString()}`;
+}
+
+function skillDirectoryPath(path: string): string {
+  const windows = /^[a-z]:[\\/]|^\\\\/i.test(path);
+  const normalized = (windows ? path.replace(/\\/g, '/') : path)
+    .replace(/\/+$/, '').replace(/\/skill\.md$/i, '');
+  return windows ? normalized.toLowerCase() : normalized;
 }
 
 /** Builds a local detail URL while preserving the legacy pathname contract. */
@@ -45,6 +59,13 @@ export function findLocalSkillRouteEntry<T extends LocalSkillRouteEntry>(
   searchParams: Pick<URLSearchParams, 'get'>,
 ): T | null {
   const { kind, projectHash, name } = params;
+  const commandPath = searchParams.get('path');
+  if (!kind && !name && commandPath) {
+    const target = skillDirectoryPath(commandPath);
+    return skills.find((skill) => skill.kind === 'skill' && [
+      skill.absolutePath, skill.mdPath, skill.discoveredPath, ...(skill.discoveryPaths ?? []),
+    ].some((path) => path && skillDirectoryPath(path) === target)) ?? null;
+  }
   if (!kind || !name) return null;
   const decodedName = decodeURIComponent(name);
   const engine = searchParams.get('engine');

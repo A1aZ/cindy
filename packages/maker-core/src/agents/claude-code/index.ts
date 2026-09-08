@@ -173,6 +173,7 @@ import type {
   MemoryResetResult,
 } from '../../types/memory.js';
 import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
+import { claudeDisabledSkillOverrides } from '../shared/skill-activation.js';
 import { scanClaudeCustomizations } from './customization-scanner.js';
 import {
   REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
@@ -2366,6 +2367,13 @@ export class ClaudeCodeAgent extends BaseAgent {
     // (eg. summarized reasoning UI 本地有 remote 没)。getter 让 memOverride /
     // mutableFastMode 读最新值 (setMemory / setFastMode 运行时改) 而不是 buildQuery
     // 时快照。装配逻辑(含 apiKeyHelper 恒置空的鉴权防线)在 flag-settings.ts。
+    const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
+      ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
+    const disabledSkillOverrides = disabledSkillPaths.length > 0
+      ? claudeDisabledSkillOverrides((await scanClaudeCustomizations({
+          workingDirs: [opts.workingDir], kinds: ['skill'],
+        })).items, disabledSkillPaths)
+      : {};
     const buildSettings = (): Settings => {
       const settings = buildClaudeFlagSettings({
         showThinkingSummaries,
@@ -2383,6 +2391,9 @@ export class ClaudeCodeAgent extends BaseAgent {
         botSkillPolicy: reviewMode ? undefined : opts.botRuntimeProfile?.skillPolicy,
         capabilityRouting: reviewMode ? undefined : this.deps.capabilityRouting,
       });
+      if (Object.keys(disabledSkillOverrides).length > 0) {
+        settings.skillOverrides = { ...settings.skillOverrides, ...disabledSkillOverrides };
+      }
       if (!reviewMode) return settings;
       return {
         ...settings,

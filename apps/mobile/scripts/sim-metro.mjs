@@ -1,5 +1,5 @@
 // 模拟器 / Metro 端口归属与 git env 的共享判断,供 sim-start.mjs / sim-rebuild.mjs 复用,
-// 避免两边各自重复一套(以及"一个脚本加了校验、另一个忘了"的不一致)。macOS 专用(lsof/ps -E)。
+// 避免两边各自重复一套(以及"一个脚本加了校验、另一个忘了"的不一致)。
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -73,7 +73,8 @@ export function clearMetroOwner(port, pid) {
 
 function readMetroOwner(port) {
   try {
-    return JSON.parse(readFileSync(metroOwnerPath(port), 'utf8'));
+    const file = metroOwnerPath(port);
+    return { ...JSON.parse(readFileSync(file, 'utf8')), recordedAtMs: statSync(file).mtimeMs };
   } catch {
     return null;
   }
@@ -88,19 +89,65 @@ function processAlive(pid) {
   }
 }
 
+/**
+ * Snapshot only process identity, avoiding command lines and environment data.
+ * @param {(file: string, args: string[], options: import('node:child_process').ExecFileSyncOptionsWithStringEncoding) => string} [run]
+ */
+export function windowsProcessSnapshot(run = execFileSync) {
+  try {
+    const output = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, @{Name='StartedAtMs';Expression={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()}} | ConvertTo-Json -Compress",
+    ], { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
+    const entries = JSON.parse(String(output));
+    return (Array.isArray(entries) ? entries : [entries]).filter(Boolean).map((entry) => ({
+      pid: entry.ProcessId,
+      parentPid: entry.ParentProcessId,
+      startedAtMs: entry.StartedAtMs,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function windowsOwnerOwnsListener(owner, listener, processes) {
+  const launcherPid = owner?.launcherPid ?? owner?.pid;
+  if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0
+    || !Number.isSafeInteger(launcherPid) || launcherPid <= 0
+    || !Number.isFinite(owner.recordedAtMs)) return false;
+
+  const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
+  const launcher = byPid.get(launcherPid);
+  // A process created after the owner file was written cannot be its launcher,
+  // even if Windows has reused that PID. File time also covers existing owners.
+  if (!launcher || !Number.isFinite(launcher.startedAtMs)
+    || launcher.startedAtMs > owner.recordedAtMs) return false;
+
+  let current = byPid.get(Number(listener));
+  const seen = new Set();
+  while (current && !seen.has(current.pid)) {
+    if (!Number.isFinite(current.startedAtMs)) return false;
+    if (current.pid === launcherPid) return true;
+    seen.add(current.pid);
+    const parent = byPid.get(current.parentPid);
+    // Windows retains ParentProcessId after a parent exits. A newer process with
+    // that PID is not the parent, so do not follow that link during takeover.
+    if (!parent || !Number.isFinite(parent.startedAtMs)
+      || parent.startedAtMs > current.startedAtMs) return false;
+    current = parent;
+  }
+  return false;
+}
+
 /** Probe a Metro listener with a worktree/source identity on every host OS. */
-export function probeMetroOwnership(port) {
-  const pid = listenerPid(port);
+export function probeMetroOwnership(port, options = {}) {
+  const pid = (options.listenerPid ?? listenerPid)(port);
   if (!pid) return null;
-  if (process.platform !== 'win32') {
+  if ((options.platform ?? process.platform) !== 'win32') {
     return { pid, cwd: cwdOfPid(pid), source: gitSourceOfPid(pid) };
   }
-  const owner = readMetroOwner(port);
-  const listenerMatchesOwner = Number(owner?.pid) === Number(pid);
-  const ownerProcessAlive = Number.isInteger(owner?.launcherPid)
-    ? processAlive(owner.launcherPid)
-    : listenerMatchesOwner && processAlive(owner.pid);
-  if (!owner || !Number.isInteger(owner.pid) || !ownerProcessAlive) {
+  const owner = (options.readOwner ?? readMetroOwner)(port);
+  if (!owner || !windowsOwnerOwnsListener(owner, pid,
+    (options.processSnapshot ?? windowsProcessSnapshot)())) {
     return { pid, cwd: null, source: null };
   }
   return {

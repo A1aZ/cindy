@@ -8532,6 +8532,9 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
             const ownsSession = getStickySessionDeviceId(p.sessionId) === push.deviceId;
             if (Object.prototype.hasOwnProperty.call(p.patch, 'clearedAt')) {
               observeRemoteInputClearBoundary(p.sessionId, p.patch.clearedAt);
+              if (!terminal && ownsSession && typeof p.patch.clearedAt === 'string' && getRemoteHistoryView(p.sessionId)) {
+                reloadMessages(p.sessionId);
+              }
             }
             remoteProjectsStore.applyPatch(push.deviceId, p.sessionId, p.patch);
             if (terminal && ownsSession) {

@@ -1392,7 +1392,19 @@ export function routeFrame(env: Envelope, handlers: {
     return;
   }
   remoteSessionStore.applyRemotePush(env.src, push.channel, push.payload);
-  if (historyView?.getSnapshot().ready && (push.channel === 'local-db:messages:created' || push.channel === 'maker:status-changed')) historyView.invalidate();
+  const patch = (push.payload as { patch?: { clearedAt?: unknown; status?: unknown } } | null)?.patch;
+  if (historyView && push.channel === 'local-db:sessions:patched'
+    && (patch?.status === 'deleted' || patch?.status === 'archived')) {
+    historyView.setActive(false);
+    historyView.reset();
+  } else if (historyView && push.channel === 'local-db:sessions:patched' && typeof patch?.clearedAt === 'string') {
+    // reset switches the screen back to its raw mirror until the fresh view arrives.
+    // Retire that mirror too so a failed refresh cannot reveal pre-clear messages.
+    remoteSessionStore.invalidateSessionMessageWindow(historySessionId as string, env.src);
+    historyView.reset();
+  } else if (historyView && push.channel === 'local-db:messages:deleted') {
+    historyView.reset();
+  } else if (historyView?.getSnapshot().ready && (push.channel === 'local-db:messages:created' || push.channel === 'maker:status-changed')) historyView.invalidate();
 }
 
 /** provider revision 后并行重拉所有 agent 的能力；旧代或异常结果都不触碰当前页面。 */

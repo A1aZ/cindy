@@ -161,6 +161,10 @@ function makeFakeHost(deviceId: string, deviceName: string) {
       messages.set(sid, arr);
       if (!opts?.lossy) pushCb?.({ deviceId, channel: 'local-db:messages:created', payload: { sessionId: sid, message: msg } });
     },
+    hostDelete(sid: string, clientIds: string[]): void {
+      messages.set(sid, (messages.get(sid) ?? []).filter((row) => !clientIds.includes(row.clientId)));
+      pushCb?.({ deviceId, channel: 'local-db:messages:deleted', payload: { sessionId: sid, clientIds } });
+    },
     /** 被控端改某会话设置 → 广播 sessions:patched(控制端镜像收敛)。 */
     hostPatch(sid: string, patch: Record<string, unknown>): void {
       sessionsMeta.set(sid, { ...(sessionsMeta.get(sid) ?? {}), ...patch });
@@ -584,6 +588,33 @@ describe('device-link controller mirror — end-to-end scenarios', () => {
       makerChatStore.purgeSession(s);
       vi.useRealTimers();
     }
+  });
+
+  it.each(['delete', 'clear'])('retires loaded older projection pages after a remote %s', async (operation) => {
+    const s = sid();
+    host.enableHistoryView();
+    const rows = Array.from({ length: 30 }, (_, index) => dbMessage(s, String(index), 'visible',
+      new Date(1_750_000_000_000 + index * 1000).toISOString(), 'user'));
+    host.seedSession(s, { clearedAt: null }, rows);
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+    makerChatStore.ensureInitialMessages(s);
+    await flush(); await flush();
+    const view = getRemoteHistoryView(s)!;
+    await view.refresh(true);
+    expect(view.getSnapshot().items).toHaveLength(30);
+    host.hostPatch(s, { title: 'ordinary metadata' });
+    expect(view.getSnapshot().items).toHaveLength(30);
+    if (operation === 'delete') host.hostDelete(s, [rows[0].clientId]);
+    else {
+      host.seedSession(s, {}, []);
+      host.hostPatch(s, { clearedAt: '2026-09-08T10:00:00Z' });
+    }
+    expect(view.getSnapshot().items).toEqual([]);
+    expect(makerChatStore.getSnapshot(s).messages.some((row) => row.clientId === rows[0].clientId)).toBe(false);
+    await flush(); await flush();
+    expect(view.getSnapshot().ready).toBe(true);
+    expect(view.getSnapshot().items).toHaveLength(operation === 'delete' ? 20 : 0);
+    view.setActive(false);
   });
 
   it('returns to raw history when a previously capable Host is downgraded', async () => {

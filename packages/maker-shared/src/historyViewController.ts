@@ -152,7 +152,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     const generation = this.generation;
     this.intentQueue.tail = this.intentQueue.tail.catch(() => undefined).then(async () => {
       if (generation !== this.generation) return;
-      if (!this.state.ready) return;
+      // Empty replacement intents must release old interest even before a reset view is ready.
       const summaries = this.active ? historyWorkSummaries(this.state.items).filter((item) => this.state.expanded.has(item.key)) : [];
       await this.transport.expanded(summaries);
     }).catch(() => {

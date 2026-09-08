@@ -241,6 +241,28 @@ describe('shared history view lifecycle', () => {
     expect(intents.at(-1)).toEqual([]);
   });
 
+  it.each([false, true])('releases old detail interest when reset before a replacement page is ready (inactive=%s)', async (inactive) => {
+    const items = projectHistoryView([row(1, 'thinking', 'body')], true);
+    let first = true;
+    const expanded = vi.fn(async () => undefined);
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: () => first ? (first = false, Promise.resolve({ version: 1, items, hasMore: false, nextCursor: null }))
+        : new Promise(() => undefined),
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded,
+    });
+    await view.refresh();
+    view.setExpanded(items[0].key, true);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(expanded).toHaveBeenLastCalledWith([items[0].type === 'work' ? items[0].summary : undefined]);
+    if (inactive) view.setActive(false);
+    view.reset();
+    await new Promise((done) => setTimeout(done, 0));
+    expect(view.getSnapshot().ready).toBe(false);
+    expect(expanded).toHaveBeenLastCalledWith([]);
+    view.setActive(false);
+  });
+
   it('does not revive durable messages removed by rewind through the live overlay', async () => {
     const view = new HistoryViewController<HistoryMessageSource>({
       page: async () => ({ version: 1, items: projectHistoryView([row(1, 'user', 'kept')], false), hasMore: false, nextCursor: null }),

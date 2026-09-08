@@ -470,8 +470,9 @@ import {
   readSessionExtraDirsFromDb,
   readSessionWritableDirsFromDb,
   readSessionWorkingDirFromDb,
-  listVisibleActiveSessionIds,
+  listVisibleActiveSessionDirectoryGrants,
 } from '../maker-host/session-storage.js';
+import { libraryExtraDirSyncTargets } from './libraryExtraDirSyncTargets.js';
 import {
   clearSessionPersistState,
   consumeLastAssistantPersistId,
@@ -2967,7 +2968,7 @@ export function applyDirectoryGrants(
       persist: (patch) => persistSessionFields(sessionId, patch),
       terminate: () => maker.closeSession(sessionId),
     });
-    log.info(label, {
+    if (result.changed || result.rejectedCount > 0) log.info(label, {
       sessionId,
       requested: requestedDirs.length,
       kept: result.dirs.length,
@@ -3025,10 +3026,11 @@ async function syncLibraryReadonlyExtraDir(
     const grantRoot = libraryExtraDirSyncRoot;
     const focused = getFocusedGhostSessionId();
     if (generation !== libraryExtraDirSyncGeneration) return 'superseded';
-    const visible = await listVisibleActiveSessionIds();
+    const visible = await listVisibleActiveSessionDirectoryGrants();
     if (generation !== libraryExtraDirSyncGeneration) return 'superseded';
-    const targets = new Set(visible);
-    if (focused) targets.add(focused);
+    const targets = libraryExtraDirSyncTargets(
+      visible, new Set(getMaker().listActiveSessions().map((session) => session.id)), focused,
+    );
     let granted = false;
     for (const sessionId of targets) {
       if (generation !== libraryExtraDirSyncGeneration) return 'superseded';
@@ -3036,8 +3038,8 @@ async function syncLibraryReadonlyExtraDir(
       if (generation !== libraryExtraDirSyncGeneration) return 'superseded';
       const nextRoot = !remote && grantRoot && sessionId === focused ? grantRoot : null;
       try {
-        await applyLibraryReadonlyExtraDir(sessionId, nextRoot);
-        if (nextRoot) granted = true;
+        const applied = await applyLibraryReadonlyExtraDir(sessionId, nextRoot);
+        if (nextRoot && applied?.some(isLibraryExtraDirSlot)) granted = true;
       } catch (error) {
         log.warn('library extraDirs session sync failed', {
           sessionId,
@@ -3938,6 +3940,8 @@ export function installDesktopInteractionListener(session: {
         agentIslandInteractionEpoch,
       );
     });
+  }, (requestId, decision) => {
+    resolvePendingInteraction(requestId, decision);
   });
 }
 
@@ -5571,13 +5575,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   ipcMain.handle(MAKER_INVOKE.EXECUTE_DESKTOP_COMMAND, async (e, name: unknown, ctx: unknown) => {
+    if (name === 'cindy-make-doctor' || name === 'cindy-make') {
+      assertTrustedAppRendererEvent(e);
+      if (ctx != null && (typeof ctx !== 'object' || Array.isArray(ctx)))
+        throwIpcError('INVALID_PARAMS', 'Invalid Make context');
+    }
     if (typeof name !== 'string' || name.length === 0) {
       throwIpcError('INVALID_PARAMS', 'name required');
     }
     // senderWebContentsId 由 main 从 event.sender 填入(覆盖 renderer 传入的任何值),
     // 供需要"只回发起窗口"的命令(/issue)做定向 send。
     const c = { ...((ctx ?? {}) as DesktopCommandContext), senderWebContentsId: e.sender.id };
-    await getDesktopCommandRegistry().execute(name, c);
+    return getDesktopCommandRegistry().execute(name, c);
   });
 
   ipcMain.handle(

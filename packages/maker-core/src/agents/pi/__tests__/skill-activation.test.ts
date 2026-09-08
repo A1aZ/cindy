@@ -90,12 +90,26 @@ describe('bounded Pi disabled Skill alias discovery', () => {
   });
 
   it('caps enumeration in a wide directory instead of inspecting every file', () => {
-    for (let index = 0; index < 2200; index += 1) fs.writeFileSync(path.join(root, `f${index}`), '');
+    // Exercise a wide directory without creating thousands of files on Windows.
+    // Real paths, junctions and directory streams are covered by the other cases.
+    let reads = 0;
+    const close = vi.fn();
+    vi.spyOn(fs, 'opendirSync').mockReturnValue({
+      readSync: () => reads < 2200 ? { name: `f${reads++}` } : null,
+      closeSync: close,
+    } as unknown as fs.Dir);
+    vi.spyOn(fs.realpathSync, 'native').mockImplementation((entry) => String(entry));
+    const directoryStat = fs.statSync(root);
     vi.spyOn(performance, 'now').mockReturnValue(0);
-    const stat = vi.spyOn(fs, 'statSync');
+    const stat = vi.spyOn(fs, 'statSync').mockImplementation((entry) => ({
+      ...directoryStat, isDirectory: () => String(entry) === root,
+    }));
     const disabled = path.join(root, 'absent-skill');
     expect(piDisabledDiscoveryPaths([disabled], [root])).toEqual([disabled]);
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThanOrEqual(2048);
     expect(stat.mock.calls.length).toBeLessThanOrEqual(2048);
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('stops further filesystem visits when the time budget expires', () => {

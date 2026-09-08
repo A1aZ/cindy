@@ -65,7 +65,7 @@ describe('Skill activation preferences', () => {
     expect(reloaded.isCindySkillEnabled(source)).toBe(true);
   });
 
-  it.each(['success', 'enabled-source', 'content-failure', 'preference-failure', 'owner-changed'])('migrates disabled state with a local rename (%s)', async (scenario) => {
+  it.each(['success', 'enabled-source', 'backup-cleanup-failure', 'content-failure', 'preference-failure', 'owner-changed'])('migrates disabled state with a local rename (%s)', async (scenario) => {
     const { renameLocalSkill } = await import('../scanner');
     const { setCindySkillEnabled, readDisabledSkillPaths, skillActivationKey } = await import('../activationPreferences');
     const source = path.join(root, scenario, '.agents', 'skills', 'old-name');
@@ -77,6 +77,13 @@ describe('Skill activation preferences', () => {
     const before = [...readDisabledSkillPaths()];
     const oldKey = skillActivationKey(source);
     const realRename = fs.renameSync;
+    const realUnlink = fs.unlinkSync;
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+      if (scenario === 'backup-cleanup-failure' && String(file).startsWith(path.join(destination, 'SKILL.md.xdt-rename-'))) {
+        throw Object.assign(new Error('simulated locked backup'), { code: 'EPERM' });
+      }
+      return realUnlink(file);
+    });
     let injected = false;
     const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
       if (!injected && ((scenario === 'content-failure' && String(to) === path.join(destination, 'SKILL.md'))
@@ -88,12 +95,37 @@ describe('Skill activation preferences', () => {
     });
     try {
       const result = await renameLocalSkill({ absolutePath: source, newName: 'new-name' }, () => scenario !== 'owner-changed');
-      if (scenario === 'success' || scenario === 'enabled-source') {
+      if (scenario === 'success' || scenario === 'enabled-source' || scenario === 'backup-cleanup-failure') {
         expect(result).toEqual({ success: true, newAbsolutePath: destination });
         expect(readDisabledSkillPaths()).not.toContain(oldKey);
-        if (scenario === 'success') expect(readDisabledSkillPaths()).toContain(skillActivationKey(destination));
+        if (scenario !== 'enabled-source') expect(readDisabledSkillPaths()).toContain(skillActivationKey(destination));
         else expect(readDisabledSkillPaths()).not.toContain(skillActivationKey(destination));
         expect(fs.readFileSync(path.join(destination, 'SKILL.md'), 'utf8')).toContain('name: new-name');
+        if (scenario === 'backup-cleanup-failure') {
+          const backup = fs.readdirSync(destination).find((name) => name.startsWith('SKILL.md.xdt-rename-'))!;
+          expect(backup).toBeTruthy();
+          expect(fs.readFileSync(path.join(destination, backup), 'utf8')).toBe(content);
+          const { listSkillFolderChildren, readSkillRawFile } = await import('../scanner');
+          const { computeFolderHashDetailed } = await import('../folderHash');
+          const { pack } = await import('../zipPacker');
+          const { writeSnapshot, getSnapshotPath } = await import('../snapshot');
+          const { default: JSZip } = await import('jszip');
+          const visible = await listSkillFolderChildren({ dirPath: destination });
+          expect(visible).toEqual({ success: true, entries: [{ name: 'SKILL.md', kind: 'file' }] });
+          expect((await readSkillRawFile({ filePath: path.join(destination, backup) })).success).toBe(false);
+          const hash = await computeFolderHashDetailed(destination);
+          expect(hash.manifest.map((file) => file.path)).toEqual(['SKILL.md']);
+          const packed = await pack(destination);
+          expect(packed.manifest.files.map((file) => file.relPath)).toEqual(['SKILL.md']);
+          const zip = await JSZip.loadAsync(packed.buffer);
+          expect(Object.keys(zip.files)).toEqual(['SKILL.md']);
+          expect(await zip.file('SKILL.md')!.async('string')).toContain('name: new-name');
+          await writeSnapshot(destination, 'cleanup-failure');
+          expect(fs.readdirSync(getSnapshotPath('cleanup-failure'))).toEqual(['SKILL.md']);
+          realUnlink(path.join(destination, backup));
+          expect((await computeFolderHashDetailed(destination)).hash).toBe(hash.hash);
+          expect((await pack(destination)).sha256).toBe(packed.sha256);
+        }
       } else {
         expect(injected).toBe(scenario !== 'owner-changed');
         expect(result.success).toBe(false);
@@ -101,7 +133,7 @@ describe('Skill activation preferences', () => {
         expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe(content);
         expect(readDisabledSkillPaths()).toEqual(before);
       }
-    } finally { spy.mockRestore(); }
+    } finally { spy.mockRestore(); unlinkSpy.mockRestore(); }
   });
 
 });

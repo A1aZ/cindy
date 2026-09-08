@@ -123,10 +123,9 @@ interface RecentTitleDbRow {
 
 function toTitleMessageCandidate(row: RecentTitleDbRow): TitleMessageCandidate | null {
   const role = row.role === 'user' ? 'user' : 'assistant';
-  const text = extractText(row.content, role);
-  if (!text) return null;
-
   const agentMeta = parseTitleAgentMeta(row.agentMeta);
+  const text = extractTitleMessageText(row.content, role, agentMeta);
+  if (!text) return null;
   return {
     role,
     text,
@@ -135,6 +134,24 @@ function toTitleMessageCandidate(row: RecentTitleDbRow): TitleMessageCandidate |
     toolUseId: row.toolUseId ?? null,
     agentMeta,
   };
+}
+
+/** Use the persisted user-authored body before the caller applies its title budget. */
+function extractTitleMessageText(
+  content: string,
+  role: 'user' | 'assistant',
+  agentMeta: Record<string, unknown> | null,
+): string {
+  const source = agentMeta?.hookSource;
+  if (role === 'user' && source && typeof source === 'object' && !Array.isArray(source)) {
+    const userText = (source as Record<string, unknown>).userText;
+    if (typeof userText === 'string' && userText.trim()) {
+      // Match hook dispatch's empty-body fallback and preserve the existing
+      // synthetic-input filtering for authored text.
+      return extractText(JSON.stringify({ text: userText.trim() }), role);
+    }
+  }
+  return extractText(content, role);
 }
 
 function parseTitleAgentMeta(raw: string | null): Record<string, unknown> | null {
@@ -337,8 +354,9 @@ async function firstUserMessageWithClearedAt(
     .orderBy(asc(messages.createdAt), asc(messageRowid))
     .limit(OPENING_SCAN_LIMIT);
   for (const row of rows) {
-    if (!isVisibleTitleUser(parseTitleAgentMeta(row.agentMeta))) continue;
-    const text = extractText(row.content, 'user');
+    const agentMeta = parseTitleAgentMeta(row.agentMeta);
+    if (!isVisibleTitleUser(agentMeta)) continue;
+    const text = extractTitleMessageText(row.content, 'user', agentMeta);
     if (text) return { text, createdAt: row.createdAt ?? null, rowid: row.rowid };
   }
   return { text: '', createdAt: null, rowid: null };
@@ -367,13 +385,9 @@ export async function regenerateTitleMaterial(
     .where(eq(messages.sessionId, sessionId))
     .get();
   const inFlightAfterSnapshotSubmit = readLatestTurnIsInFlight();
-  const [clearedAt, snapshot] = await Promise.all([
-    sessionClearedAt(sessionId),
-    snapshotPromise,
-  ]);
+  const [clearedAt, snapshot] = await Promise.all([sessionClearedAt(sessionId), snapshotPromise]);
   const snapshotUpperRowid = snapshot?.rowid ?? null;
-  const snapshotLatestTurnIsInFlight =
-    inFlightBeforeSnapshot || inFlightAfterSnapshotSubmit;
+  const snapshotLatestTurnIsInFlight = inFlightBeforeSnapshot || inFlightAfterSnapshotSubmit;
   const [recent, opening] = await Promise.all([
     recentMessagesWithClearedAt(
       sessionId,

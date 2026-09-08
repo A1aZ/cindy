@@ -69,6 +69,7 @@ export class RoutineEngine {
   };
   private readonly sources = new Map<string, RoutineSource>();
   private readonly eventAdmission = new RoutineEventAdmission();
+  private readonly sourceAdmission = new RoutineEventAdmission();
   private readonly active = new Map<string, AbortController>();
   private readonly activeTasks = new Map<string, Promise<void>>();
   private readonly blockedBots = new Set<string>();
@@ -157,13 +158,29 @@ export class RoutineEngine {
   }
 
   registerSource(source: RoutineSource): void {
-    this.sources.set(source.id, structuredClone(source));
-    this.notifyChanged();
+    // A separate quota prevents status chatter from exhausting event publication capacity.
+    const release = this.sourceAdmission.acquire(source.id, this.deps.now());
+    try {
+      const existing = this.sources.get(source.id);
+      if (
+        existing?.name === source.name && existing.status === source.status &&
+        JSON.stringify(existing.events) === JSON.stringify(source.events)
+      ) return;
+      const next = structuredClone(source);
+      // Status reports do not own the runtime's last successful event timestamp.
+      if (existing?.lastEventAt !== undefined) next.lastEventAt = existing.lastEventAt;
+      this.sources.set(source.id, next);
+      this.notifyChanged();
+    } finally {
+      release();
+    }
   }
 
   removeSource(sourceId: string): void {
     const source = this.sources.get(sourceId);
-    if (source) source.status = "disconnected";
+    if (!source || source.status === "disconnected") return;
+    // Host-observed disconnects must still take effect when a plugin has exhausted its quota.
+    source.status = "disconnected";
     this.notifyChanged();
   }
 

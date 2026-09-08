@@ -73,3 +73,75 @@ describe('Plugin routine publisher', () => {
     ).toBe(false);
   });
 });
+
+async function statusFixture() {
+  let now = 1000;
+  const changed = vi.fn();
+  const engine = new RoutineEngine({
+    load: async () => null, save: vi.fn(async () => {}), execute: vi.fn(async () => ({})),
+    id: () => 'id', now: () => now, changed, onError: vi.fn(),
+  });
+  await engine.start();
+  return {
+    engine, changed,
+    advance: () => { now += 60_000; },
+    request: (payload: unknown, plugin = ghost) => handleRoutineRequest(plugin, payload, async () => engine, () => true),
+  };
+}
+
+it('does not broadcast unchanged source reports or erase runtime event metadata', async () => {
+  const f = await statusFixture();
+  await f.request({ action: 'status', status: 'listening' });
+  await f.request({ action: 'publish', event: { id: 'first', type: 'new', occurredAt: 1, data: {} } });
+  f.changed.mockClear();
+  f.advance();
+  expect(await f.request({ action: 'status', status: 'listening' })).toEqual({ ok: true });
+  expect(f.changed).not.toHaveBeenCalled();
+  expect(f.engine.listSources()[0].lastEventAt).toBe(1000);
+  const renamed = { ...ghost, manifest: { ...ghost.manifest, name: 'Renamed Mail' } };
+  expect(await f.request({ action: 'status', status: 'listening' }, renamed)).toEqual({ ok: true });
+  expect(f.changed).toHaveBeenCalledOnce();
+  expect(f.engine.listSources()[0]).toMatchObject({ name: 'Renamed Mail', lastEventAt: 1000 });
+  await f.request({ action: 'status', status: 'disconnected' }, renamed);
+  await f.request({ action: 'status', status: 'disconnected' }, renamed);
+  expect(f.changed).toHaveBeenCalledTimes(2);
+  await f.engine.stop();
+});
+
+it('limits repeated status requests without starving events or blocking host disconnects', async () => {
+  const f = await statusFixture();
+  for (let i = 0; i < 60; i++) expect(await f.request({ action: 'status', status: 'listening' })).toEqual({ ok: true });
+  expect(f.changed).toHaveBeenCalledOnce();
+  expect(await f.request({ action: 'status', status: 'error' })).toMatchObject({ ok: false, message: expect.stringContaining('rate limit') });
+  expect(f.changed).toHaveBeenCalledOnce();
+  expect(f.engine.listSources()[0].status).toBe('listening');
+  expect(await f.request({ action: 'publish', event: { id: 'first', type: 'new', occurredAt: 1, data: {} } })).toMatchObject({ ok: true });
+  f.changed.mockClear();
+  f.engine.removeSource('plugin:mail');
+  f.engine.removeSource('plugin:mail');
+  f.engine.removeSource('plugin:unknown');
+  expect(f.changed).toHaveBeenCalledOnce();
+  expect(f.engine.listSources()[0].status).toBe('disconnected');
+  expect(await f.request({ action: 'status', status: 'listening' })).toMatchObject({ ok: false });
+  const other = { ...ghost, manifest: { ...ghost.manifest, id: 'other' } };
+  expect(await f.request({ action: 'status', status: 'listening' }, other)).toEqual({ ok: true });
+  f.advance();
+  expect(await f.request({ action: 'status', status: 'listening' })).toEqual({ ok: true });
+  expect(f.engine.listSources()[0]).toMatchObject({ status: 'listening', lastEventAt: 1000 });
+  await f.engine.stop();
+});
+
+it('caps aggregate status reports across plugin identities', async () => {
+  const f = await statusFixture();
+  for (let i = 0; i < 240; i++) {
+    const plugin = { ...ghost, manifest: { ...ghost.manifest, id: `plugin-${Math.floor(i / 60)}` } };
+    expect(await f.request({ action: 'status', status: 'listening' }, plugin)).toEqual({ ok: true });
+  }
+  expect(f.changed).toHaveBeenCalledTimes(4);
+  expect(await f.request({ action: 'status', status: 'listening' })).toMatchObject({ ok: false, message: expect.stringContaining('rate limit') });
+  expect(f.changed).toHaveBeenCalledTimes(4);
+  f.advance();
+  expect(await f.request({ action: 'status', status: 'listening' })).toEqual({ ok: true });
+  expect(f.changed).toHaveBeenCalledTimes(5);
+  await f.engine.stop();
+});

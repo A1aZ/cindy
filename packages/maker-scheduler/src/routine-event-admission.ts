@@ -12,7 +12,7 @@ export const ROUTINE_EVENT_LIMITS = {
   receiptBytesGlobal: 2 * 1024 * 1024,
 } as const;
 
-/** Reserve before parsing or joining the durable write queue, including duplicate requests. */
+/** Reserve before cloning/queuing plugin requests; separate instances isolate event and status quotas. */
 export class RoutineEventAdmission {
   private readonly windows = new Map<string, { start: number; count: number }>();
   private global = { start: 0, count: 0 };
@@ -26,10 +26,10 @@ export class RoutineEventAdmission {
     if (now - this.global.start >= limits.windowMs) this.global = { start: now, count: 0 };
     const window = this.windows.get(sourceId) ?? { start: now, count: 0 };
     if (window.count >= limits.perSource || this.global.count >= limits.global)
-      throw new Error('Routine event rate limit reached; retry after 60 seconds');
+      throw new Error('Routine request rate limit reached; retry after 60 seconds');
     const pending = this.pending.get(sourceId) ?? 0;
     if (pending >= limits.pendingPerSource || this.totalPending >= limits.pendingGlobal)
-      throw new Error('Routine event intake is busy; retry later');
+      throw new Error('Routine request intake is busy; retry later');
     window.count += 1;
     this.global.count += 1;
     this.windows.set(sourceId, window);

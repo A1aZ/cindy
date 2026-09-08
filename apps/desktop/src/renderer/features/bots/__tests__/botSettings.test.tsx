@@ -8,10 +8,10 @@ import { beginProvidersRefresh, commitProvidersSnapshot } from '@/lib/providersS
 vi.mock('@/state/modelVisibilityPrefs', () => ({ migrateModelVisibilityDefaults: vi.fn() }));
 
 vi.mock('@/hooks/useProviderOnboarding', () => ({
-  useProviderOnboarding: () => ({ visible: false }),
+  useProviderOnboarding: () => ({ visible: mocks.onboarding }),
 }));
 vi.mock('@/components/onboarding/ConnectProviderCard', () => ({
-  ConnectProviderCard: () => null,
+  ConnectProviderCard: () => <div data-testid="connect-provider-card" />,
 }));
 
 const translate = (key: string, opts?: Record<string, unknown>) =>
@@ -20,6 +20,8 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
+  onboarding: false,
+  readSession: vi.fn(),
   initialSearch: '' as string,
   profiles: [] as BotProfile[],
   params: {} as { botId?: string },
@@ -38,6 +40,8 @@ const mocks = vi.hoisted(() => ({
   })),
   openPath: vi.fn(async (): Promise<{ success: boolean; error?: string }> => ({ success: true })),
 }));
+
+vi.mock('@/lib/sessionService', () => ({ get: mocks.readSession }));
 
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
@@ -179,6 +183,8 @@ function renderSettings(overrides: Partial<BotProfile> = {}, initialSearch = 'se
 
 beforeEach(() => {
   mocks.navigate.mockReset();
+  mocks.onboarding = false;
+  mocks.readSession.mockReset();
   mocks.updateBotProfile.mockReset();
   mocks.updateBotProfile.mockImplementation(async (_id, patch) => ({
     id: 'bot-1',
@@ -204,6 +210,36 @@ afterEach(() => {
 });
 
 describe('Bot settings profile consolidation', () => {
+  it.each([true, false])('opens existing history without a model when onboarding is %s', async (onboarding) => {
+    const existing = bot({ capabilities: capabilities({ modelChain: [], model: '' }) });
+    mocks.profiles = [existing];
+    mocks.params = { botId: existing.id };
+    mocks.onboarding = onboarding;
+    mocks.readSession.mockResolvedValue({ id: existing.canonicalSessionId, status: 'active', source: 'bot', title: 'History', updatedAt: new Date().toISOString() });
+    const createCanonicalSession = vi.fn();
+    Object.assign(window.electronAPI, { localDb: { bots: { createCanonicalSession } } });
+    render(<BotsHomeView />);
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith('/bots/bot-1/session/bot-1-chat', { replace: true }));
+    expect(screen.queryByTestId('connect-provider-card')).toBeNull();
+    expect(screen.queryByTestId('model-selector')).toBeNull();
+    expect(createCanonicalSession).not.toHaveBeenCalled();
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'archived', 'foreign'])('requires a model before rebuilding a %s canonical task', async (state) => {
+    const existing = bot({ capabilities: capabilities({ modelChain: [], model: '' }) });
+    mocks.profiles = [existing];
+    mocks.params = { botId: existing.id };
+    if (state === 'missing') mocks.readSession.mockRejectedValue(new Error('missing'));
+    else mocks.readSession.mockResolvedValue({ status: state === 'archived' ? 'archived' : 'active', source: state === 'foreign' ? 'user' : 'bot' });
+    const createCanonicalSession = vi.fn();
+    Object.assign(window.electronAPI, { localDb: { bots: { createCanonicalSession } } });
+    render(<BotsHomeView />);
+    await screen.findByTestId('model-selector');
+    expect(createCanonicalSession).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
   it('opens a model picker for an existing empty-chain bot without retrying creation', async () => {
     const emptyBot = bot({ capabilities: capabilities({ modelChain: [], model: '' }), sessions: [], canonicalSessionId: undefined });
     mocks.profiles = [emptyBot];

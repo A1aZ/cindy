@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PluginSetupPrompt } from '@/components/new-chat/PluginSetupPrompt';
 import { readBotAuthorizationCard } from '../../../shared/botAuthorization';
-import { isRemoteSessionSticky } from '@/lib/makerTransport';
+import { isRemoteSessionSticky, makerApiForSticky } from '@/lib/makerTransport';
 import type { PluginSetupCommandInFlight } from '@/lib/makerChatStore';
 
 /** Same composable form for Host and plugin accounts, rendered in the transcript. */
@@ -38,7 +38,7 @@ function AuthorizationBody({
         remote={remote}
         commandInFlight={busy}
         onCommand={(requestId, action, actionId, values) => {
-          if (busy) return;
+          if (busy || (isRemoteSessionSticky(card.sessionId) && action !== 'cancel')) return;
           setFailed(false);
           setBusy({ requestId, action, actionId });
           const command =
@@ -49,7 +49,7 @@ function AuthorizationBody({
                   expectedRevision: card.snapshot.revision,
                   value: values.value,
                 })
-              : window.electronAPI.maker.resolveInteraction(requestId, {
+              : makerApiForSticky(card.sessionId).resolveInteraction(requestId, {
                   kind: 'plugin_setup',
                   action: action === 'cancel' ? 'cancel' : 'run_action',
                   ...(actionId ? { actionId } : {}),

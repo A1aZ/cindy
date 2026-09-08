@@ -1549,7 +1549,8 @@ describe('Cindy Core media invocation state and security boundary', () => {
     });
   });
 
-  it('下载地址失效后客户端自动刷新原任务地址，不重复生成', async () => {
+  it.each(['none', 'network', 'timeout', 'server', 'exhausted', 'rejected'])(
+    '下载地址失效后客户端刷新原任务地址（%s），不重复生成', async (failure) => {
     const asyncOperation = {
       ...operation(
         {
@@ -1590,7 +1591,18 @@ describe('Cindy Core media invocation state and security boundary', () => {
           { status: 200 },
         ),
       )
-      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }));
+    const failures = failure === 'none' ? 0 : failure === 'exhausted' ? 3 : failure === 'rejected' ? 1 : 2;
+    for (let index = 0; index < failures; index += 1) {
+      if (failure === 'server' || failure === 'rejected') {
+        mocks.outboundFetch.mockResolvedValueOnce(new Response('{}', { status: failure === 'server' ? 503 : 401 }));
+      } else {
+        const error = new Error('temporary refresh failure');
+        if (failure === 'timeout') error.name = 'AbortError';
+        mocks.outboundFetch.mockRejectedValueOnce(error);
+      }
+    }
+    mocks.outboundFetch
       .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'succeeded', video: 'https://cdn.example.com/refreshed.mp4' })))
       .mockResolvedValueOnce(new Response(MP4, { headers: { 'content-type': 'video/mp4' } }));
 
@@ -1602,12 +1614,22 @@ describe('Cindy Core media invocation state and security boundary', () => {
     const invocationId = prepared.invocation_id as string;
     await callCindyMedia({ action: 'request', invocationId, body: { content: [] } });
 
-    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject({
-      ok: true,
-      status: 'complete',
-    });
-    expect(mocks.rows.get(invocationId)?.state).toBe('complete');
-    expect(mocks.outboundFetch).toHaveBeenCalledTimes(5);
+    const result = await callCindyMedia({ action: 'poll', invocationId });
+    if (failure === 'exhausted' || failure === 'rejected') {
+      expect(result).toMatchObject({
+        ok: false, retryable: false,
+        errorCode: failure === 'rejected' ? 'UPSTREAM_REJECTED' : 'POLL_UNAVAILABLE',
+      });
+      expect(mocks.rows.get(invocationId)).toMatchObject({
+        state: 'pending',
+        responseJson: JSON.stringify({ status: 'succeeded', video: 'https://cdn.example.com/expired.mp4' }),
+      });
+      expect(mocks.outboundFetch).toHaveBeenCalledTimes(3 + failures);
+    } else {
+      expect(result).toMatchObject({ ok: true, status: 'complete' });
+      expect(mocks.rows.get(invocationId)?.state).toBe('complete');
+      expect(mocks.outboundFetch).toHaveBeenCalledTimes(5 + failures);
+    }
     expect(mocks.confirm).not.toHaveBeenCalled();
     expect(mocks.outboundFetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
   });

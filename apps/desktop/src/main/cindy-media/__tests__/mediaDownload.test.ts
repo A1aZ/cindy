@@ -158,15 +158,17 @@ describe('media download approval and network recovery', () => {
   it('shows the private endpoint and ordinary parameters without login or signature values', async () => {
     const ctx = context();
     mocks.fetch.mockRejectedValueOnce(new SsrFBlockedError('private'));
-    await download(ctx, 'https://test-user:test-password@known.example.com/media/view?operation=read&signature=test-signature#hidden-fragment');
+    await download(ctx, 'https://test-user:test-password@known.example.com/media/view?operation=read&signature=test-signature&sig=test-sig&OSSAccessKeyId=test-key-id#hidden-fragment');
     const request = ctx.confirm.mock.calls.at(-1)![0];
     expect(request.reasons).toEqual(['network']);
     const shown = new URL(request.source);
     expect(shown.pathname).toBe('/media/view');
     expect(shown.searchParams.get('operation')).toBe('read');
-    expect(shown.searchParams.get('signature')).toBe('[REDACTED]');
+    for (const key of ['signature', 'sig', 'OSSAccessKeyId']) {
+      expect(shown.searchParams.get(key)).toBe('[REDACTED]');
+    }
     expect(shown.hash).toBe('');
-    expect(JSON.stringify(ctx.confirm.mock.calls)).not.toMatch(/test-user|test-password|test-signature|hidden-fragment/);
+    expect(JSON.stringify(ctx.confirm.mock.calls)).not.toMatch(/test-user|test-password|test-signature|test-sig|test-key-id|hidden-fragment/);
   });
 
   it('a refreshed signed URL on the same origin reuses the operation approval', async () => {

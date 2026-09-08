@@ -1575,20 +1575,34 @@ async function pollInvocation(
     refreshExpiredUrl = true;
   }
   try {
-    const response = await dispatchRequest({
-      invocationId: invocation.id,
-      providerId: invocation.guide.connection.providerId,
-      modelId: invocation.modelId,
-      capability: invocation.capability,
-      connection: resolveConnection(invocation.guide.connection.providerId),
-      method: guide.method,
-      path: pollPath(guide.path, invocation.taskId),
-      headers: guide.headers,
-      body: pollBody(guide, invocation.taskId),
-      timeoutMs: guide.timeoutMs,
-      maxResponseBytes: guide.maxResponseBytes,
-      operation: 'poll',
-    });
+    let response: unknown;
+    for (let attempt = 0; ; attempt += 1) {
+      assertAuthScope(scope, invocation.owner);
+      try {
+        response = await dispatchRequest({
+          invocationId: invocation.id,
+          providerId: invocation.guide.connection.providerId,
+          modelId: invocation.modelId,
+          capability: invocation.capability,
+          connection: resolveConnection(invocation.guide.connection.providerId),
+          method: guide.method,
+          path: pollPath(guide.path, invocation.taskId),
+          headers: guide.headers,
+          body: pollBody(guide, invocation.taskId),
+          timeoutMs: guide.timeoutMs,
+          maxResponseBytes: guide.maxResponseBytes,
+          operation: 'poll',
+        });
+        break;
+      } catch (error) {
+        assertAuthScope(scope, invocation.owner);
+        if (!refreshExpiredUrl || attempt >= 2 ||
+            !(error instanceof MediaInvocationError) || error.code !== 'POLL_UNAVAILABLE') {
+          throw error;
+        }
+        await delay(250 * (attempt + 1), undefined, { signal: context?.signal });
+      }
+    }
     assertAuthScope(scope, invocation.owner);
     const rawStatus = valuesAtPath(response, guide.statusPath)[0];
     const status = typeof rawStatus === 'string' ? rawStatus : '';

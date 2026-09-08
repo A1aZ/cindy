@@ -233,6 +233,11 @@ async function startSchedulerInternal(deps: StartSchedulerDeps): Promise<Schedul
   return scheduler;
 }
 
+/** Cold-start probe for callers that own a durable deferred queue. */
+export function getSchedulerIfInitialized(): Scheduler | null {
+  return _scheduler;
+}
+
 export function getScheduler(): Scheduler {
   if (!_scheduler) {
     throw new Error('scheduler not started: call startScheduler() first');

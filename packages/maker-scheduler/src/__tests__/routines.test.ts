@@ -515,3 +515,48 @@ it('does not start execution if stop arrives while its running claim is being sa
   expect(f.execute).not.toHaveBeenCalled();
   expect(f.snapshot()?.runs[0].status).toBe('running');
 });
+
+it('rate-limits unmatched events before writing, without resetting the limit on source status updates', async () => {
+  const persist = vi.fn(async () => {});
+  const f = await fixture(undefined, null, persist);
+  for (let i = 0; i < 60; i++) await f.engine.publish('github', event(`unmatched-${i}`));
+  const writes = persist.mock.calls.length;
+  f.engine.registerSource({ id: 'github', name: 'GitHub', status: 'listening', events: [{ type: 'pr', name: 'PR', fields: [] }] });
+  await expect(f.engine.publish('github', event('overflow'))).rejects.toThrow('rate limit');
+  expect(persist).toHaveBeenCalledTimes(writes);
+  f.advance(60_000);
+  expect(await f.engine.publish('github', event('unmatched-0'))).toMatchObject({ duplicate: true });
+  expect(persist).toHaveBeenCalledTimes(writes);
+  await f.engine.publish('github', event('overflow'));
+  expect(persist).toHaveBeenCalledTimes(writes + 1);
+  await f.engine.stop();
+});
+
+it('bounds concurrent plugin requests before they enter the slow persistent write queue', async () => {
+  let release!: () => void;
+  let block = false;
+  const f = await fixture(undefined, null, async () => {
+    if (block) await new Promise<void>((resolve) => { release = resolve; });
+  });
+  block = true;
+  const pending = Array.from({ length: 8 }, (_, i) => f.engine.publish('github', event(`pending-${i}`)));
+  await expect(f.engine.publish('github', event('overflow'))).rejects.toThrow('busy');
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+  block = false;
+  release();
+  await Promise.all(pending);
+  expect(await f.engine.publish('github', event('overflow'))).toMatchObject({ duplicate: false });
+  await f.engine.stop();
+});
+
+it('keeps committed deduplication across restart and expires it after the bounded window', async () => {
+  const f = await fixture();
+  await f.engine.publish('github', event('receipt'));
+  await f.engine.stop();
+  const restored = await fixture(undefined, f.snapshot());
+  expect(await restored.engine.publish('github', event('receipt'))).toMatchObject({ duplicate: true });
+  restored.advance(24 * 60 * 60_000);
+  expect(await restored.engine.publish('github', event('receipt'))).toMatchObject({ duplicate: false });
+  expect(Object.keys(restored.snapshot()!.receipts)).toHaveLength(1);
+  await restored.engine.stop();
+});

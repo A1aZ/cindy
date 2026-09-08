@@ -958,7 +958,7 @@ import { pickNativeAtResource } from './nativeAtResourcePicker.js';
 import {
   startScheduler,
   resetScheduler,
-  getScheduler,
+  getSchedulerIfInitialized,
   getScheduleStorage,
   getScheduleStorageIfInitialized,
   getProjectAutomationLoader,
@@ -1014,7 +1014,7 @@ async function waitForCurrentAccountProviderModelsReady(): Promise<void> {
 }
 
 // Live getters preserve account/scheduler replacement without loading Main modules at dispatch time.
-configureRoutineHost({ getBot: getBotRemoteResourceSource, getScheduler, getScheduleStorage });
+configureRoutineHost({ getBot: getBotRemoteResourceSource, getScheduler: getSchedulerIfInitialized, getScheduleStorage });
 
 /**
  * Phase 4: 不再用 `_schedulerStarted` flag —— `startScheduler()` 内部以 `_scheduler`

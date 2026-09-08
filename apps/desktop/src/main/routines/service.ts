@@ -28,7 +28,7 @@ import { botProfiles } from '../localDb/schema.js';
 /** Bootstrap supplies live getters without a service -> scheduler -> IPC dependency cycle. */
 export interface RoutineHostDeps {
   getBot(botId: string): Promise<{ status: string; canonicalSessionId?: string | null }>;
-  getScheduler(): Pick<Scheduler, 'runNow' | 'pause' | 'delete'>;
+  getScheduler(): Pick<Scheduler, 'runNow' | 'pause' | 'delete'> | null;
   getScheduleStorage(): Pick<ScheduleStorage, 'get' | 'insert' | 'update' | 'listRuns'>;
 }
 
@@ -63,13 +63,14 @@ function assertScope(scope: string): void {
 /** Resolve the current canonical task at dispatch time, preserving its actual model and permissions. */
 async function execute(scope: string, routine: Routine, run: RoutineRun, signal: AbortSignal) {
   assertScope(scope);
+  const scheduler = getRoutineHost().getScheduler();
+  if (!scheduler) return { deferred: true };
   const bot = await getRoutineHost().getBot(routine.botId);
   assertScope(scope);
   if (signal.aborted) throw new Error('Routine cancelled');
   if (bot.status !== 'active' || !bot.canonicalSessionId)
     throw new Error('The teammate is unavailable');
   const storage = getRoutineHost().getScheduleStorage();
-  const scheduler = getRoutineHost().getScheduler();
   const id = `routine-${routine.id}`;
   const now = Date.now();
   const schedule: Schedule = {
@@ -255,6 +256,7 @@ async function cleanBackingSchedules(scope: string, ids: string[], remove: boole
   if (!ids.length) return;
   assertScope(scope);
   const scheduler = getRoutineHost().getScheduler();
+  if (!scheduler) throw new Error('Routine scheduler is not ready; retry later');
   const storage = getRoutineHost().getScheduleStorage();
   for (const id of ids) {
     const scheduleId = `routine-${id}`;

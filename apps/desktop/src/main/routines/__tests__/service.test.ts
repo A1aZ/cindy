@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const mock = vi.hoisted(() => ({
   scope: 'owner-a',
   boundaryPending: false,
+  schedulerReady: true,
   load: vi.fn<() => Promise<RoutineState | null>>(async () => null),
   profiles: [] as Array<{ id: string; status: string }>,
   save: vi.fn<(state: RoutineState) => Promise<void>>(async () => {}),
@@ -51,7 +52,7 @@ vi.mock('../store.js', () => ({
 import { configureRoutineHost, getRoutineEngine, routineTools, stopRoutines, updateBotRoutineLifecycle } from '../service.js';
 beforeEach(() => configureRoutineHost({
   getBot: mock.getBot,
-  getScheduler: () => mock.scheduler,
+  getScheduler: () => mock.schedulerReady ? mock.scheduler : null,
   getScheduleStorage: () => mock.storage,
 }));
 afterEach(async () => {
@@ -59,6 +60,7 @@ afterEach(async () => {
   vi.clearAllMocks();
   mock.scope = 'owner-a';
   mock.boundaryPending = false;
+  mock.schedulerReady = true;
   mock.load.mockResolvedValue(null);
   mock.storage.get.mockResolvedValue(null);
   mock.profiles = [];
@@ -291,4 +293,40 @@ it.each(['explicit', 'timer', 'replacement'] as const)('waits for execution and 
   expect(await replacement).not.toBe(first);
   expect(mock.load).toHaveBeenCalledTimes(2);
   expect(mock.scheduler.runNow).toHaveBeenCalledOnce();
+});
+
+it('retains a restored batch until scheduler startup completes, then executes the same run once', async () => {
+  vi.useFakeTimers();
+  const engine = await getRoutineEngine();
+  const routine = await engine.put('bot', {
+    name: 'Restored', prompt: 'Check the PR', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  const saved = structuredClone(mock.save.mock.calls.at(-1)![0]);
+  saved.runs = [{ id: 'restored-batch', routineId: routine.id, revision: 1, triggerIds: ['manual'], events: [], status: 'queued', createdAt: 1 }];
+  await stopRoutines();
+  mock.load.mockResolvedValue(saved);
+  mock.profiles = [{ id: 'bot', status: 'active' }];
+  mock.schedulerReady = false;
+  const restored = await getRoutineEngine();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(restored.history(routine.id)).toEqual([expect.objectContaining({ id: 'restored-batch', status: 'queued' })]);
+  expect(mock.storage.insert).not.toHaveBeenCalled();
+  expect(mock.scheduler.runNow).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(29000);
+  mock.schedulerReady = true;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(mock.scheduler.runNow).toHaveBeenCalledOnce();
+  expect(restored.history(routine.id)).toEqual([expect.objectContaining({ id: 'restored-batch', status: 'success' })]);
+});
+
+it('does not classify an actual backing storage failure as scheduler cold start', async () => {
+  const routine = await routineTools.save('bot', {
+    name: 'Review', prompt: 'Check', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  mock.storage.get.mockRejectedValueOnce(new Error('storage unavailable'));
+  await routineTools.runNow('bot', routine.id);
+  await vi.waitFor(async () => expect((await routineTools.history('bot', routine.id))[0]).toMatchObject({ status: 'failed', error: 'storage unavailable' }));
+  expect(mock.scheduler.runNow).not.toHaveBeenCalled();
 });

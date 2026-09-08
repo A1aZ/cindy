@@ -1,3 +1,4 @@
+import { RoutineEventAdmission, addRoutineReceipt, compactRoutineReceipts, receiptIsLive } from './routine-event-admission.js';
 import {
   matchesRoutineEvent,
   nextRoutineTriggerAt,
@@ -67,6 +68,7 @@ export class RoutineEngine {
     next: {},
   };
   private readonly sources = new Map<string, RoutineSource>();
+  private readonly eventAdmission = new RoutineEventAdmission();
   private readonly active = new Map<string, AbortController>();
   private readonly activeTasks = new Map<string, Promise<void>>();
   private readonly blockedBots = new Set<string>();
@@ -95,6 +97,7 @@ export class RoutineEngine {
       for (const routine of saved.routines) parseRoutineInput(routine);
       this.state = saved;
     }
+    this.state.receipts = compactRoutineReceipts(this.state.receipts, this.deps.now());
     for (const [botId, status] of botStates ?? []) this.applyBotState(this.state, botId, status);
     for (const botId of this.state.pausedBotIds ?? []) this.blockedBots.add(botId);
     // Removed rules have no history entry point; do not retain their event payloads.
@@ -310,37 +313,39 @@ export class RoutineEngine {
     raw: unknown,
     isCurrent: () => boolean = () => true,
   ): Promise<{ accepted: number; duplicate: boolean }> {
-    const event = parseRoutineEvent(raw);
+    if (this.stopped) throw new Error("Routine service is stopped");
     const source = this.sources.get(sourceId);
-    if (
-      !source ||
-      source.status !== "listening" ||
-      !source.events.some((item) => item.type === event.type)
-    ) {
-      throw new Error(
-        "Event source is not listening or event type is undeclared",
-      );
-    }
-    const result = await this.change((state) => {
+    if (!source || source.status !== "listening") throw new Error("Event source is not listening");
+    const release = this.eventAdmission.acquire(sourceId, this.deps.now());
+    try {
+      const event = parseRoutineEvent(raw);
+      if (!source.events.some((item) => item.type === event.type))
+        throw new Error("Event type is undeclared");
       if (!isCurrent()) throw new Error("Event publisher is no longer active");
       const receipt = JSON.stringify([sourceId, event.id]);
-      if (Object.hasOwn(state.receipts, receipt))
+      // A committed duplicate needs no clone or disk write. The queued check below handles races.
+      if (receiptIsLive(this.state.receipts[receipt], this.deps.now()))
         return { accepted: 0, duplicate: true };
-      const matches = state.routines
-        .filter((routine) => !this.blockedBots.has(routine.botId) && !this.removing.has(routine.id))
-        .map((routine) => ({
-          routine,
-          ids: matchesRoutineEvent(routine, sourceId, event),
-        }))
-        .filter((match) => match.ids.length > 0);
-      for (const { routine, ids } of matches)
-        this.enqueue(state, routine, ids, { sourceId, event });
-      state.receipts[receipt] = this.deps.now();
-      return { accepted: matches.length, duplicate: false };
-    });
-    source.lastEventAt = this.deps.now();
-    this.pump();
-    return result;
+      const result = await this.change((state) => {
+        if (!isCurrent()) throw new Error("Event publisher is no longer active");
+        const now = this.deps.now();
+        if (receiptIsLive(state.receipts[receipt], now))
+          return { accepted: 0, duplicate: true };
+        addRoutineReceipt(state.receipts, sourceId, receipt, now);
+        const matches = state.routines
+          .filter((routine) => !this.blockedBots.has(routine.botId) && !this.removing.has(routine.id))
+          .map((routine) => ({ routine, ids: matchesRoutineEvent(routine, sourceId, event) }))
+          .filter((match) => match.ids.length > 0);
+        for (const { routine, ids } of matches)
+          this.enqueue(state, routine, ids, { sourceId, event });
+        return { accepted: matches.length, duplicate: false };
+      });
+      source.lastEventAt = this.deps.now();
+      this.pump();
+      return result;
+    } finally {
+      release();
+    }
   }
 
   async runNow(botId: string, id: string): Promise<void> {

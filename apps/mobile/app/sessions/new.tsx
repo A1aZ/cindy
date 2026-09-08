@@ -488,6 +488,9 @@ export default function NewRemoteSessionScreen() {
     workspaceKind: initialWorkingDir ? 'project' : 'dialogue',
     workingDir: initialWorkingDir ?? '',
   });
+  const firstMessageRef = useRef(draft.firstMessage);
+  const firstMessageSelectionRef = useRef({ start: draft.firstMessage.length, end: draft.firstMessage.length });
+  const [firstMessageSelection, setFirstMessageSelection] = useState(firstMessageSelectionRef.current);
   const [creating, setCreating] = useState(false);
   const [createStartedAt, setCreateStartedAt] = useState<number | null>(null);
   const [createPhase, setCreatePhase] = useState<SlowSendPhase>('preparing');
@@ -611,6 +614,13 @@ export default function NewRemoteSessionScreen() {
     if (!stashed) return;
     // 返回编辑沿用草稿的工作区，不能被随后加载的全局默认覆盖。
     userTouchedWorkspaceRef.current = true;
+    firstMessageRef.current = stashed.draft.firstMessage;
+    const restoredSelection = {
+      start: stashed.draft.firstMessage.length,
+      end: stashed.draft.firstMessage.length,
+    };
+    firstMessageSelectionRef.current = restoredSelection;
+    setFirstMessageSelection(restoredSelection);
     setDraft(stashed.draft);
     setAttachments([...stashed.attachments]);
     if (stashed.notice) setAttachmentError(stashed.notice);
@@ -696,9 +706,6 @@ export default function NewRemoteSessionScreen() {
   const appliedPermissionMemoryRef = useRef(false);
   const userTouchedDeviceRef = useRef(false);
   const userTouchedWorkspaceRef = useRef(false);
-  const firstMessageRef = useRef(draft.firstMessage);
-  const firstMessageSelectionRef = useRef({ start: draft.firstMessage.length, end: draft.firstMessage.length });
-  const [firstMessageSelection, setFirstMessageSelection] = useState(firstMessageSelectionRef.current);
   const firstMessageInputRef = useRef<NativeTextInput>(null);
   const voiceDraftScrollRef = useRef<ScrollView>(null);
   const voiceRecordingActiveRef = useRef(false);
@@ -3758,11 +3765,23 @@ export default function NewRemoteSessionScreen() {
   ]);
 
   const selectSlashCommand = useCallback((command: MobileSlashCommand) => {
-    setFirstMessageDraft((current) => insertSlashCommand(current, detectComposerTrigger(current), command));
+    const current = firstMessageRef.current;
+    const next = insertSlashCommand(current, detectComposerTrigger(current), command);
+    if (next === current) return;
+    setFirstMessageDraft(next);
+    const selection = { start: next.length, end: next.length };
+    firstMessageSelectionRef.current = selection;
+    setFirstMessageSelection(selection);
   }, [setFirstMessageDraft]);
 
   const selectAtResource = useCallback((item: MobileAtResourceItem) => {
-    setFirstMessageDraft((current) => insertAtResource(current, detectComposerTrigger(current), item));
+    const current = firstMessageRef.current;
+    const next = insertAtResource(current, detectComposerTrigger(current), item);
+    if (next === current) return;
+    setFirstMessageDraft(next);
+    const selection = { start: next.length, end: next.length };
+    firstMessageSelectionRef.current = selection;
+    setFirstMessageSelection(selection);
   }, [setFirstMessageDraft]);
 
   const removeAttachment = useCallback((id: string) => {

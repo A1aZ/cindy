@@ -1537,6 +1537,30 @@ describe('new session model', () => {
 });
 
 describe('new session composer surface', () => {
+  it('keeps the controlled caret at the end after palette insertion and draft restore', () => {
+    const newSource = readTextLf(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
+    const slashStart = newSource.indexOf('const selectSlashCommand = useCallback');
+    const slashEnd = newSource.indexOf('const selectAtResource = useCallback', slashStart);
+    const slashSource = newSource.slice(slashStart, slashEnd);
+    const atStart = slashEnd;
+    const atEnd = newSource.indexOf('const removeAttachment = useCallback', atStart);
+    const atSource = newSource.slice(atStart, atEnd);
+    const restoreStart = newSource.indexOf('firstMessageRef.current = stashed.draft.firstMessage;');
+    const restoreEnd = newSource.indexOf('setDraft(stashed.draft);', restoreStart);
+    const restoreSource = newSource.slice(restoreStart, restoreEnd);
+
+    for (const source of [slashSource, atSource]) {
+      expect(source).toContain('const current = firstMessageRef.current;');
+      expect(source).toContain('const selection = { start: next.length, end: next.length };');
+      expect(source.indexOf('setFirstMessageDraft(next)')).toBeLessThan(
+        source.indexOf('setFirstMessageSelection(selection)'),
+      );
+    }
+    expect(restoreSource).toContain('firstMessageRef.current = stashed.draft.firstMessage;');
+    expect(restoreSource).toContain('firstMessageSelectionRef.current = restoredSelection;');
+    expect(restoreSource).toContain('setFirstMessageSelection(restoredSelection);');
+  });
+
   it('does not double-apply the Android safe-area inset to the top navigation', () => {
     const newSource = readTextLf(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
 

@@ -50,7 +50,7 @@ public class CindyRemotePresentationModule: Module {
 
 /** One atomic portable item; never dereference clipboard file URLs. */
 enum RemoteClipboard {
-  static let limit = 32 * 1024 * 1024
+  static let limit = RemoteClipboardSize.limit
   static func failure(_ code: String) -> NSError {
     NSError(domain: "CindyClipboard", code: 1, userInfo: [NSLocalizedDescriptionKey: code])
   }
@@ -74,10 +74,14 @@ enum RemoteClipboard {
     }
     var result: [String: String] = [:]
     func string(_ type: String) throws -> String? {
-      if let string = item[type] as? String { return string.isEmpty ? nil : string }
+      if let string = item[type] as? String {
+        guard RemoteClipboardSize.accepts(string) else { throw failure("CLIPBOARD_TOO_LONG") }
+        return string.isEmpty ? nil : string
+      }
       if let data = item[type] as? Data {
-        guard data.count <= limit else { throw failure("CLIPBOARD_TOO_LONG") }
+        guard RemoteClipboardSize.acceptsUTF8Bytes(data) else { throw failure("CLIPBOARD_TOO_LONG") }
         guard let string = String(data: data, encoding: .utf8) else { throw failure("CLIPBOARD_UNSUPPORTED") }
+        guard RemoteClipboardSize.accepts(string) else { throw failure("CLIPBOARD_TOO_LONG") }
         return string.isEmpty ? nil : string
       }
       return nil
@@ -108,13 +112,15 @@ enum RemoteClipboard {
     try foreground()
     guard version == board.changeCount else { throw failure("CLIPBOARD_CHANGED") }
     let data = try JSONSerialization.data(withJSONObject: result)
-    guard data.count <= limit else { throw failure("CLIPBOARD_TOO_LONG") }
-    return String(data: data, encoding: .utf8)!
+    let json = String(data: data, encoding: .utf8)!
+    guard RemoteClipboardSize.accepts(json) else { throw failure("CLIPBOARD_TOO_LONG") }
+    return json
   }
 
   static func write(_ json: String) throws {
     try foreground()
-    guard json.utf8.count <= limit, let data = json.data(using: .utf8),
+    guard RemoteClipboardSize.accepts(json) else { throw failure("CLIPBOARD_TOO_LONG") }
+    guard let data = json.data(using: .utf8),
       let content = try JSONSerialization.jsonObject(with: data) as? [String: String],
       !content.isEmpty,
       content.keys.allSatisfy({ ["text", "html", "rtf", "url", "png"].contains($0) })

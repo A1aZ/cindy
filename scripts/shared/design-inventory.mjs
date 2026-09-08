@@ -1248,6 +1248,12 @@ const PROTECTED_TAGS = {
     'DESIGN.md §10 语义豁免色族消费者（status / diff / 消息卡）',
     'DESIGN.md §5 登记成员 workflow-status-cell / system-category-square',
   ],
+  'desktop.chat.orca-workflow': [
+    'DESIGN.md §5 登记成员 workflow-status-cell / system-category-square（复用 desktop.chat.session 会话视图）',
+  ],
+  'desktop.bots': [
+    'DESIGN.md §5 登记成员 workflow-status-cell / system-category-square（复用 desktop.chat.session 会话视图）',
+  ],
   'desktop.chat.new-draft': ['DESIGN.md §15.15 创建页内容位'],
   'desktop.overlay.permission-prompt': [
     'DESIGN.md §5 裸文字按钮豁免（相关）',

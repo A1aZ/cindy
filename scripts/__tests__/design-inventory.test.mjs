@@ -1102,6 +1102,7 @@ test('defaultHumanSeed: 全量 legacy + unassigned,protected 与迁移状态正�
   assert.equal(seed.includes('登记成员 workflow-status-cell'), true);
   assert.equal(seed.includes('登记成员 usage-heatmap-day / usage-token-bar'), true);
   assert.equal(seed.includes('system-category-square'), true);
+  assert.equal(seed.includes('复用 desktop.chat.session'), true);
   assert.equal(
     seed.includes('2px status micro-cells'),
     false,

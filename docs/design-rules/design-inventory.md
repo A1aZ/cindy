@@ -118,10 +118,10 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.auth.add-account` | unassigned | legacy | DESIGN.md §16 登录链路 | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.auth.legacy-migration` | unassigned | legacy | DESIGN.md §16 登录链路（消费 --login-callback-* 品牌豁免族 component token） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.auth.login` | unassigned | legacy | DESIGN.md §16 登录链路 | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
-| `desktop.bots` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
+| `desktop.bots` | unassigned | legacy | DESIGN.md §5 登记成员 `workflow-status-cell` / `system-category-square`（复用 desktop.chat.session 会话视图） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.chat.files` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.chat.new-draft` | unassigned | legacy | DESIGN.md §15.15 创建页内容位 | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
-| `desktop.chat.orca-workflow` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
+| `desktop.chat.orca-workflow` | unassigned | legacy | DESIGN.md §5 登记成员 `workflow-status-cell` / `system-category-square`（复用 desktop.chat.session 会话视图） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.chat.scheduled` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.chat.session` | unassigned | legacy | DESIGN.md §10 语义豁免色族消费者（status / diff / 消息卡）；DESIGN.md §5 登记成员 `workflow-status-cell` / `system-category-square` | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 完整工具/推理/消息/代码/附件迁移，验证流式、长文与旧 msg 局部覆盖；保留现有保护族 |
 | `desktop.dev.maker-experimental` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |

@@ -1,3 +1,4 @@
+import { getSessionRewindGeneration, withSendToSessionLock } from './sendToSessionLock.js';
 import { shell } from 'electron';
 import { t } from '../i18n.js';
 import { and, eq, isNull, ne, or, gt, like, desc, inArray } from 'drizzle-orm';
@@ -250,48 +251,58 @@ export function initializeBotAuthorizationHost(
         },
       };
     },
-    async save(card) {
-      await assertSession(card.sessionId);
-      const [row] = await getDbClient()
-        .drizzle.select({ clearedAt: sessions.clearedAt })
-        .from(sessions)
-        .where(eq(sessions.id, card.sessionId))
-        .limit(1);
-      if (!row || (row.clearedAt !== null && row.clearedAt >= card.createdAt))
-        throw new Error('Authorization card was cleared');
-      card = {
-        ...card,
-        snapshot: {
-          ...sanitizeGhostSetupSnapshotForDesktop(card.snapshot),
-          ...(card.snapshot.reopenActionId ? { reopenActionId: card.snapshot.reopenActionId } : {}),
-        },
+    captureRequestGuard(sessionId) {
+      const generation = getSessionRewindGeneration(sessionId);
+      return () => {
+        if (getSessionRewindGeneration(sessionId) !== generation)
+          throw new Error('Authorization request was rewound');
       };
-      const clientId = `bot-authorization:${card.snapshot.requestId}`;
-      const phase = card.snapshot.steps.find((s) => s.phase !== 'satisfied')?.phase ?? 'satisfied';
-      const fallback = `${card.snapshot.ghost.name} · ${t(`newChat.pluginSetup.phase.${phase}`)}${card.snapshot.terminal ? '' : ` · ${t('newChat.pluginSetup.completeOnDesktop')}`}`;
-      // Only the presentation is stored. Current assessment/actions are re-read on every click.
-      await createMessage(
-        card.sessionId,
-        {
+    },
+    async save(card, assertCurrent) {
+      return withSendToSessionLock(card.sessionId, async () => {
+        assertCurrent?.();
+        await assertSession(card.sessionId);
+        const [row] = await getDbClient()
+          .drizzle.select({ clearedAt: sessions.clearedAt })
+          .from(sessions)
+          .where(eq(sessions.id, card.sessionId))
+          .limit(1);
+        if (!row || (row.clearedAt !== null && row.clearedAt >= card.createdAt))
+          throw new Error('Authorization card was cleared');
+        card = {
+          ...card,
+          snapshot: {
+            ...sanitizeGhostSetupSnapshotForDesktop(card.snapshot),
+            ...(card.snapshot.reopenActionId ? { reopenActionId: card.snapshot.reopenActionId } : {}),
+          },
+        };
+        const clientId = `bot-authorization:${card.snapshot.requestId}`;
+        const phase = card.snapshot.steps.find((s) => s.phase !== 'satisfied')?.phase ?? 'satisfied';
+        const fallback = `${card.snapshot.ghost.name} · ${t(`newChat.pluginSetup.phase.${phase}`)}${card.snapshot.terminal ? '' : ` · ${t('newChat.pluginSetup.completeOnDesktop')}`}`;
+        // Only the presentation is stored. Current assessment/actions are re-read on every click.
+        await createMessage(
+          card.sessionId,
+          {
+            clientId,
+            role: 'assistant',
+            content: fallback,
+            agentMeta: { botAuthorization: card },
+            createdAt: card.createdAt,
+          },
+          {
+            broadcastOwnerScope: ownerScopes.get(card.sessionId),
+            expectedClearBoundaryMs: row.clearedAt,
+          },
+        );
+        await assertSession(card.sessionId);
+        await updateMessageContent(card.sessionId, clientId, fallback);
+        await patchMessageAgentMeta(card.sessionId, clientId, { botAuthorization: card });
+        await broadcastMessageAgentMetaUpdate(
+          card.sessionId,
           clientId,
-          role: 'assistant',
-          content: fallback,
-          agentMeta: { botAuthorization: card },
-          createdAt: card.createdAt,
-        },
-        {
-          broadcastOwnerScope: ownerScopes.get(card.sessionId),
-          expectedClearBoundaryMs: row.clearedAt,
-        },
-      );
-      await assertSession(card.sessionId);
-      await updateMessageContent(card.sessionId, clientId, fallback);
-      await patchMessageAgentMeta(card.sessionId, clientId, { botAuthorization: card });
-      await broadcastMessageAgentMetaUpdate(
-        card.sessionId,
-        clientId,
-        ownerScopes.get(card.sessionId),
-      );
+          ownerScopes.get(card.sessionId),
+        );
+      });
     },
     async load(requestId) {
       const [row] = await getDbClient()
@@ -332,7 +343,8 @@ export function initializeBotAuthorizationHost(
           card &&
           !card.snapshot.terminal &&
           card.target.kind === target.kind &&
-          card.target.id === target.id
+          card.target.id === target.id &&
+          !!card.target.reauthorize === !!target.reauthorize
         )
           return card;
       }

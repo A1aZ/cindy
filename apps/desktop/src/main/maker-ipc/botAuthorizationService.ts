@@ -58,7 +58,8 @@ export interface BotAuthorizationAdapter {
 }
 export interface BotAuthorizationDeps {
   adapter(sessionId: string, target: BotAuthorizationTarget): Promise<BotAuthorizationAdapter>;
-  save(card: BotAuthorizationCard): Promise<void>;
+  captureRequestGuard?(sessionId: string): () => void;
+  save(card: BotAuthorizationCard, assertCurrent?: () => void): Promise<void>;
   load(requestId: string): Promise<BotAuthorizationCard | null>;
   findPending(
     sessionId: string,
@@ -105,7 +106,7 @@ export class BotAuthorizationService {
 
   private requests = new Map<string, ReturnType<BotAuthorizationService['requestCard']>>();
   request(sessionId: string, target: BotAuthorizationTarget, plan?: GhostSetupPlan) {
-    const key = `${this.epoch}:${sessionId}:${target.kind}:${target.id}`;
+    const key = `${this.epoch}:${sessionId}:${target.kind}:${target.id}:${!!target.reauthorize}`;
     const existing = this.requests.get(key);
     if (existing) return existing;
     const pending = this.requestCard(sessionId, target, plan).finally(() =>
@@ -121,6 +122,7 @@ export class BotAuthorizationService {
     plan?: GhostSetupPlan,
   ) {
     const epoch = this.epoch;
+    const assertCurrent = this.deps.captureRequestGuard?.(sessionId);
     const adapter = await this.deps.adapter(sessionId, target);
     const assessment = await adapter.assess();
     if (epoch !== this.epoch) throw new Error('Authorization context changed');
@@ -131,7 +133,8 @@ export class BotAuthorizationService {
         !e.closed &&
         e.card.sessionId === sessionId &&
         e.card.target.kind === target.kind &&
-        e.card.target.id === target.id,
+        e.card.target.id === target.id &&
+        !!e.card.target.reauthorize === !!target.reauthorize,
     );
     if (existing) {
       await existing.writes;
@@ -160,7 +163,7 @@ export class BotAuthorizationService {
     const entry = this.attach(card, adapter);
     entry.assessmentFingerprint = JSON.stringify(assessment);
     try {
-      await this.save(entry);
+      await this.save(entry, assertCurrent);
     } catch (error) {
       this.close(entry);
       throw error;
@@ -205,11 +208,11 @@ export class BotAuthorizationService {
     );
     entry.expiry.unref?.();
   }
-  private save(entry: Entry): Promise<void> {
+  private save(entry: Entry, assertCurrent?: () => void): Promise<void> {
     const card = structuredClone(entry.card);
     const write = entry.writes
       .then(() => {
-        if (!entry.closed) return this.deps.save(card);
+        if (!entry.closed) return this.deps.save(card, assertCurrent);
       })
       .catch((error: unknown) => {
         if ((error as { code?: string } | null)?.code === 'REMOTE_OPTIMISTIC_INPUT_CLEARED')

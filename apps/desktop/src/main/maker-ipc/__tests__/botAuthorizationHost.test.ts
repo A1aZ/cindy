@@ -1,3 +1,4 @@
+import { advanceSessionRewindGeneration, withSendToSessionLock } from '../sendToSessionLock';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhostSetupAssessment } from '../../../shared/ghost';
 import type { BotAuthorizationCard } from '../../../shared/botAuthorization';
@@ -73,6 +74,25 @@ describe('authorization Host frozen plugin policy', () => {
       await validate();
       state.continued();
     });
+  });
+
+  it('rejects a prepared card when rewind wins the shared write boundary', async () => {
+    await state.deps.adapter('session', target);
+    const assertCurrent = state.deps.captureRequestGuard!('session');
+    let release!: () => void;
+    const rewind = withSendToSessionLock('session', async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      advanceSessionRewindGeneration('session');
+    });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const saving = state.deps.save({ v: 1, sessionId: 'session', target, createdAt: 1,
+      snapshot: { kind: 'plugin_setup', requestId: 'stale', revision: 1,
+        ghost: { id: 'art', name: 'Art' }, steps: [] } }, assertCurrent);
+    const rejected = expect(saving).rejects.toThrow('Authorization request was rewound');
+    release();
+    await rewind;
+    await rejected;
+    expect(state.save).not.toHaveBeenCalled();
   });
 
   it('keeps credential A pending after credential B completes until A reauth is resolved', async () => {

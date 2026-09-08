@@ -56,6 +56,7 @@ function harness() {
             card.sessionId === sessionId &&
             card.target.kind === target.kind &&
             card.target.id === target.id &&
+            !!card.target.reauthorize === !!target.reauthorize &&
             !card.snapshot.terminal,
         ) ?? null,
     ),
@@ -485,6 +486,17 @@ describe('authorization durable completion boundary', () => {
 });
 
 describe('durable authorization card deduplication', () => {
+  it.each([false, true])('preserves explicit reauthorization when an ordinary card exists (expired=%s)', async (expired) => {
+    const h = harness();
+    const original = await h.service.request('s', { kind: 'plugin', id: 'p', reauthorize: false });
+    if (expired) await vi.advanceTimersByTimeAsync(61 * 60_000);
+    const reauth = await h.service.request('s', { kind: 'plugin', id: 'p', reauthorize: true });
+    expect(reauth).not.toEqual(original);
+    expect([...h.stored.values()].at(-1)?.target.reauthorize).toBe(true);
+    expect(await h.service.request('s', { kind: 'plugin', id: 'p', reauthorize: true })).toEqual(reauth);
+    await h.service.dispose();
+  });
+
   it('replaces an in-memory card whose persisted message was cleared', async () => {
     const h = harness();
     await h.service.request('s', { kind: 'plugin', id: 'p' });

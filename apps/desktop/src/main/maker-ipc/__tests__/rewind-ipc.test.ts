@@ -1,3 +1,4 @@
+import { getSessionRewindGeneration } from '../sendToSessionLock';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -111,9 +112,11 @@ describe('maker rewind IPC stop-then-rewind', () => {
     const handler = mocks.handlers.get(MAKER_INVOKE.REWIND_COMMIT);
     if (!handler) throw new Error('rewind commit handler not registered');
 
+    const generation = getSessionRewindGeneration('session-1');
     await expect(handler({}, 'session-1', 'message-1', { stopIfRunning: true })).resolves.toBe(
       session,
     );
+    expect(getSessionRewindGeneration('session-1')).toBe(generation + 1);
 
     expect(mocks.withSessionInputStoppedForRewind).toHaveBeenCalledWith(
       'session-1',

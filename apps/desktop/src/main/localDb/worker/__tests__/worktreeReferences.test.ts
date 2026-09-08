@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 
 import { readLocalWorktreeReferences } from '../worktreeReferences';
 import type { DatabaseConstructor } from '../runtime';
+
+const currentColumns = ['id', 'status', 'working_dir', 'worktree_path', 'source', 'remote_host_id'];
+const schemaRows = (columns = currentColumns) => columns.map((name) => ({ name }));
 
 describe('machine-local task reference reader', () => {
   let root: string;
@@ -16,6 +19,7 @@ describe('machine-local task reference reader', () => {
   const otherQuery = vi.fn();
   class ReadOnlyDatabase {
     constructor(file: string, options: Database.Options) { opened(file, options); }
+    transaction<T>(callback: () => T) { return callback; }
     prepare(sql: string) { return { all: () => otherQuery(sql) }; }
     close() { closed(); }
   }
@@ -23,11 +27,14 @@ describe('machine-local task reference reader', () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-task-reference-test-'));
     currentPath = path.join(root, 'cindy-current.db');
     fs.writeFileSync(currentPath, 'test fixture placeholder');
-    current = { prepare: (sql: string) => ({ all: () => sql === 'PRAGMA database_list'
+    current = { transaction: <T>(callback: () => T) => callback, prepare: (sql: string) => ({ all: () => sql === 'PRAGMA database_list'
       ? [{ name: 'main', file: currentPath }]
+      : sql === 'PRAGMA table_info(sessions)' ? schemaRows()
       : [{ id: 'current-task', status: 'active', workingDir: root, worktreePath: null, source: 'desktop' }] }) } as unknown as Database.Database;
     opened.mockReset(); closed.mockReset();
-    otherQuery.mockReset().mockReturnValue([{ id: 'other-task', status: 'active', workingDir: root, worktreePath: null, source: 'desktop' }]);
+    otherQuery.mockReset().mockImplementation((sql: string) => sql === 'PRAGMA table_info(sessions)'
+      ? schemaRows()
+      : [{ id: 'other-task', status: 'active', workingDir: root, worktreePath: null, source: 'desktop' }]);
   });
   afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
   const read = () => readLocalWorktreeReferences(current, ReadOnlyDatabase as unknown as DatabaseConstructor, 'test-native-binding');
@@ -42,8 +49,12 @@ describe('machine-local task reference reader', () => {
     expect(opened).toHaveBeenCalledTimes(2);
     for (const [, options] of opened.mock.calls) expect(options).toEqual({ readonly: true, fileMustExist: true, nativeBinding: 'test-native-binding' });
     expect(closed).toHaveBeenCalledTimes(2);
-    expect(otherQuery.mock.calls[0][0]).toContain('remote_host_id IS NULL');
-    expect(otherQuery.mock.calls[0][0]).not.toContain('messages');
+    const queries = otherQuery.mock.calls.map(([sql]) => sql).filter((sql) => sql.startsWith('SELECT'));
+    expect(queries).toHaveLength(2);
+    for (const sql of queries) {
+      expect(sql).toContain('remote_host_id IS NULL');
+      expect(sql).not.toContain('messages');
+    }
   });
   it('does not return a partial view when another database cannot be queried', () => {
     fs.writeFileSync(path.join(root, 'cindy-other.db'), '');
@@ -58,11 +69,79 @@ describe('machine-local task reference reader', () => {
   });
   it('rejects a source created during the scan', () => {
     fs.writeFileSync(path.join(root, 'cindy-other.db'), '');
-    otherQuery.mockImplementation(() => { fs.writeFileSync(path.join(root, 'cindy-new.db'), ''); return []; });
+    otherQuery.mockImplementation((sql: string) => {
+      if (sql === 'PRAGMA table_info(sessions)') return schemaRows();
+      fs.writeFileSync(path.join(root, 'cindy-new.db'), '');
+      return [];
+    });
     expect(read).toThrow('catalog changed');
   });
   it('rejects a directory masquerading as a database', () => {
     fs.mkdirSync(path.join(root, 'cindy-other.db'));
     expect(read).toThrow('regular file');
+  });
+});
+
+describe('historical task reference schemas (isolated SQLite)', () => {
+  let root: string;
+  let current: Database.Database;
+  const initialSchema = 'CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, working_dir TEXT)';
+  const additions = [
+    'ALTER TABLE sessions ADD worktree_path TEXT',
+    "ALTER TABLE sessions ADD source TEXT NOT NULL DEFAULT 'desktop'",
+    'ALTER TABLE sessions ADD remote_host_id TEXT',
+  ];
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-reference-db-'));
+    current = new Database(path.join(root, 'cindy-current.db'));
+    current.exec([initialSchema, ...additions].join(';'));
+  });
+  afterEach(() => {
+    current?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads pre-0005, pre-0007 and pre-0038 databases without changing them or dropping terminal references', () => {
+    const before = new Map<string, Buffer>();
+    for (let count = 0; count < additions.length; count += 1) {
+      const file = path.join(root, `xdt-legacy-${count}.db`);
+      const legacy = new Database(file);
+      try {
+        legacy.exec([initialSchema, ...additions.slice(0, count)].join(';'));
+        legacy.prepare('INSERT INTO sessions (id, status, working_dir) VALUES (?, ?, ?)')
+          .run(`legacy-${count}`, 'archived', path.join(root, `working-${count}`));
+        if (count > 0) legacy.prepare('UPDATE sessions SET worktree_path = ?').run(path.join(root, `worktree-${count}`));
+      } finally { legacy.close(); }
+      before.set(file, fs.readFileSync(file));
+    }
+    current.prepare('INSERT INTO sessions (id, status, working_dir, remote_host_id) VALUES (?, ?, ?, ?)')
+      .run('remote', 'active', '/remote/worktree', 'ssh-host');
+    current.prepare('INSERT INTO sessions (id, status, working_dir) VALUES (?, ?, ?)')
+      .run('local', 'archived', root);
+
+    const rows = readLocalWorktreeReferences(current, Database);
+    expect(rows).toHaveLength(4);
+    expect(rows.find((row) => row.id === 'local')).toMatchObject({ status: 'archived', currentDatabase: true });
+    for (let count = 0; count < additions.length; count += 1) {
+      expect(rows.find((row) => row.id === `legacy-${count}`)).toEqual({
+        id: `legacy-${count}`, status: null, currentDatabase: false,
+        source: count > 1 ? 'desktop' : null,
+        workingDir: path.join(root, `working-${count}`),
+        worktreePath: count > 0 ? path.join(root, `worktree-${count}`) : null,
+      });
+    }
+    for (const [file, bytes] of before) expect(fs.readFileSync(file)).toEqual(bytes);
+  });
+
+  it.each([
+    'CREATE TABLE sessions (id TEXT, status TEXT)',
+    `${initialSchema};${additions[1]}`,
+    `${initialSchema};${additions[0]};${additions[2]}`,
+    'CREATE TABLE unrelated (id TEXT)',
+  ])('rejects incomplete or unrecognized schemas instead of ignoring that database: %s', (sql) => {
+    const file = path.join(root, 'cindy-unknown.db');
+    const legacy = new Database(file);
+    try { legacy.exec(sql); } finally { legacy.close(); }
+    expect(() => readLocalWorktreeReferences(current, Database)).toThrow('unsupported task reference schema');
   });
 });

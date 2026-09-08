@@ -14,6 +14,26 @@ export interface LocalWorktreeReference {
   currentDatabase: boolean;
 }
 
+function referenceQuery(db: Database.Database): string {
+  const info = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+  const columns = new Set(info.map((column) => column.name));
+  const hasWorktree = columns.has('worktree_path');
+  const hasSource = columns.has('source');
+  const hasRemote = columns.has('remote_host_id');
+  // These columns were added in 0005, 0007 and 0038 respectively. Unknown
+  // layouts must not silently become an incomplete set of deletion evidence.
+  if (!['id', 'status', 'working_dir'].every((name) => columns.has(name))
+    || (hasSource && !hasWorktree) || (hasRemote && !hasSource)) {
+    throw new Error('unsupported task reference schema');
+  }
+  // Keep every legacy row protective, including terminal rows: missing metadata
+  // is not evidence that a directory can be deleted. No other owner's DB is migrated.
+  const status = hasRemote ? 'status' : 'NULL';
+  return `SELECT id, ${status} AS status, ${hasSource ? 'source' : 'NULL'} AS source, `
+    + `working_dir AS workingDir, ${hasWorktree ? 'worktree_path' : 'NULL'} AS worktreePath `
+    + `FROM sessions${hasRemote ? ' WHERE remote_host_id IS NULL' : ''}`;
+}
+
 /**
  * Read every known legacy task database through short-lived read-only handles.
  * No migrations, pragmas that write, or owner switching. Any unreadable source
@@ -43,10 +63,8 @@ export function readLocalWorktreeReferences(
       readonly: true, fileMustExist: true, ...(nativeBinding ? { nativeBinding } : {}),
     });
     try {
-      const references = db.prepare(
-        'SELECT id, status, source, working_dir AS workingDir, worktree_path AS worktreePath '
-        + 'FROM sessions WHERE remote_host_id IS NULL',
-      ).all() as Omit<LocalWorktreeReference, 'currentDatabase'>[];
+      // Inspect columns and rows in one read snapshot if another instance upgrades the DB.
+      const references = db.transaction(() => db.prepare(referenceQuery(db)).all())() as Omit<LocalWorktreeReference, 'currentDatabase'>[];
       rows.push(...references.map((row) => ({ ...row, currentDatabase: isCurrent })));
     } finally {
       if (!isCurrent) db.close();

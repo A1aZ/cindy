@@ -1,15 +1,14 @@
 import { MenuView, type MenuAction } from "@react-native-menu/menu";
 import { type ReactNode } from "react";
 import { NativeModules, Platform, UIManager } from "react-native";
-import { useTheme } from "@/theme";
+import { useTheme, type ThemeColors } from "@/theme";
 
 export type NativePullDownAction = {
   disabled?: boolean;
   destructive?: boolean;
   displayInline?: boolean;
   id: string;
-  /** iOS SF Symbol name. */
-  image?: string;
+  image?: MenuAction["image"];
   keepPresented?: boolean;
   preferredElementSize?: "small" | "medium" | "large";
   state?: "on" | "off" | "mixed";
@@ -29,12 +28,23 @@ export function usesNativePullDownMenu(): boolean {
   return nativePullDownAvailable;
 }
 
-function toMenuAction(action: NativePullDownAction, imageColor: string): MenuAction {
+function toMenuAction(
+  action: NativePullDownAction,
+  colors: ThemeColors,
+): MenuAction {
   return {
     id: action.id,
     title: action.title,
-    // Menu 2.0 Fabric forwards an omitted imageColor as transparent (0).
-    ...(action.image ? { image: action.image, imageColor } : {}),
+    // Fabric defaults the library's optional Int32 imageColor to transparent.
+    // Always pair a symbol with a visible semantic color.
+    ...(action.image
+      ? {
+          image: action.image,
+          imageColor: action.destructive
+            ? colors.destructive
+            : colors.textPrimary,
+        }
+      : {}),
     ...(action.subtitle ? { subtitle: action.subtitle } : {}),
     ...(action.state ? { state: action.state } : {}),
     ...(action.displayInline ? { displayInline: true } : {}),
@@ -51,7 +61,11 @@ function toMenuAction(action: NativePullDownAction, imageColor: string): MenuAct
         }
       : {}),
     ...(action.subactions?.length
-      ? { subactions: action.subactions.map((child) => toMenuAction(child, imageColor)) }
+      ? {
+          subactions: action.subactions.map((item) =>
+            toMenuAction(item, colors),
+          ),
+        }
       : {}),
   };
 }
@@ -77,7 +91,7 @@ export function NativePullDownMenu({
   if (!usesNativePullDownMenu()) return children;
   return (
     <MenuView
-      actions={actions.map((action) => toMenuAction(action, colors.textPrimary))}
+      actions={actions.map((action) => toMenuAction(action, colors))}
       onPressAction={({ nativeEvent }) => {
         if (nativeEvent.event) onAction(nativeEvent.event);
       }}

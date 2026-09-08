@@ -5127,6 +5127,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         modelChain: import('../shared/botModelChain').BotModelRoute[];
         isCustomized: boolean;
       }> => ipcRenderer.invoke('local-db:bots:model-chain-settings-get'),
+      resetModelChainSettings: (): Promise<{
+        modelChain: import('../shared/botModelChain').BotModelRoute[];
+        isCustomized: boolean;
+      }> => ipcRenderer.invoke('local-db:bots:model-chain-settings-reset'),
       setModelChainSettings: (body: {
         modelChain: import('../shared/botModelChain').BotModelRoute[];
       }): Promise<{
@@ -5612,7 +5616,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       savedProviderId?: string;
     }): Promise<{
       ok: boolean;
-      models?: { id: string; name: string; contextWindow?: number }[];
+      models?: import('@cindy/model-providers').DiscoveredModel[];
       code?: import('../shared/providerErrors').ProviderErrorCode;
       status?: number;
       detail?: string;

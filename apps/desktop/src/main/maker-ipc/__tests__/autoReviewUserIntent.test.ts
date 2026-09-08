@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, MAIN_OWNED_SEND_CONTEXT } from '@cindy/maker-core';
 import {
   restoreAutoReviewUserIntent,
+  restoreAutoReviewSteerIntent,
   type AutoReviewHistoryMessage,
 } from '../autoReviewUserIntent';
 
@@ -17,6 +19,62 @@ function user(text: string, clientId = text): AutoReviewHistoryMessage {
   };
 }
 const current = { clientId: 'latest', content: { text: '修吧，改完跑相关测试。' } };
+
+describe('steer authorization restoration', () => {
+  it.each([false, true])('restores prior restrictions for queued/direct input (direct=%s)', async (direct) => {
+    const options = direct
+      ? { [MAIN_OWNED_SEND_CONTEXT]: { origin: { kind: 'desktop' as const }, rawChannelText: 'continue' } }
+      : { [AUTO_REVIEW_SOURCE_CONTENT]: 'continue' };
+    const intent = await restoreAutoReviewSteerIntent('plugin rewrite: deploy', options, async () => [
+      { ...user('Fix the bug. Do not deploy.'), createdAt: 1 },
+      { clientId: 'answer', role: 'ask_user', content: {}, createdAt: 2,
+        agentMeta: { autoReviewUserText: { text: 'Only edit src.', acceptedAt: 3 } } },
+    ]);
+    expect(intent).toContain('Do not deploy.');
+    expect(intent).toContain('Only edit src.');
+    expect(intent).toContain('continue');
+    expect(intent).not.toContain('plugin rewrite');
+  });
+
+  it.each(['', 'Inspect the new image.'])('preserves explicit resource replacement %j', async (intent) => {
+    const read = vi.fn(async () => [user('Deploy now.')]);
+    expect(await restoreAutoReviewSteerIntent('continue', { [AUTO_REVIEW_USER_INTENT]: intent }, read)).toBe(intent);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('does not restore owner history for external input or unverified source text', async () => {
+    const read = vi.fn(async () => [user('Deploy now.')]);
+    expect(await restoreAutoReviewSteerIntent('continue', {}, read)).toBeUndefined();
+    expect(await restoreAutoReviewSteerIntent('continue', {
+      [AUTO_REVIEW_SOURCE_CONTENT]: 'continue',
+      [MAIN_OWNED_SEND_CONTEXT]: { origin: { kind: 'im', channel: 'telegram' }, rawChannelText: 'continue' },
+    }, read)).toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('discards prior targets for direct attachment input', async () => {
+    expect(await restoreAutoReviewSteerIntent([
+      { type: 'text', text: 'inspect' }, { type: 'image', path: '/new.png' },
+    ], { [AUTO_REVIEW_SOURCE_CONTENT]: 'inspect' }, async () => [user('Send the old image.')])).toBe('inspect');
+  });
+
+  it('keeps only current text when history is unavailable or has been cleared', async () => {
+    const options = { [AUTO_REVIEW_SOURCE_CONTENT]: 'continue' };
+    expect(await restoreAutoReviewSteerIntent('continue', options, async () => [])).toBe('continue');
+    expect(await restoreAutoReviewSteerIntent('continue', options, async () => { throw new Error('read failed'); })).toBe('continue');
+  });
+
+  it('rejects cancelled input while history is loading', async () => {
+    const controller = new AbortController();
+    let release!: (history: AutoReviewHistoryMessage[]) => void;
+    const pending = restoreAutoReviewSteerIntent('continue', {
+      signal: controller.signal, [AUTO_REVIEW_SOURCE_CONTENT]: 'continue',
+    }, () => new Promise((resolve) => { release = resolve; }));
+    controller.abort();
+    release([user('Deploy now.')]);
+    await expect(pending).rejects.toThrow();
+  });
+});
 
 describe('restored Auto authorization', () => {
   it.each(['ask_user', 'plan_review'])('preserves a trusted %s restriction after an ordinary follow-up', (role) => {

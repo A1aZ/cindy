@@ -1,5 +1,5 @@
-import { appendAutoReviewUserIntent, extractAutoReviewUserIntent } from '@cindy/maker-core';
-import type { UserMessage } from '@cindy/maker-core';
+import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, MAIN_OWNED_SEND_CONTEXT, appendAutoReviewUserIntent, extractAutoReviewUserIntent } from '@cindy/maker-core';
+import type { SendOptions, UserMessage } from '@cindy/maker-core';
 import { joinChatQuoteTextSegments, parseChatQuoteSegments } from '@cindy/maker-shared/chat-quotes';
 import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
 
@@ -20,6 +20,28 @@ function interactionAnswer(message: AutoReviewHistoryMessage): { text: string; a
   return typeof answer.text === 'string' && typeof answer.acceptedAt === 'number'
     && Number.isFinite(answer.acceptedAt)
     ? { text: answer.text, acceptedAt: answer.acceptedAt } : null;
+}
+
+/** Both queued and direct steers may reach a freshly reattached harness. */
+export async function restoreAutoReviewSteerIntent(
+  content: string | ReadonlyArray<{ type: string; [key: string]: unknown }>,
+  options: SendOptions,
+  readHistory: () => Promise<AutoReviewHistoryMessage[]>,
+): Promise<string | undefined> {
+  options.signal?.throwIfAborted();
+  // Resource changes already carry an explicit replacement, including an empty one.
+  if (options[AUTO_REVIEW_USER_INTENT] !== undefined) return options[AUTO_REVIEW_USER_INTENT];
+  const context = options[MAIN_OWNED_SEND_CONTEXT];
+  if (context && context.origin.kind !== 'desktop') return undefined;
+  const text = options[AUTO_REVIEW_SOURCE_CONTENT] ?? context?.rawChannelText;
+  if (typeof text !== 'string') return undefined;
+  const history = await readHistory().catch(() => []);
+  options.signal?.throwIfAborted();
+  return restoreAutoReviewUserIntent(history, {
+    clientId: '', authoredText: text,
+    content: typeof content === 'string' || content.every((block) => block.type === 'text')
+      ? { text } : [],
+  });
 }
 
 /** Read only the user's authored text, never the decorated agent-facing projection. */

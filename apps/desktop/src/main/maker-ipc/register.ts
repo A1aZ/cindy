@@ -31,6 +31,7 @@ import {
   piSubagentRunRoot,
 } from '@cindy/maker-core/pi-subagent-runs';
 import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, MAIN_OWNED_SEND_CONTEXT } from '@cindy/maker-core';
+import { restoreAutoReviewSteerIntent } from './autoReviewUserIntent.js';
 import type {
   AgentEvent,
   AgentKind,
@@ -11517,11 +11518,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
   };
 
+  const readAutoReviewHistory = async (sessionId: string) => {
+    await drainPersistQueue();
+    return listMessagesForAgentHandoff(sessionId, 100, undefined, 'authorization');
+  };
   const { sendToAgentAccepted: sendToAgentAcceptedUnlocked } = createMakerSendTransaction({
-    readAutoReviewHistory: async (sessionId) => {
-      await drainPersistQueue();
-      return listMessagesForAgentHandoff(sessionId, 100, undefined, 'authorization');
-    },
+    readAutoReviewHistory,
     getSession: (sessionId) => maker.getSession(sessionId),
     closeSession: (sessionId) => maker.closeSession(sessionId),
     getSessionMeta: (sessionId) => maker.getSessionMeta(sessionId),
@@ -12076,6 +12078,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     const meta = await maker.getSessionMeta(sessionId).catch(() => null);
     sess = readCurrentSteerSession();
+    const authorizationSession = sess;
+    const authorizationTurn = sess.getTurnGeneration();
+    const restoredSteerIntent = await restoreAutoReviewSteerIntent(
+      typeof normalized === 'string' ? normalized : normalized.content,
+      so,
+      () => readAutoReviewHistory(sessionId),
+    );
+    sess = readCurrentSteerSession();
+    if (sess !== authorizationSession || sess.getTurnGeneration() !== authorizationTurn) {
+      throw new Error(`[STALE_TURN] Session ${sessionId} changed turns while restoring authorization`);
+    }
     // 手机说明同样只进 wire payload(steer 路径不落库用户消息,天然不污染原话)。
     // 两个来源都要认:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
     const steerNote =
@@ -12102,7 +12115,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         signal: so.signal,
         [MAIN_OWNED_SEND_CONTEXT]: so[MAIN_OWNED_SEND_CONTEXT],
         [AUTO_REVIEW_SOURCE_CONTENT]: so[AUTO_REVIEW_SOURCE_CONTENT],
-        [AUTO_REVIEW_USER_INTENT]: so[AUTO_REVIEW_USER_INTENT],
+        [AUTO_REVIEW_USER_INTENT]: restoredSteerIntent,
       });
       log.info('steer: delivered', { sessionId, agentKind: sess.agentKind });
     } catch (err) {

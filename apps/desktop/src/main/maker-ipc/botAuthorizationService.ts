@@ -293,8 +293,11 @@ export class BotAuthorizationService {
           action: undefined,
         })),
       };
-      await this.save(entry);
-      this.close(entry);
+      try {
+        await this.save(entry);
+      } finally {
+        this.close(entry);
+      }
       return true;
     }
     if (!sender) return false;

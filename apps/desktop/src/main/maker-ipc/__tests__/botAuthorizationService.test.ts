@@ -646,3 +646,18 @@ it.each(['result', 'throw'] as const)('removes the expired OAuth reopen action a
   expect(h.deps.openExternal).not.toHaveBeenCalled();
   await h.service.dispose();
 });
+
+it('retires a cancelled entry when its terminal save fails so a later request is actionable', async () => {
+  const h = harness();
+  await h.service.request('s', { kind: 'plugin', id: 'p' });
+  h.deps.save.mockRejectedValueOnce(new Error('profile paused'));
+  await expect(h.service.resolve(h.card().snapshot.requestId, {
+    kind: 'plugin_setup', action: 'cancel', expectedRevision: h.card().snapshot.revision,
+  })).rejects.toThrow('profile paused');
+  expect(h.listeners.size).toBe(0);
+  await h.service.request('s', { kind: 'plugin', id: 'p' });
+  await h.click();
+  await flush();
+  expect(h.adapter.execute).toHaveBeenCalledTimes(1);
+  await h.service.dispose();
+});

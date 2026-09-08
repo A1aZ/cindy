@@ -64,6 +64,7 @@ export async function isBotAuthorizationSession(sessionId: string): Promise<bool
 /** Adapts existing Host credentials and plugin configuration into the same card lifecycle. */
 export function initializeBotAuthorizationHost(
   resume: (card: BotAuthorizationCard, validate: () => Promise<void>, assertCurrent: () => void) => Promise<void>,
+  captureInputGuard: (sessionId: string) => () => void = () => () => {},
 ) {
   const ownerScopes = new Map<string, ReturnType<typeof captureDataOwnerBroadcastScope>>();
   const assertPluginPolicy = async (sessionId: string, pluginId: string) => {
@@ -252,8 +253,10 @@ export function initializeBotAuthorizationHost(
       };
     },
     captureRequestGuard(sessionId) {
+      const assertInputCurrent = captureInputGuard(sessionId);
       const generation = getSessionRewindGeneration(sessionId);
       return () => {
+        assertInputCurrent();
         if (getSessionRewindGeneration(sessionId) !== generation)
           throw new Error('Authorization request was rewound');
       };
@@ -280,6 +283,7 @@ export function initializeBotAuthorizationHost(
         const phase = card.snapshot.steps.find((s) => s.phase !== 'satisfied')?.phase ?? 'satisfied';
         const fallback = `${card.snapshot.ghost.name} · ${t(`newChat.pluginSetup.phase.${phase}`)}${card.snapshot.terminal ? '' : ` · ${t('newChat.pluginSetup.completeOnDesktop')}`}`;
         // Only the presentation is stored. Current assessment/actions are re-read on every click.
+        assertCurrent?.();
         await createMessage(
           card.sessionId,
           {

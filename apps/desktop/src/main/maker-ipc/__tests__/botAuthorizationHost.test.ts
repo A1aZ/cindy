@@ -76,6 +76,21 @@ describe('authorization Host frozen plugin policy', () => {
     });
   });
 
+  it('rejects a card prepared before a clear even when its timestamp is newer', async () => {
+    let generation = 0;
+    initializeBotAuthorizationHost(async () => {}, () => {
+      const captured = generation;
+      return () => { if (generation !== captured) throw new Error('cleared'); };
+    });
+    const assertCurrent = state.deps.captureRequestGuard!('session');
+    await state.deps.adapter('session', target);
+    generation++;
+    await expect(state.deps.save({ v: 1, sessionId: 'session', target, createdAt: Date.now(),
+      snapshot: { kind: 'plugin_setup', requestId: 'pre-clear', revision: 1,
+        ghost: { id: 'art', name: 'Art' }, steps: [] } }, assertCurrent)).rejects.toThrow('cleared');
+    expect(state.save).not.toHaveBeenCalled();
+  });
+
   it('rejects a prepared card when rewind wins the shared write boundary', async () => {
     await state.deps.adapter('session', target);
     const assertCurrent = state.deps.captureRequestGuard!('session');

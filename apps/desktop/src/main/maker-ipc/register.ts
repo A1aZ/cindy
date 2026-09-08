@@ -8990,6 +8990,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const result = await dispatchBotSessionMessage({ ...buildBotAuthorizationContinuation(card), authorizationGuard });
     if (!result.ok) throw new Error('Authorization continuation not accepted');
     await awaitAgentInputQueueSnapshotPersistence(card.sessionId);
+  }, (sessionId) => {
+    const generation = inputCoordinator.getGeneration(sessionId);
+    return () => {
+      assertRemoteInputClearNotInFlight(sessionId, true);
+      if (!inputCoordinator.isGenerationCurrent(sessionId, generation))
+        throw new Error('Authorization request input boundary changed');
+    };
   });
 
   botDirectMessageServiceHolder = createBotDirectMessageService({

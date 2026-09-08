@@ -103,6 +103,13 @@ export class RoutineEngine {
     this.state.receipts = compactRoutineReceipts(this.state.receipts, this.deps.now());
     for (const [botId, status] of botStates ?? []) this.applyBotState(this.state, botId, status);
     for (const botId of this.state.pausedBotIds ?? []) this.blockedBots.add(botId);
+    // Older versions retained timer cursors for disabled rules. Remove them in
+    // the existing startup save so an idle tick cannot keep rewriting history.
+    for (const routine of this.state.routines) {
+      if (routine.enabled) continue;
+      for (const key of Object.keys(this.state.next))
+        if (key.startsWith(`${routine.id}:`)) delete this.state.next[key];
+    }
     // Removed rules have no history entry point; do not retain their event payloads.
     const retainedIds = new Set(this.state.routines.map((routine) => routine.id));
     this.state.runs = this.state.runs.filter((run) => retainedIds.has(run.routineId));
@@ -218,7 +225,7 @@ export class RoutineEngine {
       ];
       for (const key of Object.keys(state.next))
         if (key.startsWith(`${routine.id}:`)) delete state.next[key];
-      for (const trigger of routine.triggers) {
+      for (const trigger of routine.enabled ? routine.triggers : []) {
         const oldTrigger = existing?.triggers.find(
           (item) => item.id === trigger.id,
         );
@@ -388,11 +395,11 @@ export class RoutineEngine {
     if (!Object.values(this.state.next).some((time) => time <= now)) return;
     await this.change((state) => {
       for (const routine of state.routines) {
-        if (this.blockedBots.has(routine.botId) || this.removing.has(routine.id)) continue;
+        if (!routine.enabled || this.blockedBots.has(routine.botId) || this.removing.has(routine.id)) continue;
         for (const trigger of routine.triggers) {
           const key = `${routine.id}:${trigger.id}`;
           if (state.next[key] === undefined || state.next[key] > now) continue;
-          if (routine.enabled) this.enqueue(state, routine, [trigger.id]);
+          this.enqueue(state, routine, [trigger.id]);
           const next = nextRoutineTriggerAt(trigger, now);
           if (next !== undefined) state.next[key] = next;
         }

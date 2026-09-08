@@ -33,6 +33,7 @@ async function fixture(
   let now = 1000;
   let id = 0;
   const onError = vi.fn();
+  const changed = vi.fn();
   const engine = new RoutineEngine({
     load: async () => structuredClone(snapshot),
     save: async (state) => {
@@ -42,7 +43,7 @@ async function fixture(
     execute,
     id: () => `id-${++id}`,
     now: () => now,
-    changed: vi.fn(),
+    changed,
     onError,
   });
   await engine.start();
@@ -56,6 +57,7 @@ async function fixture(
     engine,
     execute,
     onError,
+    changed,
     snapshot: () => snapshot,
     advance: (ms: number) => {
       now += ms;
@@ -64,6 +66,79 @@ async function fixture(
 }
 
 describe("Routine event admission and execution", () => {
+  it.each([
+    { id: 'timer', kind: 'interval' as const, intervalMs: 60_000 },
+    { id: 'timer', kind: 'cron' as const, expression: '* * * * *', timezone: 'UTC' },
+  ])('does not write or broadcast disabled $kind timers and resumes from re-enable time', async (trigger) => {
+    const persist = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({}));
+    const f = await fixture(execute, null, persist);
+    const enabledInput = { ...input, triggers: [trigger] };
+    try {
+      const routine = await f.engine.put('bot', enabledInput);
+      await f.engine.put('bot', { ...enabledInput, enabled: false }, routine.id);
+      // Creating an already-disabled rule must also remain idle.
+      const disabled = await f.engine.put('bot', { ...enabledInput, enabled: false });
+      expect(f.snapshot()?.next).toEqual({});
+      persist.mockClear();
+      f.changed.mockClear();
+      for (let minute = 0; minute < 3; minute++) {
+        f.advance(60_000);
+        await f.engine.tick();
+      }
+      expect(persist).not.toHaveBeenCalled();
+      expect(f.changed).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+
+      await f.engine.put('bot', enabledInput, routine.id);
+      persist.mockClear();
+      f.changed.mockClear();
+      await f.engine.tick();
+      expect(persist).not.toHaveBeenCalled();
+      expect(f.changed).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      f.advance(60_000);
+      await f.engine.tick();
+      await vi.waitFor(() => expect(f.engine.history(routine.id)[0]?.status).toBe('success'));
+      expect(execute).toHaveBeenCalledOnce();
+      expect(f.engine.history(disabled.id)).toEqual([]);
+      expect(f.snapshot()?.next[`${disabled.id}:timer`]).toBeUndefined();
+    } finally {
+      await f.engine.stop();
+    }
+  });
+
+  it('cleans legacy disabled timer cursors on restart without shifting enabled timers or history', async () => {
+    const first = await fixture();
+    const disabled = await first.engine.put('bot', { ...input, enabled: false });
+    const enabled = await first.engine.put('bot', input);
+    await first.engine.runNow('bot', disabled.id);
+    await vi.waitFor(() => expect(first.engine.history(disabled.id)[0]?.status).toBe('success'));
+    await first.engine.stop();
+    const saved = structuredClone(first.snapshot()!);
+    saved.next[`${disabled.id}:fallback`] = 1;
+    const enabledNext = saved.next[`${enabled.id}:fallback`];
+    const history = structuredClone(saved.runs);
+    const persist = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({}));
+    const restored = await fixture(execute, saved, persist);
+    try {
+      expect(restored.snapshot()?.next).toEqual({ [`${enabled.id}:fallback`]: enabledNext });
+      expect(restored.snapshot()?.runs).toEqual(history);
+      persist.mockClear();
+      restored.changed.mockClear();
+      for (let minute = 0; minute < 3; minute++) {
+        restored.advance(60_000);
+        await restored.engine.tick();
+      }
+      expect(persist).not.toHaveBeenCalled();
+      expect(restored.changed).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await restored.engine.stop();
+    }
+  });
+
   it('still dispatches an explicit manual run of a disabled routine', async () => {
     const execute = vi.fn<RoutineEngineDeps['execute']>(async (_routine, _run, _signal, canDispatch) => {
       expect(canDispatch()).toBe(true);
@@ -76,6 +151,7 @@ describe("Routine event admission and execution", () => {
       await vi.waitFor(() => expect(f.engine.history(routine.id)[0].status).toBe('success'));
       expect(execute).toHaveBeenCalledOnce();
       expect(f.engine.list('bot')[0].enabled).toBe(false);
+      expect(f.snapshot()?.next).toEqual({});
     } finally {
       await f.engine.stop();
     }

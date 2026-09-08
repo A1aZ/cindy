@@ -1,11 +1,13 @@
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Bot, Check, FolderOpen } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useBotTranslation } from './botPronounContext';
 
 import { Spinner } from '@/components/ui/spinner';
+import { useProviders } from '@/hooks/useProviders';
+import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import * as sessionService from '@/lib/sessionService';
 import type { ConversationSearchJump } from '../../../shared/conversationSearchJump';
 import { useRegisterContentHeader } from '../feature-context';
@@ -17,6 +19,7 @@ import {
   updateBotProfile,
   useBotProfiles,
   getEffectiveBotModelChain,
+  subscribeBotGlobalModel,
   type BotCapabilities,
   type BotProfile,
 } from './botStore';
@@ -376,10 +379,21 @@ export function BotsHomeView() {
   const [searchParams] = useSearchParams();
   const bots = useBotProfiles();
   const providerOnboarding = useProviderOnboarding();
+  useProviders();
+  useAvailableAgents();
+  const hasDefaultModel = useSyncExternalStore(
+    subscribeBotGlobalModel,
+    () => getEffectiveBotModelChain().length > 0,
+  );
   const creatingBotRef = useRef<{ botId: string; token: symbol } | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<unknown>(null);
   const selectedBot = useMemo(() => bots.find((bot) => bot.id === botId) ?? null, [botId, bots]);
+  // An empty profile projection can predate the newly connected source/runtime.
+  // Only followers may resume from live defaults; Main resolves the actual route
+  // when opening the canonical task without writing a per-Bot override.
+  const needsModelSelection = selectedBot?.capabilities.modelChain.length === 0
+    && !(selectedBot.capabilities.modelChainOverride === null && hasDefaultModel);
   // `?add=1` 是阵容还在弹模态那阵子的入口。阵容页面化之后它只剩兼容职责:
   // 老书签、老深链通过 /bots/roster 复用同一个创建弹窗。
   const addRequested = searchParams.get('add') === '1';
@@ -485,7 +499,7 @@ export function BotsHomeView() {
   useRegisterContentHeader(headerContent);
 
   useEffect(() => {
-    if (providerOnboarding.visible || selectedBot?.capabilities.modelChain.length === 0) return;
+    if (providerOnboarding.visible || needsModelSelection) return;
     if (selectedBot?.invitation && selectedBot.invitation.stage !== 'ready') return;
     if (!selectedBot || shouldDeferCanonicalBotSessionNavigation({ settingsOpen, addRequested }))
       return;
@@ -577,7 +591,7 @@ export function BotsHomeView() {
         creatingBotRef.current = null;
       }
     };
-  }, [addRequested, createCanonicalSession, selectedBot, sessionId, settingsOpen, navigate, providerOnboarding.visible]);
+  }, [addRequested, createCanonicalSession, selectedBot, sessionId, settingsOpen, navigate, providerOnboarding.visible, needsModelSelection]);
 
   if (providerOnboarding.visible && !settingsOpen) {
     return <main className="flex h-full items-center justify-center px-6" role="main"><ConnectProviderCard /></main>;
@@ -602,7 +616,7 @@ export function BotsHomeView() {
     );
   }
 
-  if (selectedBot.capabilities.modelChain.length === 0) {
+  if (needsModelSelection) {
     return (
       <main className="flex h-full flex-col items-center justify-center gap-3 px-6" role="main">
         <BotModelChainEditor

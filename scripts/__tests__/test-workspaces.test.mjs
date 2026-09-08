@@ -252,6 +252,22 @@ test("real agent integration tests are explicit tiers outside unit", () => {
 	]);
 });
 
+test("Pi RPC lifecycle stays in unit while binary resource discovery stays in integration", () => {
+	const makerCore = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "packages/maker-core",
+	);
+	const testDir = "packages/maker-core/src/agents/pi/__tests__";
+	const files = fs.readdirSync(path.join(ROOT, testDir))
+		.filter((file) => file.startsWith("pi-rpc-"))
+		.map((file) => `${testDir}/${file}`);
+	assert.deepEqual(selectFilesForTier(makerCore, makerCore.tiers.unit, files), [
+		`${testDir}/pi-rpc-harness.test.ts`,
+	]);
+	assert.deepEqual(selectFilesForTier(makerCore, makerCore.tiers.integration, files), [
+		`${testDir}/pi-rpc-resource-discovery.integration.test.ts`,
+	]);
+});
+
 test("unit tier pins an explicit vitest pool, forks only by documented exception", () => {
 	// The default forks pool recycles one child process per test file, which on
 	// 2026-07-30 sustained ~21 LaunchServices check-ins/second and took down

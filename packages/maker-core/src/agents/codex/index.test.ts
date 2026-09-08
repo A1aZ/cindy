@@ -3768,7 +3768,7 @@ describe('CodexAgent reference directories', () => {
       expect(events.filter((event) => event.type === 'done')).toHaveLength(2),
     );
 
-    const doneEvents = events.filter((event): event is Extract<AgentEvent, { type: 'done' }> =>
+    const doneEvents = events.filter((event) =>
       event.type === 'done',
     );
     expect((doneEvents[0]?.data as { usage?: { segments?: unknown[] } }).usage?.segments).toHaveLength(1);
@@ -5533,7 +5533,7 @@ describe('CodexAgent fast mode service tier', () => {
     await sendPromise;
     await waitForExpectation(() => expect(events.some((event) => event.type === 'done')).toBe(true));
 
-    const done = events.find((event): event is Extract<AgentEvent, { type: 'done' }> => event.type === 'done');
+    const done = events.find((event) => event.type === 'done');
     expect((done?.data as { usage?: { segments?: unknown[] } }).usage?.segments).toEqual([
       expect.objectContaining({ inputTokens: 20, outputTokens: 10, priceVariant: 'standard' }),
     ]);
@@ -13809,7 +13809,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     if (!handlers?.mcpServerElicitation) {
       throw new Error('expected mcpServerElicitation handler');
     }
-    handlers.itemStarted({
+    handlers.itemStarted!({
       threadId: 'start-thread-id',
       turnId: 'turn-wechat-mcp',
       item: {
@@ -13844,7 +13844,7 @@ describe('CodexAgent MCP thread context hooks', () => {
       toolName: 'mcp:cindy_contacts',
       suggestions: undefined,
     });
-    handlers.itemStarted({
+    handlers.itemStarted!({
       threadId: 'start-thread-id',
       turnId: 'turn-wechat-mcp',
       item: {
@@ -13871,7 +13871,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     });
     expect(resolver.mock.calls[1]?.[0]).not.toHaveProperty('toolUseId');
     for (const itemId of ['contacts-call-1', 'contacts-call-2']) {
-      handlers.itemCompleted({
+      handlers.itemCompleted!({
         threadId: 'start-thread-id',
         turnId: 'turn-wechat-mcp',
         item: {
@@ -13883,7 +13883,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         },
       } as never);
     }
-    handlers.itemUpdated({
+    handlers.itemUpdated!({
       threadId: 'start-thread-id',
       turnId: 'turn-wechat-mcp',
       item: {
@@ -23276,7 +23276,7 @@ describe('CodexAgent turn lifecycle', () => {
           turnStartResponse.resolve({ turn: { id: 'turn-retry-state' } });
           await sendPromise;
         } else {
-          handlers.turnStarted({
+          handlers.turnStarted!({
             threadId: 'start-thread-id',
             turn: { id: 'turn-retry-state' },
           });
@@ -30530,7 +30530,7 @@ describe('CodexAgent context window reporting', () => {
           currentTurnResponse.resolve({ turn: { id: 'turn-current-diff' } });
           await sendPromise;
         } else {
-          handlers.turnStarted({
+          handlers.turnStarted!({
             threadId: 'start-thread-id',
             turn: { id: 'turn-current-diff' },
           });

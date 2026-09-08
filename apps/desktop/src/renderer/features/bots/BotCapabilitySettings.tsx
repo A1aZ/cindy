@@ -55,7 +55,8 @@ export function BotCapabilitySettings({
     const offPush = window.electronAPI.localDb?.sessionsPush?.onPatched(({ sessionId, patch }, stamp) => {
       if (isDataOwnerPushCurrent(stamp)) changed(sessionId, patch);
     });
-    return () => { offLocal(); offPush?.(); };
+    const offMcp = window.electronAPI.maker.onMcpChanged(refresh);
+    return () => { offLocal(); offPush?.(); offMcp(); };
   }, [open, bot.canonicalSessionId, refresh]);
 
   useEffect(() => {

@@ -5,7 +5,7 @@ import { updateBotProfile } from '../localDb/ipc/bots.js';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { listCustomMcpServers } from '../maker-host/custom-mcp-store.js';
 import { BOT_BASELINE_PLUGIN_IDS } from '../maker-host/plugins/types.js';
-import type { Maker } from '@cindy/maker-core';
+import type { AgentKind, Maker } from '@cindy/maker-core';
 import type { PluginRegistry } from '../maker-host/plugins/plugin-registry.js';
 import type { BotToolsetContext } from '../../shared/botRemoteCapabilities.js';
 import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
@@ -13,8 +13,9 @@ import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
 type Kind = 'skill' | 'mcp' | 'toolset';
 type Input = { callerSessionId: string; kind: Kind };
 type Entry = { id: string; name: string; description: string; available: boolean; joined: boolean };
-interface BotCapabilityServiceDeps {
-  getMaker: () => Pick<Maker, 'getSession' | 'listAgentSkills'>;
+export interface BotCapabilityServiceDeps {
+  getMaker: () => Pick<Maker, 'listAgentSkills'>;
+  resolveBotAgentKind: (sessionId: string) => Promise<AgentKind | null>;
   getPluginRegistry: () => Pick<PluginRegistry, 'getPlugins' | 'getEnableState'>;
   isBotToolsetAvailable: (input: BotToolsetContext & { toolsetId: string }) => boolean;
   listMcpServers: NonNullable<BotProfileRuntimeDeps['listMcpServers']>;
@@ -46,7 +47,6 @@ async function context(callerSessionId: string) {
       archivedAt: botSessionLinks.archivedAt,
       sessionStatus: sessions.status,
       source: sessions.source,
-      agentKind: sessions.agentKind,
       workingDir: sessions.workingDir,
       remoteHostId: sessions.remoteHostId,
       config: botProfileVersions.capabilitiesJson,
@@ -88,9 +88,10 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>, d
     (id) => input.kind !== 'toolset' || !BOT_BASELINE_PLUGIN_IDS.has(id),
   ));
   const { getMaker, getPluginRegistry, isBotToolsetAvailable } = deps;
-  const agentKind =
-    getMaker().getSession(input.callerSessionId)?.agentKind ??
-    (ctx.agentKind === 'cc' ? 'claude-code' : ctx.agentKind === 'pi' ? 'pi' : 'codex');
+  // Grants apply next turn, so use the same preview as settings and send-time reconciliation.
+  const agentKind = await deps.resolveBotAgentKind(input.callerSessionId);
+  ctx.assertOwner();
+  if (!agentKind) throw new Error('Bot next-turn route is unavailable');
   const workingDir = ctx.workingDir ?? '';
   let items: Omit<Entry, 'joined'>[];
   if (input.kind === 'skill') {

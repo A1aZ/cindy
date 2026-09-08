@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   listCustomMcpServers: vi.fn<(context?: CustomMcpListContext) => Promise<CustomMcpListResult>>(),
   getSession: vi.fn<() => Promise<Partial<Session>>>(),
   onSessionPatched: vi.fn(),
+  onMcpChanged: vi.fn(),
   listAgentSkills: vi.fn(),
   listToolsets: vi.fn(),
   updateBotProfile: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({
@@ -162,6 +163,7 @@ beforeEach(() => {
   mocks.initialSearch = '';
   mocks.getSession.mockReset().mockResolvedValue({ agentKind: 'cc', workingDir: '/bot/workspace' });
   mocks.onSessionPatched.mockReset().mockReturnValue(vi.fn());
+  mocks.onMcpChanged.mockReset().mockReturnValue(vi.fn());
   mocks.listAgentSkills.mockReset().mockResolvedValue({ success: true, skills: [{ name: 'release-check' }] });
   mocks.listToolsets.mockReset().mockResolvedValue([
     { id: 'docs', name: 'Documents', effectiveEnabled: true, available: true },
@@ -180,6 +182,7 @@ beforeEach(() => {
     openPath: mocks.openPath,
     localDb: { sessionsPush: { onPatched: mocks.onSessionPatched } },
     maker: {
+      onMcpChanged: mocks.onMcpChanged,
       listAgentSkills: mocks.listAgentSkills,
       listCustomMcpServers: mocks.listCustomMcpServers,
       plugins: { list: mocks.listToolsets },
@@ -346,6 +349,55 @@ describe('same-Bot capability updates while editing settings', () => {
     expect(mocks.listCustomMcpServers).toHaveBeenCalledTimes(2);
     expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ agentKind: 'codex' }));
     expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it.each(['deleted', 'unavailable'] as const)('refreshes MCP %s while open and preserves removal of selected references', async (change) => {
+    const off = vi.fn();
+    mocks.onMcpChanged.mockReturnValue(off);
+    renderSettings({ capabilities: capabilities({ mcpMode: 'allowlist', mcpServers: ['events'] }) });
+    expect(mocks.onMcpChanged).not.toHaveBeenCalled();
+    mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('claude-code'));
+    await openCapabilities();
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).checked).toBe(true);
+    let finishRefresh!: (result: CustomMcpListResult) => void;
+    mocks.listCustomMcpServers.mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    await act(async () => { mocks.onMcpChanged.mock.calls[0]![0](); });
+    // The old available catalog is invalidated immediately, while the selected ref stays removable.
+    expect((screen.getByRole('checkbox', { name: /events/ }) as HTMLInputElement).disabled).toBe(false);
+    await act(async () => { finishRefresh(change === 'deleted' ? { agentKind: 'claude-code', servers: [] }
+      : { ...sseCatalog('claude-code'), servers: sseCatalog('claude-code').servers.map((entry) => ({ ...entry, available: false })) }); });
+    const checkbox = screen.getByRole('checkbox', { name: change === 'deleted' ? /events/ : /SSE Events/ }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(false);
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] } }));
+    if (change === 'unavailable') expect(checkbox.disabled).toBe(true);
+    else expect(screen.queryByRole('checkbox', { name: /events/ })).toBeNull();
+    const details = screen.getByText('bots.capabilities.title').parentElement as HTMLDetailsElement;
+    await act(async () => { details.open = false; fireEvent(details, new Event('toggle')); });
+    expect(off).toHaveBeenCalledOnce();
+  });
+
+  it('invalidates selectable MCPs immediately and ignores an outdated refresh after another change', async () => {
+    mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('claude-code'));
+    const off = vi.fn();
+    mocks.onMcpChanged.mockReturnValue(off);
+    const view = renderSettings();
+    await openCapabilities();
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(false);
+    let finishOld!: (result: CustomMcpListResult) => void;
+    mocks.listCustomMcpServers.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue({ agentKind: 'claude-code', servers: [] });
+    await act(async () => { mocks.onMcpChanged.mock.calls[0]![0](); });
+    expect(screen.queryByRole('checkbox', { name: /SSE Events/ })).toBeNull();
+    await act(async () => { mocks.onMcpChanged.mock.calls[0]![0](); });
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledTimes(3);
+    await act(async () => { finishOld(sseCatalog('claude-code')); });
+    expect(screen.queryByRole('checkbox', { name: /SSE Events/ })).toBeNull();
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    view.unmount();
+    expect(off).toHaveBeenCalledOnce();
   });
 
   it('refreshes on a local model-chain edit and discards the preceding catalog response', async () => {

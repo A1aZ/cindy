@@ -418,6 +418,7 @@ import {
   prepareCodexForCustomProviderHostChange,
   restartCodexAfterAuthModeChange,
   setBeforeLocalCodexSessionStartHook,
+  setBotCapabilityAgentKindResolver,
 } from '../maker-host/index.js';
 import {
   readMemorySettingsState,
@@ -10657,6 +10658,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
   });
+
+  setBotCapabilityAgentKindResolver(async (sessionId) =>
+    (await reconcileBotModelRoute.preview(sessionId))?.agentKind ?? null);
 
   const readBotFallbackCandidate = async (
     sessionId: string,

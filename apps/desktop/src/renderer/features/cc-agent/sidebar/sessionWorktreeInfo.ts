@@ -13,7 +13,7 @@ import { useEffect, useState } from 'react';
 
 import { groupingWorktreeBaseRepo } from '@cindy/maker-shared/worktree-paths';
 
-import { useWorktreeForSession } from '@/contexts/WorktreeContext';
+import { useReportWorktreeLiveness, useWorktreeForSession } from '@/contexts/WorktreeContext';
 import type { Session } from '@/lib/ccAgent.types';
 import type { GitContextDirSource } from '@/lib/gitContext.types';
 import type { DetectCwdResp, WorktreeMeta } from '@/lib/worktree.types';
@@ -100,7 +100,8 @@ export function useTaskInfoWorktree(
   enabled: boolean,
   opts?: { observeTelemetry?: boolean },
 ): SessionWorktreeInfo | null {
-  const official = useWorktreeForSession(session.id);
+  const official = useWorktreeForSession(session.id, { includeInvalid: opts?.observeTelemetry });
+  const reportLiveness = useReportWorktreeLiveness();
   const managed = resolveManagedWorktree(official);
   const [observed, setObserved] = useState<SessionWorktreeInfo | null>(null);
   const [officialStillLive, setOfficialStillLive] = useState(true);
@@ -124,7 +125,9 @@ export function useTaskInfoWorktree(
       if (officialPath) {
         const live = await probeIsInsideWorktree(officialPath, deviceId);
         if (cancelled || gen !== generation) return;
+        if (live === null) return; // IPC 失败不代表目录已被删除，保留上次状态。
         setOfficialStillLive(live);
+        if (official) reportLiveness(official, live);
         if (live) {
           setObserved(null);
           return;
@@ -167,7 +170,7 @@ export function useTaskInfoWorktree(
       unsubscribe?.();
       window.removeEventListener('focus', onFocus);
     };
-  }, [enabled, officialPath, deviceId, isRemote, observeTelemetry, session.id]);
+  }, [enabled, official, officialPath, deviceId, isRemote, observeTelemetry, session.id, reportLiveness]);
 
   if (isRemote) return null;
   if (!observeTelemetry) {
@@ -186,7 +189,7 @@ export function useTaskInfoWorktree(
   });
 }
 
-async function probeIsInsideWorktree(cwd: string, deviceId: string | null): Promise<boolean> {
+async function probeIsInsideWorktree(cwd: string, deviceId: string | null): Promise<boolean | null> {
   try {
     const detect: DetectCwdResp = deviceId
       ? ((await window.electronAPI.deviceLink.invoke(deviceId, DETECT_CWD_CHANNEL, [
@@ -195,7 +198,7 @@ async function probeIsInsideWorktree(cwd: string, deviceId: string | null): Prom
       : await window.electronAPI.worktreeDetectCwd({ cwd });
     return Boolean(detect?.isInsideWorktree);
   } catch {
-    return false;
+    return null;
   }
 }
 

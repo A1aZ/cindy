@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** WorktreeContext 有界后台校验；聚焦读缓存，创建/回收事件按 sessionId 增量更新。 */
+/** WorktreeContext 只共享快照与 active 任务的探测结果；创建/回收按 sessionId 增量更新。 */
 
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +9,10 @@ import {
   WorktreeProvider,
   useWorktrees,
   useRefreshWorktreeForSession,
+  useReportWorktreeLiveness,
+  useWorktreeForSession,
 } from '@/contexts/WorktreeContext';
+import { useTaskInfoWorktree } from '@/features/cc-agent/sidebar/sessionWorktreeInfo';
 import { emitRefresh } from '@/lib/sessionsBus';
 
 vi.mock('@/lib/logger', () => ({
@@ -20,6 +23,7 @@ const mocks = {
   worktreeListAll: vi.fn(),
   worktreeGetForSession: vi.fn(),
   worktreeDetectCwd: vi.fn(),
+  findLinkedWorktree: vi.fn(),
   listeners: new Set<(payload: { sessionId: string }) => void>(),
   sessionCreatedListeners: new Set<
     (payload: { sessionId: string }, ownerStamp?: unknown) => void
@@ -46,10 +50,16 @@ function Probe() {
   );
 }
 
+function ActiveProbe() {
+  const info = useTaskInfoWorktree({ id: 'open', workingDir: '/repo' }, true, { observeTelemetry: true });
+  return <span data-testid="active">{info?.path ?? ''}</span>;
+}
+
 beforeEach(() => {
   mocks.worktreeListAll.mockReset();
   mocks.worktreeGetForSession.mockReset();
   mocks.worktreeDetectCwd.mockReset();
+  mocks.findLinkedWorktree.mockReset().mockResolvedValue(null);
   mocks.worktreeDetectCwd.mockResolvedValue({
     isInsideWorktree: true,
     isGitRepo: true,
@@ -63,6 +73,7 @@ beforeEach(() => {
       worktreeListAll: mocks.worktreeListAll,
       worktreeGetForSession: mocks.worktreeGetForSession,
       worktreeDetectCwd: mocks.worktreeDetectCwd,
+      gitContext: { findLinkedWorktree: mocks.findLinkedWorktree },
       onWorktreeChanged: (cb: (payload: { sessionId: string }) => void) => {
         mocks.listeners.add(cb);
         return () => mocks.listeners.delete(cb);
@@ -86,6 +97,89 @@ afterEach(() => {
 });
 
 describe('WorktreeContext recycle refresh', () => {
+  it('shares external deletion with sidebar badges, retains metadata for reopening and detects external restoration', async () => {
+    const meta = { sessionId: 'open', path: '/tmp/wt/open' };
+    mocks.worktreeListAll.mockResolvedValue([meta, { sessionId: 'idle', path: '/tmp/wt/idle' }]);
+    const content = (active: boolean) => <WorktreeProvider><Probe />{active && <ActiveProbe />}</WorktreeProvider>;
+    const view = render(content(true));
+    await act(async () => {});
+    expect(view.getByTestId('active').textContent).toBe(meta.path);
+
+    mocks.worktreeDetectCwd.mockResolvedValue({ isInsideWorktree: false });
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    expect(view.getByTestId('active').textContent).toBe('');
+    expect(view.getByTestId('ids').textContent).toBe('idle:/tmp/wt/idle');
+
+    view.rerender(content(false));
+    mocks.worktreeDetectCwd.mockClear().mockResolvedValue({ isInsideWorktree: true });
+    view.rerender(content(true));
+    await act(async () => {});
+    expect(view.getByTestId('active').textContent).toBe(meta.path);
+    expect(view.getByTestId('ids').textContent).toContain('open:/tmp/wt/open');
+    expect(mocks.worktreeDetectCwd).toHaveBeenCalledExactlyOnceWith({ cwd: meta.path });
+    expect(mocks.worktreeListAll).toHaveBeenCalledOnce();
+    expect(mocks.worktreeGetForSession).not.toHaveBeenCalled();
+  });
+
+  it('rechecks same-path restoration through refreshSession without requiring a changed push or focus', async () => {
+    const meta = { sessionId: 'open', path: '/tmp/wt/open' };
+    mocks.worktreeListAll.mockResolvedValue([meta]);
+    mocks.worktreeDetectCwd.mockResolvedValue({ isInsideWorktree: false });
+    let refresh!: (sessionId: string) => Promise<void>;
+    function Actions() {
+      refresh = useRefreshWorktreeForSession();
+      return <><Probe /><ActiveProbe /></>;
+    }
+    const view = render(<WorktreeProvider><Actions /></WorktreeProvider>);
+    await act(async () => {});
+    expect(view.getByTestId('active').textContent).toBe('');
+    expect(view.getByTestId('ids').textContent).toBe('');
+
+    mocks.worktreeGetForSession.mockResolvedValue({ ...meta });
+    mocks.worktreeDetectCwd.mockClear().mockResolvedValue({ isInsideWorktree: true });
+    await act(async () => { await refresh('open'); });
+    expect(view.getByTestId('active').textContent).toBe(meta.path);
+    expect(view.getByTestId('ids').textContent).toBe(`open:${meta.path}`);
+    expect(mocks.worktreeDetectCwd).toHaveBeenCalledExactlyOnceWith({ cwd: meta.path });
+    expect(mocks.worktreeListAll).toHaveBeenCalledOnce();
+  });
+
+  it('does not hide a live worktree when its probe rejects', async () => {
+    mocks.worktreeListAll.mockResolvedValue([{ sessionId: 'open', path: '/tmp/wt/open' }]);
+    const view = render(<WorktreeProvider><Probe /><ActiveProbe /></WorktreeProvider>);
+    await act(async () => {});
+    mocks.worktreeDetectCwd.mockRejectedValue(new Error('probe timeout'));
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    expect(view.getByTestId('active').textContent).toBe('/tmp/wt/open');
+    expect(view.getByTestId('ids').textContent).toBe('open:/tmp/wt/open');
+  });
+
+  it('ignores liveness reports captured before same-path restoration or recycling', async () => {
+    const meta = { sessionId: 'open', path: '/tmp/wt/open' };
+    mocks.worktreeListAll.mockResolvedValue([meta]);
+    let report!: ReturnType<typeof useReportWorktreeLiveness>;
+    let original!: NonNullable<ReturnType<typeof useWorktreeForSession>>;
+    let refresh!: (sessionId: string) => Promise<void>;
+    function Actions() {
+      report = useReportWorktreeLiveness();
+      original = useWorktreeForSession('open') ?? original;
+      refresh = useRefreshWorktreeForSession();
+      return <Probe />;
+    }
+    const view = render(<WorktreeProvider><Actions /></WorktreeProvider>);
+    await act(async () => {});
+    const oldMeta = original;
+    mocks.worktreeGetForSession.mockResolvedValue({ ...meta });
+    await act(async () => { await refresh('open'); });
+    await act(async () => { report(oldMeta, false); });
+    expect(view.getByTestId('ids').textContent).toBe('open:/tmp/wt/open');
+    mocks.worktreeGetForSession.mockResolvedValue(null);
+    await act(async () => { await refresh('open'); });
+    await act(async () => { report(original, true); });
+    expect(view.getByTestId('ids').textContent).toBe('');
+    expect(mocks.worktreeDetectCwd).not.toHaveBeenCalled();
+  });
+
   it('removes only the reported session without reloading the full snapshot', async () => {
     mocks.worktreeListAll.mockResolvedValueOnce([
       { sessionId: 'archived-one', path: '/tmp/wt/archived-one' },

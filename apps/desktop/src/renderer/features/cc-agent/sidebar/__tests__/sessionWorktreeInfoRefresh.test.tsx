@@ -7,12 +7,16 @@ import { useTaskInfoWorktree } from '../sessionWorktreeInfo';
 
 const mocks = vi.hoisted(() => ({
   official: vi.fn(),
+  reportLiveness: vi.fn(),
   detect: vi.fn(),
   findLinked: vi.fn(),
   listeners: new Set<(payload: { sessionId: string }) => void>(),
 }));
 
-vi.mock('@/contexts/WorktreeContext', () => ({ useWorktreeForSession: mocks.official }));
+vi.mock('@/contexts/WorktreeContext', () => ({
+  useWorktreeForSession: mocks.official,
+  useReportWorktreeLiveness: () => mocks.reportLiveness,
+}));
 
 const session = { id: 'open', workingDir: '/repo', worktreePath: '/tmp/wt/open' };
 
@@ -23,6 +27,7 @@ function switchFocus() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mocks.reportLiveness.mockReset();
   mocks.official.mockReset().mockReturnValue({ path: '/tmp/wt/open', name: 'open', branch: 'feature' });
   mocks.detect.mockReset().mockResolvedValue({ isInsideWorktree: true });
   mocks.findLinked.mockReset().mockResolvedValue(null);

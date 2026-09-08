@@ -1,6 +1,8 @@
 import path from 'node:path';
 
-/** Bound native process creation and share pending probes; never cache completed Git state. */
+/** Bound native process creation and share pending probes; never cache completed Git state.
+ * The probe must bound its Git commands and await cleanup before settling.
+ */
 export function createCwdProbeScheduler<T>(probe: (cwd: string) => Promise<T>) {
   const pending = new Map<string, Promise<T>>();
   const queue: Array<() => void> = [];

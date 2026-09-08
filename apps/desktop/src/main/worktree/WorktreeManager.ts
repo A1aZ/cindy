@@ -398,6 +398,9 @@ async function withPrecreatedWorktreeOperationQueue<T>(
  */
 export const detectCwd = createCwdProbeScheduler(detectCwdOnce);
 
+// 每条探测命令都有界；复用 gitExec 的整树清理后才释放 scheduler slot。
+const CWD_PROBE_GIT_OPTS = { timeoutMs: 10_000 };
+
 async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
   // One Git process returns the same snapshot that previously needed five.
   // Unborn HEADs, older Git versions and newline-containing paths retain the
@@ -406,6 +409,7 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
     const { stdout } = await gitExec(
       ['rev-parse', '--show-toplevel', '--abbrev-ref', 'HEAD', '--git-dir', '--git-common-dir'],
       cwd,
+      CWD_PROBE_GIT_OPTS,
     );
     const lines = stdout.trim().split(/\r?\n/);
     if (lines.length === 4 && lines.every((line) => line.trim().length > 0)) {
@@ -419,7 +423,8 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
         ...(branch !== 'HEAD' ? { currentBranch: branch.trim() } : {}),
       };
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof GitExecError && err.timedOut) throw err;
     // Preserve the existing partial results and error classification.
   }
   const out: DetectCwdResp = {
@@ -430,8 +435,9 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
   };
   // 1. git --version 探测安装
   try {
-    await gitExec(['--version']);
+    await gitExec(['--version'], undefined, CWD_PROBE_GIT_OPTS);
   } catch (err) {
+    if (err instanceof GitExecError && err.timedOut) throw err;
     if (err instanceof GitExecError && err.cause?.code === 'ENOENT') {
       out.gitInstalled = false;
       return out;
@@ -443,13 +449,14 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
 
   // 2. rev-parse --show-toplevel: 拿 repo 根
   try {
-    const { stdout } = await gitExec(['rev-parse', '--show-toplevel'], cwd);
+    const { stdout } = await gitExec(['rev-parse', '--show-toplevel'], cwd, CWD_PROBE_GIT_OPTS);
     const toplevel = stdout.trim();
     if (toplevel) {
       out.isGitRepo = true;
       out.repoRoot = path.resolve(toplevel);
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof GitExecError && err.timedOut) throw err;
     out.isGitRepo = false;
   }
 
@@ -457,10 +464,11 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
 
   // 3. 当前分支
   try {
-    const { stdout } = await gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+    const { stdout } = await gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], cwd, CWD_PROBE_GIT_OPTS);
     const branch = stdout.trim();
     if (branch && branch !== 'HEAD') out.currentBranch = branch;
-  } catch {
+  } catch (err) {
+    if (err instanceof GitExecError && err.timedOut) throw err;
     // ignore — 分支信息不影响主流程
   }
 
@@ -470,16 +478,28 @@ async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
   // 这种判断是 git 自己用来区分主/linked worktree 的方式, 不依赖目录命名约定 ——
   // 任何工具(CC Desktop / 手工 git worktree add 等) 创建的 worktree 都能被检出。
   try {
-    const [{ stdout: gitDirRaw }, { stdout: gitCommonDirRaw }] = await Promise.all([
-      gitExec(['rev-parse', '--git-dir'], cwd),
-      gitExec(['rev-parse', '--git-common-dir'], cwd),
+    // 任一命令失败后仍等另一条完成清理，不能提前释放目录探测槽位。
+    const results = await Promise.allSettled([
+      gitExec(['rev-parse', '--git-dir'], cwd, CWD_PROBE_GIT_OPTS),
+      gitExec(['rev-parse', '--git-common-dir'], cwd, CWD_PROBE_GIT_OPTS),
     ]);
+    for (const result of results) {
+      if (result.status === 'rejected' && result.reason instanceof GitExecError && result.reason.timedOut) {
+        throw result.reason;
+      }
+    }
+    const [gitDirResult, commonDirResult] = results;
+    if (gitDirResult.status === 'rejected') throw gitDirResult.reason;
+    if (commonDirResult.status === 'rejected') throw commonDirResult.reason;
+    const gitDirRaw = gitDirResult.value.stdout;
+    const gitCommonDirRaw = commonDirResult.value.stdout;
     const gitDir = path.resolve(cwd, gitDirRaw.trim());
     const gitCommonDir = path.resolve(cwd, gitCommonDirRaw.trim());
     if (gitDir && gitCommonDir && gitDir !== gitCommonDir) {
       out.isInsideWorktree = true;
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof GitExecError && err.timedOut) throw err;
     // 解析失败 → 兜底走托管目录名启发式, 至少识别出 Cindy 自己创建的 worktree
     const normalizedRepoRoot = out.repoRoot?.replace(/\\/g, '/');
     if (normalizedRepoRoot && getManagedWorktreeBasePath(normalizedRepoRoot) != null) {

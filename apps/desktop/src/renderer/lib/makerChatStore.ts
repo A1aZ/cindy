@@ -3906,11 +3906,17 @@ function resolveGatewayRecoveryProviderId(
 }
 
 function enterView(sessionId: string): () => void {
-  getRemoteHistoryView(sessionId)?.setActive(true);
+  const view = getRemoteHistoryView(sessionId);
+  const resumingHistory = view && !view.isActive();
+  view?.setActive(true);
   _activeViewSessions.set(sessionId, (_activeViewSessions.get(sessionId) ?? 0) + 1);
   _lastViewedAt.delete(sessionId);
   _ensureDemoteTimer();
-  scheduleIdlePlanDiscoveryIfNeeded(sessionId);
+  if (resumingHistory) {
+    void view.refresh().then(() => {
+      if (!view.getSnapshot().error) scheduleIdlePlanDiscoveryIfNeeded(sessionId);
+    });
+  } else scheduleIdlePlanDiscoveryIfNeeded(sessionId);
   return () => leaveView(sessionId);
 }
 
@@ -10813,6 +10819,7 @@ function ensureInitialMessages(sessionId: string): void {
       if (!snapshot.error && snapshot.ready) {
         releaseHistoryFetchIfCurrent(sessionId, historyFetchToken);
         void reconcilePendingInteractions(sessionId);
+        scheduleIdlePlanDiscoveryIfNeeded(sessionId);
         return null;
       }
       if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
@@ -11143,7 +11150,6 @@ function cancelIdlePlanDiscovery(sessionId: string): void {
 }
 
 function scheduleIdlePlanDiscoveryIfNeeded(sessionId: string): void {
-  if (getRemoteHistoryView(sessionId)) return;
   if (!_activeViewSessions.has(sessionId)) return;
   const state = sessions.get(sessionId);
   if (!state?.historyLoaded || state.isLoadingMore || !state.hasMoreMessages) return;
@@ -11155,14 +11161,13 @@ function scheduleIdlePlanDiscoveryIfNeeded(sessionId: string): void {
 
   const run = () => {
     _idlePlanDiscoveryHandles.delete(sessionId);
-    void loadOneOlderPageForPlanDiscovery(sessionId);
+    void loadOneOlderPageForPlanDiscovery(sessionId).catch(() => undefined);
   };
 
   _idlePlanDiscoveryHandles.set(sessionId, setTimeout(run, IDLE_PLAN_DISCOVERY_DELAY_MS));
 }
 
 function loadOneOlderPageForPlanDiscovery(sessionId: string): Promise<boolean> {
-  if (getRemoteHistoryView(sessionId)) return Promise.resolve(false);
   if (!_activeViewSessions.has(sessionId)) return Promise.resolve(false);
   const state = sessions.get(sessionId);
   if (!state?.historyLoaded || state.isLoadingMore || !state.hasMoreMessages) {
@@ -11797,15 +11802,21 @@ function loadOlderMessages(
   maxPages = MAX_LOAD_OLDER_PAGES,
 ): Promise<boolean> {
   const view = getRemoteHistoryView(sessionId);
-  if (view?.getSnapshot().ready) return view.refresh(true).then(() => {
-    if (isHistoryViewUnavailable(view.getSnapshot().error)) {
-      view.setActive(false);
-      remoteHistoryViews.delete(sessionId);
-      return reconcileRemoteMessages(sessionId, { force: true }).then(() => loadOlderMessages(sessionId, automatic, maxPages));
-    }
-    if (view.getSnapshot().error) throw view.getSnapshot().error;
-    return true;
-  });
+  if (view?.getSnapshot().ready) {
+    const before = view.getSnapshot().nextCursor;
+    const epoch = _messagesEpoch.get(sessionId) ?? 0;
+    return view.refresh(true).then(() => {
+      if (isHistoryViewUnavailable(view.getSnapshot().error)) {
+        view.setActive(false);
+        remoteHistoryViews.delete(sessionId);
+        return reconcileRemoteMessages(sessionId, { force: true }).then(() => loadOlderMessages(sessionId, automatic, maxPages));
+      }
+      if (view.getSnapshot().error) throw view.getSnapshot().error;
+      const snapshot = view.getSnapshot();
+      return getRemoteHistoryView(sessionId) === view && snapshot.ready && view.isActive()
+        && (_messagesEpoch.get(sessionId) ?? 0) === epoch && snapshot.nextCursor !== before;
+    });
+  }
   const state = getOrCreateState(sessionId);
   if (state.isLoadingMore || !state.hasMoreMessages) return Promise.resolve(false);
 

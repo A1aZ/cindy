@@ -50,6 +50,7 @@ vi.mock('@/lib/composerDraftStore', () => ({
 
 import { makerChatStore, getRemoteHistoryView } from '@/lib/makerChatStore';
 import { projectHistoryView } from '@cindy/maker-shared/message-window';
+import { getLatestMessageTodoState } from '@cindy/maker-shared/message-render';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 
 // ─── 忠实的被控端内存替身(单一真相源)───────────────────────────────────────────
@@ -90,8 +91,17 @@ function makeFakeHost(deviceId: string, deviceName: string) {
 
   const invoke = vi.fn(async (_d: string, channel: string, args: unknown[]) => {
     switch (channel) {
-      case 'local-db:messages:view':
-        return historyViewEnabled ? { version: 1, items: projectHistoryView(messages.get(args[0] as string) ?? [], false), hasMore: false, nextCursor: null } : null;
+      case 'local-db:messages:view': {
+        if (!historyViewEnabled) return null;
+        const rows = messages.get(args[0] as string) ?? [];
+        const before = (args[1] as { before?: string })?.before;
+        const projected = projectHistoryView(before ? rows.slice(0, rows.findIndex((row) => row.id === before)) : rows, false);
+        const items = projected.slice(-20);
+        const first = items[0];
+        const hasMore = projected.length > items.length;
+        return { version: 1, items, hasMore,
+          nextCursor: hasMore ? (first.type === 'work' ? first.summary.firstMessageId : first.messages[0].id) : null };
+      }
       case 'local-db:messages:work-details': {
         const rows = messages.get(args[0] as string) ?? [];
         const ref = args[1] as { firstMessageId: string; lastMessageId: string };
@@ -214,6 +224,94 @@ afterEach(() => {
 });
 
 describe('device-link controller mirror — end-to-end scenarios', () => {
+  it.each(['mounted', 'prefetched', 'resumed', 'discovered', 'stalled'])('discovers plans through visible pages and stops without progress (%s)', async (entry) => {
+    vi.useFakeTimers();
+    const s = sid();
+    let leave: (() => void) | undefined;
+    const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+    try {
+      const row = (index: number, content: string, role: Message['role'] = 'assistant') =>
+        dbMessage(s, String(index), content, new Date(Date.UTC(2026, 5, 15) + index * 1000).toISOString(), role);
+      const create = { ...row(1, '', 'tool_use'), toolUseId: 'create',
+        content: { toolName: 'TaskCreate', input: { subject: 'Collect logs' }, toolUseId: 'create' } } as unknown as Message;
+      const result = { ...row(2, 'Task #abc created successfully: Collect logs', 'tool_result'), toolUseId: 'create' };
+      const update = { ...row(44, '', 'tool_use'), toolUseId: 'update',
+        ...(entry === 'discovered' ? { createdAt: row(23.5, '').createdAt } : {}),
+        content: { toolName: 'TaskUpdate', input: { taskId: 'abc', status: 'in_progress' }, toolUseId: 'update' } } as unknown as Message;
+      host.enableHistoryView();
+      host.seedSession(s, {}, [row(0, 'Investigate', 'user'), create, result, row(3, 'hidden', 'thinking'),
+        ...Array.from({ length: 40 }, (_, i) => row(i + 4, `# Result ${i}\nUseful output`)), update]
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+      remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+      if (entry !== 'prefetched') leave = makerChatStore.enterView(s);
+      makerChatStore.ensureInitialMessages(s);
+      await settle();
+      const view = getRemoteHistoryView(s)!;
+      expect(view.getSnapshot().items).toHaveLength(20);
+      expect(getLatestMessageTodoState(makerChatStore.getSnapshot(s).messages, { taskHistoryMayBeIncomplete: true }).hasPlanEvent).toBe(entry !== 'discovered');
+      if (entry === 'stalled') {
+        const invoke = host.invoke.getMockImplementation()!;
+        host.invoke.mockImplementation((device, channel, args) => invoke(device, channel,
+          channel === 'local-db:messages:view' ? [args[0], {}] : args));
+      }
+      if (entry === 'resumed') { leave!(); leave = undefined; }
+      if (entry === 'prefetched' || entry === 'resumed') {
+        await vi.advanceTimersByTimeAsync(200);
+        expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(1);
+        leave = makerChatStore.enterView(s);
+        await settle();
+      }
+      await vi.advanceTimersByTimeAsync(200);
+      await settle();
+      const state = makerChatStore.getSnapshot(s);
+      const plan = getLatestMessageTodoState(state.messages, { taskHistoryMayBeIncomplete: state.hasMoreMessages });
+      if (entry === 'stalled') {
+        expect(plan.isResolved).toBe(false);
+        expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(2);
+        return;
+      }
+      expect(plan).toMatchObject({ hasPlanEvent: true, isResolved: true });
+      expect(JSON.stringify(plan.insertion)).toContain('Collect logs');
+      expect(view.getSnapshot().hasMore).toBe(false);
+      expect(view.getSnapshot().details.size).toBe(0);
+      expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(entry === 'resumed' ? 4 : 3);
+      expect(host.invoke.mock.calls.some(([, channel]) => channel === 'local-db:messages:list' || channel === 'local-db:messages:work-details')).toBe(false);
+    } finally {
+      leave?.();
+      makerChatStore.purgeSession(s);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])('bounds idle discovery without a plan, including a failed page (fails=%s)', async (fails) => {
+    vi.useFakeTimers();
+    const s = sid();
+    let leave: (() => void) | undefined;
+    try {
+      host.enableHistoryView();
+      host.seedSession(s, {}, Array.from({ length: 60 }, (_, i) => dbMessage(s, String(i), `# Result ${i}\nUseful output`, new Date(Date.UTC(2026, 5, 15) + i * 1000).toISOString())));
+      remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+      leave = makerChatStore.enterView(s);
+      makerChatStore.ensureInitialMessages(s);
+      await vi.advanceTimersByTimeAsync(0);
+      const invoke = host.invoke.getMockImplementation()!;
+      if (fails) host.invoke.mockImplementation(async (device, channel, args) => {
+        if (channel === 'local-db:messages:view' && (args[1] as { before?: string })?.before) throw new Error('timeout');
+        return invoke(device, channel, args);
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(2);
+      const snapshot = getRemoteHistoryView(s)!.getSnapshot();
+      expect(snapshot.items).toHaveLength(fails ? 20 : 40);
+      expect(snapshot.hasMore).toBe(true);
+      expect(snapshot.error ? String(snapshot.error) : null).toBe(fails ? 'Error: timeout' : null);
+    } finally {
+      leave?.();
+      makerChatStore.purgeSession(s);
+      vi.useRealTimers();
+    }
+  });
+
   it('returns to raw history when a previously capable Host is downgraded', async () => {
     const s = sid();
     host.enableHistoryView();

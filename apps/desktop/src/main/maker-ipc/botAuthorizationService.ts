@@ -219,9 +219,20 @@ export class BotAuthorizationService {
     entry.writes = write.catch(this.deps.warn);
     return write;
   }
+  private async isVisible(entry: Entry): Promise<boolean> {
+    await entry.writes;
+    if (entry.closed) return false;
+    const card = await this.deps.load(entry.card.snapshot.requestId);
+    if (entry.closed) return false;
+    if (!card || card.snapshot.terminal) {
+      this.close(entry);
+      return false;
+    }
+    return true;
+  }
   private async get(requestId: string): Promise<Entry | null> {
     const live = this.entries.get(requestId);
-    if (live) return live;
+    if (live) return (await this.isVisible(live)) ? live : null;
     let flight = this.restoring.get(requestId);
     if (!flight) {
       const epoch = this.epoch;
@@ -233,11 +244,20 @@ export class BotAuthorizationService {
           card.completionPending ? { ...card.target, reauthorize: false } : card.target,
         );
         // A retained card can start a fresh flow; an old browser URL is never persisted.
-        card.snapshot = { ...card.snapshot, reopenActionId: undefined };
+        const hadReopenAction = !!card.snapshot.reopenActionId;
+        card.snapshot = {
+          ...card.snapshot,
+          reopenActionId: undefined,
+          revision: card.snapshot.revision + (hadReopenAction ? 1 : 0),
+        };
         const assessment = await adapter.assess();
         if (epoch !== this.epoch) return null;
         const entry = this.attach(card, adapter);
         entry.assessmentFingerprint = JSON.stringify(assessment);
+        if (!(await this.isVisible(entry))) return null;
+        // Broadcast a newer revision before accepting a stale reopen click. The
+        // retained card can then start a new flow without a generic action error.
+        if (hadReopenAction) await this.save(entry);
         return entry.closed ? null : entry;
       })().finally(() => this.restoring.delete(requestId));
       this.restoring.set(requestId, flight);
@@ -278,7 +298,7 @@ export class BotAuthorizationService {
     if (command.actionId === 'reopen-authorization') {
       if (!entry.authorizationUrl) return false;
       await entry.adapter.assess();
-      if (entry.closed || entry.cancelled) return false;
+      if (entry.cancelled || !(await this.isVisible(entry))) return false;
       await this.deps.openExternal(entry.authorizationUrl);
       return true;
     }
@@ -310,7 +330,7 @@ export class BotAuthorizationService {
       // Re-resolve the adapter at the action boundary: current owner, bot and plugin policy win.
       await this.deps.adapter(entry.card.sessionId, entry.card.target);
       const assessment = await entry.adapter.assess();
-      if (entry.closed || entry.cancelled) return;
+      if (entry.cancelled || !(await this.isVisible(entry))) return;
       entry.assessmentFingerprint = JSON.stringify(assessment);
       if (assessment.state === 'ready') {
         await this.check(entry);
@@ -327,7 +347,7 @@ export class BotAuthorizationService {
       }
       this.watch(entry);
       await this.phase(entry, 'action_running', actionId);
-      if (entry.closed || entry.cancelled) return;
+      if (entry.cancelled || !(await this.isVisible(entry))) return;
       this.startPoll(entry);
       const result = await this.execute(entry, action, sender, value, (url) => {
         if (entry.closed || entry.cancelled) return;

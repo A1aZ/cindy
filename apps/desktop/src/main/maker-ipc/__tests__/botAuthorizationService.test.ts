@@ -239,6 +239,80 @@ describe('Bot authorization transcript lifecycle (Grok parity)', () => {
     await flush();
     await h.service.dispose();
   });
+  it.each(['resolve', 'submit', 'reopen'])('rejects a hidden live card at the %s boundary', async (operation) => {
+    const h = harness();
+    h.adapter.execute = vi.fn(async (_a, _s, _v, onUrl) => {
+      onUrl?.('https://example.invalid/authorize');
+      return { ok: true as const, waitingExternal: true };
+    });
+    await h.service.request('s', { kind: 'host', id: 'grok' });
+    if (operation === 'reopen') {
+      await h.click();
+      await flush();
+    }
+    const card = structuredClone(h.card());
+    h.stored.clear(); // load no longer finds a visible row after clear or rewind
+    vi.mocked(h.adapter.execute).mockClear();
+    const command = {
+      kind: 'plugin_setup', action: 'run_action',
+      actionId: operation === 'reopen' ? 'reopen-authorization' : 'connect',
+      expectedRevision: card.snapshot.revision,
+    };
+    const accepted = operation === 'submit'
+      ? await h.service.submit(card.snapshot.requestId, { actionId: 'connect', expectedRevision: card.snapshot.revision, value: 'fake-secret' })
+      : await h.service.resolve(card.snapshot.requestId, command, h.sender);
+    expect(accepted).toBe(false);
+    await flush();
+    expect(h.adapter.execute).not.toHaveBeenCalled();
+    expect(h.deps.openExternal).not.toHaveBeenCalled();
+    expect(h.listeners.size).toBe(0);
+    expect(h.stored.size).toBe(0);
+    await h.service.dispose();
+  });
+
+  it('rechecks visibility after asynchronous assessment before starting OAuth', async () => {
+    const h = harness();
+    await h.service.request('s', { kind: 'host', id: 'grok' });
+    const assess = h.adapter.assess;
+    h.adapter.assess = async () => {
+      h.stored.clear();
+      return assess();
+    };
+    await h.click();
+    await flush();
+    expect(h.adapter.execute).not.toHaveBeenCalled();
+    expect(h.stored.size).toBe(0);
+    expect(h.listeners.size).toBe(0);
+    await h.service.dispose();
+  });
+
+  it('restoring a stale reopen action broadcasts its removal and accepts the obsolete click', async () => {
+    const h = harness();
+    await h.service.request('s', { kind: 'host', id: 'grok' });
+    const card = h.card();
+    card.snapshot.reopenActionId = 'reopen-authorization';
+    const oldRevision = card.snapshot.revision;
+    await h.service.dispose();
+    h.deps.save.mockClear();
+    const restored = new BotAuthorizationService(h.deps);
+    expect(await restored.resolve(card.snapshot.requestId, {
+      kind: 'plugin_setup', action: 'run_action', actionId: 'reopen-authorization',
+      expectedRevision: oldRevision,
+    }, h.sender)).toBe(true);
+    expect(h.deps.save).toHaveBeenCalled();
+    expect(h.card().snapshot.reopenActionId).toBeUndefined();
+    expect(h.card().snapshot.revision).toBeGreaterThan(oldRevision);
+    expect(h.deps.openExternal).not.toHaveBeenCalled();
+    expect(h.adapter.execute).not.toHaveBeenCalled();
+    await restored.resolve(card.snapshot.requestId, {
+      kind: 'plugin_setup', action: 'run_action', actionId: 'connect',
+      expectedRevision: h.card().snapshot.revision,
+    }, h.sender);
+    await flush();
+    expect(h.adapter.execute).toHaveBeenCalledTimes(1);
+    await restored.dispose();
+  });
+
   it('disposal suppresses a callback from an outstanding action', async () => {
     const h = harness();
     let finish!: () => void;

@@ -15,6 +15,7 @@ import { Session } from './session.js';
 import { createAsyncQueue } from './agents/shared/async-queue.js';
 import {
   AgentStartupCleanupPendingError,
+  AgentStartupStoppedError,
   TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
   type BaseAgent,
@@ -1574,10 +1575,41 @@ describe('Maker start-option lifecycle hooks', () => {
     expect(onStartCleanupSucceeded).not.toHaveBeenCalled();
   });
 
-  it('preserves runtime protection for an ordinary adapter failure without exit evidence', async () => {
+  it.each([new TypeError('startup RPC failed'), 'non-Error startup failure'])(
+    'releases only the confirmed-stopped startup and preserves its original error: %s', async (startupError) => {
+      const otherStartup = {} as CreateSessionOptions;
+      const leased = new Set<CreateSessionOptions>([otherStartup]);
+      const onStartFailed = vi.fn(({ options, runtimeMayBeAlive }: SessionStartFailureContext) => {
+        if (!runtimeMayBeAlive) leased.delete(options);
+      });
+      const onStartCleanupSucceeded = vi.fn();
+      const maker = new Maker({
+        agents: { pi: createAgent(vi.fn().mockRejectedValue(new AgentStartupStoppedError(startupError)), 'pi') },
+        storage: createStorage(), logger: createLogger(),
+        lifecycleHooks: {
+          prepareStartOptions: (_id, options) => { leased.add(options); },
+          onStartFailed, onStartCleanupSucceeded,
+        },
+      });
+      await expect(maker.createSession({
+        id: 'confirmed-exit', agentKind: 'pi', workingDir: '/repo', model: 'pi-model',
+      })).rejects.toBe(startupError);
+      expect(onStartFailed).toHaveBeenCalledOnce();
+      expect(onStartFailed).toHaveBeenCalledWith(expect.objectContaining({
+        stage: 'agent-start', error: startupError, runtimeMayBeAlive: false,
+      }));
+      expect(leased).toEqual(new Set([otherStartup]));
+      expect(onStartCleanupSucceeded).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    new Error('ordinary startup failure'),
+    Object.assign(new Error('ordinary startup failure'), { name: 'AgentStartupStoppedError' }),
+  ])('preserves runtime protection for an adapter failure without exit evidence: %s', async (error) => {
     const onStartFailed = vi.fn();
     const onStartCleanupSucceeded = vi.fn();
-    const startSession = vi.fn().mockRejectedValue(new Error('ordinary startup failure'));
+    const startSession = vi.fn().mockRejectedValue(error);
     const maker = new Maker({
       agents: { codex: createAgent(startSession) }, storage: createStorage(), logger: createLogger(),
       lifecycleHooks: { onStartFailed, onStartCleanupSucceeded },

@@ -1468,6 +1468,17 @@ export class AgentNotAuthenticatedError extends Error {
   }
 }
 
+/**
+ * An adapter failed before returning a handle and has confirmed its process stopped.
+ * Maker unwraps the cause after releasing only this startup's host resources.
+ */
+export class AgentStartupStoppedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'AgentStartupStoppedError';
+  }
+}
+
 /** An adapter failed before returning a handle, but its process has not confirmed exit. */
 export class AgentStartupCleanupPendingError extends Error {
   readonly whenStopped: Promise<void>;

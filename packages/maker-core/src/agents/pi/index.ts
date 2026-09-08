@@ -57,6 +57,7 @@ function validateSdkSessionId(value: string): string {
 import {
   AgentNotAuthenticatedError,
   AgentStartupCleanupPendingError,
+  AgentStartupStoppedError,
   BaseAgent,
   MAIN_OWNED_SEND_CONTEXT,
   PiManagedPackageMutationCancelledError,
@@ -5166,7 +5167,8 @@ export class PiAgent extends BaseAgent {
         cleanupRuntimeFiles();
       }
       if (cleanupPending) throw cleanupPending;
-      throw err;
+      // Only a successful close proves exit; do not infer it from the startup error.
+      throw new AgentStartupStoppedError(err);
     }
 
     const launchSubagentRunner = (request: PiSubagentRunnerLaunchRequest): Promise<void> =>

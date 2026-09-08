@@ -38,7 +38,7 @@ import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilitie
 import { piExplicitSkillRuntimePath } from './agents/pi/skill-runtime-provenance.js';
 import { fingerprintPiProjectSkillEntrypoint } from './agents/pi/project-resource-assembly.js';
 import { Session, generateSessionId } from './session.js';
-import { AgentStartupCleanupPendingError } from './agents/base-agent.js';
+import { AgentStartupCleanupPendingError, AgentStartupStoppedError } from './agents/base-agent.js';
 import type {
   AgentSessionHandle,
   AgentSessionTeardownOptions,
@@ -716,7 +716,9 @@ export class Maker {
       codexThreadClaim?.release();
       // A generic adapter error does not prove its process stopped. Preserve
       // host guards; only pre-adapter failure or explicit exit evidence releases them.
-      await notifyStartFailed('agent-start', error, agentStartAttempted);
+      const runtimeStopped = error instanceof AgentStartupStoppedError;
+      const startupError = runtimeStopped ? error.cause : error;
+      await notifyStartFailed('agent-start', startupError, agentStartAttempted && !runtimeStopped);
       if (error instanceof AgentStartupCleanupPendingError) {
         // The adapter still owns this unpublished process. Its eventual close
         // must release only this startup's resources, even after a rebuild.
@@ -726,7 +728,7 @@ export class Maker {
           });
         });
       }
-      throw error;
+      throw startupError;
     }
     if (opts.agentKind === 'codex' && isClaimableCodexThreadId(handle.id)) {
       try {

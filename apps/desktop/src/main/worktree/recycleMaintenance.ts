@@ -116,8 +116,10 @@ export class WorktreeRecycleMaintenance {
     if (record.phase === 'restored' || record.phase === 'restoring' || record.meta.ephemeral) return false;
     const current = store.get(record.meta.sessionId);
     if (record.phase === 'removed' && !current) return false;
-    return (!current || worktreeGeneration(current) === record.generation)
-      && (this.attempts.get(this.key(record))?.count ?? 0) < MAX_ATTEMPTS;
+    // Attempts only control backoff. A directory may remain externally locked
+    // longer than one backoff window; it must become eligible again when the
+    // lock is released or the next deadline arrives.
+    return !current || worktreeGeneration(current) === record.generation;
   }
 
   private deadline(record: WorktreeRecycleRecord): number {

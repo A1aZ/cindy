@@ -120,11 +120,17 @@ describe('durable worktree maintenance', () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(closeAndRecycle).toHaveBeenCalledExactlyOnceWith('owner', 'archived');
   });
-  it('bounds automatic retries and lets a resource event renew that budget', async () => {
-    await maintenance.start(); await vi.runAllTimersAsync();
-    expect(closeAndRecycle).toHaveBeenCalledTimes(8); expect(vi.getTimerCount()).toBe(0);
+  it('keeps retrying after the backoff cap and lets a resource event wake it early', async () => {
+    await maintenance.start();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(closeAndRecycle).toHaveBeenCalledTimes(8);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(closeAndRecycle).toHaveBeenCalledTimes(9);
     notifyWorktreeRecycleOpportunity(state.records[0].meta.path);
-    await vi.advanceTimersByTimeAsync(100); expect(closeAndRecycle).toHaveBeenCalledTimes(9);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(closeAndRecycle.mock.calls.length).toBeGreaterThan(9);
+    expect(vi.getTimerCount()).toBe(1);
   });
   it('continues with other resources after one request fails', async () => {
     state.records.push(record('second')); state.rows.push({ ...state.rows[0], id: 'second' });

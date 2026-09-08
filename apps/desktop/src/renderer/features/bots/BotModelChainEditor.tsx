@@ -32,7 +32,8 @@ function defaultRoute(vendor: 'cc' | 'codex' | 'pi'): BotModelRoute {
 
 export function BotModelChainEditor({
   value,
-  onChange,
+  onChange: onValueChange,
+  disabled = false,
   hiddenVendors = [],
   remote = false,
   label,
@@ -40,6 +41,7 @@ export function BotModelChainEditor({
 }: {
   value: BotModelRoute[];
   onChange: (next: BotModelRoute[]) => void;
+  disabled?: boolean;
   hiddenVendors?: MakerVendor[];
   remote?: boolean;
   label?: string;
@@ -49,6 +51,10 @@ export function BotModelChainEditor({
   const { availableVendors, loaded } = useAvailableAgents();
   const [expanded, setExpanded] = useState(false);
   const routes = value.slice(0, BOT_MODEL_CHAIN_MAX);
+  // Picker content may be portaled outside a form's disabled fieldset.
+  const onChange = (next: BotModelRoute[]) => {
+    if (!disabled) onValueChange(next);
+  };
   // All local entry points, including empty-chain recovery, use the runtime
   // roster. Remote callers supply their own device's hiddenVendors instead.
   const visibleVendors = (['pi', 'codex', 'cc'] as const)
@@ -82,7 +88,7 @@ export function BotModelChainEditor({
   const picker = (route: BotModelRoute, index: number) => (
     <div className="min-w-0 flex-1">
       <ModelSelector
-        disabled={!remote && !loaded}
+        disabled={disabled || (!remote && !loaded)}
         vendorKey={vendorFor(route.harness)}
         modelId={route.model}
         effort={route.effort}
@@ -137,7 +143,7 @@ export function BotModelChainEditor({
                 <div className="flex shrink-0 gap-1">
                   <button
                     type="button"
-                    disabled={index === 0}
+                    disabled={disabled || index === 0}
                     onClick={() => move(index, -1)}
                     aria-label={t('bots.modelChain.moveUp')}
                     className="rounded-lg p-1.5 hover:bg-[var(--surface-hover)] disabled:opacity-30"
@@ -146,7 +152,7 @@ export function BotModelChainEditor({
                   </button>
                   <button
                     type="button"
-                    disabled={index === routes.length - 1}
+                    disabled={disabled || index === routes.length - 1}
                     onClick={() => move(index, 1)}
                     aria-label={t('bots.modelChain.moveDown')}
                     className="rounded-lg p-1.5 hover:bg-[var(--surface-hover)] disabled:opacity-30"
@@ -156,6 +162,7 @@ export function BotModelChainEditor({
                   {routes.length > 1 ? (
                     <button
                       type="button"
+                      disabled={disabled}
                       onClick={() => onChange(routes.filter((_, at) => at !== index))}
                       aria-label={t('bots.modelChain.remove')}
                       className="rounded-lg p-1.5 hover:bg-[var(--danger-bg-soft)] hover:text-[var(--text-danger)]"
@@ -168,7 +175,7 @@ export function BotModelChainEditor({
             ))}
             <button
               type="button"
-              disabled={routes.length >= BOT_MODEL_CHAIN_MAX || visibleVendors.length === 0}
+              disabled={disabled || routes.length >= BOT_MODEL_CHAIN_MAX || visibleVendors.length === 0}
               onClick={add}
               className={cn(
                 'inline-flex h-8 items-center gap-2 rounded-full px-3 text-12',
@@ -181,7 +188,8 @@ export function BotModelChainEditor({
             {onRestoreDefault ? (
               <button
                 type="button"
-                onClick={onRestoreDefault}
+                disabled={disabled}
+                onClick={() => { if (!disabled) onRestoreDefault(); }}
                 className="ml-2 h-8 rounded-full px-3 text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"
               >
                 {t('bots.model.restoreDefault')}

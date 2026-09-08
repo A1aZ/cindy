@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const translate = (key: string, opts?: Record<string, unknown>) =>
@@ -27,12 +27,14 @@ vi.mock('../botStore', () => ({
   getEffectiveBotModelSettings: () => ({ model: 'custom-model', providerId: 'custom', effort: 'high', fastMode: false }),
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: ({ unifiedAgents, onUnifiedSelect }: {
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect, disabled, vendorKey }: {
+    disabled: boolean;
+    vendorKey: string;
     unifiedAgents: string[];
     onUnifiedSelect: (selection: unknown) => void;
   }) => (
-    <>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
-      <button key={engine} type="button" onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>
+    <><span data-testid="selected-engine">{vendorKey}</span>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+      <button key={engine} disabled={disabled} type="button" onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>
         {engine === 'pi' ? 'choose-custom-model' : 'choose-custom-codex-model'}
       </button>
     ))}</>
@@ -65,6 +67,25 @@ describe('BotRosterView — 唯一的伙伴创建界面', () => {
     fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
     await waitFor(() => expect(mocks.addBotProfileAndWait).toHaveBeenCalledTimes(2));
     expect(mocks.addBotProfileAndWait.mock.calls[1][0].capabilities.modelChainOverride[0]).toMatchObject({ model: 'custom-model', providerId: 'custom' });
+  });
+
+  it('locks the recovery picker while creation is pending and unlocks after failure', async () => {
+    mocks.addBotProfileAndWait.mockRejectedValueOnce(new mocks.BotModelSelectionRequiredError());
+    render(<BotRosterView />);
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    fireEvent.click(await screen.findByText('choose-custom-model'));
+    let reject!: (reason: Error) => void;
+    mocks.addBotProfileAndWait.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    const picker = screen.getByText('choose-custom-codex-model') as HTMLButtonElement;
+    expect(picker.disabled).toBe(true);
+    fireEvent.click(picker);
+    expect(screen.getByTestId('selected-engine').textContent).toBe('pi');
+    expect(mocks.addBotProfileAndWait.mock.lastCall?.[0].capabilities.modelChainOverride[0].harness).toBe('pi');
+    await act(async () => { reject(new Error('offline')); });
+    expect(picker.disabled).toBe(false);
+    fireEvent.click(picker);
+    expect(screen.getByTestId('selected-engine').textContent).toBe('codex');
   });
 
   it('offers only installed runtimes when recovering creation with an empty chain', async () => {

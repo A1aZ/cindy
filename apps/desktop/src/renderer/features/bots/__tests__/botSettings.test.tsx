@@ -350,6 +350,28 @@ describe('Bot settings profile consolidation', () => {
 });
 
 describe('Bot settings unified autosave', () => {
+  it('clears an override with no default route and follows defaults when they recover', async () => {
+    vi.useFakeTimers();
+    const route = capabilities().modelChain[0]!;
+    const view = renderSettings({ capabilities: capabilities({ modelChainOverride: [route] }) });
+    const details = view.container.querySelector('[data-testid="bot-model-chain-editor"] details')!;
+    (details as HTMLDetailsElement).open = true;
+    fireEvent(details, new Event('toggle'));
+    fireEvent.click(screen.getByText('bots.model.restoreDefault'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    expect(mocks.updateBotProfile.mock.lastCall?.[1]).toMatchObject({
+      capabilities: { modelChainOverride: null, modelOverride: null, modelChain: [], model: '' },
+    });
+    const saves = mocks.updateBotProfile.mock.calls.length;
+    act(() => {
+      mocks.defaultModelChain = [{ ...route, model: 'recovered-model' }];
+      for (const listener of mocks.modelListeners) listener();
+    });
+    expect(screen.getAllByTestId('current-model')[0]?.textContent).toBe('recovered-model');
+    view.unmount();
+    expect(mocks.updateBotProfile).toHaveBeenCalledTimes(saves);
+  });
+
   it.each(['provider', 'runtime', 'global chain'] as const)(
     'refreshes a nonempty default chain after %s changes without saving or losing edits',
     async (source) => {

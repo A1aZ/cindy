@@ -290,10 +290,9 @@ export function BotSettings({
               onRestoreDefault={() => {
                 const modelChain = getEffectiveBotModelChain();
                 const primary = modelChain[0];
-                if (!primary) return;
                 setCapabilities((current) => ({
                   ...current,
-                  ...primary,
+                  ...(primary ?? { model: '', providerId: null, effort: '', fastMode: false }),
                   modelOverride: null,
                   modelChain,
                   modelChainOverride: null,

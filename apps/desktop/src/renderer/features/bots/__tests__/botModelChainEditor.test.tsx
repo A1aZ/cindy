@@ -117,6 +117,31 @@ describe('BotModelChainEditor', () => {
     });
   });
 
+  it('blocks picker callbacks and chain controls when disabled', () => {
+    const route = { harness: 'codex' as const, model: 'saved-model', providerId: 'openai', effort: '', fastMode: false };
+    const onChange = vi.fn();
+    const restore = vi.fn();
+    const view = render(<BotModelChainEditor value={[route, { ...route, model: 'backup' }]} onChange={onChange} onRestoreDefault={restore} disabled />);
+    expect(modelSelectorProps.mock.lastCall?.[0].disabled).toBe(true);
+    // Simulate callbacks from content portaled outside the disabled trigger.
+    fireEvent.click(screen.getByText('choose-official-codex-model'));
+    fireEvent.click(screen.getByText('set-high-effort'));
+    fireEvent.click(screen.getByText('enable-fast-mode'));
+    const details = view.container.querySelector('details')!;
+    details.open = true;
+    fireEvent(details, new Event('toggle'));
+    for (const label of ['bots.modelChain.moveUp', 'bots.modelChain.moveDown', 'bots.modelChain.remove']) {
+      for (const button of screen.getAllByLabelText(label)) {
+        expect((button as HTMLButtonElement).disabled).toBe(true);
+        fireEvent.click(button);
+      }
+    }
+    fireEvent.click(screen.getByText('bots.modelChain.add'));
+    fireEvent.click(screen.getByText('bots.model.restoreDefault'));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
   it('allows selecting the first route when the default chain is empty', () => {
     const onChange = vi.fn();
     render(<BotModelChainEditor value={[]} onChange={onChange} />);

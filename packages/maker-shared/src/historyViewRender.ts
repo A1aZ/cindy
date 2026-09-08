@@ -48,8 +48,10 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
     const range = preview ? summary.preview! : summary;
     const state = snapshot.details.get(range.key);
     const cached = state?.messages ?? [];
-    const first = cached.findIndex((row) => row.id === range.firstMessageId);
-    const last = cached.findIndex((row) => row.id === range.lastMessageId);
+    const matchesReference = (row: T, id: string) => row.id === id
+      || (id.startsWith('history-live:') && row.clientId === id.slice('history-live:'.length));
+    const first = cached.findIndex((row) => matchesReference(row, range.firstMessageId));
+    const last = cached.findIndex((row) => matchesReference(row, range.lastMessageId));
     // A visible result can split a previously cached range. Retain only this
     // reference's prefix while its replacement pages are being fetched.
     const body = (first < 0 ? [] : cached.slice(first, last < first ? undefined : last + 1))

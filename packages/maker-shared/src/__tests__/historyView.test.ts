@@ -313,6 +313,38 @@ describe('shared history view lifecycle', () => {
     view.setActive(false);
   });
 
+  it.each(['live', 'mixed', 'preview', 'stored'])('matches persisted detail boundaries without changing reference identity: %s', async (mode) => {
+    const persisted = [row(1, 'thinking', 'first'), row(2, 'thinking', 'last')];
+    const references = persisted.map((message, index) => ({ ...message,
+      id: mode === 'stored' ? message.clientId : mode === 'mixed' && index === 0
+        ? message.id : `history-live:${message.clientId}` }));
+    const items = projectHistoryView(references, true);
+    if (items[0].type !== 'work') throw new Error('missing work');
+    const summary = items[0].summary;
+    if (mode === 'preview') summary.preview = { ...summary, key: 'preview' };
+    const view = new HistoryViewController<HistoryMessageSource>({
+      page: async () => ({ version: 1, items, hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: persisted, hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    const key = mode === 'preview' ? 'preview' : summary.key;
+    view.setExpanded(key, true);
+    await new Promise(done => setTimeout(done, 0));
+    const snapshot = view.getSnapshot();
+    const detail = snapshot.details.get(key)!;
+    // A refreshed subrange can temporarily reuse a wider cache. Both endpoints
+    // must still clip correctly after the live rows acquire persistent IDs.
+    snapshot.details.set(key, { ...detail, messages: [row(0, 'thinking', 'before'), ...persisted, row(3, 'thinking', 'after')] });
+    const rendered = renderHistoryView({ view, snapshot, liveMessages: [], streaming: true,
+      build: messages => messages.map(message => message.content), structure: ungroupedStructure });
+    if (mode === 'stored') expect(rendered).not.toContain('first');
+    else expect(rendered).toEqual(['first', 'last']);
+    expect(view.getSnapshot().items).toEqual(items);
+    expect([...snapshot.expanded]).toEqual([key]);
+    view.setActive(false);
+  });
+
   it('does not revive durable messages removed by rewind through the live overlay', async () => {
     const view = new HistoryViewController<HistoryMessageSource>({
       page: async () => ({ version: 1, items: projectHistoryView([row(1, 'user', 'kept')], false), hasMore: false, nextCursor: null }),

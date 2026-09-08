@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Image } from "react-native";
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import {
   prepareConversationShareImages,
   type ConversationShareImageContext,
@@ -13,8 +13,8 @@ import {
   isDesktopLocalMediaUrl,
   type ResolveRemoteMediaFn,
 } from "@/session/remoteMedia";
-import { downloadRemoteMediaAsDataUri } from "@/session/remoteMediaDiskCacheExpo";
-import { imageMimeFromUrl } from "@/session/remoteMediaDiskCache";
+import { withDownloadedRemoteMediaFile } from "@/session/remoteMediaDiskCacheExpo";
+import { extOfMime, imageMimeFromUrl } from "@/session/remoteMediaDiskCache";
 import {
   getSentAttachmentThumbUri,
   ensureSentAttachmentThumbsHydrated,
@@ -22,14 +22,66 @@ import {
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
+async function readShareImageSize(uri: string, signal: AbortSignal) {
+  if (signal.aborted) throw new Error("conversation share image cancelled");
+  let onAbort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("conversation share image cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    // Android's encoded-image size reader accepts file:// but rejects data:.
+    // Racing cancellation also releases temporary files if native IO stalls.
+    return await Promise.race([Image.getSize(uri), cancelled]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function readShareImageFile(
   uri: string,
   mimeType: string,
-): Promise<string | null> {
+  canRead: () => boolean,
+  signal: AbortSignal,
+  embeddedUri?: string,
+): Promise<ConversationShareImage | null> {
+  if (!canRead()) return null;
   const file = new File(uri);
   if (!file.exists || file.size <= 0 || file.size > MAX_IMAGE_BYTES)
     return null;
-  return `data:${mimeType};base64,${await file.base64()}`;
+  const size = await readShareImageSize(uri, signal);
+  if (!canRead()) return null;
+  const dataUri = embeddedUri ?? `data:${mimeType};base64,${await file.base64()}`;
+  return canRead() ? { uri: dataUri, ...size } : null;
+}
+
+/** Inline sources need a file only for sizing; exports keep their embedded bytes. */
+async function readShareImageDataUri(
+  uri: string,
+  canRead: () => boolean,
+  signal: AbortSignal,
+): Promise<ConversationShareImage | null> {
+  const header = /^data:(image\/[^;,]+);base64,/.exec(uri);
+  if (!header || uri.length === header[0].length || !canRead()) return null;
+  const directory = new Directory(Paths.cache, "conversation-share-images");
+  let file: File | null = null;
+  try {
+    directory.create({ intermediates: true, idempotent: true });
+    const unique = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    file = new File(directory, `image-${unique}.${extOfMime(header[1]!)}`);
+    const FileSystem = await import("expo-file-system/legacy");
+    if (!canRead()) return null;
+    await FileSystem.writeAsStringAsync(file.uri, uri.slice(header[0].length), {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    return await readShareImageFile(file.uri, header[1]!, canRead, signal, uri);
+  } finally {
+    try {
+      file?.delete();
+    } catch {
+      // Best-effort cleanup within the OS cache, including partial writes.
+    }
+  }
 }
 
 async function loadShareImage(
@@ -42,13 +94,17 @@ async function loadShareImage(
   await ensureSentAttachmentThumbsHydrated();
   if (!canRead()) return null;
   const localThumb = getSentAttachmentThumbUri(url);
-  let uri = localThumb
-    ? ((await readShareImageFile(
-        localThumb,
-        imageMimeFromUrl(localThumb) ?? "image/jpeg",
-      ).catch(() => null)) ?? url)
-    : url;
+  if (localThumb) {
+    const image = await readShareImageFile(
+      localThumb,
+      imageMimeFromUrl(localThumb) ?? "image/jpeg",
+      canRead,
+      signal,
+    ).catch(() => null);
+    if (image) return image;
+  }
   if (!canRead()) return null;
+  let uri = url;
   let mimeType = imageMimeFromUrl(uri) ?? "image/jpeg";
   if (uri === url && isDesktopLocalMediaUrl(url)) {
     const media = await resolve(
@@ -73,14 +129,14 @@ async function loadShareImage(
     // Only download objects whose size the controlled desktop resolver knows.
     // Arbitrary HTTP sources have no trusted pre-transfer bound: keep alt text.
     if (/^https?:\/\//i.test(uri)) {
-      uri =
-        (await downloadRemoteMediaAsDataUri(uri, mimeType, MAX_IMAGE_BYTES)) ??
-        "";
+      return withDownloadedRemoteMediaFile(uri, mimeType, MAX_IMAGE_BYTES, (file) =>
+        readShareImageFile(file.uri, mimeType, canRead, signal),
+      );
     }
   }
   if (uri.startsWith("file://") && isDesktopLocalMediaUrl(url)) {
     // Other local files must come from the controlled media resolver.
-    uri = (await readShareImageFile(uri, mimeType)) ?? "";
+    return readShareImageFile(uri, mimeType, canRead, signal);
   }
   if (
     !canRead() ||
@@ -88,8 +144,7 @@ async function loadShareImage(
     uri.length > (MAX_IMAGE_BYTES * 4) / 3 + 128
   )
     return null;
-  const size = await Image.getSize(uri);
-  return { uri, width: size.width, height: size.height };
+  return readShareImageDataUri(uri, canRead, signal);
 }
 
 interface ShareImageJob {

@@ -521,7 +521,9 @@ export function setBeforeLocalCodexSessionStartHook(hook: (() => Promise<void>) 
   _beforeLocalCodexSessionStartHook = hook;
 }
 
-// The IPC composition root owns route reconciliation; MCP factories bind before it is ready.
+// Process-lifetime IPC binding: its reconciler reads the dynamic Maker facade and
+// clears owner-scoped bookkeeping by epoch. Keep it across resetMaker; IPC is not
+// registered again after an account switch. MCP factories bind before it is ready.
 let _resolveBotCapabilityAgentKind: BotCapabilityServiceDeps['resolveBotAgentKind'] | null = null;
 export function setBotCapabilityAgentKindResolver(
   resolver: BotCapabilityServiceDeps['resolveBotAgentKind'] | null,
@@ -2708,7 +2710,6 @@ export function resetMaker(): void {
   _registerPiAgent = null;
   _codexAgent = null;
   _mcpProviders = {};
-  _resolveBotCapabilityAgentKind = null;
   // coordinator 闭包捕获了刚作废的那个 maker —— 不清掉的话,换账号窗口期内到达的 auth
   // 事件会拿旧实例去拉模型清单(串号)。下次 getMaker() 会带着干净记账重建它。
   _codexModelBackfill = null;

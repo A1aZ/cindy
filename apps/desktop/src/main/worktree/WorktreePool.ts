@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { checkpointWorktreeForReuse, recycleManagedWorktree } from './managedRecycle';
 import { withWorktreeResourceLock } from './resourceLock';
 import { readRecycleRecord } from './recycleJournal';
+import { restoreRecordedWorktree } from './restoreRecovery';
 import { withLegacyWorktreeRuntimeGuard } from './legacyRuntimeGuard';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -76,6 +77,7 @@ export async function acquireWorktree(
     if (entry) {
       pool.delete(key);
 
+      let checkpointed = false;
       try {
         const resolvedName = await WorktreeManager.resolveAvailableWorktreeName(
           entry.meta.baseRepo,
@@ -93,6 +95,7 @@ export async function acquireWorktree(
             opts,
             async () => {
               await checkpointWorktreeForReuse(entry.meta);
+              checkpointed = true;
               if (!legacyGuardHeld()) throw new Error('runtime evidence unavailable');
             },
           );
@@ -114,6 +117,21 @@ export async function acquireWorktree(
           return { ok: true as const, meta };
         }));
       } catch (err) {
+        if (checkpointed) {
+          try {
+            const restored = await restoreRecordedWorktree(entry.meta.sessionId, entry.meta.path);
+            if (!restored) {
+              log.warn('[WorktreePool] failed reuse could not restore its checkpoint', {
+                sessionId: entry.meta.sessionId,
+              });
+            }
+          } catch (restoreError) {
+            log.warn('[WorktreePool] restoring failed reuse checkpoint threw', {
+              sessionId: entry.meta.sessionId,
+              error: restoreError instanceof Error ? restoreError.message : String(restoreError),
+            });
+          }
+        }
         log.warn(
           '[WorktreePool] resetWorktree failed, falling back to fresh creation:',
           err instanceof Error ? err.message : String(err),

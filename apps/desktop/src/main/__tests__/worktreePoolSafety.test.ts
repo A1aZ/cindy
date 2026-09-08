@@ -1,5 +1,6 @@
 const checkpointMock = vi.hoisted(() => vi.fn());
 const recyclePoolMock = vi.hoisted(() => vi.fn());
+const restoreRecordedWorktreeMock = vi.hoisted(() => vi.fn());
 vi.mock('../worktree/managedRecycle', () => ({
   checkpointWorktreeForReuse: checkpointMock,
   recycleManagedWorktree: recyclePoolMock,
@@ -50,6 +51,9 @@ vi.mock('../worktree/worktreeStore', () => ({
     storeMap.set(id, meta);
   },
   del: (sessionId: string) => storeMap.delete(sessionId),
+}));
+vi.mock('../worktree/restoreRecovery', () => ({
+  restoreRecordedWorktree: restoreRecordedWorktreeMock,
 }));
 
 vi.mock('../worktree/WorktreeManager', () => ({
@@ -136,6 +140,7 @@ describe('WorktreePool safety', () => {
       storeMap.delete(meta.sessionId);
       return true;
     });
+    restoreRecordedWorktreeMock.mockReset().mockResolvedValue(true);
     rmSpy = vi.spyOn(fs, 'rm');
 
     pool = await import('../worktree/WorktreePool');
@@ -414,6 +419,24 @@ describe('WorktreePool safety', () => {
     expect(commands.some((args) => args[0] === 'clean')).toBe(false);
     expect(commands.some((args) => args.includes('-B'))).toBe(false);
     expect(createWorktreeMock).toHaveBeenCalledWith(req);
+  });
+
+  it('restores the old generation before falling back when reset fails after checkpoint', async () => {
+    const meta = makeMeta(baseRepo, 'previous', '2026-05-26T00:00:00.000Z');
+    fsSync.mkdirSync(meta.path, { recursive: true });
+    storeMap.set(meta.sessionId, meta);
+    await expect(pool.releaseWorktree(meta.sessionId)).resolves.toBe('pooled');
+    createWorktreeMock.mockResolvedValue({ ok: false as const, error: { kind: 'unknown' as const, message: 'fresh create failed' } });
+    gitExecMock.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'checkout') throw new Error('checkout failed after checkpoint');
+      return { stdout: '', stderr: '' };
+    });
+
+    await pool.acquireWorktree({ sessionId: 'next', name: 'next', baseRepo, sourceBranch: 'main', ephemeral: true });
+
+    expect(restoreRecordedWorktreeMock).toHaveBeenCalledWith(meta.sessionId, meta.path);
+    expect(storeMap.get(meta.sessionId)).toEqual(meta);
+    expect(storeMap.has('next')).toBe(false);
   });
 
   it('preserves dirty worktrees instead of auto-stashing them into the pool', async () => {

@@ -40,6 +40,12 @@ const compiled = ts.transpileModule([
   `return { ${callbackNames.join(', ')} };`,
 ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
+const opacityDeclaration = renderer!.body!.statements.flatMap(node => (
+  ts.isVariableStatement(node) ? [...node.declarationList.declarations] : []
+)).find(node => ts.isIdentifier(node.name) && node.name.text === 'initialRevealOpacity')!;
+const renderOpacity = new Function('listRevealed', 'initialRevealProgress',
+  `return ${opacityDeclaration.initializer!.getText(source)};`) as (revealed: boolean, progress: object) => unknown;
+
 function harness() {
   const ref = <T>(current: T) => ({ current });
   const state = {
@@ -108,6 +114,30 @@ beforeEach(() => {
 afterEach(() => { setMobileDebugSink(undefined); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('streaming follow yields to the reader', () => {
+  it('keeps revealed history opaque after a delayed native stop value and keyboard rerenders', () => {
+    const h = harness();
+    const progress = { value: 0 };
+    let revealed = false;
+    h.initialRevealProgress.setValue.mockImplementation((value: number) => { progress.value = value; });
+    h.setListRevealed.mockImplementation((value: boolean) => { revealed = value; });
+    h.state.initialRevealAnimationRef.current!.stop = () => {
+      setTimeout(() => { progress.value = 0; }, 1);
+    };
+    expect(renderOpacity(revealed, progress)).toBe(progress);
+    h.revealPositionedHistory();
+    expect(progress.value).toBe(1);
+    expect(renderOpacity(revealed, progress)).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(progress.value).toBe(0); // Native completion delivers its old hidden value.
+    for (const viewportHeight of [500, 912]) {
+      h.state.scrollMetricsRef.current.viewportHeight = viewportHeight;
+      h.handleContentSize(400, 2000);
+      expect(renderOpacity(revealed, progress)).toBe(1);
+    }
+    // A task switch resets revealed state and uses a fresh animation value.
+    const nextProgress = { value: 0 };
+    expect(renderOpacity(false, nextProgress)).toBe(nextProgress);
+  });
   it.each(['off', 'on', 'failed'])('preserves reader ownership with Debug recording %s', (recording) => {
     const sink = vi.fn(() => { if (recording === 'failed') throw new Error('storage unavailable'); });
     setMobileDebugSink(recording === 'off' ? undefined : sink);

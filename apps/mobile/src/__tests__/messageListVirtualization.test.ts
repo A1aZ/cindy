@@ -245,7 +245,7 @@ describe('mobile message list container', () => {
     expect(source).toContain('const [listRevealed, setListRevealed] = useState(false);');
     expect(source).toContain('setListRevealed(true);');
     expect(source).toContain('const initialRevealProgress = useMemo(');
-    expect(source).toContain('const initialRevealOpacity = initialRevealProgress;');
+    expect(source).toContain('const initialRevealOpacity = listRevealed ? 1 : initialRevealProgress;');
     expect(source).toContain('<Animated.View style={[styles.messageList, { opacity: initialRevealOpacity }]}>');
     expect(source).toContain('const MOBILE_INITIAL_REVEAL_MAX_MS = 300;');
     expect(source).not.toContain('MOBILE_INITIAL_REVEAL_FADE_MS');

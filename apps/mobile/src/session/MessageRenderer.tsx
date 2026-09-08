@@ -827,8 +827,10 @@ export function MessageRenderer({
     () => new Animated.Value(0),
     [scrollResetKey],
   );
-  const initialRevealOpacity = initialRevealProgress;
   const [listRevealed, setListRevealed] = useState(false);
+  // Once revealed, detach opacity from the native animation. Its delayed stop callback
+  // may still update the Animated.Value; later keyboard/layout renders must stay visible.
+  const initialRevealOpacity = listRevealed ? 1 : initialRevealProgress;
   // Re-evaluate the near-start predicate after a prepend request releases its ref-only lock.
   // Without a render tick, a user who remains at the top can stall after one page because the
   // page commit effect ran while readingOlderRef was still true.

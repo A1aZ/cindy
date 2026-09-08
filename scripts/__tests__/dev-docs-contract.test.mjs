@@ -292,8 +292,8 @@ test("client CI keeps the complete two-shard unit gate on Windows", () => {
 	assert.match(shards, /^      fail-fast: false$/m);
 	assert.match(shards, /^        shard: \[1, 2\]$/m);
 	assert.match(shards, /^      XDT_UNIT_TEST_SHARD: \$\{\{ matrix\.shard \}\}\/2$/m);
-	assert.match(shards, /^        run: pnpm test:unit$/m);
-	assert.doesNotMatch(shards, /pnpm test:unit\s+--/);
+	assert.match(shards, /^        run: pnpm exec node scripts\/test-workspaces\.mjs --tier unit$/m);
+	assert.doesNotMatch(shards, /pnpm test:unit(?:\s|$)/);
 
 	const gate = workflowJob(workflow, "windows-unit");
 	assert.ok(gate, "client CI must preserve the stable Windows unit check");

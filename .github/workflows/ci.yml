@@ -206,7 +206,9 @@ jobs:
         run: pnpm install:ripgrep
 
       - name: Run client and package unit tests
-        run: pnpm test:unit
+        # test:runner runs once in verify-checks. Running the root test:unit
+        # script here would repeat all runner self-tests for every shard.
+        run: pnpm exec node scripts/test-workspaces.mjs --tier unit
 
       # localDb suites are outside the unit tier; exercise these DB boundaries on both OSes.
       - name: Run companion database regressions

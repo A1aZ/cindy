@@ -11,7 +11,9 @@ import {
   type CodexHttpBridge,
   withMcpRouteIdentity,
 } from '../codexHttpBridge.js';
-import { CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY } from '../codexBuiltinToolPolicy.js';
+import { CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY, CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY } from '../codexBuiltinToolPolicy.js';
+import { isBotToolsetAvailableOnTarget } from '../../../shared/botRemoteCapabilities.js';
+import { resolveBotAllowedBuiltinPluginIds } from '../../maker-host/plugins/types.js';
 
 function noopLogger(): Logger {
   const logger: Logger = {
@@ -220,7 +222,14 @@ describe('codexHttpBridge', () => {
       logger: noopLogger(),
     });
     const current = bridge;
-    const ctx = { agentKind, sessionId: 'remote-bot', sessionInstanceId: 'remote-instance', remoteHostId: 'ssh-host', workingDir: '/bot' };
+    const allowed = resolveBotAllowedBuiltinPluginIds([{
+      id: 'xdt_helper',
+      available: isBotToolsetAvailableOnTarget({ agentKind, remoteHostId: 'ssh-host', toolsetId: 'xdt_helper' }),
+    }], []);
+    const ctx = {
+      agentKind, sessionId: 'remote-bot', sessionInstanceId: 'remote-instance', remoteHostId: 'ssh-host', workingDir: '/bot',
+      vendorOptions: { [CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY]: allowed },
+    };
     if (agentKind === 'claude-code') current.registerSessionCtx(ctx.sessionId, ctx);
     const url = withMcpRouteIdentity(current.url('cindy_helper'), {
       sessionInstanceId: ctx.sessionInstanceId,

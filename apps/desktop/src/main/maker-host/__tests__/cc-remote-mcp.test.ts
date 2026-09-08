@@ -16,6 +16,8 @@ import {
   isFrozenBuiltinPluginAllowed,
 } from '../../mcp-integrations/codexBuiltinToolPolicy.js';
 import { buildCcRemoteHttpMcpServers } from '../cc-remote-mcp.js';
+import { isBotToolsetAvailableOnTarget } from '../../../shared/botRemoteCapabilities.js';
+import { resolveBotAllowedBuiltinPluginIds } from '../plugins/types.js';
 
 function fakeBridge() {
   const registered = new Map<
@@ -62,9 +64,15 @@ describe('buildCcRemoteHttpMcpServers', () => {
 
   it.each([true, false])('injects the helper only for an identified Bot (bot=%s)', async (botSession) => {
     const { bridge, registered } = fakeBridge();
+    const allowed = resolveBotAllowedBuiltinPluginIds([{
+      id: 'xdt_helper',
+      available: isBotToolsetAvailableOnTarget({
+        agentKind: 'claude-code', remoteHostId: HOST.id, toolsetId: 'xdt_helper',
+      }),
+    }], []);
     const { servers, cleanup } = await buildCcRemoteHttpMcpServers({
       host: HOST, sessionId: 'bot-session', sessionInstanceId: 'bot-instance', workingDir: '/remote/bot', botSession,
-      vendorOptions: { [CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY]: ['xdt_helper'] },
+      vendorOptions: { [CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY]: allowed },
     }, {
       ensureBridgeStarted: async () => ({ port: 38080, serverNames: ['cindy_helper', 'cindy_orca'], bridge }),
       ensureForward: async () => 47921, getBridgeToken: () => 'remote-test-token', isCollabEnabled: () => false,

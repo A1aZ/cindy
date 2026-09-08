@@ -1,6 +1,6 @@
 # 用量历史图表与日期选择
 
-适用入口：设置 → 用量历史（`UsageHistorySection`）。依据为 2026-09-07 所有者圆角裁决与 `DESIGN.md §5`；规范登记由 [PR #4072](https://github.com/makecindy/cindy/pull/4072) 引入，本次实现需在其合入后交付。
+适用入口：设置 → 用量历史（`UsageHistorySection`）。依据为 2026-09-07 所有者圆角裁决与 `DESIGN.md §5`；`usage-heatmap-day` / `usage-token-bar` 的成员登记与 2026-09-08 交互几何登记由本 PR 直接落在 `DESIGN.md §4/§5`（usage data marks 2px 例外 + 交互几何段），不依赖尚未合入的规范 PR。
 
 ## 可见层与布局
 

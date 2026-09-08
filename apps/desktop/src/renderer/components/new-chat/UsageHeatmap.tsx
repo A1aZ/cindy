@@ -176,6 +176,7 @@ export function UsageHeatmap({
   }, []);
 
   const minimumWeeks = Math.max(MIN_HEATMAP_WEEKS, Math.ceil(windowDays / 7));
+  // Data geometry stays compact when a cell also acts as a date filter (DESIGN.md §4).
   const cellSize = CELL_PX;
   const visibleWeeks = resolveHeatmapWeeks({
     days,

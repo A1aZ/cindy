@@ -100,15 +100,21 @@ export function useTaskInfoWorktree(
   enabled: boolean,
   opts?: { observeTelemetry?: boolean },
 ): SessionWorktreeInfo | null {
-  const official = useWorktreeForSession(session.id, { includeInvalid: opts?.observeTelemetry });
+  const observeTelemetry = Boolean(opts?.observeTelemetry);
+  // Keep the raw row so an invalid worktree can be re-probed, but seed the
+  // displayed liveness from the filtered snapshot. This prevents a remounted
+  // task from briefly showing a stale managed badge before its probe settles.
+  const liveOfficial = useWorktreeForSession(session.id);
+  const official = useWorktreeForSession(session.id, { includeInvalid: observeTelemetry });
   const reportLiveness = useReportWorktreeLiveness();
   const managed = resolveManagedWorktree(official);
   const [observed, setObserved] = useState<SessionWorktreeInfo | null>(null);
-  const [officialStillLive, setOfficialStillLive] = useState(true);
+  const [officialStillLive, setOfficialStillLive] = useState(
+    () => !observeTelemetry || liveOfficial !== null,
+  );
   const officialPath = official?.path ?? null;
   const deviceId = session.deviceLinkDeviceId ?? null;
   const isRemote = Boolean(deviceId || session.remoteHostId);
-  const observeTelemetry = Boolean(opts?.observeTelemetry);
 
   useEffect(() => {
     setObserved(null);

@@ -63,6 +63,21 @@ describe('opened worktree refresh', () => {
     expect(result.current).toBeNull();
   });
 
+  it('keeps an invalid official worktree hidden until a remount probe confirms it', async () => {
+    const official = { path: '/tmp/wt/open', name: 'open', branch: 'feature' };
+    mocks.official.mockImplementation((_session, options?: { includeInvalid?: boolean }) =>
+      options?.includeInvalid ? official : null,
+    );
+    let finish!: (value: { isInsideWorktree: boolean }) => void;
+    mocks.detect.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+
+    const { result } = renderHook(() => useTaskInfoWorktree(session, true, { observeTelemetry: true }));
+    expect(result.current).toBeNull();
+
+    await act(async () => finish({ isInsideWorktree: true }));
+    expect(result.current?.source).toBe('managed');
+  });
+
   it('applies recycle and restore events immediately', async () => {
     const { result } = renderHook(() => useTaskInfoWorktree(session, true, { observeTelemetry: true }));
     await act(async () => {});

@@ -551,7 +551,10 @@ export function registerRemoteDesktopIpc(): void {
         throwIpcError('PERMISSION_DENIED', 'Invalid desktop host input');
       try {
         remoteDesktop.input(lease, sequence, events);
-      } catch {
+      } catch (error) {
+        // PiP can revoke control before an in-flight input arrives. Drop that
+        // input without closing the DataChannel that also carries view heartbeats.
+        if (error instanceof Error && error.message === 'DESKTOP_VIEW_ONLY') return;
         throwIpcError('PERMISSION_DENIED', 'Desktop input rejected');
       }
     },

@@ -13,6 +13,8 @@ const h = vi.hoisted(() => ({
   stop: vi.fn(),
   nativeStop: vi.fn(),
   nativeFrame: vi.fn(async () => 'frame'),
+  input: vi.fn(),
+  viewHeartbeat: vi.fn(),
 }));
 vi.mock('electron', () => ({
   app: { on: vi.fn() },
@@ -87,8 +89,8 @@ vi.mock('../controller', () => ({
       this.stop();
     }
     tick() {}
-    input = vi.fn();
-    viewHeartbeat = vi.fn();
+    input = h.input;
+    viewHeartbeat = h.viewHeartbeat;
   },
 }));
 vi.mock('../nativeCapture', () => ({
@@ -152,6 +154,8 @@ beforeEach(() => {
   h.stop.mockClear();
   h.nativeStop.mockClear();
   h.nativeFrame.mockClear();
+  h.input.mockReset();
+  h.viewHeartbeat.mockClear();
   registerRemoteDesktopIpc();
 });
 afterEach(() => {
@@ -238,6 +242,25 @@ it('denies main/child-frame capture IPC and forces disposal on offer timeout', a
   await rejected;
   expect(owner.dead).toBe(true);
   expect(h.nativeStop).toHaveBeenCalled();
+});
+
+it('drops view-only input without breaking heartbeats, but still rejects invalid or revoked input', async () => {
+  const pending = offer();
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), h.owner.send.mock.calls[0][1].id, 'answer');
+  await pending;
+  const input = h.handlers.get(DESKTOP_LOCAL.INPUT);
+  h.input.mockImplementation(() => { throw new Error('DESKTOP_VIEW_ONLY'); });
+  expect(() => input(event(), 'lease', 1, [{ type: 'release' }])).not.toThrow();
+  h.handlers.get(DESKTOP_LOCAL.VIEW_HEARTBEAT)(event(), 'lease');
+  expect(h.viewHeartbeat).toHaveBeenCalledWith('lease');
+  expect(h.owner.dead).toBe(false);
+  expect(() => input(event(), 'old-lease', 2, [])).toThrow('PERMISSION_DENIED');
+  for (const reason of ['DESKTOP_STOPPED', 'DESKTOP_LEASE_EXPIRED', 'INVALID_REQUEST', 'DESKTOP_INPUT_UNAVAILABLE']) {
+    h.input.mockImplementation(() => { throw new Error(reason); });
+    expect(() => input(event(), 'lease', 2, [])).toThrow('PERMISSION_DENIED');
+  }
 });
 
 it('retains the capture owner on ICE timeout and rejects old-owner replies after replacement', async () => {

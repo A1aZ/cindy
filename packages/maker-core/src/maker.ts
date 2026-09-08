@@ -38,7 +38,11 @@ import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilitie
 import { piExplicitSkillRuntimePath } from './agents/pi/skill-runtime-provenance.js';
 import { fingerprintPiProjectSkillEntrypoint } from './agents/pi/project-resource-assembly.js';
 import { Session, generateSessionId } from './session.js';
-import { AgentStartupCleanupPendingError, AgentStartupStoppedError } from './agents/base-agent.js';
+import {
+  AgentNotAuthenticatedError,
+  AgentStartupCleanupPendingError,
+  AgentStartupStoppedError,
+} from './agents/base-agent.js';
 import type {
   AgentSessionHandle,
   AgentSessionTeardownOptions,
@@ -717,8 +721,13 @@ export class Maker {
       // A generic adapter error does not prove its process stopped. Preserve
       // host guards; only pre-adapter failure or explicit exit evidence releases them.
       const runtimeStopped = error instanceof AgentStartupStoppedError;
+      const authenticationFailed = error instanceof AgentNotAuthenticatedError;
       const startupError = runtimeStopped ? error.cause : error;
-      await notifyStartFailed('agent-start', startupError, agentStartAttempted && !runtimeStopped);
+      await notifyStartFailed(
+        'agent-start',
+        startupError,
+        agentStartAttempted && !runtimeStopped && !authenticationFailed,
+      );
       if (error instanceof AgentStartupCleanupPendingError) {
         // The adapter still owns this unpublished process. Its eventual close
         // must release only this startup's resources, even after a rebuild.

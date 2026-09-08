@@ -176,6 +176,26 @@ async function recycleManagedWorktreeInSlot(meta: WorktreeMeta, options: Managed
       }
       record.phase = 'removing';
       await writeRecycleRecord(record);
+      // Revalidate immediately before the destructive Git operation. The
+      // earlier inventory is only a snapshot; a late editor/IDE write or a
+      // newly live reference must keep this generation protected.
+      if (!record.archive || !record.snapshot) return defer('recovery-evidence-missing');
+      await verifyRecoveryArchive(record.archive);
+      if (!sameWorktreeFiles(await inventoryWorktree(meta.path), record.archive.files, Boolean(partialRemoval))) {
+        return defer('files-changed-before-removal');
+      }
+      if (!(await canRemove())) return defer('referenced-before-removal');
+      if (await directoryIdentity(meta.path) !== identity) return defer('directory-replaced');
+      await assertManagedResourcePath(meta, store.getAllPaths());
+      let finalGitLinkPresent = true;
+      try { await fs.lstat(path.join(meta.path, '.git')); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        finalGitLinkPresent = false;
+      }
+      if (!partialRemoval || finalGitLinkPresent) {
+        await assertWorktreeGitIdentity(meta);
+        if (!(await worktreeContentBaselineMatches(meta.path, record.snapshot))) return defer('git-baseline-changed-before-removal');
+      }
       try {
         await gitExec(['-c', 'core.longpaths=true', 'worktree', 'remove', '--force', meta.path], meta.baseRepo);
       } catch {

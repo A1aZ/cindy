@@ -218,6 +218,17 @@ describe('shared worktree recycling', () => {
     expect((await readRecycleRecord(meta.path))?.reason).toBe('git-baseline-changed');
     expect(git.mock.calls.some(([args]) => args.includes('remove'))).toBe(false);
   });
+  it('rechecks files after marking removal and preserves a late editor write', async () => {
+    baselineMatches.mockImplementationOnce(async () => {
+      await fs.writeFile(path.join(meta.path, 'late-editor-write.txt'), 'keep me');
+      return true;
+    });
+    expect(await recycle()).toBe(false);
+    expect((await readRecycleRecord(meta.path))?.reason).toBe('files-changed-before-removal');
+    expect(git.mock.calls.some(([args]) => args.includes('remove'))).toBe(false);
+    expect(await fs.readFile(path.join(meta.path, 'late-editor-write.txt'), 'utf8')).toBe('keep me');
+    expect(state.registry.has(meta.sessionId)).toBe(true);
+  });
   it('persists a shared owner request before the last borrower status write', async () => {
     await requestWorktreeRecycle('borrower', [meta.path]);
     expect((await readRecycleRecord(meta.path))?.meta.sessionId).toBe(meta.sessionId);

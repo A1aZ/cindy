@@ -14,6 +14,7 @@ import { Maker, type CreateSessionOptions, type SessionStartFailureContext } fro
 import { Session } from './session.js';
 import { createAsyncQueue } from './agents/shared/async-queue.js';
 import {
+  AgentNotAuthenticatedError,
   AgentStartupCleanupPendingError,
   AgentStartupStoppedError,
   TurnPermissionPolicyUnsupportedError,
@@ -1644,6 +1645,29 @@ describe('Maker start-option lifecycle hooks', () => {
     expect(onStartFailed).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'session-1', stage: 'agent-start' }),
     );
+  });
+
+  it('releases the startup lease when authentication fails before spawning an agent', async () => {
+    const leased = new Set<CreateSessionOptions>();
+    const onStartFailed = vi.fn(({ options, runtimeMayBeAlive }: SessionStartFailureContext) => {
+      if (!runtimeMayBeAlive) leased.delete(options);
+    });
+    const authError = new AgentNotAuthenticatedError('claude-code', 'not authenticated');
+    const maker = new Maker({
+      agents: { 'claude-code': createAgent(vi.fn().mockRejectedValue(authError), 'claude-code') },
+      storage: createStorage(), logger: createLogger(),
+      lifecycleHooks: {
+        prepareStartOptions: (_id, options) => { leased.add(options); },
+        onStartFailed,
+      },
+    });
+    await expect(maker.createSession({
+      id: 'auth-failure', agentKind: 'claude-code', workingDir: '/repo', model: 'claude-model',
+    })).rejects.toBe(authError);
+    expect(onStartFailed).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'agent-start', error: authError, runtimeMayBeAlive: false,
+    }));
+    expect(leased).toHaveLength(0);
   });
 
   it('preserves the original startup error when the failure hook also fails', async () => {

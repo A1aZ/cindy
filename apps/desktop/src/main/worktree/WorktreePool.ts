@@ -78,12 +78,15 @@ export async function acquireWorktree(
       pool.delete(key);
 
       let checkpointed = false;
+      let checkedOutNewBranch = false;
+      let newBranch: string | undefined;
       try {
         const resolvedName = await WorktreeManager.resolveAvailableWorktreeName(
           entry.meta.baseRepo,
           req.name,
         );
-        const newBranch = getBranchName(resolvedName);
+        const branchName = getBranchName(resolvedName);
+        newBranch = branchName;
         return await withWorktreeResourceLock(entry.meta.path, () => withLegacyWorktreeRuntimeGuard(async (legacyGuardHeld) => {
           const refs = await loadLiveSessionPathKeys({ contextPath: entry.meta.path });
           if (hasKeepSentinel(entry.meta.path) || hasLiveSessionReference(entry.meta, refs)) throw new Error('pooled worktree is in use');
@@ -91,20 +94,21 @@ export async function acquireWorktree(
             entry.meta.path,
             entry.meta.baseRepo,
             req.sourceBranch,
-            newBranch,
+            branchName,
             opts,
             async () => {
               await checkpointWorktreeForReuse(entry.meta);
               checkpointed = true;
               if (!legacyGuardHeld()) throw new Error('runtime evidence unavailable');
             },
+            () => { checkedOutNewBranch = true; },
           );
 
           const meta: WorktreeMeta = {
             ...entry.meta,
             sessionId: req.sessionId,
             name: resolvedName,
-            branch: newBranch,
+            branch: branchName,
             sourceBranch: req.sourceBranch,
             createdAt: new Date().toISOString(),
             generation: randomUUID(),
@@ -119,6 +123,12 @@ export async function acquireWorktree(
       } catch (err) {
         if (checkpointed) {
           try {
+            if (checkedOutNewBranch && newBranch) {
+              await withWorktreeResourceLock(
+                entry.meta.path,
+                () => rollbackFailedReuse(entry.meta, newBranch!),
+              );
+            }
             const restored = await restoreRecordedWorktree(entry.meta.sessionId, entry.meta.path);
             if (!restored) {
               log.warn('[WorktreePool] failed reuse could not restore its checkpoint', {
@@ -146,6 +156,22 @@ export async function acquireWorktree(
   }
 }
 
+/** Return a failed pool reset to the checkpointed branch before recovery/fresh creation. */
+async function rollbackFailedReuse(meta: WorktreeMeta, newBranch: string): Promise<void> {
+  const record = await readRecycleRecord(meta.path, meta.sessionId);
+  const snapshot = record?.snapshot;
+  if (!snapshot) return;
+  if (snapshot.headRef) {
+    await gitExec(['checkout', snapshot.headRef.slice('refs/heads/'.length)], meta.path);
+  } else {
+    await gitExec(['checkout', '--detach', snapshot.head], meta.path);
+  }
+  const oldBranch = snapshot.headRef?.slice('refs/heads/'.length);
+  if (oldBranch !== newBranch) {
+    await gitExec(['branch', '-D', newBranch], meta.path);
+  }
+}
+
 // ── reset ────────────────────────────────────────────────────────────────────
 
 /**
@@ -159,6 +185,7 @@ async function resetWorktree(
   newBranch: string,
   opts?: { sourceFetchAlreadyAttempted?: boolean },
   beforeReset?: () => Promise<void>,
+  onBranchCreated?: () => void,
 ): Promise<void> {
   // 防御性断言：池中 worktree 理论上必定 clean
   if (await isWorktreeDirty(worktreePath)) {
@@ -194,6 +221,7 @@ async function resetWorktree(
   // 2. 非覆盖式创建并切换分支。查重后的 TOCTOU 竞态会让 -b 安全失败，
   //    绝不能用 -B 重置一个不属于池条目的已有分支。
   await gitExec(['checkout', '--no-track', '-b', newBranch, sourceBranch], worktreePath);
+  onBranchCreated?.();
 
   // 3. 确保 index 与 HEAD 一致（上次 agent 可能 git add 了文件但未 commit）
   await gitExec(['reset', '--hard', sourceBranch], worktreePath);

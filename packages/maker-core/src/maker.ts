@@ -636,11 +636,15 @@ export class Maker {
       }
     };
     const notifyStartCleanupSucceeded = (): void => {
-      void Promise.resolve()
+      const cleanup = Promise.resolve()
         .then(() => this.lifecycleHooks.onStartCleanupSucceeded?.(id, startOpts))
         .catch((error) => this.logger.warn('lifecycleHooks.onStartCleanupSucceeded threw', {
           sessionId: id, error: String(error),
         }));
+      this.pendingLifecycleCloses.add(cleanup);
+      void cleanup.then(() => {
+        this.pendingLifecycleCloses.delete(cleanup);
+      });
     };
     if (this.lifecycleHooks.prepareStartOptions) {
       try {

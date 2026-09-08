@@ -81,9 +81,9 @@ describe('opened worktree refresh', () => {
   it('resets liveness from the new snapshot when switching tasks in place', async () => {
     const metaA = { path: '/tmp/wt/a', name: 'a', branch: 'feature-a' };
     const metaB = { path: '/tmp/wt/b', name: 'b', branch: 'feature-b' };
-    mocks.official.mockImplementation((task: { id: string }, options?: { includeInvalid?: boolean }) => {
-      if (options?.includeInvalid) return task.id === 'a' ? metaA : metaB;
-      return task.id === 'a' ? null : metaB;
+    mocks.official.mockImplementation((sessionId: string, options?: { includeInvalid?: boolean }) => {
+      if (options?.includeInvalid) return sessionId === 'a' ? metaA : metaB;
+      return sessionId === 'a' ? null : metaB;
     });
     mocks.detect.mockResolvedValue({ isInsideWorktree: false });
     const view = renderHook(
@@ -96,6 +96,63 @@ describe('opened worktree refresh', () => {
     mocks.detect.mockResolvedValue({ isInsideWorktree: true });
     await act(async () => view.rerender({ current: { ...session, id: 'b' } }));
     expect(view.result.current?.source).toBe('managed');
+  });
+
+  it('keeps invalid liveness through disable, delayed re-enable, and a failed probe', async () => {
+    mocks.detect.mockResolvedValue({ isInsideWorktree: false });
+    const view = renderHook(
+      ({ enabled }) => useTaskInfoWorktree(session, enabled, { observeTelemetry: true }),
+      { initialProps: { enabled: true } },
+    );
+    await act(async () => {});
+    expect(view.result.current).toBeNull();
+
+    view.rerender({ enabled: false });
+    await act(async () => switchFocus());
+    expect(view.result.current).toBeNull();
+    expect(mocks.detect).toHaveBeenCalledOnce();
+    expect(mocks.listeners.size).toBe(0);
+
+    let reject!: (error: Error) => void;
+    mocks.detect.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    view.rerender({ enabled: true });
+    expect(view.result.current).toBeNull();
+    await act(async () => reject(new Error('[INTERNAL] Worktree directory probe failed')));
+    expect(view.result.current).toBeNull();
+    expect(mocks.reportLiveness).toHaveBeenCalledTimes(1);
+
+    mocks.detect.mockResolvedValue({ isInsideWorktree: true });
+    await act(async () => switchFocus());
+    expect(view.result.current?.source).toBe('managed');
+    expect(mocks.reportLiveness).toHaveBeenLastCalledWith(expect.anything(), true);
+  });
+
+  it('updates liveness after a route switch even when the previous task had the same probe result', async () => {
+    const metaA = { path: '/tmp/wt/a', name: 'a', branch: 'feature-a' };
+    const metaB = { path: '/tmp/wt/b', name: 'b', branch: 'feature-b' };
+    mocks.official.mockImplementation((sessionId: string, options?: { includeInvalid?: boolean }) => {
+      if (options?.includeInvalid) return sessionId === 'a' ? metaA : metaB;
+      return sessionId === 'a' ? metaA : null;
+    });
+    const view = renderHook(
+      ({ id }) => useTaskInfoWorktree({ ...session, id }, true, { observeTelemetry: true }),
+      { initialProps: { id: 'a' } },
+    );
+    await act(async () => {});
+    expect(view.result.current?.path).toBe(metaA.path);
+
+    let finish!: (value: { isInsideWorktree: boolean }) => void;
+    mocks.detect.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    view.rerender({ id: 'b' });
+    expect(view.result.current).toBeNull();
+    await act(async () => finish({ isInsideWorktree: true }));
+    expect(view.result.current?.path).toBe(metaB.path);
+
+    mocks.detect.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    view.rerender({ id: 'a' });
+    expect(view.result.current?.path).toBe(metaA.path);
+    await act(async () => finish({ isInsideWorktree: false }));
+    expect(view.result.current).toBeNull();
   });
 
   it('applies recycle and restore events immediately', async () => {

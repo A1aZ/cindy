@@ -9,7 +9,7 @@
  * 不写 store、不改变回收。目录没了摘掉徽标。外部 observed 不可 reveal。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { groupingWorktreeBaseRepo } from '@cindy/maker-shared/worktree-paths';
 
@@ -110,15 +110,16 @@ export function useTaskInfoWorktree(
   const managed = resolveManagedWorktree(official);
   const [observed, setObserved] = useState<SessionWorktreeInfo | null>(null);
   const initialOfficialStillLive = !observeTelemetry || liveOfficial !== null;
-  const [officialStillLive, setOfficialStillLive] = useState(initialOfficialStillLive);
-  const livenessRef = useRef({ sessionId: session.id, live: initialOfficialStillLive });
-  if (livenessRef.current.sessionId !== session.id) {
+  const [liveness, setLiveness] = useState({ sessionId: session.id, live: initialOfficialStillLive });
+  if (liveness.sessionId !== session.id) {
     // The hook instance is reused when the route changes. Reset synchronously
     // from the new snapshot so the previous task's state cannot leak for a
     // render while the effect starts its probe.
-    livenessRef.current = { sessionId: session.id, live: initialOfficialStillLive };
+    setLiveness({ sessionId: session.id, live: initialOfficialStillLive });
   }
-  const displayedOfficialStillLive = livenessRef.current.live;
+  const displayedOfficialStillLive = liveness.sessionId === session.id
+    ? liveness.live
+    : initialOfficialStillLive;
   const officialPath = official?.path ?? null;
   const deviceId = session.deviceLinkDeviceId ?? null;
   const isRemote = Boolean(deviceId || session.remoteHostId);
@@ -126,8 +127,8 @@ export function useTaskInfoWorktree(
   useEffect(() => {
     setObserved(null);
     if (!enabled || isRemote || !observeTelemetry) {
-      livenessRef.current = { sessionId: session.id, live: !isRemote };
-      setOfficialStillLive(!isRemote);
+      // Pausing probes says nothing about directory liveness. Preserve the last
+      // result until a resumed probe actually confirms deletion or restoration.
       return;
     }
     let cancelled = false;
@@ -140,16 +141,14 @@ export function useTaskInfoWorktree(
         const live = await probeIsInsideWorktree(officialPath, deviceId);
         if (cancelled || gen !== generation) return;
         if (live === null) return; // IPC 失败不代表目录已被删除，保留上次状态。
-        livenessRef.current = { sessionId: session.id, live };
-        setOfficialStillLive(live);
+        setLiveness({ sessionId: session.id, live });
         if (official) reportLiveness(official, live);
         if (live) {
           setObserved(null);
           return;
         }
       } else if (gen === generation) {
-        livenessRef.current = { sessionId: session.id, live: false };
-        setOfficialStillLive(false);
+        setLiveness({ sessionId: session.id, live: false });
       }
       if (isRemote) {
         if (!cancelled && gen === generation) setObserved(null);

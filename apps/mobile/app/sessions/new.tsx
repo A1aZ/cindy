@@ -3228,11 +3228,23 @@ export default function NewRemoteSessionScreen() {
         },
         localVoiceInputHistory,
         readCurrentDraft: () => firstMessageRef.current,
-        onDraftChanged: (text, selection) => {
-          // Follow final ASR/refinement until a native edit claims the caret.
-          if (selection && !voiceSelectionUserOwnedRef.current) {
-            firstMessageSelectionRef.current = selection;
-            setFirstMessageSelection(selection);
+        onDraftChanged: (text, selection, replacement) => {
+          // Follow ASR until a native edit claims the caret; then preserve its
+          // position in the surrounding text as the voice range changes length.
+          let nextSelection = voiceSelectionUserOwnedRef.current ? undefined : selection;
+          if (voiceSelectionUserOwnedRef.current && replacement) {
+            const replacementEnd = replacement.start + replacement.text.length;
+            const rebaseOffset = (offset: number) => {
+              if (offset <= replacement.start) return offset;
+              if (offset >= replacement.end) return offset + replacementEnd - replacement.end;
+              return Math.min(offset, replacementEnd);
+            };
+            const current = firstMessageSelectionRef.current;
+            nextSelection = { start: rebaseOffset(current.start), end: rebaseOffset(current.end) };
+          }
+          if (nextSelection) {
+            firstMessageSelectionRef.current = nextSelection;
+            setFirstMessageSelection(nextSelection);
           }
           setFirstMessageDraft(text);
         },

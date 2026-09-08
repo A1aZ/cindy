@@ -108,14 +108,14 @@ const compiledVoice = ts.transpileModule(`function voiceCallbacks(bindings) {
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const voiceCallbacks = new Function(`${compiledVoice}; return voiceCallbacks;`)() as
   (bindings: Record<string, unknown>) => {
-    publish: (text: string, selection?: Selection) => void;
+    publish: (text: string, selection?: Selection, replacement?: Selection & { text: string }) => void;
     select: (event: { nativeEvent: { selection: Selection } }) => void;
     type: (text: string) => void;
     stop: () => Promise<string | null>;
   };
 
-function pendingVoiceStop() {
-  const firstMessageRef = { current: '前后' };
+function pendingVoiceStop(initialDraft = '前后') {
+  const firstMessageRef = { current: initialDraft };
   const firstMessageSelectionRef = { current: { start: 1, end: 1 } };
   let controlledSelection = firstMessageSelectionRef.current;
   let completeStop!: (draft: string) => void;
@@ -145,6 +145,43 @@ function pendingVoiceStop() {
 }
 
 describe('new-session selection during dictation stop', () => {
+  it.each([
+    ['caret in suffix', [4, 4], [6, 6], [3, 3], '前词后!缀'],
+    ['selected suffix', [3, 5], [5, 7], [2, 4], '前词!'],
+    ['selected prefix', [0, 1], [0, 1], [0, 1], '!词后缀'],
+    ['selection across insertion', [0, 5], [0, 7], [0, 4], '!'],
+    ['caret inside replacement', [2, 2], [2, 2], [2, 2], '前词!后缀'],
+  ] as const)('rebases %s through longer ASR and shorter refinement', async (_name, initial, longer, shorter, inserted) => {
+    const voice = pendingVoiceStop('前后缀');
+    voice.publish('前识别后缀', { start: 3, end: 3 });
+    const stop = voice.stop();
+    voice.move(initial[0], initial[1]);
+    voice.publish('前原始转写后缀', { start: 5, end: 5 }, { start: 1, end: 3, text: '原始转写' });
+    expect(voice.selection()).toEqual({ start: longer[0], end: longer[1] });
+    voice.publish('前词后缀', { start: 2, end: 2 }, { start: 1, end: 5, text: '词' });
+    expect(voice.selection()).toEqual({ start: shorter[0], end: shorter[1] });
+    voice.complete();
+    expect(await stop).toBe('前词后缀');
+    expect(voice.setNativeProps).toHaveBeenCalledWith({ selection: { start: shorter[0], end: shorter[1] } });
+    expect(voice.insert('!')).toBe(inserted);
+  });
+
+  it('preserves the position after manually typed suffix text when final voice text changes length', async () => {
+    const voice = pendingVoiceStop();
+    voice.publish('前识别后', { start: 3, end: 3 });
+    const stop = voice.stop();
+    voice.move(4);
+    voice.type(voice.insert('!'));
+    voice.move(5);
+    voice.publish('前原始转写后!', { start: 5, end: 5 }, { start: 1, end: 3, text: '原始转写' });
+    expect(voice.selection()).toEqual({ start: 7, end: 7 });
+    voice.publish('前词后!', { start: 2, end: 2 }, { start: 1, end: 5, text: '词' });
+    voice.complete();
+    await stop;
+    expect(voice.selection()).toEqual({ start: 4, end: 4 });
+    expect(voice.insert('?')).toBe('前词后!?');
+  });
+
   it.each([false, true])('follows final ASR and refinement without a user move (partial=%s)', async (partial) => {
     const voice = pendingVoiceStop();
     if (partial) voice.publish('前识别后', { start: 3, end: 3 });

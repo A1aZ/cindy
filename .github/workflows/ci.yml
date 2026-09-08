@@ -140,8 +140,8 @@ jobs:
         run: pnpm install:ripgrep
 
       - name: Run client and package unit test shard
-        # 通过 pnpm 启动 runner，保留当前 pnpm 入口与 workspace 解析语义。
-        run: pnpm exec node scripts/test-workspaces.mjs --tier unit
+        # package script 会传递 npm_execpath，让子进程复用当前 pnpm 入口。
+        run: pnpm run test:workspaces --tier unit
 
       # localDb suites are outside the unit tier; exercise these DB boundaries on both OSes.
       - name: Run companion database regressions
@@ -206,9 +206,9 @@ jobs:
         run: pnpm install:ripgrep
 
       - name: Run client and package unit tests
-        # test:runner runs once in verify-checks. Running the root test:unit
-        # script here would repeat all runner self-tests for every shard.
-        run: pnpm exec node scripts/test-workspaces.mjs --tier unit
+        # test:runner 只在 verify-checks 跑一次。通过 package script 传递
+        # npm_execpath，避免 Windows 子进程退回 PATH 上的 pnpm.cmd。
+        run: pnpm run test:workspaces --tier unit
 
       # localDb suites are outside the unit tier; exercise these DB boundaries on both OSes.
       - name: Run companion database regressions

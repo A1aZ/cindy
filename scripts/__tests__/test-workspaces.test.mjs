@@ -83,6 +83,8 @@ test("parseWorkspacePatterns reads pnpm-workspace.yaml package globs", () => {
 
 test("root unit and all scripts run runner self-tests before workspace sweep", () => {
 	const scripts = readRootScripts();
+	// CI uses the package lifecycle to propagate npm_execpath without duplicating self-tests.
+	assert.equal(scripts["test:workspaces"], "node scripts/test-workspaces.mjs");
 	assert.match(
 		scripts["test:unit"],
 		/^pnpm test:runner && node scripts\/test-workspaces\.mjs --tier unit$/,

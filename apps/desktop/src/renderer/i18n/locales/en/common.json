@@ -11240,7 +11240,7 @@
       "sharedImpact": "Other Agents sharing this skill will also be affected. Published versions and installations elsewhere are unaffected.",
       "managedElsewhere": "This Skill belongs to another package or shared directory. Remove it at its source.",
       "managedByPlugin": "This skill is provided by a plugin. Manage it on that plugin’s page.",
-      "cleanupIncomplete": "The skill was removed, but some local records or links could not be cleaned up.",
+      "cleanupIncomplete": "The skill was removed, but some records or links remain. Retry before closing or reloading this window.",
       "retryCleanup": "Retry cleanup",
       "cleanupComplete": "Cleanup completed"
     }

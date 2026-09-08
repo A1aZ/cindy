@@ -280,6 +280,23 @@ describe('skillhub/installService', () => {
     expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('restored');
   });
 
+  it('releases a discarded cleanup receipt without retrying filesystem or registry operations', async () => {
+    const { source, target } = await localFixture('cleanup-discarded');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    vi.mocked(registryService.removeInstall).mockRejectedValueOnce(new Error('disk unavailable'));
+    const { uninstall, retryUninstallCleanup, discardUninstallCleanup } = await import('../installService');
+    const { shell } = await import('electron');
+    const result = await uninstall(source, target);
+    if (!result.success || !result.cleanupToken) throw new Error('expected receipt');
+    discardUninstallCleanup(result.cleanupToken);
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(registryService.removeInstall).toHaveBeenCalledOnce();
+    expect(shell.trashItem).toHaveBeenCalledOnce();
+  });
+
   it('keeps the previous install intact when extraction fails during forced update', async () => {
     const finalDir = path.join(TEST_ROOT, 'skills', 'broken-skill');
     fs.mkdirSync(finalDir, { recursive: true });

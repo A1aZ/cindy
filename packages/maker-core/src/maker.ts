@@ -1294,15 +1294,16 @@ export class Maker {
         && !sessionMeta.remoteHostId
       ));
     const agent = this.requireAgent(agentKind);
+    const session = sessionId ? this.getSession(sessionId) : undefined;
     const filter = (result: ListAgentSkillsResult) => agent.filterActiveSkillCommands(
       result, agentOpts.remoteHostId ?? sessionMeta?.remoteHostId ?? undefined,
+      session?.agentKind === agentKind ? session.getDisabledSkillPaths() : undefined,
     );
     const result = filter(await agent.listAgentSkills({
       ...agentOpts,
       includeManagedPiPackages,
     }));
     if (agentKind !== 'pi' || !sessionId) return result;
-    const session = this.getSession(sessionId);
     if (
       session?.agentKind !== 'pi'
       || !opts.workingDir

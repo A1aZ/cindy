@@ -1399,6 +1399,10 @@ export class Session {
     return this.handle.getRuntimeCapabilities?.();
   }
 
+  getDisabledSkillPaths(): readonly string[] | undefined {
+    return this.handle.disabledSkillPaths;
+  }
+
   /** Subscribe to replacement of the current per-session Pi runtime catalog. */
   onRuntimeCapabilitiesChange(
     listener: (manifest: PiRuntimeCapabilityManifest | undefined) => void,

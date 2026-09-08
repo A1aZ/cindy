@@ -19,6 +19,8 @@ const installServiceMocks = vi.hoisted(() => ({
   install: vi.fn(),
   cancelInstall: vi.fn(),
   uninstall: vi.fn(),
+  retryUninstallCleanup: vi.fn(),
+  discardUninstallCleanup: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -157,6 +159,7 @@ describe('registerSkillhubIpc usage handlers', () => {
     const destroyedCallbacks: Array<() => void> = [];
     const sender = {
       id: 11,
+      on: vi.fn(),
       once: vi.fn((event: string, callback: () => void) => {
         if (event === 'destroyed') destroyedCallbacks.push(callback);
       }),
@@ -228,7 +231,7 @@ describe('registerSkillhubIpc usage handlers', () => {
   });
 
   it('revokes project scan grants after the last active project session disappears', async () => {
-    const sender = { id: 12, once: vi.fn() };
+    const sender = { id: 12, on: vi.fn(), once: vi.fn() };
     scanAllSkills.mockResolvedValueOnce({
       skills: [{
         absolutePath: '/physical/demo',
@@ -275,7 +278,7 @@ describe('registerSkillhubIpc usage handlers', () => {
       || (candidate.includes('/new-skill') && roots.has('/physical/new-skill'))
     ));
     readSkillRawFile.mockResolvedValue({ success: true, content: 'raw' });
-    const sender = { id: 33, once: vi.fn() };
+    const sender = { id: 33, on: vi.fn(), once: vi.fn() };
     const scan = handlers.get('skillhub:scan');
 
     const olderRequest = scan?.({ sender }, { projects: [{ projectRoot: '/old', hash: 'old' }] });
@@ -302,7 +305,7 @@ describe('registerSkillhubIpc usage handlers', () => {
   });
 
   it('revokes a sender scan grant when the active data owner changes', async () => {
-    const sender = { id: 34, once: vi.fn() };
+    const sender = { id: 34, on: vi.fn(), once: vi.fn() };
     scanAllSkills.mockResolvedValueOnce({
       skills: [{
         absolutePath: '/physical/demo',
@@ -332,7 +335,7 @@ describe('registerSkillhubIpc usage handlers', () => {
   });
 
   it('rejects renderer-provided project roots outside Main-owned active projects', async () => {
-    const sender = { id: 44, once: vi.fn() };
+    const sender = { id: 44, on: vi.fn(), once: vi.fn() };
 
     const result = await handlers.get('skillhub:scan')?.(
       { sender },
@@ -625,7 +628,7 @@ describe('registerSkillhubIpc usage handlers', () => {
       kind: 'skill', scope: 'project', name: 'local', absolutePath,
       discoveredPath: source, projectRoot: project,
     }], sources: [] });
-    const event = { sender: { id: 71, once: vi.fn() } };
+    const event = { sender: { id: 71, on: vi.fn(), once: vi.fn() } };
     await handlers.get('skillhub:scan')!(event, { projects: [{ projectRoot: project, hash: 'fixture' }] });
     return { event, absolutePath, project };
   }
@@ -650,6 +653,30 @@ describe('registerSkillhubIpc usage handlers', () => {
     expect(setCindySkillEnabled).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['destroyed', 'reload'] as const)('revokes cleanup grants and receipts on window %s', async (lifecycle) => {
+    const { event, absolutePath } = await scanLocalFixture();
+    installServiceMocks.uninstall.mockResolvedValueOnce({ success: true, cleanupToken: 'receipt' });
+    await handlers.get('skillhub:uninstall')!(event, { absolutePath });
+    if (lifecycle === 'destroyed') {
+      event.sender.once.mock.calls.find(([name]) => name === 'destroyed')![1]();
+    } else {
+      event.sender.on.mock.calls.find(([name]) => name === 'did-start-navigation')![1]({}, '', false, true);
+    }
+    expect(installServiceMocks.discardUninstallCleanup).toHaveBeenCalledWith('receipt');
+    await expect(handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'receipt')).rejects.toThrow('PRECONDITION_FAILED');
+    expect(installServiceMocks.retryUninstallCleanup).not.toHaveBeenCalled();
+  });
+
+  it('discards a late cleanup receipt when its window reloads during uninstall', async () => {
+    const { event, absolutePath } = await scanLocalFixture();
+    installServiceMocks.uninstall.mockImplementationOnce(async () => {
+      event.sender.on.mock.calls.find(([name]) => name === 'did-start-navigation')![1]({}, '', false, true);
+      return { success: true, cleanupToken: 'late-receipt' };
+    });
+    expect(await handlers.get('skillhub:uninstall')!(event, { absolutePath })).toEqual({ success: true });
+    expect(installServiceMocks.discardUninstallCleanup).toHaveBeenCalledWith('late-receipt');
+  });
+
   it('rejects direct uninstall of a plugin snapshot even when the scanned UI claims it is removable', async () => {
     const stateRoot = fs.mkdtempSync(path.join(fixtureRoot, 'plugin-state-'));
     const source = path.join(stateRoot, 'skill-snapshots', 'plugin', 'revision', 'skill');
@@ -663,7 +690,7 @@ describe('registerSkillhubIpc usage handlers', () => {
       kind: 'skill', scope: 'global', name: 'plugin--skill', canUninstall: true,
       absolutePath: source, discoveredPath: alias, discoveryPaths: [alias],
     }], sources: [] });
-    const event = { sender: { id: 73, once: vi.fn() } };
+    const event = { sender: { id: 73, on: vi.fn(), once: vi.fn() } };
     await handlers.get('skillhub:scan')!(event, {});
     await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath: source }))
       .rejects.toThrow('PRECONDITION_FAILED');

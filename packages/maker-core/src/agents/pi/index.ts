@@ -5812,6 +5812,7 @@ export class PiAgent extends BaseAgent {
       getRuntimeCapabilities() {
         return runtimeCapabilityManifest;
       },
+      disabledSkillPaths: Object.freeze([...disabledSkillPaths]),
       onRuntimeCapabilitiesChange(listener) {
         if (closed) {
           notifyRuntimeCapabilityListener(listener, undefined);

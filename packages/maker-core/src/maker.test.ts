@@ -16,7 +16,7 @@ import { createAsyncQueue } from './agents/shared/async-queue.js';
 import {
   TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
-  type BaseAgent,
+  BaseAgent,
 } from './agents/base-agent.js';
 import type { SessionMeta, SessionStorage } from './interfaces/session-storage.js';
 import type { AgentKind, PermissionMode } from './types/common.js';
@@ -132,6 +132,31 @@ function createAgent(
 }
 
 describe('Maker Pi managed-package skill boundary', () => {
+  it.each(['claude-code', 'codex', 'pi'] as const)('keeps %s live palettes on their startup Skill snapshot', async (agentKind) => {
+    const source = '/fixture/disabled-skill';
+    let disabled: string[] = [source];
+    const agent = createAgent(async (opts) => ({
+      ...createHandle({ id: opts.sessionId ?? 'fixture', agentKind }),
+      disabledSkillPaths: Object.freeze([...disabled]),
+    }), agentKind);
+    agent.listAgentSkills = vi.fn(async () => ({ skills: [{
+      kind: 'agent-skill' as const, name: 'demo', source: 'skill' as const, path: source,
+    }] }));
+    agent.filterActiveSkillCommands = (result, remoteHostId, snapshot) => BaseAgent.prototype.filterActiveSkillCommands.call(
+      { deps: { getDisabledSkillPaths: () => disabled } } as unknown as BaseAgent, result, remoteHostId, snapshot,
+    );
+    const maker = new Maker({ agents: { [agentKind]: agent }, storage: createStorage(), logger: createLogger() });
+    await maker.createSession({ id: 'disabled-start', agentKind, workingDir: '/repo', model: 'm' });
+    disabled = [];
+    expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo' })).skills).toHaveLength(1);
+    expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo', sessionId: 'disabled-start' })).skills).toEqual([]);
+    await maker.createSession({ id: 'enabled-start', agentKind, workingDir: '/repo', model: 'm' });
+    disabled = [source];
+    expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo' })).skills).toEqual([]);
+    expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo', sessionId: 'enabled-start' })).skills).toHaveLength(1);
+    await maker.shutdown();
+  });
+
   it('allows package skills only for previews and ordinary local Pi tasks', async () => {
     const storage = createStorage();
     const base = {

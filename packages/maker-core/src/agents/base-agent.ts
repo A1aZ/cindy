@@ -1947,6 +1947,8 @@ export interface CodexContextWindowInfo {
  * 上层 Session 类持有此句柄并对外暴露 UI 友好的 API。
  */
 export interface AgentSessionHandle {
+  /** Cindy Skill preference snapshot used to configure this native runtime. */
+  readonly disabledSkillPaths?: readonly string[];
   getCodexContextWindowInfo?(): Promise<CodexContextWindowInfo | null>;
   /** SDK 内部 sessionId，session.started 后会回填 */
   readonly id: string;
@@ -2322,8 +2324,8 @@ export abstract class BaseAgent {
   }
 
   /** Filter only the palette projection; management discovery retains disabled sources. */
-  filterActiveSkillCommands(result: ListAgentSkillsResult, remoteHostId?: string): ListAgentSkillsResult {
-    const disabled = remoteHostId ? [] : this.deps.getDisabledSkillPaths?.() ?? [];
+  filterActiveSkillCommands(result: ListAgentSkillsResult, remoteHostId?: string, snapshot?: readonly string[]): ListAgentSkillsResult {
+    const disabled = remoteHostId ? [] : snapshot ?? this.deps.getDisabledSkillPaths?.() ?? [];
     if (disabled.length === 0) return result;
     return { ...result, skills: result.skills.filter((skill) => !skill.path || !isSkillDisabled(skill.path, disabled)) };
   }

@@ -1099,6 +1099,11 @@ interface UninstallCleanup {
 // Only Main-issued receipts can retry metadata/link cleanup; no second trash operation.
 const pendingUninstallCleanup = new Map<string, UninstallCleanup>();
 
+/** End a window-scoped retry receipt without performing any filesystem mutation. */
+export function discardUninstallCleanup(token: string): void {
+  pendingUninstallCleanup.delete(token);
+}
+
 async function finishUninstallCleanup(cleanup: UninstallCleanup, canMutate: () => boolean): Promise<boolean> {
   const { skillName, resolved, operationPath, registryMatch, links } = cleanup;
   if (!canMutate()) return false;

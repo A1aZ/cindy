@@ -236,6 +236,18 @@ function ensureAuthListener(): void {
   });
 }
 
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    authListenerUnsubscribe?.();
+    localStateListenerUnsubscribe?.();
+    authListenerUnsubscribe = null;
+    localStateListenerUnsubscribe = null;
+    scanRequestId += 1;
+    latestScan = null;
+    listeners.clear();
+  });
+}
+
 // ── v0.2.1: wire up sync store setters into useSkillSync ─────────────────────
 
 registerSyncStoreSetters({ setSyncResults, mergeSyncResults, setSyncError });

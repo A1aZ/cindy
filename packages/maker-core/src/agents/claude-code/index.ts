@@ -5594,6 +5594,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       });
     };
     const handle: AgentSessionHandle = {
+      disabledSkillPaths: Object.freeze([...disabledSkillPaths]),
       reviewAutoPermissionAction: async (action) => {
         const decision = await reviewAutoAction(
           action,

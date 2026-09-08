@@ -161,14 +161,28 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   };
   const scanGenerationBySender = new Map<number, number>();
   const scanGrantCleanupRegistered = new WeakSet<object>();
+  const cleanupGenerationBySender = new WeakMap<object, number>();
 
   const ensureScanGrantCleanup = (event: Electron.IpcMainInvokeEvent) => {
     if (scanGrantCleanupRegistered.has(event.sender)) return;
     scanGrantCleanupRegistered.add(event.sender);
-    event.sender.once('destroyed', () => {
+    const revokeWindowGrants = () => {
+      cleanupGenerationBySender.set(event.sender, (cleanupGenerationBySender.get(event.sender) ?? 0) + 1);
+      for (const [token, grant] of cleanupGrants) {
+        if (grant.senderId !== event.sender.id) continue;
+        cleanupGrants.delete(token);
+        installService.discardUninstallCleanup(token);
+      }
       scannedSkillRootsBySender.delete(event.sender.id);
       localSkillsBySender.delete(event.sender.id);
+      scanGenerationBySender.set(event.sender.id, (scanGenerationBySender.get(event.sender.id) ?? 0) + 1);
+    };
+    event.sender.once('destroyed', () => {
+      revokeWindowGrants();
       scanGenerationBySender.delete(event.sender.id);
+    });
+    event.sender.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) revokeWindowGrants();
     });
   };
 
@@ -973,13 +987,20 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
         throwIpcError('PRECONDITION_FAILED', 'Skill cannot be uninstalled; refresh and retry');
       }
       const ownerId = getCurrentDataOwnerId();
+      const cleanupGeneration = cleanupGenerationBySender.get(event.sender) ?? 0;
       const result = await installService.uninstall(absolutePath, target,
         () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending()
           && !isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots()));
       if (!result.success) throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
       await refreshCodexProjectSkillCache(result.projectWorkingDir);
       broadcastLocalChange();
-      if (result.cleanupToken) cleanupGrants.set(result.cleanupToken, { ownerId, senderId: event.sender.id });
+      if (result.cleanupToken) {
+        if ((cleanupGenerationBySender.get(event.sender) ?? 0) !== cleanupGeneration) {
+          installService.discardUninstallCleanup(result.cleanupToken);
+          return { success: true };
+        }
+        cleanupGrants.set(result.cleanupToken, { ownerId, senderId: event.sender.id });
+      }
       return { success: true, ...(result.cleanupToken ? { cleanupToken: result.cleanupToken } : {}) };
     },
   );
@@ -988,6 +1009,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     assertTrustedAppRendererEvent(event);
     const grant = cleanupGrants.get(token);
     const canMutate = () => !!grant && grant.ownerId === getCurrentDataOwnerId()
+      && cleanupGrants.get(token) === grant
       && grant.senderId === event.sender.id && !isAppSessionBoundaryPending();
     if (!canMutate()) throwIpcError('PRECONDITION_FAILED', 'Cleanup is no longer available');
     const complete = await installService.retryUninstallCleanup(token, canMutate);

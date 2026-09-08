@@ -500,6 +500,7 @@ function createIpcFanOut(channel: string): FanOut {
 // Stage 2 C1: cc-agent:* push channel fanout 全部退役 (renderer 已切到 maker:event 等),
 // 老 7 个 fanOut + fanOutUserMessagePersisted 一起拿掉。
 const fanOutUpdateStatus = createIpcFanOut('update-status');
+const fanOutSkillhubLocalStateChanged = createIpcFanOut('skillhub:local-state-changed');
 const fanOutDbSlimmingStartupProgress = createIpcFanOut(
   DB_SLIMMING_STARTUP_PROGRESS_CHANGED_CHANNEL,
 );
@@ -2947,11 +2948,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   skillhub: {
     setEnabled: (params: { absolutePath: string; enabled: boolean }): Promise<{ cindyEnabled: boolean }> =>
       ipcRenderer.invoke('skillhub:set-enabled', params),
-    onLocalStateChanged: (callback: () => void): (() => void) => {
-      const handler = () => callback();
-      ipcRenderer.on('skillhub:local-state-changed', handler);
-      return () => ipcRenderer.removeListener('skillhub:local-state-changed', handler);
-    },
+    onLocalStateChanged: fanOutSkillhubLocalStateChanged,
     scan: (params: {
       projects?: import('../main/skillhub/scanner').ProjectInput[];
     }): Promise<{

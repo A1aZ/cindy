@@ -1497,7 +1497,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     callerSessionId: string;
     objective: string;
     contextRefs: string[];
-    plan: BotDelegationPlanSnapshot;
+    plan: Omit<BotDelegationPlanSnapshot, 'permission'>;
     session: {
       workingDir: string;
       model: string;
@@ -1505,7 +1505,6 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       fastMode?: boolean;
       providerId?: string | null;
       agentKind: 'cc' | 'codex' | 'pi';
-      permissionMode: string;
       title: string;
       source: 'desktop';
     };
@@ -1515,9 +1514,34 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     status: 'queued' | 'running' | 'failed';
     deadlineAt: number;
   }>> => {
-    const { plan } = input;
     const delegationId = createId();
     const childSessionId = resolveBusinessSessionId(undefined);
+    await ensureProjectGitInitialized({
+      workingDir: input.session.workingDir,
+      workspaceKind: 'dialogue',
+      remoteHostId: null,
+      sessionId: childSessionId,
+      autoSnapshotEnabled: readGitSafetySettings().autoSnapshotEnabled,
+      source: 'bot-delegation',
+    });
+    // Read stable authority after asynchronous preparation, with no await before
+    // submitting creation. Both persisted records must use this same snapshot.
+    const callerPermission = deps.readCallerPermission
+      ? deps.readCallerPermission(input.callerSessionId)
+      : input.caller.permissionMode;
+    if (callerPermission === null) {
+      return { ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE', message: '伙伴权限正在切换或任务正在关闭，请稍后重试' };
+    }
+    const permissionMode = permissionModeOrAsk(callerPermission);
+    const plan: BotDelegationPlanSnapshot = {
+      ...input.plan,
+      permission: {
+        mode: permissionMode,
+        requesterMode: permissionMode,
+        // Legacy target-profile field; the effective child permission is mode.
+        targetConfigured: 'ask',
+      },
+    };
     const createdAt = plan.createdAt;
     const permissionSnapshotJson = JSON.stringify(plan);
     const childRow = {
@@ -1534,7 +1558,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
             ? { providerId: input.session.providerId }
             : {}),
           agentKind: input.session.agentKind,
-          permissionMode: input.session.permissionMode,
+          permissionMode,
           parentSessionId: input.callerSessionId,
         },
         createdAt,
@@ -1543,14 +1567,6 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       source: input.session.source,
     };
     try {
-      await ensureProjectGitInitialized({
-        workingDir: input.session.workingDir,
-        workspaceKind: 'dialogue',
-        remoteHostId: null,
-        sessionId: childSessionId,
-        autoSnapshotEnabled: readGitSafetySettings().autoSnapshotEnabled,
-        source: 'bot-delegation',
-      });
       await getDbClient().tx('bots.createDelegation', {
         maxActiveChildren,
         session: {
@@ -1720,26 +1736,13 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
         app.getPath('userData'),
       );
     }
-    const callerPermission = deps.readCallerPermission
-      ? deps.readCallerPermission(input.callerSessionId)
-      : caller.permissionMode;
-    if (callerPermission === null) {
-      return { ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE', message: '伙伴权限正在切换或任务正在关闭，请稍后重试' };
-    }
-    const permissionMode = permissionModeOrAsk(callerPermission);
-    const plan: BotDelegationPlanSnapshot = {
+    const plan: Omit<BotDelegationPlanSnapshot, 'permission'> = {
       version: 1,
       createdAt,
       targetBotId: null,
       access: { contextRefs: contextRefs.refs },
       completionTarget: { parentSessionId: input.callerSessionId },
       limits: { maxDepth: DEFAULT_MAX_DEPTH, timeoutMs, deadlineAt },
-      permission: {
-        mode: permissionMode,
-        requesterMode: permissionMode,
-        // Legacy target-profile field; the effective child permission is mode.
-        targetConfigured: 'ask',
-      },
     };
     const started = await startDelegation({
       caller,
@@ -1756,7 +1759,6 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
           : {}),
         ...(callerRuntime.providerId ? { providerId: callerRuntime.providerId } : {}),
         agentKind: callerRuntime.agentKind as 'cc' | 'codex' | 'pi',
-        permissionMode,
         title: input.title?.trim() || objective.split('\n')[0]!.slice(0, 60),
         source: 'desktop',
       },

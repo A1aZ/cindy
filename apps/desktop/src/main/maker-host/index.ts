@@ -55,6 +55,7 @@ import {
   type BotProfileRuntimeSnapshot,
 } from '../maker-ipc/botProfileRuntime.js';
 import { collectBotOwnSkillMounts } from '../maker-ipc/botSkillService.js';
+import { buildBotMcpCatalog } from './botMcpCatalog.js';
 import {
   botProfileDir,
   ensureBotContentDirs,
@@ -2299,26 +2300,12 @@ export function getMaker(): Maker {
             : agentKind === 'codex'
               ? codexMcpProviders
               : piMcpProviders;
-        const builtinNames = new Set(getBuiltinMcpServerNames());
-        const customGenerations = new Map(
-          (await listCustomMcpRuntimeGenerations()).map((entry) => [
-            entry.id,
-            `${entry.transport}:${entry.updatedAt}`,
-          ]),
-        );
-        return [...new Map(
-          providers.map((provider) => [
-            provider.name,
-            {
-              name: provider.name,
-              source: builtinNames.has(provider.name) ? 'builtin' as const : 'custom' as const,
-              available: true,
-              generation: builtinNames.has(provider.name)
-                ? 'builtin:1'
-                : customGenerations.get(provider.name) ?? 'custom:unknown',
-            },
-          ]),
-        ).values()];
+        return buildBotMcpCatalog({
+          agentKind,
+          providers,
+          builtinNames: getBuiltinMcpServerNames(),
+          customServers: await listCustomMcpRuntimeGenerations(),
+        });
       },
       listToolsets: async ({ botId, agentKind, workingDir, remoteHostId }) => {
         const registry = getPluginRegistry();

@@ -4,6 +4,7 @@ import { getDbClient } from '../localDb/client/current.js';
 import { updateBotProfile } from '../localDb/ipc/bots.js';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { listCustomMcpServers } from '../maker-host/custom-mcp-store.js';
+import { BOT_BASELINE_PLUGIN_IDS } from '../maker-host/plugins/types.js';
 
 type Kind = 'skill' | 'mcp' | 'toolset';
 type Input = { callerSessionId: string; kind: Kind };
@@ -73,7 +74,9 @@ async function context(callerSessionId: string) {
 }
 
 async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): Promise<Entry[]> {
-  const joined = new Set(strings(ctx.config[fields[input.kind].list]));
+  const joined = new Set(strings(ctx.config[fields[input.kind].list]).filter(
+    (id) => input.kind !== 'toolset' || !BOT_BASELINE_PLUGIN_IDS.has(id),
+  ));
   const { getMaker, getPluginRegistry, isBotToolsetAvailable } = await import('../maker-host/index.js');
   const agentKind =
     getMaker().getSession(input.callerSessionId)?.agentKind ??
@@ -104,7 +107,7 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): 
     items = await Promise.all(
       registry
         .getPlugins()
-        .filter((plugin) => plugin.id !== 'collab')
+        .filter((plugin) => plugin.id !== 'collab' && !BOT_BASELINE_PLUGIN_IDS.has(plugin.id))
         .map(async (plugin) => ({
           id: plugin.id,
           name: plugin.name,
@@ -151,6 +154,13 @@ export async function findBotCapabilities(input: Input & { query?: string }) {
 export async function selectBotCapability(input: Input & { id: string; joined: boolean }) {
   try {
     const ctx = await context(input.callerSessionId);
+    if (input.kind === 'toolset' && BOT_BASELINE_PLUGIN_IDS.has(input.id)) {
+      return {
+        ok: false as const,
+        errorCode: 'CAPABILITY_NOT_SELECTABLE',
+        message: '该工具集是伙伴固定能力，无需加入且不能移除',
+      };
+    }
     const field = fields[input.kind];
     const previous = strings(ctx.config[field.list]);
     if (input.joined) {

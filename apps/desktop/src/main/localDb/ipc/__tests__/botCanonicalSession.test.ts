@@ -7,6 +7,8 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOT_TEMPLATE_PRESET_IDENTITIES } from '../../../../shared/botTemplatePreset';
 import { findBotCapabilities, selectBotCapability } from '../../../maker-ipc/botCapabilityService';
+import { buildBotMcpCatalog } from '../../../maker-host/botMcpCatalog';
+import { CustomMcpProvider } from '../../../mcp-integrations/custom-mcp-provider';
 
 import {
   botDelegations,
@@ -100,7 +102,7 @@ vi.mock('../../../maker-host/custom-mcp-store.js', () => ({
 vi.mock('../../../maker-host/index.js', () => ({
   getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
   getPluginRegistry: () => ({
-    getPlugins: () => ['contacts', 'lsp'].map((id) => ({ id, name: id, description: id })),
+    getPlugins: () => ['memory', 'xdt_helper', 'contacts', 'lsp'].map((id) => ({ id, name: id, description: id })),
     getEnableState: async () => ({ effectiveEnabled: true }),
   }),
   isBotToolsetAvailable: () => h.toolsetsAvailable,
@@ -1614,6 +1616,49 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
   });
 
+  it('revalidates saved MCP transports on fallback and restores them when switching back', async () => {
+    const configs = (['http', 'sse'] as const).map((transport) => ({
+      id: transport, name: transport, transport, url: `https://example.invalid/${transport}`,
+      headers: { Authorization: 'FAKE_SECRET' }, updatedAt: 1,
+    }));
+    const providers = configs.map((config) => new CustomMcpProvider(config, () => 'FAKE_TOKEN'));
+    await invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: ['http', 'sse'], mcpMode: 'allowlist' },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    for (const agentKind of ['claude-code', 'codex', 'pi', 'claude-code'] as const) {
+      const opts: MakerSessionCreateOpts = {
+        id: created.session.id, agentKind, workingDir: created.session.workingDir,
+        workspaceKind: 'dialogue', model: 'test-model', permissionMode: 'auto',
+      };
+      const snapshot = await hydrateBotProfileRuntime(opts, {
+        listMcpServers: async ({ agentKind: actualRoute }) => {
+          const catalog = buildBotMcpCatalog({
+            agentKind: actualRoute, providers, builtinNames: [], customServers: configs,
+          });
+          for (const provider of providers) {
+            const context = { agentKind: actualRoute, workingDir: created.session.workingDir };
+            const serialized = actualRoute === 'codex'
+              ? provider.toCodexMcpConfig(context) : provider.toClaudeSdkConfig(context);
+            expect(catalog.find((entry) => entry.name === provider.name)?.available).toBe(serialized !== null);
+          }
+          expect(JSON.stringify(catalog)).not.toMatch(/FAKE_SECRET|FAKE_TOKEN|example.invalid|Authorization/);
+          return catalog;
+        },
+      });
+      expect(snapshot).toMatchObject({
+        configuredMcpServers: ['http', 'sse'],
+        resolvedMcpServers: agentKind === 'codex' ? ['http'] : ['http', 'sse'],
+        unavailableMcpServers: agentKind === 'codex' ? ['sse'] : [],
+      });
+      expect(opts.botRuntimeProfile?.mcpPolicy.catalog).toContainEqual(expect.objectContaining({
+        name: 'sse', available: agentKind !== 'codex',
+      }));
+    }
+  });
+
   it.each(['contacts', 'lsp'])('rejects gated %s despite registry enablement and keeps joined references removable', async (id) => {
     const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1 });
     const input = { callerSessionId: created.session.id, kind: 'toolset' as const, id };
@@ -1625,6 +1670,36 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(selectBotCapability({ ...input, joined: true })).resolves.toMatchObject({ ok: true });
     h.toolsetsAvailable = false;
     await expect(selectBotCapability({ ...input, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+  });
+
+  it.each([false, true])('keeps fixed toolsets out of selection even with saved references: %s', async (savedReferences) => {
+    await invoke('local-db:bots:update', {
+      id: 'bot-1',
+      capabilities: { toolsets: savedReferences ? ['memory', 'xdt_helper', 'retired-toolset'] : [] },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    const input = { callerSessionId: created.session.id, kind: 'toolset' as const };
+    h.toolsetsAvailable = true;
+    const discovered = await findBotCapabilities(input);
+    expect(discovered.ok).toBe(true);
+    if (!discovered.ok) throw new Error(discovered.message);
+    for (const id of ['memory', 'xdt_helper']) {
+      expect(discovered.capabilities.some((item) => item.id === id)).toBe(false);
+      for (const joined of [true, false]) {
+        await expect(selectBotCapability({ ...input, id, joined })).resolves.toMatchObject({
+          ok: false, errorCode: 'CAPABILITY_NOT_SELECTABLE',
+        });
+      }
+    }
+    expect(h.sqlite!.prepare('SELECT current_version FROM bot_profiles WHERE id = ?').pluck().get('bot-1')).toBe(2);
+    if (savedReferences) {
+      expect(discovered.capabilities).toContainEqual({
+        id: 'retired-toolset', name: 'retired-toolset', description: '', available: false, joined: true,
+      });
+      await expect(selectBotCapability({ ...input, id: 'retired-toolset', joined: false })).resolves.toMatchObject({ ok: true });
+    }
   });
 
   it('refuses absent capabilities and callers without an active canonical Bot', async () => {
@@ -2831,6 +2906,38 @@ describe('Bot Session task end-to-end runtime', () => {
       if (!result.ok) throw new Error(result.message);
       expect(h.sqlite!.prepare('SELECT permission_mode FROM sessions WHERE id = ?').pluck().get(result.childSessionId)).toBe(mode);
     } finally {
+      runtime.dispose();
+    }
+  });
+
+  it.each(['ask', 'auto', null])('uses stable permission after asynchronous workspace preparation: %s', async (settledMode) => {
+    await seedPair();
+    let permission: string | null = 'bypassPermissions';
+    let finishPreparation!: () => void;
+    const preparation = new Promise<void>((resolve) => { finishPreparation = resolve; });
+    h.ensureGit.mockImplementationOnce(async () => { await preparation; return undefined; });
+    const runtime = createDelegationRuntime({ readCallerPermission: () => permission });
+    const starting = runtime.delegation.startSessionTask({ callerSessionId: 'session-1', objective: 'Run the requested checks.' });
+    try {
+      await vi.waitFor(() => expect(h.ensureGit).toHaveBeenCalledWith(expect.objectContaining({ source: 'bot-delegation' })));
+      permission = settledMode;
+      finishPreparation();
+      const result = await starting;
+      if (settledMode === null) {
+        expect(result).toMatchObject({ ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE' });
+        expect(h.sqlite!.prepare('SELECT count(*) FROM bot_delegations').pluck().get()).toBe(0);
+        expect(h.sqlite!.prepare('SELECT count(*) FROM sessions WHERE parent_session_id = ?').pluck().get('session-1')).toBe(0);
+        expect(runtime.started).toEqual([]);
+      } else {
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error(result.message);
+        expect(h.sqlite!.prepare('SELECT permission_mode FROM sessions WHERE id = ?').pluck().get(result.childSessionId)).toBe(settledMode);
+        const snapshot = h.sqlite!.prepare('SELECT permission_snapshot_json FROM bot_delegations WHERE id = ?').pluck().get(result.delegationId) as string;
+        expect(JSON.parse(snapshot).permission).toMatchObject({ mode: settledMode, requesterMode: settledMode });
+      }
+    } finally {
+      finishPreparation();
+      await starting;
       runtime.dispose();
     }
   });

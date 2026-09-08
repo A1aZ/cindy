@@ -1,5 +1,30 @@
 import type { InstalledGhost } from '../../shared/ghost.js';
 import type { RoutineEngine } from '@cindy/maker-scheduler';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('routines:plugin');
+
+// Exact host-authored rejections only. Never echo arbitrary storage errors across the plugin boundary.
+const PUBLIC_REJECTIONS = [
+  'Routine request rate limit reached; retry after 60 seconds',
+  'Routine request intake is busy; retry later',
+  'Routine receipt storage is full; retry after receipts expire (24 hours)',
+  'Routine queue is full; retry this event later',
+  'Routine service is stopped',
+  'Event source is not listening',
+  'Event type is undeclared',
+  'Event publisher is no longer active',
+  'Expected an object',
+  'Too many event fields',
+  'Event fields must be strings, finite numbers or booleans',
+  'Invalid event field',
+  'Event payload is too large',
+  'Invalid event timestamp',
+  'Expected nonempty text of at most 128 characters',
+  'Expected nonempty text of at most 200 characters',
+  'Expected nonempty text of at most 256 characters',
+  'Expected nonempty text of at most 1000 characters',
+] as const;
 
 /** Host-authenticated publisher: a plugin may only publish its own declared event types. */
 export async function handleRoutineRequest(
@@ -31,9 +56,17 @@ export async function handleRoutineRequest(
     if (request.action !== 'publish') return { ok: false, message: 'Unknown routine operation' };
     return { ok: true, ...(await engine.publish(sourceId, request.event, isCurrent)) };
   } catch (error) {
+    const publicMessage = error instanceof Error
+      ? PUBLIC_REJECTIONS.find((message) => message === error.message)
+      : undefined;
+    if (publicMessage) return { ok: false, message: publicMessage };
+    log.warn('routine plugin request failed', {
+      ghostId: ghost.manifest.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return {
       ok: false,
-      message: error instanceof Error ? error.message : 'Routine event rejected',
+      message: 'Routine request failed; please retry later',
     };
   }
 }

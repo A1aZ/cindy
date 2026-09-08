@@ -449,6 +449,6 @@ it('reports real database failures instead of waiting indefinitely and allows a 
   const f = await restoreEventRoutine();
   mock.readProfiles.mockRejectedValueOnce(new Error('database query failed'));
   await expect(f.request({ action: 'status', status: 'listening' }))
-    .resolves.toMatchObject({ ok: false, message: 'database query failed' });
+    .resolves.toMatchObject({ ok: false, message: 'Routine request failed; please retry later' });
   await expect(f.request({ action: 'status', status: 'listening' })).resolves.toEqual({ ok: true });
 });

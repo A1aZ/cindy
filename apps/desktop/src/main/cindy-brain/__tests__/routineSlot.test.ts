@@ -1,7 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { RoutineEngine } from '@cindy/maker-scheduler';
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { handleRoutineRequest } from '../routineSlot.js';
+
+const warn = vi.hoisted(() => vi.fn());
+vi.mock('../../logger.js', () => ({ createLogger: () => ({ warn }) }));
+afterEach(() => { warn.mockClear(); });
 
 const ghost = {
   enabled: true,
@@ -143,5 +147,51 @@ it('caps aggregate status reports across plugin identities', async () => {
   f.advance();
   expect(await f.request({ action: 'status', status: 'listening' })).toEqual({ ok: true });
   expect(f.changed).toHaveBeenCalledTimes(5);
+  await f.engine.stop();
+});
+
+it.each([
+  new Error("EACCES: permission denied, open '/Users/private-user/Library/Application Support/Cindy/routines/routines.json'"),
+  new Error("EBUSY: resource busy, rename 'C:\\Users\\private-user\\AppData\\Roaming\\Cindy\\routines\\private.tmp'"),
+  new SyntaxError('Unexpected token in private routine instructions'),
+  new Error('Routine request rate limit reached; retry after 60 seconds /private/internal-path'),
+  'Unexpected failure at /private/internal-path',
+])('keeps unexpected startup failure details in Main logs, not plugin replies: %s', async (error) => {
+  const result = await handleRoutineRequest(
+    ghost, { action: 'status', status: 'listening' }, async () => { throw error; }, () => true,
+  );
+  expect(result).toEqual({ ok: false, message: 'Routine request failed; please retry later' });
+  expect(warn).toHaveBeenCalledWith('routine plugin request failed', {
+    ghostId: 'mail', error: error instanceof Error ? error.message : error,
+  });
+});
+
+it.each(['write', 'rename'])('hides %s failures and keeps the same event retryable until durable acceptance', async (operation) => {
+  const save = vi.fn(async () => {});
+  const engine = new RoutineEngine({
+    load: async () => null, save, execute: vi.fn(async () => ({})),
+    id: () => 'id', now: () => 1, changed: vi.fn(), onError: vi.fn(),
+  });
+  await engine.start();
+  const request = (payload: unknown) => handleRoutineRequest(ghost, payload, async () => engine, () => true);
+  await request({ action: 'status', status: 'listening' });
+  const payload = { action: 'publish', event: { id: 'retry-me', type: 'new', occurredAt: 1, data: { label: 'private-event-data' } } };
+  const error = new Error(`EACCES: ${operation} '/Users/private-user/Cindy/routines/private.tmp'`);
+  save.mockRejectedValueOnce(error);
+  expect(await request(payload)).toEqual({ ok: false, message: 'Routine request failed; please retry later' });
+  expect(warn).toHaveBeenCalledWith('routine plugin request failed', { ghostId: 'mail', error: error.message });
+  expect(JSON.stringify(warn.mock.calls)).not.toContain('private-event-data');
+  expect(await request(payload)).toEqual({ ok: true, accepted: 0, duplicate: false });
+  expect(await request(payload)).toEqual({ ok: true, accepted: 0, duplicate: true });
+  await engine.stop();
+});
+
+it('keeps fixed validation and retry guidance without logging repeated expected rejections', async () => {
+  const f = await statusFixture();
+  await f.request({ action: 'status', status: 'listening' });
+  expect(await f.request({ action: 'publish', event: { id: 'bad', type: 'new', occurredAt: -1, data: {} } }))
+    .toEqual({ ok: false, message: 'Invalid event timestamp' });
+  for (let i = 0; i < 80; i++) await f.request({ action: 'status', status: 'listening' });
+  expect(warn).not.toHaveBeenCalled();
   await f.engine.stop();
 });

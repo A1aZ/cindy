@@ -138,7 +138,7 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.overlay.toast` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.plugins.app-main` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.plugins.installed` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
-| `desktop.settings` | unassigned（用量图表裁决与迁移跟进：kirozeng） | pilot | DESIGN.md §10 语义豁免色族消费者；外部主题导入保护 token（资源用量类别色在独立窗）；DESIGN.md §5 登记成员 `usage-heatmap-day` / `usage-token-bar` | DS-4 / DS-4b 的 Button / Input 与 SettingsTextInput 局部兼容壳已落地；DS-6 完整表单和第二消费者，DS-8 数值同源；用量图表另走普通命名的视觉修复 PR，见下方待迁移记录 | DS-6 补全状态、说明与公开附件；focus、ivory/elevated 见治理 §10。旧 alias 与 slot 按作用域生效，禁止仅因同值删除局部配色；DS-6/8/9/11 按实际消费者分批核对跨 surface alias，confirm-dialog 归 DS-6；用量图表按 2026-09-07 裁决跟进，不记为已合规 |
+| `desktop.settings` | unassigned（用量图表裁决与迁移跟进：kirozeng） | pilot | DESIGN.md §10 语义豁免色族消费者；外部主题导入保护 token（资源用量类别色在独立窗）；DESIGN.md §5 登记成员 `usage-heatmap-day` / `usage-token-bar` | DS-4 / DS-4b 的 Button / Input 与 SettingsTextInput 局部兼容壳已落地；DS-6 完整表单和第二消费者，DS-8 数值同源；用量图表另走普通命名的视觉修复 PR，见下方待迁移记录 | DS-6 补全状态、说明与公开附件；focus、ivory/elevated 见治理 §10。旧 alias 与 slot 按作用域生效，禁止仅因同值删除局部配色；DS-6/8/9/11 按实际消费者分批核对跨 surface alias，confirm-dialog 归 DS-6；用量图表形状与密度已随 #4064 恢复、等价日期控件未交付，不记为已合规（见下方迁移记录） |
 | `desktop.shell.main-layout` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族（侧栏 vibrancy / 选中 pill）；外部主题导入保护 token；DESIGN.md §5 登记成员 `workflow-status-cell`（background-tasks 面板详情） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.skillhub.local` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.skillhub.market` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
@@ -151,15 +151,15 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.window.voice-dictionary-toast` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.voice-overlay` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 
-### `desktop.settings`：用量图表圆角与命中布局待迁移（2026-09-07）
+### `desktop.settings`：用量图表等价日期控件待交付（2026-09-07；图元形状与密度已随 #4064 恢复）
 
-- **入口与状态：** 设置 → 用量历史（`SettingsView` → `UsageHistorySection`）；这是 `desktop.settings` 的局部待迁移项，不是资源用量独立窗口。规范依据为 [`DESIGN.md §5`](./DESIGN.md#border-radius-scale) 与 [`design-decision-log.md`](./design-decision-log.md) 09-07 裁决；本次只改规范与登记，**生产实现未变，视觉验收尚未发生**。
-- **Owner：** kirozeng 负责本次裁决与迁移跟进；后续实现负责人待认领并回填。**后续 PR：**「按裁决修复图表形状与日期选择」（尚未创建，编号待回填；普通命名，不占 DS 编号）。
+- **入口与状态：** 设置 → 用量历史（`SettingsView` → `UsageHistorySection`）；这是 `desktop.settings` 的局部待迁移项，不是资源用量独立窗口。规范依据为 [`DESIGN.md §5`](./DESIGN.md#border-radius-scale) 与 [`design-decision-log.md`](./design-decision-log.md) 09-07 裁决。09-07 裁决 PR 只改规范与登记；图元形状与密集密度随后由 #4064 在 main 落地并经合并纳入本分支，**等价日期控件尚未交付，密集目标处于 §5 登记在案的过渡不合规**。
+- **Owner：** kirozeng 负责本次裁决与迁移跟进；后续实现负责人待认领并回填。**后续 PR：** 形状与密度恢复已由 #4064 交付；「等价单日选择控件」仍待单独交付（尚未创建，编号待回填；普通命名，不占 DS 编号）。
 
 | 登记成员 / 责任 | 已知待修差异（2026-09-07 源码核对） | 后续验收要求 |
 | --- | --- | --- |
-| 图元 `usage-heatmap-day` | `apps/desktop/src/renderer/components/new-chat/UsageHeatmap.tsx` 的可见彩色日格仍按交互分支取 `rounded-full` / `rounded-[3px]`。 | 两个分支均遵守 §5 的成员登记值；热力图 `3px → 2px` 是新裁决的视觉调整，不称原样回退。登记不覆盖图例、容器或 tooltip。 |
-| 图元 `usage-token-bar` | `apps/desktop/src/renderer/components/settings/usage/UsageTokenBars.tsx` 的可见柱体及其自身裁剪仍用 `rounded-full`，命中按钮另有 pill 外形与焦点 / 选中指示。 | 柱体及其自身裁剪按 §5 登记恢复四角处理，不采用仅上角圆、方基线或全 0；命中区与指示器不得将柱体改回 pill。 |
-| 命中布局、日期选择与指示器 | `UsageHeatmap` 的排布 `cellSize` 因交互由 12 改为 24；`UsageTokenBars` 命中宽 / 高至少 24、30 柱容器最小宽度为 807px 并横向滚动。`UsageHistorySection` 的相对范围预设和当前单日回显未提供任意单日等价选择。 | 依 §5 的 Equivalent 路径，在同页提供覆盖每个可选日期、产生相同筛选结果且满足 WCAG 2.2 SC 2.5.8 的日期选择控件，**与密度恢复同 PR 交付**；此前不缩小目标，不以不同日期的重叠热区扩容，不采用 Essential 通用豁免。组件条目须明确独立 hover / focus / 选中指示几何，保留数据映射、键盘可达与可见焦点。 |
+| 图元 `usage-heatmap-day` | **已随 #4064 恢复**（2026-09-08 合并后源码核对）：日格 `12×12`、`rounded-[2px]`，交互与只读同几何。 | 两个分支均遵守 §5 的成员登记值。登记不覆盖图例、容器或 tooltip。 |
+| 图元 `usage-token-bar` | **已随 #4064 恢复**（2026-09-08 合并后源码核对）：细柱四角 2px、`3px` 间距、无最小列宽与横向滚动。 | 柱体及其自身裁剪遵守 §5 登记值；命中区与指示器不得将柱体改回 pill。 |
+| 命中布局、日期选择与指示器 | 密集目标已随 #4064 恢复（方格 12×12、细柱无最小宽度）；但 `UsageHistorySection` 仍只有相对范围预设与当前单日回显，**任意单日等价选择未交付——密集目标处于 §5 登记在案的过渡不合规**。 | 依 §5 的 Equivalent 路径，在同页提供覆盖每个可选日期、产生相同筛选结果且满足 WCAG 2.2 SC 2.5.8 的日期选择控件；控件交付并验收前密集目标不记为合规，不以不同日期的重叠热区扩容，不采用 Essential 通用豁免。组件条目须明确独立 hover / focus / 选中指示几何，保留数据映射、键盘可达与可见焦点。 |
 
-**下一动作：** 后续一张「有意可见变化」PR 同时交付热力图格登记形状、每日 token 柱登记形状、等价单日选择控件和密度恢复四项；半径值以 §5 成员表为唯一当前值来源。按治理合同 §6 提供真实运行的 Light / Dark 证据与人工验收，AI 不得用自己产出的截图自我批准。完成前保持本条待迁移状态，回填实际负责人、PR 链接与验收结论；**此过渡记录不授权新增同类偏差**。
+**下一动作：** 后续「有意可见变化」PR 交付等价单日选择控件（形状与密度恢复已由 #4064 完成）；半径值以 §5 成员表为唯一当前值来源。控件 PR 按治理合同 §6 提供真实运行的 Light / Dark 证据与人工验收，AI 不得用自己产出的截图自我批准。控件交付并验收前保持本条过渡状态，回填实际负责人、PR 链接与验收结论；**此过渡记录不授权新增同类偏差，密集目标不因本记录视为合规**。

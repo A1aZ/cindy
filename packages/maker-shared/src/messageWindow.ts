@@ -1,3 +1,5 @@
+export { isRemoteTextDelta, readRemoteTextSnapshot, reconcileRemoteText, consumeRemoteSessionSync } from './remoteTextStream.js';
+
 export interface MessageScrollMetrics {
   contentHeight: number;
   offsetY: number;

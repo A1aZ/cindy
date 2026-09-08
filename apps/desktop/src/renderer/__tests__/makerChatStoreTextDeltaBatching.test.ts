@@ -510,6 +510,34 @@ const flushPromises = async () => {
 };
 
 describe('makerChatStore text delta batching', () => {
+  it('repairs remote text before new deltas and ignores a repair after durable takeover', () => {
+    remoteProjectsStore.pinSessionOrigin('device-1', SESSION_ID);
+    const send = (channel: string, payload: unknown, deviceId = 'device-1') => onRemotePush?.({ deviceId, channel, payload });
+    const text = (value: string) => ({ sessionId: SESSION_ID, persistId: 'assistant-1',
+      event: { type: 'text', data: { text: value, isFinal: false } } });
+    const repair = { ...text('prefix suffix'), event: { type: 'text', data: {
+      text: 'prefix suffix', isFinal: false, isFullText: true, createdAt: '2026-09-08T00:00:01Z',
+    } } };
+    send('maker:event', text(' suffix'));
+    send('maker:session-sync', repair);
+    send('maker:session-sync', repair);
+    send('maker:event', text(' tail'));
+    vi.advanceTimersByTime(32);
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages).toEqual([
+      expect.objectContaining({ clientId: 'assistant-1', content: 'prefix suffix tail',
+        createdAt: '2026-09-08T00:00:01.000Z', isStreaming: true }),
+    ]);
+    send('maker:session-sync', { ...repair, event: { type: 'text', data: { text: 'wrong owner', isFullText: true, isFinal: false } } }, 'device-2');
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages[0].content).toBe('prefix suffix tail');
+    send('local-db:messages:created', { sessionId: SESSION_ID, message: {
+      id: 'db-id', clientId: 'assistant-1', role: 'assistant', content: 'durable answer', createdAt: '2026-09-08T00:00:01Z',
+    } });
+    send('maker:session-sync', repair);
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages).toEqual([
+      expect.objectContaining({ clientId: 'assistant-1', content: 'durable answer', isStreaming: false }),
+    ]);
+  });
+
   const MULTI_SESSION_IDS = Array.from({ length: 10 }, (_, i) => `${SESSION_ID}-multi-${i}`);
   const LRU_SESSION_IDS = Array.from({ length: 21 }, (_, i) => `${SESSION_ID}-lru-${i}`);
 

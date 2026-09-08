@@ -1,5 +1,27 @@
 /** Disk-only LRU. The index contains metadata, never message bodies. */
 export const HISTORY_DISK_BUDGET_BYTES = 1024 * 1024 * 1024;
+export const HISTORY_DISK_ITEM_BYTES = 8 * 1024 * 1024;
+
+/** Conservative JSON/UTF-8 bound with early exit; never copies message bodies. */
+export function historyValueBytes(value: unknown, limit: number, depth = 0): number {
+  if (limit <= 0 || depth > 64) return Infinity;
+  if (typeof value === 'string') return 2 + 6 * value.length;
+  if (!value || typeof value !== 'object') return 32;
+  let bytes = 16;
+  const add = (child: unknown) => { bytes += historyValueBytes(child, limit - bytes, depth + 1) + 16; };
+  if (value instanceof Map) {
+    for (const [key, child] of value) { add(key); add(child); if (bytes > limit) return Infinity; }
+  } else if (value instanceof Set || Array.isArray(value)) {
+    for (const child of value) { add(child); if (bytes > limit) return Infinity; }
+  } else {
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      add(key); add((value as Record<string, unknown>)[key]);
+      if (bytes > limit) return Infinity;
+    }
+  }
+  return bytes;
+}
 export interface HistoryDiskIO {
   read(name: string): Promise<string | null>;
   write(name: string, text: string): Promise<void>;
@@ -44,7 +66,7 @@ export class HistoryDiskStore {
       await this.init();
       if (epoch !== this.epoch || !current()) return null;
       const entry = this.entries![key];
-      if (!entry) return null;
+      if (!entry || entry.bytes > HISTORY_DISK_ITEM_BYTES) return null;
       const text = await this.io.read(entry.file);
       if (epoch !== this.epoch || !current()) return null;
       if (text === null) delete this.entries![key];
@@ -54,12 +76,13 @@ export class HistoryDiskStore {
     }).catch(() => null);
   }
   write(key: string, text: string, current: () => boolean): Promise<void> {
+    if (text.length > HISTORY_DISK_ITEM_BYTES) return Promise.resolve();
     const epoch = this.epoch;
     // UTF-8 bytes, rather than JS UTF-16 code units, own the disk budget.
     const bytes = new TextEncoder().encode(text).byteLength;
     return this.run(async () => {
       await this.init();
-      if (epoch !== this.epoch || !current() || bytes > this.budget) return;
+      if (epoch !== this.epoch || !current() || bytes > Math.min(this.budget, HISTORY_DISK_ITEM_BYTES)) return;
       const file = `view-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}.json`;
       await this.io.write(file, text);
       if (epoch !== this.epoch || !current()) { await this.io.remove(file); return; }

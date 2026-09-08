@@ -67,10 +67,10 @@ export class HistoryViewController<T extends HistoryMessageSource> {
 
   /** Optimistic local display only. A fresh response or reset always wins over disk IO. */
   async restoreCachedView(read: () => Promise<HistoryViewSnapshot<T> | null>): Promise<void> {
-    if (this.state.ready) return;
+    if (this.state.ready || isHistoryViewUnavailable(this.state.error)) return;
     const generation = this.generation;
     const cached = await read().catch(() => null);
-    if (!cached || this.state.ready || generation !== this.generation) return;
+    if (!cached || this.state.ready || isHistoryViewUnavailable(this.state.error) || generation !== this.generation) return;
     this.publish({ ...cached, loading: this.state.loading, error: this.state.error });
   }
 

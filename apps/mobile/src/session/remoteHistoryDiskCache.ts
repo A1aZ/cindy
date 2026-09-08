@@ -1,7 +1,7 @@
 import type { HistoryViewSnapshot } from '@cindy/maker-shared/message-window';
 import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
 import { getActiveMobileSessionRealm } from '@/config/env';
-import { HistoryDiskStore } from './historyDiskStore';
+import { HistoryDiskStore, HISTORY_DISK_ITEM_BYTES, historyValueBytes } from './historyDiskStore';
 import type { RemoteMessage } from './types';
 
 let store: Promise<HistoryDiskStore> | null = null;
@@ -66,6 +66,7 @@ export async function readHistoryDisk(authority: Authority): Promise<HistoryView
 }
 export async function writeHistoryDisk(authority: Authority, snapshot: HistoryViewSnapshot<RemoteMessage>): Promise<void> {
   if (!authority.current() || !snapshot.ready || snapshot.loading || snapshot.error) return;
+  if (historyValueBytes([snapshot.items, snapshot.details, snapshot.expanded, snapshot.nextCursor], HISTORY_DISK_ITEM_BYTES - 1024) > HISTORY_DISK_ITEM_BYTES - 1024) return;
   try {
     const text = JSON.stringify({ version: 1, items: snapshot.items,
       details: [...snapshot.details].filter(([, detail]) => detail.complete && !detail.loading && !detail.error),

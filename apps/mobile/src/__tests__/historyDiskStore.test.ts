@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { HistoryDiskStore, HISTORY_DISK_BUDGET_BYTES, type HistoryDiskIO } from '../session/historyDiskStore';
+import { HistoryDiskStore, HISTORY_DISK_BUDGET_BYTES, HISTORY_DISK_ITEM_BYTES, historyValueBytes, type HistoryDiskIO } from '../session/historyDiskStore';
 
 function fixture(budget = 100) {
   const files = new Map<string, string>();
@@ -13,6 +13,23 @@ function fixture(budget = 100) {
 }
 const current = () => true;
 describe('history disk cache', () => {
+  it('bounds nested accounting without copying or visiting the remaining details', () => {
+    const late = vi.fn(() => 'must not visit');
+    const value = ['x'.repeat(1000), { get content() { return late(); } }];
+    expect(historyValueBytes(value, 100)).toBe(Infinity);
+    expect(late).not.toHaveBeenCalled();
+    const small = { text: '\u0000中😀', values: [null, true, 1] };
+    expect(historyValueBytes(small, 10000)).toBeGreaterThan(new TextEncoder().encode(JSON.stringify(small)).length);
+  });
+  it('rejects a giant string before encoding and does not read oversized legacy bodies', async () => {
+    const h = fixture(HISTORY_DISK_BUDGET_BYTES);
+    await h.cache.write('big', 'x'.repeat(HISTORY_DISK_ITEM_BYTES + 1), current);
+    expect(h.io.write).not.toHaveBeenCalled();
+    h.files.set('index.json', JSON.stringify({ old: { file: 'view-old.json', bytes: HISTORY_DISK_ITEM_BYTES + 1, accessed: 1 } }));
+    h.files.set('view-old.json', 'large legacy body');
+    expect(await new HistoryDiskStore(h.io).read('old', current)).toBeNull();
+    expect(h.io.read).not.toHaveBeenCalledWith('view-old.json');
+  });
   it('uses a GiB budget and survives a new store without reading every body', async () => {
     expect(HISTORY_DISK_BUDGET_BYTES).toBe(1073741824);
     const h = fixture();

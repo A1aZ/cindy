@@ -20,6 +20,17 @@ const snapshot = (text: string): HistoryViewSnapshot<RemoteMessage> => ({
 });
 afterEach(async () => { await clearHistoryDisk(); setMobileAuthOwner(null); });
 describe('persistent history integration', () => {
+  it('skips oversized snapshots before serializing complete details', async () => {
+    setMobileAuthOwner('a');
+    const auth = historyDiskAuthority('d', 's');
+    const value = snapshot('small');
+    const toJSON = vi.fn(() => { throw new Error('must not serialize'); });
+    value.details = new Map([['huge', { messages: [{ content: 'x'.repeat(2 * 1024 * 1024), toJSON }],
+      complete: true, loading: false, error: null, revision: 'r', lastMessageId: 'a' }]]) as unknown as typeof value.details;
+    await writeHistoryDisk(auth, value);
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(await readHistoryDisk(auth)).toBeNull();
+  });
   it('restores items, pagination and expansion while separating account ownership', async () => {
     setMobileAuthOwner('a');
     const auth = historyDiskAuthority('d', 's');
@@ -77,6 +88,22 @@ describe('persistent history integration', () => {
     expect(JSON.stringify(view.getSnapshot())).toContain('disk');
     await view.refresh();
     expect(JSON.stringify(view.getSnapshot())).toContain('network');
+  });
+  it.each(['UNSUPPORTED_CAPABILITY', 'CHANNEL_NOT_ALLOWED'])('does not restore disk after %s fallback', async (code) => {
+    const view = new HistoryViewController<RemoteMessage>({
+      page: async () => { throw new Error(`[${code}] unavailable`); },
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => {},
+    });
+    let resolve!: (value: HistoryViewSnapshot<RemoteMessage>) => void;
+    const reading = view.restoreCachedView(() => new Promise(done => { resolve = done; }));
+    await view.refresh();
+    resolve(snapshot('stale disk')); await reading;
+    const read = vi.fn(async () => snapshot('stale disk'));
+    await view.restoreCachedView(read);
+    expect(read).not.toHaveBeenCalled();
+    expect(view.getSnapshot().ready).toBe(false);
+    expect(view.getSnapshot().items).toEqual([]);
   });
   it.each(['fresh', 'reset', 'deactivate'])('ignores late disk after %s', async (action) => {
     const view = controller();

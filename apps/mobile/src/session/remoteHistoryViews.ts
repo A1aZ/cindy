@@ -2,6 +2,7 @@ import { HistoryViewController } from '@cindy/maker-shared/message-window';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import type { RemoteMessage } from './types';
 import { historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from './remoteHistoryDiskCache';
+import { historyValueBytes } from './historyDiskStore';
 
 // Retain only recently visited views in memory. The existing account/device and
 // session reclamation boundaries own invalidation. Older views remain in the disk LRU.
@@ -67,8 +68,9 @@ export function mountRemoteHistoryView(entry: Entry, reader: Reader, active: boo
     const key = keyFor(entry.deviceId, entry.sessionId);
     if (views.get(key) !== entry) return;
     const snapshot = entry.view.getSnapshot();
-    // Wire data is JSON. Count UTF-16 conservatively without retaining another copy.
-    entry.bytes = 2 * JSON.stringify([snapshot.items, [...snapshot.details], [...snapshot.expanded]]).length;
+    // Bound accounting work before allocating a serialization of large details.
+    entry.bytes = Math.min(MAX_INACTIVE_HISTORY_BYTES + 1,
+      2 * historyValueBytes([snapshot.items, snapshot.details, snapshot.expanded], MAX_INACTIVE_HISTORY_BYTES));
     views.delete(key);
     views.set(key, entry);
     let count = 0;

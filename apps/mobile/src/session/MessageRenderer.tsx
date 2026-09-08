@@ -1830,15 +1830,17 @@ export function MessageRenderer({
   }, [getCurrentHistoryTopOffsetAdjustment, historyProgressKey, onLoadEarlier]);
 
   const flushQueuedLoadEarlier = useCallback(() => {
-    if (
-      !queuedLoadEarlierRef.current
-      || isDraggingRef.current
+    if (!queuedLoadEarlierRef.current) return;
+    // Native MVCP can prepend while iOS is scrolling. Only the app-owned Android anchor
+    // needs a quiet gesture boundary; delaying both platforms defeats near-start prefetch.
+    if (MOBILE_HISTORY_PREPEND_USES_APP_OWNED_ANCHOR && (
+      isDraggingRef.current
       || isMomentumScrollingRef.current
       || historyTouchStartYRef.current !== null
-    ) return;
+    )) return;
     // Android must not start until a committed render removes RN's native MVCP prop. Otherwise a
     // fast local/relay response can prepend before that prop update lands. iOS keeps native MVCP
-    // throughout and can start immediately once the user's gesture is no longer active.
+    // throughout and can start while the user's gesture is still active.
     if (
       MOBILE_HISTORY_PREPEND_USES_APP_OWNED_ANCHOR
       && !historyPrependNativeMvcpDisabledRef.current

@@ -160,7 +160,7 @@ describe('mobile message list container', () => {
     expect(maybeFinishSource).toContain('historyTouchStartYRef.current !== null');
     expect(source).toContain('transaction.userHandoffPending = true;');
     expect(source).toContain('currentTransaction.userHandoffPending = false;');
-    // 直接拖动结束前不发请求，避免远端页在手指仍控制 ScrollView 时落地。
+    // Android 的手动锚定等手势结束；iOS 由 native MVCP 保持视口，可在手势中预取。
     expect(source).toContain('queuedLoadEarlierRef.current = true');
     expect(source).toContain('setHistoryPrependNativeMvcpDisabled(true)');
     expect(source).toMatch(

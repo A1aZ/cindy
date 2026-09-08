@@ -6911,6 +6911,7 @@ export class PiAgent extends BaseAgent {
           description: skill.description,
           source: 'skill' as const,
           path: skill.path,
+          origin: 'package' as const,
           scope: 'user' as const,
           enabled: true,
           runtimeStatus: 'approved' as const,

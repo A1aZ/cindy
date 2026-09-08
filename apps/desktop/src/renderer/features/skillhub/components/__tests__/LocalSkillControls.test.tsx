@@ -113,4 +113,14 @@ describe('Local Skill management', () => {
     expect(mocks.uninstall).toHaveBeenCalledOnce();
     expect(mocks.success).toHaveBeenCalledWith('skillhub.management.cleanupComplete');
   });
+
+  it('directs plugin-owned Skills to plugin management without allowing uninstall', async () => {
+    render(<LocalSkillControls skill={{ ...skill, canUninstall: false, managedByPlugin: true }} />);
+    fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.management.moreLabel' }), { key: 'Enter' });
+    const item = await screen.findByRole('menuitem');
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(item);
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(screen.getByText('skillhub.management.managedByPlugin')).toBeTruthy();
+  });
 });

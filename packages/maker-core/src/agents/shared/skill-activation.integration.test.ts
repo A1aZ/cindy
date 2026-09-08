@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { claudeDisabledSkillOverrides, skillEntryPath } from './skill-activation.js';
+import { scanClaudeRuntimeSkills } from '../claude-code/customization-scanner.js';
 
 const repo = fileURLToPath(new URL('../../../../..', import.meta.url));
 const suffix = process.platform === 'win32' ? '.exe' : '';
@@ -61,6 +62,49 @@ function safeEnv(home: string): NodeJS.ProcessEnv {
 }
 
 describe('pinned native Skill activation', () => {
+  it.skipIf(!fs.existsSync(binary('claude-code')))('disables ancestor Skills using native Git boundaries and nearest-source precedence', async () => {
+    const { root, home, cwd: project } = fixture();
+    const cwd = path.join(project, 'src');
+    fs.mkdirSync(cwd);
+    fs.mkdirSync(path.join(project, '.git'));
+    const ancestor = path.join(project, '.claude', 'skills', 'ancestor');
+    const parentCopy = path.join(project, '.claude', 'skills', 'same');
+    const childCopy = path.join(cwd, '.claude', 'skills', 'same');
+    const outside = path.join(root, '.claude', 'skills', 'outside');
+    writeSkill(ancestor, 'ancestor');
+    writeSkill(parentCopy, 'parent-copy');
+    writeSkill(childCopy, 'child-copy');
+    writeSkill(outside, 'outside');
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const { items } = await scanClaudeRuntimeSkills(cwd);
+      expect(items.some((item) => item.name === 'outside')).toBe(false);
+      const settings = (disabled: string[]) => claudeDisabledSkillOverrides(items, disabled);
+      expect(settings([ancestor, parentCopy, outside])).toEqual({ ancestor: 'off' });
+      expect(settings([childCopy])).toEqual({ same: 'off' });
+      const commands = async (disabled: string[]) => rpc({ binary: binary('claude-code'), cwd,
+        env: { ...safeEnv(home), CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
+          ANTHROPIC_API_KEY: 'fixture-only', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+        args: ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+          '--settings', JSON.stringify({ apiKeyHelper: '', skillOverrides: settings(disabled) })],
+        initial: { type: 'control_request', request_id: 'init', request: { subtype: 'initialize' } },
+        onMessage: (data) => data.type === 'control_response' ? data.response.response.commands.map((item: { name: string }) => item.name) : undefined,
+      });
+      expect(await commands([])).toEqual(expect.arrayContaining(['ancestor', 'child-copy']));
+      const disabled = await commands([ancestor, parentCopy]);
+      expect(disabled).not.toContain('ancestor');
+      expect(disabled).toContain('child-copy');
+      expect(disabled).not.toContain('outside');
+      expect(await commands([childCopy])).not.toContain('child-copy');
+      // Worktree Git markers are files; discovery still stops there.
+      fs.rmdirSync(path.join(project, '.git'));
+      fs.writeFileSync(path.join(project, '.git'), 'gitdir: /fixture-only');
+      expect((await scanClaudeRuntimeSkills(cwd)).items.some((item) => item.name === 'outside')).toBe(false);
+      fs.unlinkSync(path.join(project, '.git'));
+      expect((await scanClaudeRuntimeSkills(cwd)).items.some((item) => item.name === 'outside')).toBe(true);
+    } finally { homeSpy.mockRestore(); }
+  });
+
   it.skipIf(!fs.existsSync(binary('claude-code')))('Claude disables by directory identity even when the frontmatter name differs', async () => {
     const { home, cwd } = fixture();
     const source = path.join(home, '.claude', 'skills', 'directory-name');

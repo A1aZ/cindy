@@ -1709,12 +1709,14 @@ describe('Maker Pi runtime skill status', () => {
       expect.objectContaining({
         name: 'context-mode-old',
         path: managedPath,
+        origin: 'package',
         runtimeStatus: 'loaded',
         runtimeCommandName: 'skill:context-mode-old',
       }),
       expect.objectContaining({
         name: 'unproven-at-launch',
         runtimeStatus: 'unknown',
+        origin: 'package',
       }),
     ]);
     expect(active.skills.some((skill) => skill.name === 'installed-after-start')).toBe(false);

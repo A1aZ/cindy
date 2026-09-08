@@ -1,5 +1,5 @@
 import { isCindySkillEnabled } from './activationPreferences';
-import { inspectLocalSkillTarget } from './localSkillTarget';
+import { inspectLocalSkillTarget, isPluginManagedSkillPath } from './localSkillTarget';
 /**
  * SkillHub Scanner — 商店层 (registry / market) 视图组装。
  *
@@ -43,6 +43,7 @@ export interface Skill {
   /** Local Cindy override, independent of each engine's native availability. */
   cindyEnabled?: boolean;
   canUninstall?: boolean;
+  managedByPlugin?: boolean;
   uninstallLinkOnly?: boolean;
   /** All lexical discovery aliases; Main owns their validation. */
   discoveryPaths?: string[];
@@ -194,6 +195,7 @@ function filterSkillPackageFileEntries(rootDir: string, entries: SkillFileEntry[
 export async function scanAllSkills(
   params: { projects?: ProjectInput[] },
   maker: Maker,
+  managedSkillRoots: readonly string[] = [],
 ): Promise<ScanResult> {
   const projects = params.projects ?? [];
   const projectByWorkingDir = new Map<string, ProjectInput>();
@@ -334,8 +336,9 @@ export async function scanAllSkills(
       registryEntry: null,            // 下面 join 阶段填
       ...(c.kind === 'skill' ? (() => {
         const discoveryPaths = all.map((item) => item.absolutePath);
-        const target = inspectLocalSkillTarget(realPath, discoveryPaths);
+        const target = inspectLocalSkillTarget(realPath, discoveryPaths, managedSkillRoots);
         return { cindyEnabled: isCindySkillEnabled(realPath), discoveryPaths,
+          managedByPlugin: isPluginManagedSkillPath(realPath, managedSkillRoots),
           canUninstall: target !== null, uninstallLinkOnly: target?.linkOnly ?? false };
       })() : {}),
       ...(project ? { projectRoot: project.projectRoot } : {}),

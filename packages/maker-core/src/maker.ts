@@ -236,6 +236,7 @@ async function mergePiRuntimeSkillStatuses(
         ...(skill.description ? { description: skill.description } : {}),
         source: 'skill' as const,
         path: skill.sourcePath,
+        origin: 'package' as const,
         scope: 'user' as const,
         enabled: true,
         runtimeStatus: skill.runtimeCommandName ? 'loaded' as const : 'unknown' as const,

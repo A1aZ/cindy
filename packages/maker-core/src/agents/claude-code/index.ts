@@ -174,7 +174,7 @@ import type {
 } from '../../types/memory.js';
 import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
 import { claudeDisabledSkillOverrides } from '../shared/skill-activation.js';
-import { scanClaudeCustomizations } from './customization-scanner.js';
+import { scanClaudeCustomizations, scanClaudeRuntimeSkills } from './customization-scanner.js';
 import {
   REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   isReviewSensitiveCredentialSelector,
@@ -2370,9 +2370,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
     const disabledSkillOverrides = disabledSkillPaths.length > 0
-      ? claudeDisabledSkillOverrides((await scanClaudeCustomizations({
-          workingDirs: [opts.workingDir], kinds: ['skill'],
-        })).items, disabledSkillPaths)
+      ? claudeDisabledSkillOverrides((await scanClaudeRuntimeSkills(opts.workingDir)).items, disabledSkillPaths)
       : {};
     const buildSettings = (): Settings => {
       const settings = buildClaudeFlagSettings({

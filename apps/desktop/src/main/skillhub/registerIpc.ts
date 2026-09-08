@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { throwIpcError } from '../utils/ipcValidate';
 import { setCindySkillEnabled } from './activationPreferences';
-import { inspectLocalSkillTarget, isLocalSkillTargetCurrent, type LocalSkillTarget } from './localSkillTarget';
+import { inspectLocalSkillTarget, isLocalSkillTargetCurrent, isPluginManagedSkillPath, type LocalSkillTarget } from './localSkillTarget';
 import { tryAcquireSkillInstallLock } from './installLock';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -65,6 +65,7 @@ interface ScannedSkillGrant {
 
 export interface RegisterSkillhubIpcOptions {
   getMaker: () => Maker;
+  getManagedSkillRoots: () => readonly string[];
   getAllowedProjectRoots: () => Promise<readonly string[]>;
   marketService?: SkillhubMarketService;
   publishService?: SkillPublishService;
@@ -205,7 +206,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       if (skill.kind !== 'skill') return [];
       try {
         return [{ skill, physicalIdentity: physicalIdentity(skill.absolutePath),
-          target: inspectLocalSkillTarget(skill.absolutePath, skill.discoveryPaths ?? [skill.discoveredPath]) }];
+          target: inspectLocalSkillTarget(skill.absolutePath, skill.discoveryPaths ?? [skill.discoveredPath], options.getManagedSkillRoots()) }];
       } catch { return []; }
     }));
   };
@@ -368,7 +369,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
           params?.projects,
           options.getAllowedProjectRoots,
         );
-        const result = await scanAllSkills({ projects }, options.getMaker());
+        const result = await scanAllSkills({ projects }, options.getMaker(), options.getManagedSkillRoots());
         if (
           scanGenerationBySender.get(event.sender.id) === scanGeneration
           && !isAppSessionBoundaryPending()
@@ -968,12 +969,13 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     'skillhub:uninstall',
     async (event, { absolutePath }: { absolutePath: string }) => {
       const { target } = await requireLocalSkill(event, absolutePath);
-      if (!target || !isLocalSkillTargetCurrent(target)) {
+      if (!target || !isLocalSkillTargetCurrent(target) || isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots())) {
         throwIpcError('PRECONDITION_FAILED', 'Skill cannot be uninstalled; refresh and retry');
       }
       const ownerId = getCurrentDataOwnerId();
       const result = await installService.uninstall(absolutePath, target,
-        () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending());
+        () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending()
+          && !isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots()));
       if (!result.success) throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
       await refreshCodexProjectSkillCache(result.projectWorkingDir);
       broadcastLocalChange();

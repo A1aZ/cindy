@@ -6643,6 +6643,7 @@ interface SkillhubFileEntry {
 interface SkillhubSkill {
   cindyEnabled?: boolean;
   canUninstall?: boolean;
+  managedByPlugin?: boolean;
   uninstallLinkOnly?: boolean;
   discoveryPaths?: string[];
   id: string;

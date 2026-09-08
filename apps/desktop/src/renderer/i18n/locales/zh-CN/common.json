@@ -11223,6 +11223,7 @@
       "unlinkDescription": "仅移除本地技能入口，原文件及修改会保留。",
       "sharedImpact": "共用此技能的其他 Agent 也会受影响。云端发布和其他安装位置不受影响。",
       "managedElsewhere": "此技能由其他包或共享目录管理，需在其来源处移除",
+      "managedByPlugin": "此技能由插件提供，请到所属插件页面管理。",
       "cleanupIncomplete": "技能已移除，但部分本地记录或链接未清理完成。",
       "retryCleanup": "重试清理",
       "cleanupComplete": "清理完成"

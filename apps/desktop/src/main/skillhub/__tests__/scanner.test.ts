@@ -80,6 +80,26 @@ function createSymlinkedSkill() {
 }
 
 describe('scanAllSkills', () => {
+  it('projects plugin ownership and prevents standalone uninstall for snapshot links', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillhub-plugin-source-'));
+    tempRoots.push(root);
+    const stateRoot = path.join(root, 'ghost-install-state');
+    const source = path.join(stateRoot, 'skill-snapshots', 'plugin', 'revision', 'skill');
+    const alias = path.join(root, '.agents', 'skills', 'plugin--skill');
+    fs.mkdirSync(source, { recursive: true });
+    fs.mkdirSync(path.dirname(alias), { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), '---\nname: example\n---\nExample');
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const maker = { listCustomizations: vi.fn(async () => ({ errors: [], items: [{
+      engine: 'pi', kind: 'skill', scope: 'user', name: 'example', absolutePath: alias,
+      mdPath: path.join(alias, 'SKILL.md'), files: [],
+    }] })) } as unknown as Maker;
+    const result = await scanAllSkills({}, maker, [stateRoot]);
+    expect(result.skills).toHaveLength(1);
+    expect(result.skills[0]).toMatchObject({ managedByPlugin: true, canUninstall: false });
+    expect(fs.existsSync(alias)).toBe(true);
+  });
+
   it('uses projectRoot as maker workingDirs and maps projectHash back to project skills', async () => {
     const projectRoot = path.resolve('/repo');
     const skillDir = path.join(projectRoot, '.claude', 'skills', 'demo');

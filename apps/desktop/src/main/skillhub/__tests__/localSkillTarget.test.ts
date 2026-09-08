@@ -38,6 +38,22 @@ describe('local Skill removal targets', () => {
     expect(isLocalSkillTargetCurrent(target)).toBe(false);
   });
 
+  it('excludes plugin snapshots through direct and chained discovery links without blocking external imports', () => {
+    const managedRoot = path.join(root, 'ghost-install-state');
+    const source = directory('ghost-install-state', 'skill-snapshots', 'plugin', 'revision', 'skill');
+    const alias = path.join(root, '.agents', 'skills', 'plugin--skill');
+    const fanout = path.join(root, '.claude', 'skills', 'plugin--skill');
+    fs.mkdirSync(path.dirname(fanout), { recursive: true });
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    fs.symlinkSync(alias, fanout, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(inspectLocalSkillTarget(source, [alias, fanout], [managedRoot])).toBeNull();
+    expect(inspectLocalSkillTarget(fanout, [fanout], [managedRoot])).toBeNull();
+    const external = directory('external', 'skill-snapshots', 'plugin', 'revision', 'skill');
+    const externalAlias = path.join(root, '.agents', 'skills', 'external--skill');
+    fs.symlinkSync(external, externalAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(inspectLocalSkillTarget(external, [externalAlias], [managedRoot])?.linkOnly).toBe(true);
+  });
+
   it('treats a standalone Markdown Skill as one file', () => {
     const file = path.join(root, '.pi', 'skills', 'standalone.md');
     fs.mkdirSync(path.dirname(file), { recursive: true });

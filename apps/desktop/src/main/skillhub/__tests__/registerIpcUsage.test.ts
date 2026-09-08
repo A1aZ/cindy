@@ -70,6 +70,7 @@ const listSkillFolderChildren = vi.fn();
 const readSkillSiblingFile = vi.fn();
 const renameLocalSkill = vi.fn();
 const scanAllSkills = vi.fn();
+const getManagedSkillRoots = vi.fn((): string[] => []);
 const writeSkillFile = vi.fn();
 const resolveExistingSkillPathForGrant = vi.fn();
 const isExistingSkillPathGranted = vi.fn();
@@ -124,6 +125,7 @@ describe('registerSkillhubIpc usage handlers', () => {
   beforeEach(async () => {
     handlers.clear();
     vi.clearAllMocks();
+    getManagedSkillRoots.mockReturnValue([]);
     getCurrentDataOwnerId.mockReturnValue('local-v1');
     getCurrentDbClientSnapshot.mockReset();
     getCurrentDbClientSnapshot.mockReturnValue({
@@ -144,6 +146,7 @@ describe('registerSkillhubIpc usage handlers', () => {
     const { registerSkillhubIpc } = await import('../registerIpc');
     registerSkillhubIpc({
       getMaker: () => ({ listAgentSkills }) as never,
+      getManagedSkillRoots,
       getAllowedProjectRoots,
       marketService: marketService as never,
       publishService: { publish, cancel } as never,
@@ -645,6 +648,28 @@ describe('registerSkillhubIpc usage handlers', () => {
     await expect(handler({ sender: { id: 72 } }, { absolutePath, enabled: false }))
       .rejects.toThrow('PRECONDITION_FAILED');
     expect(setCindySkillEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects direct uninstall of a plugin snapshot even when the scanned UI claims it is removable', async () => {
+    const stateRoot = fs.mkdtempSync(path.join(fixtureRoot, 'plugin-state-'));
+    const source = path.join(stateRoot, 'skill-snapshots', 'plugin', 'revision', 'skill');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'plugin skill');
+    const alias = path.join(fixtureRoot, '.agents', 'skills', 'plugin--skill');
+    fs.mkdirSync(path.dirname(alias), { recursive: true });
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    getManagedSkillRoots.mockReturnValue([stateRoot]);
+    scanAllSkills.mockResolvedValue({ skills: [{
+      kind: 'skill', scope: 'global', name: 'plugin--skill', canUninstall: true,
+      absolutePath: source, discoveredPath: alias, discoveryPaths: [alias],
+    }], sources: [] });
+    const event = { sender: { id: 73, once: vi.fn() } };
+    await handlers.get('skillhub:scan')!(event, {});
+    await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath: source }))
+      .rejects.toThrow('PRECONDITION_FAILED');
+    expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
+    expect(fs.existsSync(alias)).toBe(true);
+    getManagedSkillRoots.mockReturnValue([]);
   });
 
   it('rejects owner changes and replaced sources before mutation', async () => {

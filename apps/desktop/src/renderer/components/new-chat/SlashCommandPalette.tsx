@@ -299,7 +299,7 @@ export function SlashCommandPalette({
           <div className="flex items-center gap-1 text-14 font-medium text-[var(--cmd-palette-item-text)]">
             <span className="min-w-0 truncate">{focusedCmd.name}</span>
             {onOpenSkillDetails && focusedCmd.kind === 'agent-skill'
-              && focusedCmd.source === 'skill' && focusedCmd.path && (
+              && focusedCmd.source === 'skill' && focusedCmd.path && focusedCmd.origin !== 'package' && (
               <Tip text={t('commandPalette.viewSkillDetails')}>
                 <Button variant="secondary"
                   className="w-8 border-transparent bg-transparent p-0 text-[var(--cmd-palette-item-meta)]"

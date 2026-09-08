@@ -69,6 +69,17 @@ describe('SlashCommandPalette project Skill rows', () => {
     expect(screen.queryByRole('button', { name: 'commandPalette.viewSkillDetails' })).toBeNull();
   });
 
+  it('keeps a package Skill usable without offering an unresolvable local detail page', () => {
+    const command: UnifiedCommand = { ...discoveredProjectSkill, path: '/packages/demo/SKILL.md',
+      origin: 'package', runtimeStatus: 'approved' };
+    const onSelect = vi.fn();
+    render(<SlashCommandPalette query="" commands={[command]} focusedIndex={0}
+      onFocusedIndexChange={vi.fn()} onSelect={onSelect} onClose={vi.fn()} onOpenSkillDetails={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'commandPalette.viewSkillDetails' })).toBeNull();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'demo' }));
+    expect(onSelect).toHaveBeenCalledWith(command);
+  });
+
   it('keeps a discovered Skill disabled and non-actionable', () => {
     const onSelect = vi.fn();
 

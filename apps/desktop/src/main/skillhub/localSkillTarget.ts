@@ -22,10 +22,25 @@ function targetIdentity(operationPath: string): string {
   return JSON.stringify([source, entry.dev, entry.ino, physical.dev, physical.ino]);
 }
 
+/** Ownership comes from Host-managed roots, never a link name or a directory-name heuristic. */
+export function isPluginManagedSkillPath(source: string, managedRoots: readonly string[]): boolean {
+  const canonical = (value: string) => {
+    let resolved = path.resolve(value);
+    try { resolved = fs.realpathSync.native(resolved); } catch { /* Missing roots have no live targets. */ }
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const target = canonical(source);
+  return managedRoots.some((root) => {
+    const relative = path.relative(canonical(root), target);
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  });
+}
+
 /** Only standalone Skill entities may be trashed; never an enclosing package or discovery root. */
-export function inspectLocalSkillTarget(source: string, discoveryPaths: readonly string[]): LocalSkillTarget | null {
+export function inspectLocalSkillTarget(source: string, discoveryPaths: readonly string[], managedRoots: readonly string[] = []): LocalSkillTarget | null {
   try {
     const sourcePath = fs.realpathSync.native(source);
+    if (isPluginManagedSkillPath(sourcePath, managedRoots)) return null;
     const stat = fs.statSync(sourcePath);
     if (stat.isDirectory()) {
       if (!['SKILL.md', 'skill.md'].some((name) => fs.statSync(path.join(sourcePath, name), { throwIfNoEntry: false })?.isFile())) return null;

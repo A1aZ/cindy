@@ -8953,7 +8953,7 @@ export function ChatInput({
               onFocusedIndexChange={setSlashFocus}
               onSelect={(cmd) => insertSlashCommand(cmd)}
               onOpenSkillDetails={!isRemoteSession && !deviceLinkDeviceId ? (cmd) => {
-                if (cmd.kind !== 'agent-skill' || cmd.source !== 'skill' || !cmd.path) return;
+                if (cmd.kind !== 'agent-skill' || cmd.source !== 'skill' || !cmd.path || cmd.origin === 'package') return;
                 draftSaveSchedulerRef.current?.flush();
                 navigate(buildLocalSkillPathRoute(cmd.path), { state: { resetHistory: true } });
               } : undefined}

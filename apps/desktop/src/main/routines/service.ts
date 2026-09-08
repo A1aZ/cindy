@@ -8,6 +8,8 @@ import {
   type RoutineRun,
   type RoutineInput,
   type Schedule,
+  type ScheduleStorage,
+  type Scheduler,
 } from '@cindy/maker-scheduler';
 import {
   activeOwnerScopeKey,
@@ -20,6 +22,26 @@ import { throwIpcError } from '../utils/ipcValidate.js';
 import { createLogger } from '../logger.js';
 import { RoutineFileStore } from './store.js';
 import { untrustedJsonBlock } from '../../shared/untrustedPrompt.js';
+import { getDbClient } from '../localDb/client/current.js';
+import { botProfiles } from '../localDb/schema.js';
+
+/** Bootstrap supplies live getters without a service -> scheduler -> IPC dependency cycle. */
+export interface RoutineHostDeps {
+  getBot(botId: string): Promise<{ status: string; canonicalSessionId?: string | null }>;
+  getScheduler(): Pick<Scheduler, 'runNow' | 'pause' | 'delete'>;
+  getScheduleStorage(): Pick<ScheduleStorage, 'get' | 'insert' | 'update' | 'listRuns'>;
+}
+
+let hostDeps: RoutineHostDeps | undefined;
+
+export function configureRoutineHost(deps: RoutineHostDeps): void {
+  hostDeps = deps;
+}
+
+function getRoutineHost(): RoutineHostDeps {
+  if (!hostDeps) throw new Error('Routine host is not configured');
+  return hostDeps;
+}
 
 const log = createLogger('routines');
 let current:
@@ -40,16 +62,13 @@ function assertScope(scope: string): void {
 /** Resolve the current canonical task at dispatch time, preserving its actual model and permissions. */
 async function execute(scope: string, routine: Routine, run: RoutineRun, signal: AbortSignal) {
   assertScope(scope);
-  const { getBotRemoteResourceSource } = await import('../localDb/ipc/bots.js');
-  const bot = await getBotRemoteResourceSource(routine.botId);
+  const bot = await getRoutineHost().getBot(routine.botId);
   assertScope(scope);
   if (signal.aborted) throw new Error('Routine cancelled');
   if (bot.status !== 'active' || !bot.canonicalSessionId)
     throw new Error('The teammate is unavailable');
-  const { getScheduler, getScheduleStorage } = await import('../scheduler-host/index.js');
-  assertScope(scope);
-  const storage = getScheduleStorage();
-  const scheduler = getScheduler();
+  const storage = getRoutineHost().getScheduleStorage();
+  const scheduler = getRoutineHost().getScheduler();
   const id = `routine-${routine.id}`;
   const now = Date.now();
   const schedule: Schedule = {
@@ -129,8 +148,6 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
     if (epoch !== generation) throw new Error('Routine service was reset');
     const botStates = new Map<string, 'active' | 'paused' | 'deleted'>();
     if (saved?.routines.length) {
-      const { getDbClient } = await import('../localDb/client/current.js');
-      const { botProfiles } = await import('../localDb/schema.js');
       assertScope(scope);
       const profiles = await getDbClient().drizzle
         .select({ id: botProfiles.id, status: botProfiles.status }).from(botProfiles);
@@ -220,10 +237,9 @@ export async function stopRoutines(): Promise<void> {
 
 async function cleanBackingSchedules(scope: string, ids: string[], remove: boolean): Promise<void> {
   if (!ids.length) return;
-  const { getScheduler, getScheduleStorage } = await import('../scheduler-host/index.js');
   assertScope(scope);
-  const scheduler = getScheduler();
-  const storage = getScheduleStorage();
+  const scheduler = getRoutineHost().getScheduler();
+  const storage = getRoutineHost().getScheduleStorage();
   for (const id of ids) {
     const scheduleId = `routine-${id}`;
     const schedule = await storage.get(scheduleId);
@@ -298,8 +314,7 @@ async function withBot<T>(
     throw new Error('Invalid teammate');
   const scope = activeOwnerScopeKey();
   assertScope(scope);
-  const { getBotRemoteResourceSource } = await import('../localDb/ipc/bots.js');
-  await getBotRemoteResourceSource(botId);
+  await getRoutineHost().getBot(botId);
   assertScope(scope);
   const engine = await getRoutineEngine();
   assertScope(scope);
@@ -315,12 +330,7 @@ export const routineTools = {
     withBot(botId, (engine) => engine.put(botId, input, id)),
   remove: (botId: string, id: string) =>
     withBot(botId, async (engine, scope) => {
-      await engine.remove(botId, id);
-      assertScope(scope);
-      const { getScheduler, getScheduleStorage } = await import('../scheduler-host/index.js');
-      assertScope(scope);
-      const scheduleId = `routine-${id}`;
-      if (await getScheduleStorage().get(scheduleId)) await getScheduler().delete(scheduleId, { internalRoutine: true });
+      await engine.remove(botId, id, () => cleanBackingSchedules(scope, [id], true));
     }),
   runNow: (botId: string, id: string) => withBot(botId, (engine) => engine.runNow(botId, id)),
   history: (botId: string, id: string) =>

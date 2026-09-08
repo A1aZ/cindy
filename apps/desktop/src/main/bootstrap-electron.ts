@@ -958,10 +958,13 @@ import { pickNativeAtResource } from './nativeAtResourcePicker.js';
 import {
   startScheduler,
   resetScheduler,
+  getScheduler,
   getScheduleStorage,
   getScheduleStorageIfInitialized,
   getProjectAutomationLoader,
 } from './scheduler-host/index.js';
+import { configureRoutineHost } from './routines/service.js';
+import { getBotRemoteResourceSource } from './localDb/ipc/bots.js';
 import {
   registerScheduleHandlers,
   attachSchedulerEventListeners,
@@ -1009,6 +1012,9 @@ async function waitForCurrentAccountProviderModelsReady(): Promise<void> {
     );
   }
 }
+
+// Live getters preserve account/scheduler replacement without loading Main modules at dispatch time.
+configureRoutineHost({ getBot: getBotRemoteResourceSource, getScheduler, getScheduleStorage });
 
 /**
  * Phase 4: 不再用 `_schedulerStarted` flag —— `startScheduler()` 内部以 `_scheduler`

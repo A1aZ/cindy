@@ -390,6 +390,7 @@ import {
   type BotDirectMessageService,
 } from './botDirectMessageService.js';
 import { registerBotLifecycleHandlers } from './botLifecycleService.js';
+import { updateBotRoutineLifecycle } from '../routines/service.js';
 import {
   createBotCompactRuntimeRefreshCoordinator,
   replaceBotRuntimeAfterPreflight,
@@ -9058,9 +9059,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerBotLifecycleHandlers({
     maker,
     getDelegationService: () => botDelegationServiceHolder,
-    onPaused: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'pause'),
-    onResumed: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'resume'),
-    onBeforeDelete: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'delete'),
+    onPaused: (botId) => updateBotRoutineLifecycle(botId, 'pause'),
+    onResumed: (botId) => updateBotRoutineLifecycle(botId, 'resume'),
+    onBeforeDelete: (botId) => updateBotRoutineLifecycle(botId, 'delete'),
   });
   const delegationForRestore = botDelegationServiceHolder;
   void restoreBotRuntimeForCurrentOwner();

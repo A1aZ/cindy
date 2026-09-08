@@ -411,3 +411,54 @@ it('blocks new dispatch even if persisting the Bot pause fails', async () => {
   expect(f.execute).not.toHaveBeenCalled();
   await f.engine.stop();
 });
+
+it('blocks all admission and edits during cleanup without blocking another rule of the same Bot', async () => {
+  const f = await fixture();
+  const removed = await f.engine.put('bot', input);
+  const retained = await f.engine.put('bot', { ...input, name: 'Retained', triggers: [input.triggers[1]] });
+  let finishCleanup!: () => void;
+  const cleanup = vi.fn(() => new Promise<void>((resolve) => { finishCleanup = resolve; }));
+  const removal = f.engine.remove('bot', removed.id, cleanup);
+  await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+  await expect(f.engine.runNow('bot', removed.id)).rejects.toThrow('being removed');
+  await expect(f.engine.put('bot', input, removed.id)).rejects.toThrow('being removed');
+  await expect(f.engine.remove('bot', removed.id, cleanup)).rejects.toThrow('being removed');
+  expect(await f.engine.publish('github', event('during-cleanup'))).toMatchObject({ accepted: 0 });
+  f.advance(3600_000);
+  await f.engine.tick();
+  await vi.waitFor(() => expect(f.engine.history(retained.id)[0]?.status).toBe('success'));
+  expect(f.engine.history(removed.id)).toEqual([]);
+  finishCleanup();
+  await removal;
+  expect(f.engine.list('bot').map((routine) => routine.id)).toEqual([retained.id]);
+  await f.engine.stop();
+});
+
+it('keeps deletion retryable across restart if the final routine purge cannot be persisted', async () => {
+  let rejectPurge = false;
+  const f = await fixture(undefined, null, async (state) => {
+    if (rejectPurge && state.routines.length === 0) throw new Error('disk full');
+  });
+  const routine = await f.engine.put('bot', input);
+  await f.engine.publish('github', event());
+  await vi.waitFor(() => expect(f.engine.history(routine.id)[0].status).toBe('success'));
+  const cleanup = vi.fn(async () => {});
+  await expect(f.engine.remove('other-bot', routine.id, cleanup)).rejects.toThrow('not found');
+  expect(cleanup).not.toHaveBeenCalled();
+  rejectPurge = true;
+  await expect(f.engine.remove('bot', routine.id, cleanup)).rejects.toThrow('disk full');
+  expect(cleanup).toHaveBeenCalledOnce();
+  expect(f.engine.list('bot')[0].enabled).toBe(false);
+  expect(f.engine.history(routine.id)).toHaveLength(1);
+  await f.engine.stop();
+  const restarted = await fixture(undefined, f.snapshot());
+  restarted.advance(7200_000);
+  await restarted.engine.tick();
+  expect(await restarted.engine.publish('github', event('after-restart'))).toMatchObject({ accepted: 0 });
+  expect(restarted.execute).not.toHaveBeenCalled();
+  await restarted.engine.remove('bot', routine.id, cleanup);
+  expect(cleanup).toHaveBeenCalledTimes(2);
+  expect(restarted.snapshot()?.routines).toEqual([]);
+  expect(restarted.snapshot()?.runs).toEqual([]);
+  await restarted.engine.stop();
+});

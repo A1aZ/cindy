@@ -70,6 +70,7 @@ export class RoutineEngine {
   private readonly active = new Map<string, AbortController>();
   private readonly activeTasks = new Map<string, Promise<void>>();
   private readonly blockedBots = new Set<string>();
+  private readonly removing = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
   // Keep the outcome after execute returns: a failed save must retry persistence,
   // never execution. The durable running row also blocks dispatch until settled.
@@ -165,6 +166,7 @@ export class RoutineEngine {
     const input = parseRoutineInput(raw);
     return this.change((state) => {
       if (this.blockedBots.has(botId)) throw new Error("The teammate is paused");
+      if (id && this.removing.has(id)) throw new Error("Routine is being removed");
       const existing = id
         ? state.routines.find(
             (routine) => routine.id === id && routine.botId === botId,
@@ -214,20 +216,39 @@ export class RoutineEngine {
     });
   }
 
-  async remove(botId: string, id: string): Promise<void> {
-    await this.change((state) => {
-      if (
-        !state.routines.some(
-          (routine) => routine.id === id && routine.botId === botId,
-        )
-      )
-        throw new Error("Routine not found");
-      state.routines = state.routines.filter((routine) => routine.id !== id);
-      state.runs = state.runs.filter((run) => run.routineId !== id);
-      for (const key of Object.keys(state.next))
-        if (key.startsWith(`${id}:`)) delete state.next[key];
-    });
+  /** Quiesce execution before host cleanup; failed cleanup leaves a disabled, retryable rule. */
+  async remove(botId: string, id: string, cleanup?: () => Promise<void>): Promise<void> {
+    if (!this.state.routines.some((routine) => routine.id === id && routine.botId === botId))
+      throw new Error("Routine not found");
+    if (this.removing.has(id)) throw new Error("Routine is being removed");
+    this.removing.add(id);
     this.active.get(id)?.abort();
+    try {
+      await this.change((state) => {
+        const routine = state.routines.find((row) => row.id === id && row.botId === botId);
+        if (!routine) throw new Error("Routine not found");
+        routine.enabled = false;
+        routine.revision += 1;
+        routine.updatedAt = this.deps.now();
+        this.cancelQueued(state, id);
+        for (const key of Object.keys(state.next))
+          if (key.startsWith(`${id}:`)) delete state.next[key];
+      });
+      // An aborted executor may still be finishing an asynchronous backing write.
+      await this.activeTasks.get(id);
+      await cleanup?.();
+      await this.change((state) => {
+        state.routines = state.routines.filter((routine) => routine.id !== id);
+        state.runs = state.runs.filter((run) => run.routineId !== id);
+        for (const key of Object.keys(state.next))
+          if (key.startsWith(`${id}:`)) delete state.next[key];
+      });
+      this.retryAfter.delete(id);
+      for (const [runId, pending] of this.pendingSettlements)
+        if (pending.routineId === id) this.pendingSettlements.delete(runId);
+    } finally {
+      this.removing.delete(id);
+    }
   }
 
   private applyBotState(state: RoutineState, botId: string, status: "active" | "paused" | "deleted"): void {
@@ -304,7 +325,7 @@ export class RoutineEngine {
       if (Object.hasOwn(state.receipts, receipt))
         return { accepted: 0, duplicate: true };
       const matches = state.routines
-        .filter((routine) => !this.blockedBots.has(routine.botId))
+        .filter((routine) => !this.blockedBots.has(routine.botId) && !this.removing.has(routine.id))
         .map((routine) => ({
           routine,
           ids: matchesRoutineEvent(routine, sourceId, event),
@@ -327,6 +348,7 @@ export class RoutineEngine {
         (row) => row.id === id && row.botId === botId,
       );
       if (!routine) throw new Error("Routine not found");
+      if (this.removing.has(id)) throw new Error("Routine is being removed");
       this.enqueue(state, routine, ["manual"]);
     });
     this.pump();
@@ -340,7 +362,7 @@ export class RoutineEngine {
     if (!Object.values(this.state.next).some((time) => time <= now)) return;
     await this.change((state) => {
       for (const routine of state.routines) {
-        if (this.blockedBots.has(routine.botId)) continue;
+        if (this.blockedBots.has(routine.botId) || this.removing.has(routine.id)) continue;
         for (const trigger of routine.triggers) {
           const key = `${routine.id}:${trigger.id}`;
           if (state.next[key] === undefined || state.next[key] > now) continue;
@@ -418,6 +440,7 @@ export class RoutineEngine {
       const owner = this.state.routines.find((routine) => routine.id === pending.routineId)?.botId;
       if (
         (owner !== undefined && this.blockedBots.has(owner)) ||
+        this.removing.has(pending.routineId) ||
         this.active.has(pending.routineId) ||
         this.state.runs.some(
           (run) => run.routineId === pending.routineId && run.status === "running",
@@ -469,7 +492,7 @@ export class RoutineEngine {
       const run = state.runs.find((row) => row.id === id);
       if (!run || run.status !== "queued") return null;
       const routine = state.routines.find((row) => row.id === run.routineId);
-      if (!routine || this.blockedBots.has(routine.botId) || controller.signal.aborted) {
+      if (!routine || this.blockedBots.has(routine.botId) || this.removing.has(routine.id) || controller.signal.aborted) {
         run.status = "cancelled";
         run.finishedAt = this.deps.now();
         return null;

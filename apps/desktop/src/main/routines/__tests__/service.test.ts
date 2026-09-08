@@ -1,5 +1,5 @@
-import type { RoutineState, Schedule } from '@cindy/maker-scheduler';
-import { afterEach, expect, it, vi } from 'vitest';
+import type { RoutineState, Schedule, ScheduleRun } from '@cindy/maker-scheduler';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const mock = vi.hoisted(() => ({
   scope: 'owner-a',
   boundaryPending: false,
@@ -9,15 +9,15 @@ const mock = vi.hoisted(() => ({
   getBot: vi.fn(async () => ({ status: 'active', canonicalSessionId: 'canonical-task' })),
   storage: {
     get: vi.fn<(id: string) => Promise<Schedule | null>>(async () => null),
-    insert: vi.fn<(schedule: { prompt: string }) => Promise<void>>(async () => {}),
-    update: vi.fn(async () => {}),
-    listRuns: vi.fn(async () => [
-      { id: 'execution', status: 'success', resultText: 'Reviewed PR' },
+    insert: vi.fn<(schedule: Schedule) => Promise<Schedule>>(async (schedule) => schedule),
+    update: vi.fn(async () => null),
+    listRuns: vi.fn<() => Promise<ScheduleRun[]>>(async () => [
+      { id: 'execution', scheduleId: 'backing', firedAt: 1, status: 'success', resultText: 'Reviewed PR' },
     ]),
   },
   scheduler: {
     runNow: vi.fn(async (): Promise<{ runId: string; deferred?: boolean }> => ({ runId: 'execution' })),
-    pause: vi.fn(async () => {}),
+    pause: vi.fn(async () => ({}) as Schedule),
     delete: vi.fn(async () => {}),
   },
 }));
@@ -42,18 +42,18 @@ vi.mock('../../logger.js', () => ({ createLogger: () => ({ warn: vi.fn() }) }));
 vi.mock('../../localDb/client/current.js', () => ({
   getDbClient: () => ({ drizzle: { select: () => ({ from: async () => mock.profiles }) } }),
 }));
-vi.mock('../../localDb/ipc/bots.js', () => ({ getBotRemoteResourceSource: mock.getBot }));
-vi.mock('../../scheduler-host/index.js', () => ({
-  getScheduler: () => mock.scheduler,
-  getScheduleStorage: () => mock.storage,
-}));
 vi.mock('../store.js', () => ({
   RoutineFileStore: class {
     load = mock.load;
     save = mock.save;
   },
 }));
-import { getRoutineEngine, routineTools, stopRoutines, updateBotRoutineLifecycle } from '../service.js';
+import { configureRoutineHost, getRoutineEngine, routineTools, stopRoutines, updateBotRoutineLifecycle } from '../service.js';
+beforeEach(() => configureRoutineHost({
+  getBot: mock.getBot,
+  getScheduler: () => mock.scheduler,
+  getScheduleStorage: () => mock.storage,
+}));
 afterEach(async () => {
   await stopRoutines();
   vi.clearAllMocks();
@@ -213,4 +213,44 @@ it('reconciles paused and deleted owners before dispatching persisted queued wor
   expect(mock.scheduler.pause).toHaveBeenCalledWith(`routine-${active.id}`, { internalRoutine: true });
   expect(mock.scheduler.runNow).not.toHaveBeenCalled();
   await expect(restored.runNow('paused-bot', active.id)).rejects.toThrow('paused');
+});
+
+it('retains a disabled rule and its history when single-rule backing cleanup fails, then retries', async () => {
+  const routine = await routineTools.save('bot', {
+    name: 'Review', prompt: 'Private instructions', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  await routineTools.runNow('bot', routine.id);
+  await vi.waitFor(async () => expect((await routineTools.history('bot', routine.id))[0].status).toBe('success'));
+  mock.storage.get.mockResolvedValue({ id: `routine-${routine.id}`, source: 'bot' } as Schedule);
+  mock.scheduler.delete.mockRejectedValueOnce(new Error('SQLite busy'));
+  await expect(routineTools.remove('bot', routine.id)).rejects.toThrow('SQLite busy');
+  expect(await routineTools.list('bot')).toEqual([expect.objectContaining({ id: routine.id, enabled: false })]);
+  expect(await routineTools.history('bot', routine.id)).toHaveLength(1);
+  expect(mock.save.mock.calls.at(-1)![0].routines[0]).toMatchObject({ id: routine.id, enabled: false });
+  await routineTools.remove('bot', routine.id);
+  expect(mock.scheduler.delete).toHaveBeenCalledTimes(2);
+  expect(mock.scheduler.delete).toHaveBeenLastCalledWith(`routine-${routine.id}`, { internalRoutine: true });
+  expect(await routineTools.list('bot')).toEqual([]);
+  expect((await getRoutineEngine()).history(routine.id)).toEqual([]);
+});
+
+it('waits for an in-flight backing write before deleting its schedule and rule', async () => {
+  let finishInsert!: () => void;
+  mock.storage.insert.mockImplementationOnce((schedule) => new Promise<Schedule>((resolve) => { finishInsert = () => resolve(schedule); }));
+  const routine = await routineTools.save('bot', {
+    name: 'Review', prompt: 'Private instructions', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  await routineTools.runNow('bot', routine.id);
+  await vi.waitFor(() => expect(mock.storage.insert).toHaveBeenCalledOnce());
+  mock.storage.get.mockResolvedValue({ id: `routine-${routine.id}`, source: 'bot' } as Schedule);
+  const removal = routineTools.remove('bot', routine.id);
+  await vi.waitFor(async () => expect((await routineTools.list('bot'))[0].enabled).toBe(false));
+  expect(mock.scheduler.delete).not.toHaveBeenCalled();
+  finishInsert();
+  await removal;
+  expect(mock.scheduler.delete).toHaveBeenCalledOnce();
+  expect(mock.scheduler.runNow).not.toHaveBeenCalled();
+  expect(await routineTools.list('bot')).toEqual([]);
 });

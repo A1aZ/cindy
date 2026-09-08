@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { useBotTranslation } from './botPronounContext';
 
 import { cn } from '@/lib/utils';
+import { useProviders } from '@/hooks/useProviders';
+import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import {
   getEffectiveBotModelChain,
   setBotGlobalModelChain,
@@ -22,6 +24,10 @@ const ROW_HINT_CLASS =
 
 export function BotsGlobalSettingsSection() {
   const { t } = useBotTranslation();
+  // Re-render derived defaults when the shared picker inputs change, including
+  // when the empty-chain editor has no ModelSelector mounted yet.
+  useProviders();
+  useAvailableAgents();
   const [, bumpModelSettings] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
 

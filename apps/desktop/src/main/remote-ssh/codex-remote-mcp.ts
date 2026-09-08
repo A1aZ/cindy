@@ -208,9 +208,29 @@ export function invalidateRemoteCodexMcpEndpointState(hostId: string): void {
 export function buildRemoteCodexSessionMcpConfig(
   hostId: string,
   sessionInstanceId: string,
+  opts: {
+    bridgeInstanceId: string | null;
+    serverNames: string[];
+    collabEnabled: boolean;
+    makerMemoryEnabled: boolean;
+  },
 ): Record<string, unknown> {
   const prefs = readPortPrefs()[hostId];
-  if (!prefs?.appliedFingerprint || !sessionInstanceId) return {};
+  const token = getRemoteMcpBridgeToken();
+  if (!prefs?.appliedFingerprint || !sessionInstanceId || !token || !opts.bridgeInstanceId) return {};
+  const serverNames = selectRemoteInjectableServerNames(opts.serverNames, {
+    collabEnabled: opts.collabEnabled,
+    memoryEnabled: opts.makerMemoryEnabled,
+    botHelperEnabled: true,
+  });
+  // A written config is not proof that a busy daemon has loaded this generation.
+  // Never combine a new route with its old token or pre-helper server config.
+  if (!serverNames.includes(REMOTE_BOT_HELPER_SERVER_NAME) || prefs.appliedFingerprint !== computeRemoteMcpFingerprint({
+    token,
+    bridgeInstanceId: opts.bridgeInstanceId,
+    remotePort: prefs.remotePort,
+    serverNames,
+  })) return {};
   return {
     [`mcp_servers.${REMOTE_BOT_HELPER_SERVER_NAME}.url`]: withMcpRouteIdentity(
       `http://127.0.0.1:${prefs.remotePort}/mcp/${REMOTE_BOT_HELPER_SERVER_NAME}`,

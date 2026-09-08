@@ -236,6 +236,7 @@ import { cleanupComputerDriverSession } from '../mcp-integrations/computer.js';
 import { createPluginRegistry, resetPluginRegistry } from './plugins/index.js';
 import {
   withCodexMcpDiscoveryContext,
+  getActiveCodexBridgeInstanceId,
   getActiveCodexBridgeServerNames,
   getCodexExtraSpawnConfig,
   registerCodexMcpThreadContext,
@@ -1455,7 +1456,12 @@ export function getMaker(): Maker {
             codexProxyActive: false,
             codexBrowserUseAvailable: true,
             buildSessionMcpConfig: (instance: string) =>
-              buildRemoteCodexSessionMcpConfig(ctx.remoteHostId!, instance),
+              buildRemoteCodexSessionMcpConfig(ctx.remoteHostId!, instance, {
+                bridgeInstanceId: getActiveCodexBridgeInstanceId(),
+                serverNames: getActiveCodexBridgeServerNames() ?? [],
+                collabEnabled: pluginRegistry.isEnabled('collab'),
+                makerMemoryEnabled: _maker?.makerMemory?.isEnabled() ?? false,
+              }),
           };
         }
         const isControlPlane = ctx.hostPurpose === 'control-plane';

@@ -4792,6 +4792,14 @@ export class CodexAgent extends BaseAgent {
         );
       }
     }
+    const readSessionMcpConfig = (): Record<string, unknown> => {
+      const config = host.getSessionMcpConfig(opts.sessionInstanceId);
+      if (opts.remoteHostId && opts.botRuntimeProfile?.mcpPolicy
+        && typeof config['mcp_servers.cindy_helper.url'] !== 'string') {
+        throw new Error('Remote Codex Bot tools are not ready. Retry after the active remote task finishes.');
+      }
+      return config;
+    };
     let botMcpConfig: Record<string, unknown> = {};
     if (!reviewMode && opts.botRuntimeProfile?.mcpPolicy) {
       try {
@@ -4802,7 +4810,7 @@ export class CodexAgent extends BaseAgent {
         assertCurrentHost('Bot MCP configuration');
         const transports = new Set(Object.entries(asRecord(asRecord(response.config).mcp_servers))
           .filter(([, value]) => hasCodexMcpTransport(value)).map(([name]) => name));
-        for (const [key, value] of Object.entries(host.getSessionMcpConfig(opts.sessionInstanceId))) {
+        for (const [key, value] of Object.entries(readSessionMcpConfig())) {
           const match = /^mcp_servers\.([A-Za-z0-9_-]+)\.(?:url|command)$/.exec(key);
           if (match && typeof value === 'string' && value.trim()) transports.add(match[1]);
         }
@@ -5590,7 +5598,7 @@ export class CodexAgent extends BaseAgent {
       const threadContextWindow = effectiveThreadContextWindow(contextLimit);
       const config = {
         // Apply transport defaults before the per-session Bot capability policy.
-        ...(reviewMode ? {} : host.getSessionMcpConfig(opts.sessionInstanceId)),
+        ...(reviewMode ? {} : readSessionMcpConfig()),
         ...capabilityRoutingConfig,
         ...customProviderThreadConfig,
         // Bot memory and delegation belong to its Cindy Profile and Session

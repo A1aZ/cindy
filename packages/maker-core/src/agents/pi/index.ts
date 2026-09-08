@@ -2643,7 +2643,15 @@ export class PiAgent extends BaseAgent {
       reviewMode ? 'ask' : normalizePermissionMode(opts.permissionMode);
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
     let mutableWritableDirs = [...(opts.writableDirs ?? [])];
-    const reviewReadGrants = reviewMode ? await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? []) : [];
+    let reviewReadGrants: Awaited<ReturnType<typeof buildReviewReadGrants>> = [];
+    if (reviewMode) {
+      try {
+        reviewReadGrants = await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? []);
+      } catch (error) {
+        // No Pi process exists until after the review grants are validated.
+        throw new AgentStartupStoppedError(error);
+      }
+    }
     const reviewReadPaths = reviewReadGrants.map((grant) => grant.realPath);
     // Keep ordinary permission files shape-compatible with older Cindy/Pi
     // sessions. The Review-only marker is capability-like: absence means the

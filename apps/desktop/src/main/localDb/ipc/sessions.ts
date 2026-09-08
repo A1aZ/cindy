@@ -128,6 +128,7 @@ function compactTerminalSessionToolResults(
 type OwnerScope = ReturnType<typeof broadcastTap.captureDataOwnerBroadcastScope> | null;
 type SessionRemovalCancelOperations = (sessionId: string) => Promise<void>;
 type SessionRemovalCleanup = (sessionId: string) => Promise<void>;
+type SessionWorktreeRecycle = (sessionId: string, resources?: readonly string[]) => Promise<void>;
 export interface SessionRecycleScope {
   ownerScope: OwnerScope;
   mediaDb: DbClient['drizzle'];
@@ -142,6 +143,7 @@ export interface RegisterSessionIpcOpts {
 
 let sessionRemovalCancelOperations: SessionRemovalCancelOperations | null = null;
 let sessionRemovalCleanup: SessionRemovalCleanup | null = null;
+let sessionWorktreeRecycle: SessionWorktreeRecycle | null = null;
 
 /** Composition-root injection for Host-owned operations that must stop before worktree recycle. */
 export function setSessionRemovalCancelOperations(
@@ -155,6 +157,13 @@ export function setSessionRemovalCleanup(
   cleanupRemovedSession: SessionRemovalCleanup | null,
 ): void {
   sessionRemovalCleanup = cleanupRemovedSession;
+}
+
+/** Composition-root injection keeps the localDb IPC layer independent of worktree implementation modules. */
+export function setSessionWorktreeRecycle(
+  recycle: SessionWorktreeRecycle | null,
+): void {
+  sessionWorktreeRecycle = recycle;
 }
 
 function captureOwnerScope(): OwnerScope {
@@ -200,9 +209,9 @@ async function withStatusWriteLock<T>(
 }
 
 async function requestWorktreeRecycle(sessionId: string, resources: readonly string[] = []): Promise<void> {
-  // Keep the existing localDb -> worktreeStore -> localDb dependency lazy.
-  const recycle = await import('../../worktree/managedRecycle');
-  await recycle.requestWorktreeRecycle(sessionId, resources);
+  const recycle = sessionWorktreeRecycle;
+  if (!recycle) throw new Error('worktree recycle implementation is not wired');
+  await recycle(sessionId, resources);
 }
 
 /** Read from the same captured database that will receive the status/path update. */

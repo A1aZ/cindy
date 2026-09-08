@@ -1,4 +1,5 @@
 import { startWorktreeRecycleMaintenance, stopWorktreeRecycleMaintenance, auditRegisteredWorktrees } from './worktree/recycleMaintenance';
+import { requestWorktreeRecycle } from './worktree/managedRecycle';
 import { recycleSessionWorktreeForStatusChange } from './localDb/ipc/sessions';
 import { tryGetDbClient } from './localDb/client/current';
 import {
@@ -8227,6 +8228,7 @@ app.on('ready', async () => {
   registerLegacyMigrationIpc();
   registerLocalDbIpc({
     resolveContextWindow: (session) => resolveSessionContextWindow(getActiveCatalog(), session),
+    requestWorktreeRecycle,
     cancelSessionOperations: cancelIOSSimulatorSessionOperations,
     cleanupRemovedSession: cleanupIOSSimulatorRemovedSession,
     closeIdleSessionForMove: async (sessionId) => {

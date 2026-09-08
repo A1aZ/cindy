@@ -81,11 +81,11 @@ vi.mock('../worktree/sessionRemovalRecycle.js', () => ({
   hasRegisteredWorktreeForSession: h.hasRegisteredWorktreeForSession,
   recycleWorktreeForRemovedSession: h.recycleWorktreeForRemovedSession,
 }));
-vi.mock('../worktree/managedRecycle', () => ({ requestWorktreeRecycle: h.requestRecycle }));
 import {
   recycleSessionWorktreeForStatusChange,
   setSessionRemovalCancelOperations,
   setSessionRemovalCleanup,
+  setSessionWorktreeRecycle,
   setSessionRuntimeCleanup,
   setSessionsStatusInDb,
 } from '../localDb/ipc/sessions.js';
@@ -109,6 +109,7 @@ beforeEach(() => {
   Object.assign(h.drizzle, { select: () => ({ from: () => ({ where: () => ({ limit: h.readBindings }) }) }) });
   setSessionRemovalCancelOperations(h.cancelSessionOperations);
   setSessionRemovalCleanup(h.cleanupRemovedSession);
+  setSessionWorktreeRecycle(h.requestRecycle);
   setSessionRuntimeCleanup(h.runtimeCleanup);
   setSessionRouteLockImplementation(h.withSendToSessionLock);
 });
@@ -116,6 +117,7 @@ beforeEach(() => {
 afterEach(() => {
   setSessionRemovalCancelOperations(null);
   setSessionRemovalCleanup(null);
+  setSessionWorktreeRecycle(null);
   setSessionRuntimeCleanup(null);
   setSessionRouteLockImplementation(null);
   fs.rmSync(h.userDataPath, { recursive: true, force: true });

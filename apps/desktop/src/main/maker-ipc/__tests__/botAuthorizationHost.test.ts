@@ -3,6 +3,9 @@ import type { BotAuthorizationCard } from '../../../shared/botAuthorization';
 import type { initBotAuthorizationService } from '../botAuthorizationService';
 
 const state = vi.hoisted(() => ({
+  profileStatus: 'active',
+  login: vi.fn(async () => ({ ok: true })),
+  continued: vi.fn(),
   policy: JSON.stringify({ toolsets: ['art'] }) as string | undefined,
   deps: null as unknown as Parameters<typeof initBotAuthorizationService>[0],
   execute: vi.fn(async () => ({ ok: true })),
@@ -19,7 +22,7 @@ vi.mock('../../localDb/client/current.js', () => ({
       from: () => query, innerJoin: () => query, where: () => query, orderBy: () => query,
       limit: async () => 'resolvedJson' in fields
         ? (state.policy === undefined ? [] : [{ resolvedJson: state.policy }])
-        : [{ id: 'bot', workingDir: '/bot' }],
+        : [{ id: 'bot', workingDir: '/bot', status: state.profileStatus }],
     };
     return query;
   } } }),
@@ -48,7 +51,7 @@ vi.mock('../../cindy-brain/ghostSetupChangeBus.js', () => ({
 vi.mock('../../cindy-brain/ghostSetupCoordinator.js', () => ({ toReauthInteractionAssessment: () => null }));
 vi.mock('../../cindy-brain/ghostSetupInteractionBridge.js', () => ({ sanitizeGhostSetupSnapshotForRemote: (v: unknown) => v }));
 vi.mock('../../maker-host/grok-oauth-login.js', () => ({
-  getGrokAccessToken: vi.fn(), hasGrokOAuthLogin: () => false, runGrokOAuthLogin: vi.fn(),
+  getGrokAccessToken: vi.fn(), hasGrokOAuthLogin: () => false, runGrokOAuthLogin: state.login,
   getGrokOAuthCredentialGeneration: () => 0, cancelGrokOAuthLogin: vi.fn(),
 }));
 import { initializeBotAuthorizationHost } from '../botAuthorizationHost';
@@ -57,8 +60,30 @@ const target = { kind: 'plugin' as const, id: 'art' };
 describe('authorization Host frozen plugin policy', () => {
   beforeEach(() => {
     state.policy = JSON.stringify({ toolsets: ['art'] });
+    state.profileStatus = 'active';
+    state.login.mockClear();
+    state.continued.mockClear();
     state.execute.mockClear();
-    initializeBotAuthorizationHost(async (_card, validate) => validate());
+    initializeBotAuthorizationHost(async (_card, validate) => {
+      await validate();
+      state.continued();
+    });
+  });
+
+  it.each(['paused', 'archived', 'deleting', 'error'])('rejects old plugin and Host cards when the Profile is %s', async (status) => {
+    const plugin = await state.deps.adapter('session', target);
+    const hostTarget = { kind: 'host' as const, id: 'grok' as const };
+    const host = await state.deps.adapter('session', hostTarget);
+    state.profileStatus = status; // canonical Session remains active
+    for (const [adapter, cardTarget] of [[plugin, target], [host, hostTarget]] as const) {
+      await expect(state.deps.adapter('session', cardTarget)).rejects.toThrow('teammate is unavailable');
+      await expect(adapter.assess()).rejects.toThrow('teammate is unavailable');
+      await expect(adapter.execute({ id: 'connect', kind: 'oauth_connect' }, undefined)).rejects.toThrow('teammate is unavailable');
+      await expect(state.deps.resume({ sessionId: 'session', target: cardTarget } as BotAuthorizationCard)).rejects.toThrow('teammate is unavailable');
+    }
+    expect(state.execute).not.toHaveBeenCalled();
+    expect(state.login).not.toHaveBeenCalled();
+    expect(state.continued).not.toHaveBeenCalled();
   });
 
   it.each([undefined, '{', '{}', '{"toolsets":[]}'])('rejects restored cards without an applied grant: %s', async (policy) => {

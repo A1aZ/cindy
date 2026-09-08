@@ -43,7 +43,7 @@ const log = createLogger('bot-authorization');
 /** Uses the canonical DB link, never an agent-supplied bot identity. */
 export async function isBotAuthorizationSession(sessionId: string): Promise<boolean> {
   const [row] = await getDbClient()
-    .drizzle.select({ id: botSessionLinks.botId })
+    .drizzle.select({ id: botSessionLinks.botId, status: botProfiles.status })
     .from(botSessionLinks)
     .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
     .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
@@ -57,7 +57,7 @@ export async function isBotAuthorizationSession(sessionId: string): Promise<bool
       ),
     )
     .limit(1);
-  return !!row;
+  return row?.status === 'active';
 }
 
 /** Adapts existing Host credentials and plugin configuration into the same card lifecycle. */

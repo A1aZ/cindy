@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { gitExec } from './gitExec';
+import { gitExec, GitExecError } from './gitExec';
 import type { WorktreeRecycleRecord } from './recycleJournal';
 
 async function indexHash(worktreePath: string): Promise<string> {
@@ -11,12 +11,26 @@ async function indexHash(worktreePath: string): Promise<string> {
   return createHash('sha256').update(await fs.readFile(stdout.trim())).digest('hex');
 }
 
+/** Distinguish a deliberately detached HEAD from an unreadable symbolic ref. */
+export async function readWorktreeHeadRef(worktreePath: string): Promise<string | null> {
+  try {
+    const { stdout } = await gitExec(['symbolic-ref', '--quiet', 'HEAD'], worktreePath);
+    const ref = stdout.trim();
+    if (!ref.startsWith('refs/heads/')) throw new Error('unsupported worktree HEAD ref');
+    return ref;
+  } catch (error) {
+    if (error instanceof GitExecError && error.exitCode === 1) return null;
+    throw error;
+  }
+}
+
 export async function worktreeContentBaselineMatches(
   worktreePath: string,
   snapshot: NonNullable<WorktreeRecycleRecord['snapshot']>,
 ): Promise<boolean> {
   const { stdout } = await gitExec(['rev-parse', 'HEAD'], worktreePath);
-  return stdout.trim() === snapshot.head && await indexHash(worktreePath) === snapshot.indexHash;
+  return stdout.trim() === snapshot.head && await indexHash(worktreePath) === snapshot.indexHash
+    && (snapshot.headRef === undefined || await readWorktreeHeadRef(worktreePath) === snapshot.headRef);
 }
 
 /** Snapshot the actual HEAD, index and file tree without stashing or changing the live checkout. */
@@ -30,6 +44,7 @@ export async function captureWorktreeContent(
   try {
     const { stdout: headOutput } = await gitExec(['rev-parse', '--verify', 'HEAD^{commit}'], worktreePath);
     const head = headOutput.trim();
+    const headRef = await readWorktreeHeadRef(worktreePath);
     const { stdout: indexPath } = await gitExec(['rev-parse', '--path-format=absolute', '--git-path', 'index'], worktreePath);
     await fs.copyFile(indexPath.trim(), index);
     const originalIndexHash = createHash('sha256').update(await fs.readFile(index)).digest('hex');
@@ -54,7 +69,7 @@ export async function captureWorktreeContent(
     );
     const commit = commitOutput.trim();
     await gitExec(['update-ref', ref, commit], worktreePath);
-    const snapshot = { head, tree, indexTree, commit, ref, indexHash: originalIndexHash };
+    const snapshot = { head, headRef, tree, indexTree, commit, ref, indexHash: originalIndexHash };
     if (!(await worktreeContentBaselineMatches(worktreePath, snapshot))) throw new Error('worktree HEAD or index changed during snapshot');
     return snapshot;
   } finally {

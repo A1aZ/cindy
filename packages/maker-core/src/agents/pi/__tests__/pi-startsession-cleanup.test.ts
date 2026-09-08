@@ -121,7 +121,7 @@ import { Session } from '../../../session.js';
 import * as piSubagentRuns from '../pi-subagent-runs.js';
 import type { PiSubagentRunStatus } from '../pi-subagent-runs.js';
 import { piProjectKey } from '../project-trust.js';
-import type { AgentDeps } from '../../base-agent.js';
+import { AgentStartupCleanupPendingError, type AgentDeps } from '../../base-agent.js';
 import type { Logger } from '../../../interfaces/logger.js';
 import type { PiProjectTrustInputSnapshot } from '../../../types/pi-project-trust.js';
 
@@ -357,16 +357,22 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     knobs.closeRejects = true;
     const agent = new PiAgent(buildDeps());
 
-    await expect(agent.startSession(opts())).rejects.toThrow(/cleanup remains unconfirmed/);
+    const failure = await agent.startSession(opts()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentStartupCleanupPendingError);
+    if (!(failure instanceof AgentStartupCleanupPendingError)) throw new Error('missing cleanup evidence');
+    const stopped = vi.fn();
+    void failure.whenStopped.then(stopped);
     expect(knobs.spawnedEnvs).toHaveLength(1);
     // Same business id cannot spawn while the old proc still fails cleanup.
     await expect(agent.startSession(opts())).rejects.toThrow(/close unconfirmed/);
     expect(knobs.spawnedEnvs).toHaveLength(1);
+    expect(stopped).not.toHaveBeenCalled();
 
     knobs.closeRejects = false;
     knobs.getStateRejects = false;
     const handle = await agent.startSession(opts());
     expect(knobs.spawnedEnvs).toHaveLength(2);
+    expect(stopped).toHaveBeenCalledOnce();
     await handle.close();
   });
 
@@ -375,17 +381,23 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     knobs.closeRejects = true;
     const agent = new PiAgent(buildDeps());
 
-    await expect(agent.startSession(opts())).rejects.toThrow(/cleanup remains unconfirmed/);
+    const failure = await agent.startSession(opts()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentStartupCleanupPendingError);
+    if (!(failure instanceof AgentStartupCleanupPendingError)) throw new Error('missing cleanup evidence');
+    const stopped = vi.fn();
+    void failure.whenStopped.then(stopped);
     await expect(agent.startSession({ ...opts(), sessionId: 's2' })).rejects.toThrow(
       /cleanup remains unconfirmed/,
     );
     expect(knobs.closeCount).toBe(2);
+    expect(stopped).not.toHaveBeenCalled();
 
     knobs.closeRejects = false;
     await agent.dispose();
     await agent.dispose();
 
     expect(knobs.closeCount).toBe(4);
+    expect(stopped).toHaveBeenCalledOnce();
   });
 
   it('reclaims a startup cleanup entry registered after dispose begins', async () => {

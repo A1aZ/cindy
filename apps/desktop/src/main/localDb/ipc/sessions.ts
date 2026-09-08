@@ -1539,7 +1539,7 @@ export function registerSessionIpc(
       }
 
       const db = getDbClient().drizzle;
-      const updated = await withSessionRouteLock(sid, async () => {
+      const updated = await withStatusWriteLock(db, sid, 'active', async () => {
         if (!isOwnerScopeCurrent(ownerScope)) return null;
         await assertGenericSessionLifecycleAllowed(db, sid);
         // 显式 .run() 才能从生产 DbClient.drizzle proxy 拿到 changes；隐式 await

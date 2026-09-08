@@ -24,7 +24,7 @@ export interface WorktreeRecycleRecord {
   nextAttemptAt: number;
   reason?: string;
   directoryIdentity?: string;
-  snapshot?: { head: string; tree: string; indexTree: string; commit: string; ref: string; indexHash: string };
+  snapshot?: { head: string; headRef?: string | null; tree: string; indexTree: string; commit: string; ref: string; indexHash: string };
   restoredGeneration?: string;
   archive?: WorktreeRecoveryArchive;
 }

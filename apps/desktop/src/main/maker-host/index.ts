@@ -9,7 +9,7 @@
  */
 
 import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
-import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease } from '../worktree/runtimeLeases';
+import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, type WorktreeRuntimeLease } from '../worktree/runtimeLeases';
 import { readCodexContextWindowInfo } from './codex-context-window.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
@@ -333,6 +333,8 @@ type RemoteCcQuery = Awaited<
 let _maker: Maker | null = null;
 /** Prepared Bot runtime records waiting for the matching Maker startup result. */
 const pendingBotRuntimeSnapshots = new Map<string, BotProfileRuntimeSnapshot>();
+// Maker copies start options for every runtime, including rebuilds of one task.
+const worktreeRuntimeLeases = new WeakMap<object, WorktreeRuntimeLease>();
 let botRuntimeResourcePreflight:
   | ((opts: MakerSessionCreateOpts) => Promise<BotProfileRuntimeSnapshot | null>)
   | null = null;
@@ -2416,7 +2418,8 @@ export function getMaker(): Maker {
           createOpts.id ??= sessionId;
           await prepareBotWorkspaceRuntime(createOpts);
           if (!createOpts.remoteHostId && createOpts.workingDir) {
-            await acquireWorktreeRuntimeLease(sessionId, createOpts.workingDir);
+            const lease = await acquireWorktreeRuntimeLease(sessionId, createOpts.workingDir);
+            if (lease) worktreeRuntimeLeases.set(opts, lease);
           }
           let skillLinksChanged = false;
           if (!createOpts.remoteHostId && createOpts.workingDir) {
@@ -2513,10 +2516,13 @@ export function getMaker(): Maker {
             }
           }
         },
-        onStartFailed: async ({ sessionId, stage, error }) => {
-          await releaseWorktreeRuntimeLease(sessionId).catch((error) => {
-            desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
-          });
+        onStartFailed: async ({ sessionId, options, stage, error, runtimeMayBeAlive }) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease && !runtimeMayBeAlive) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           const snapshot = pendingBotRuntimeSnapshots.get(sessionId);
           if (!snapshot) return;
           try {
@@ -2532,14 +2538,25 @@ export function getMaker(): Maker {
             pendingBotRuntimeSnapshots.delete(sessionId);
           }
         },
+        onStartCleanupSucceeded: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
+        },
         getCodexHistoryHasProductPrompt: (sessionId) => readCodexHistoryHasProductPrompt(sessionId),
         onCodexProductPromptDelivery: async ({ sessionId, historyHasProductPrompt }) => {
           await writeCodexHistoryHasProductPrompt(sessionId, historyHasProductPrompt);
         },
-        onClose: async (sessionId) => {
-          await releaseWorktreeRuntimeLease(sessionId).catch((error) => {
-            desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
-          });
+        onClose: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           // rehydrate close suppression 只跳过 worktree / temp file 这类重副作用;
           // registry 必须先清,后续 resume 会在首个 /responses 前重新登记,避免旧 thread prompt 驻留。
           unregisterCodexProxyPrompt(sessionId);

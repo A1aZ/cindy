@@ -56,6 +56,7 @@ function validateSdkSessionId(value: string): string {
 
 import {
   AgentNotAuthenticatedError,
+  AgentStartupCleanupPendingError,
   BaseAgent,
   MAIN_OWNED_SEND_CONTEXT,
   PiManagedPackageMutationCancelledError,
@@ -1184,6 +1185,7 @@ interface FailedPiStartupCleanup {
   proc: PiRpcProcess;
   promise: Promise<void> | null;
   cleanupLocal?: () => void;
+  confirmStopped: () => void;
 }
 
 /**
@@ -1406,6 +1408,7 @@ export class PiAgent extends BaseAgent {
     }
     if (this.failedStartupCleanups.get(sessionId) === entry) {
       this.failedStartupCleanups.delete(sessionId);
+      entry.confirmStopped();
       entry.cleanupLocal?.();
     }
   }
@@ -5136,14 +5139,20 @@ export class PiAgent extends BaseAgent {
       // quarantine；后续同 session startSession 会先重试 cleanup，绝不直接 spawn。
       // 远端失败时不清 runtime 文件；本地也只有确认进程结束后才清，避免存活
       // 进程丢 bridge/permission 状态。
-      let closeError: unknown = null;
+      let cleanupPending: AgentStartupCleanupPendingError | null = null;
       try {
         await proc.close();
       } catch (error) {
-        closeError = error;
+        let confirmStopped!: () => void;
+        const whenStopped = new Promise<void>((resolve) => { confirmStopped = resolve; });
+        cleanupPending = new AgentStartupCleanupPendingError(
+          `pi startup failed and process cleanup remains unconfirmed: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: err, whenStopped },
+        );
         this.failedStartupCleanups.set(startupCleanupKey, {
           proc,
           promise: null,
+          confirmStopped,
           ...(!remote
             ? { cleanupLocal: () => {
                 cleanupConfigHome();
@@ -5152,16 +5161,11 @@ export class PiAgent extends BaseAgent {
             : {}),
         });
       }
-      if (!remote && !closeError) {
+      if (!remote && !cleanupPending) {
         cleanupConfigHome();
         cleanupRuntimeFiles();
       }
-      if (closeError) {
-        throw new Error(
-          `pi startup failed and process cleanup remains unconfirmed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
-          { cause: err },
-        );
-      }
+      if (cleanupPending) throw cleanupPending;
       throw err;
     }
 

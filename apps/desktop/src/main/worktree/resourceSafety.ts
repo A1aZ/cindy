@@ -49,4 +49,11 @@ export async function assertWorktreeGitIdentity(meta: WorktreeMeta): Promise<voi
   const metadataRoot = path.join(await physicalWorktreeKey(common.trim()), 'worktrees');
   if (path.dirname(await physicalWorktreeKey(gitDir.trim())) !== metadataRoot) throw new Error('Git worktree metadata mismatch');
   for (const name of ['locked', 'index.lock', 'HEAD.lock']) await assertAbsent(path.join(gitDir.trim(), name));
+  // A parent snapshot preserves gitlink OIDs, not the submodule's objects/index.
+  // worktree remove --force deletes modules/ too, including child-only commits.
+  await assertAbsent(path.join(gitDir.trim(), 'modules'));
+  const { stdout: entries } = await gitExec(['ls-files', '--stage', '-z'], meta.path);
+  if (entries.split('\0').some((entry) => entry.startsWith('160000 '))) {
+    throw new Error('submodule recovery is not supported; preserving worktree');
+  }
 }

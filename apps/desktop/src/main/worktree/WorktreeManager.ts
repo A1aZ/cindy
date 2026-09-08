@@ -1039,8 +1039,8 @@ async function createWorktreeInner(req: CreateWorktreeReq): Promise<CreateWorktr
       //     后台跑全 checkout。fullCheckoutPromise 故意 fire-and-forget,
       //     失败仅日志, 不阻塞 IPC 返回。
       let bgPromise: Promise<void> | undefined;
-      const checkoutLease = `checkout:${req.sessionId}`;
-      await acquireWorktreeRuntimeLease(checkoutLease, worktreePath);
+      const checkoutLease = await acquireWorktreeRuntimeLease(`checkout:${req.sessionId}`, worktreePath);
+      if (!checkoutLease) throw new Error('managed checkout runtime lease is missing');
       try {
         const stageRes = await timed('stage checkout', () => stageCheckout(worktreePath));
         bgPromise = stageRes.fullCheckoutPromise.finally(() => releaseWorktreeRuntimeLease(checkoutLease));

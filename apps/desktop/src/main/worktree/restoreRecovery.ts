@@ -12,6 +12,7 @@ import { hasLiveSessionReference, loadLiveSessionPathKeys } from './liveSessionR
 import { assertManagedResourceLocation, assertManagedResourcePath, assertWorktreeGitIdentity } from './resourceSafety';
 import * as store from './worktreeStore';
 import { withLegacyWorktreeRuntimeGuard } from './legacyRuntimeGuard';
+import { readWorktreeHeadRef } from './contentSnapshot';
 
 async function indexIsRestorable(worktreePath: string, indexTree: string): Promise<boolean> {
   const { stdout } = await gitExec(['rev-parse', '--path-format=absolute', '--git-path', 'index'], worktreePath);
@@ -35,6 +36,8 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     if (!record?.snapshot || !record.archive || record.phase === 'restored' || record.phase === 'pending') return null;
     if ([record.snapshot.head, record.snapshot.tree, record.snapshot.indexTree, record.snapshot.commit]
       .some((value) => typeof value !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value))) return false;
+    const headRef = record.snapshot.headRef;
+    if (headRef != null && (typeof headRef !== 'string' || !headRef.startsWith('refs/heads/'))) return false;
     if (await physicalWorktreeKey(record.meta.path) !== await physicalWorktreeKey(worktreePath)) return false;
     const registered = store.get(sessionId);
     if (registered && worktreeGeneration(registered) === record.restoredGeneration) {
@@ -70,6 +73,11 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     }
     if (hasLiveSessionReference(record.meta, await loadLiveSessionPathKeys({ excludeSessionId: sessionId }))) return false;
     await verifyRecoveryArchive(record.archive);
+    if (headRef) {
+      // Never reset a branch that advanced or was replaced while this task was archived.
+      const { stdout: branchHead } = await gitExec(['rev-parse', '--verify', `${headRef}^{commit}`], record.meta.baseRepo);
+      if (branchHead.trim() !== record.snapshot.head) return false;
+    }
     if (!legacyGuardHeld()) return false;
     if (identity === null) {
       await fs.mkdir(worktreePath, { recursive: false });
@@ -89,7 +97,9 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
       const checkout = path.join(temp, 'checkout');
       try {
         await gitExec(['worktree', 'prune'], record.meta.baseRepo);
-        await gitExec(['worktree', 'add', '--detach', '--no-checkout', checkout, record.snapshot.head], record.meta.baseRepo);
+        // Git checks branch occupancy itself; no --force/-B may bypass another checkout.
+        const target = headRef ? headRef.slice('refs/heads/'.length) : record.snapshot.head;
+        await gitExec(['worktree', 'add', '--no-checkout', ...(headRef ? [] : ['--detach']), checkout, target], record.meta.baseRepo);
         await fs.copyFile(path.join(checkout, '.git'), gitLink, constants.COPYFILE_EXCL);
         await gitExec(['worktree', 'repair', worktreePath], record.meta.baseRepo);
       } finally {
@@ -101,15 +111,21 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     if (!legacyGuardHeld()) return false;
     const { stdout: head } = await gitExec(['rev-parse', 'HEAD'], worktreePath);
     if (head.trim() !== record.snapshot.head) return false;
+    if (headRef !== undefined && await readWorktreeHeadRef(worktreePath) !== headRef) return false;
     if (!(await indexIsRestorable(worktreePath, record.snapshot.indexTree))) return false;
     await extractRecoveryArchive(record.archive, worktreePath, true);
     if (hasLiveSessionReference(record.meta, await loadLiveSessionPathKeys({ excludeSessionId: sessionId }))) return false;
     await assertManagedResourcePath(record.meta, [worktreePath]);
     await assertWorktreeGitIdentity(record.meta);
     if (!legacyGuardHeld()) return false;
+    const { stdout: currentHead } = await gitExec(['rev-parse', 'HEAD'], worktreePath);
+    if (currentHead.trim() !== record.snapshot.head) return false;
+    if (headRef !== undefined && await readWorktreeHeadRef(worktreePath) !== headRef) return false;
     if (!(await indexIsRestorable(worktreePath, record.snapshot.indexTree))) return false;
     await gitExec(['read-tree', record.snapshot.indexTree], worktreePath);
-    await store.set(sessionId, { ...record.meta, sessionId, generation: record.restoredGeneration, quarantinePath: undefined });
+    await store.set(sessionId, { ...record.meta, sessionId,
+      ...(headRef ? { branch: headRef.slice('refs/heads/'.length) } : {}),
+      generation: record.restoredGeneration, quarantinePath: undefined });
     record.phase = 'restored';
     await writeRecycleRecord(record);
     return true;

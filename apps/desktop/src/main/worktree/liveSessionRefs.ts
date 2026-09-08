@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import { getDbClient } from '../localDb/client/current';
 import { physicalWorktreeKey } from './resourceLock';
 import { readWorktreeRuntimePaths } from './runtimeLeases';
+import { readPiSubagentWorktreeReferences } from './piSubagentReferences';
 import * as store from './worktreeStore';
 import { createLogger } from '../logger';
 
@@ -66,18 +67,30 @@ export async function loadLiveSessionPathKeys(
     const rows = await db.readLocalWorktreeReferences();
     const runtimePaths = await readWorktreeRuntimePaths();
     if (!runtimePaths) return null;
+    const subagentReferences = await readPiSubagentWorktreeReferences();
+    if (!subagentReferences) return null;
     const keys = new Set(runtimePaths);
+    // Config cwd can refer to an earlier workdir or a child-specific directory,
+    // even after the parent row changes or disappears from the task database.
+    for (const paths of subagentReferences.values()) {
+      for (const value of paths) {
+        keys.add(pathKey(value)!);
+        keys.add(await physicalWorktreeKey(value));
+      }
+    }
     const knownSessionIds = new Set(rows.map((row) => row.id));
     for (const meta of store.getAll()) {
-      if (meta.sessionId !== opts.excludeSessionId && !knownSessionIds.has(meta.sessionId)) {
+      if (subagentReferences.has(meta.sessionId)
+        || (meta.sessionId !== opts.excludeSessionId && !knownSessionIds.has(meta.sessionId))) {
         keys.add(await physicalWorktreeKey(meta.path));
       }
     }
     for (const row of rows) {
+      const hasSubagentRuns = subagentReferences.has(row.id);
       // The same id in another database is not the row the caller just closed.
-      if (row.currentDatabase && opts.excludeSessionId && row.id === opts.excludeSessionId) continue;
+      if (!hasSubagentRuns && row.currentDatabase && opts.excludeSessionId && row.id === opts.excludeSessionId) continue;
       const isTerminal = row.status === 'archived' || row.status === 'deleted';
-      if (row.source !== 'bot' && isTerminal && (!row.currentDatabase || opts.isSessionRuntimeAlive?.(row.id) !== true)) {
+      if (!hasSubagentRuns && row.source !== 'bot' && isTerminal && (!row.currentDatabase || opts.isSessionRuntimeAlive?.(row.id) !== true)) {
         continue;
       }
       const workingDirKey = pathKey(row.workingDir);

@@ -234,6 +234,20 @@ describe('shared worktree recycling', () => {
     expect(await recycle()).toBe(false);
     expect(archive).not.toHaveBeenCalled();
   });
+  it('preserves indexed submodules before creating incomplete recovery evidence', async () => {
+    const originalGit = git.getMockImplementation()!;
+    git.mockImplementation(async (args: string[]) => args.includes('--stage')
+      ? { stdout: `160000 ${'a'.repeat(40)} 0\tchild\0` } : originalGit(args));
+    expect(await recycle()).toBe(false);
+    expect(archive).not.toHaveBeenCalled();
+    expect(state.registry.has(meta.sessionId)).toBe(true);
+  });
+  it('preserves submodule metadata even after its gitlink was removed from the index', async () => {
+    await fs.mkdir(path.join(meta.baseRepo, '.git', 'worktrees', 'one', 'modules', 'child'), { recursive: true });
+    expect(await recycle()).toBe(false);
+    expect(archive).not.toHaveBeenCalled();
+    expect(state.registry.has(meta.sessionId)).toBe(true);
+  });
   it('rejects a Git link pointing at another repository', async () => {
     const originalGit = git.getMockImplementation()!;
     git.mockImplementation(async (args: string[], cwd: string) => args.includes('--git-common-dir') && cwd === meta.path

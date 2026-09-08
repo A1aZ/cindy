@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
@@ -23,35 +23,45 @@ export function managedWorktreeRoot(value: string): string | null {
 }
 
 function leaseFile(sessionId: string): string {
-  const key = createHash('sha256').update(sessionId).digest('hex');
+  const key = createHash('sha256').update(`${sessionId}:${randomUUID()}`).digest('hex');
   return path.join(runtimeRoot(), `${process.pid}-${key}.json`);
 }
 
-export async function acquireWorktreeRuntimeLease(sessionId: string, cwd: string): Promise<void> {
+/** A startup owns its own file, even when the business task id is reused. */
+export interface WorktreeRuntimeLease {
+  readonly file: string;
+  readonly physicalPath: string;
+}
+
+export async function acquireWorktreeRuntimeLease(sessionId: string, cwd: string): Promise<WorktreeRuntimeLease | null> {
   const root = managedWorktreeRoot(cwd);
-  if (!root) return;
-  await withWorktreeResourceLock(root, async () => {
+  if (!root) return null;
+  return withWorktreeResourceLock(root, async () => {
     await fs.mkdir(runtimeRoot(), { recursive: true });
+    const lease = { file: leaseFile(sessionId), physicalPath: await physicalWorktreeKey(root) };
     // A partial write is intentionally unreadable, hence protective to deletion.
-    await fs.writeFile(leaseFile(sessionId), JSON.stringify({
-      version: 1, pid: process.pid, path: await physicalWorktreeKey(root),
-    }), { mode: 0o600 });
+    try {
+      await fs.writeFile(lease.file, JSON.stringify({
+        version: 1, pid: process.pid, path: lease.physicalPath,
+      }), { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      // No runtime can start after acquisition fails. Only remove this attempt's
+      // file; an older/newer runtime of the same task keeps its separate lease.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        await fs.unlink(lease.file).catch(() => undefined);
+      }
+      throw error;
+    }
+    return lease;
   });
 }
 
-export async function releaseWorktreeRuntimeLease(sessionId: string): Promise<void> {
-  let physicalPath: string | undefined;
-  try {
-    const lease = JSON.parse(await fs.readFile(leaseFile(sessionId), 'utf8'));
-    if (typeof lease.path === 'string') physicalPath = lease.path;
-  } catch {
-    // Releasing our own malformed/partial lease is still safe; it cannot wake another resource.
-  }
-  try { await fs.unlink(leaseFile(sessionId)); } catch (error) {
+export async function releaseWorktreeRuntimeLease(lease: WorktreeRuntimeLease): Promise<void> {
+  try { await fs.unlink(lease.file); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  if (physicalPath) notifyWorktreeRecycleOpportunity(physicalPath);
+  notifyWorktreeRecycleOpportunity(lease.physicalPath);
 }
 
 function pidMayBeAlive(pid: number): boolean {
@@ -107,7 +117,10 @@ export async function readWorktreeRuntimePaths(): Promise<Set<string> | null> {
   const paths = new Set<string>();
   for (const name of leases) {
     const match = /^(\d+)-[a-f0-9]{64}\.json$/.exec(name);
-    if (!match || !pidMayBeAlive(Number(match[1]))) continue;
+    if (!match) continue;
+    // Main may have crashed while a detached child still uses the directory.
+    // Only explicit lease release proves that startup stopped; a dead owner PID
+    // is not sufficient evidence and its leftover lease remains protective.
     try {
       const lease = JSON.parse(await fs.readFile(path.join(runtimeRoot(), name), 'utf8'));
       if (lease.version !== 1 || typeof lease.path !== 'string') return null;

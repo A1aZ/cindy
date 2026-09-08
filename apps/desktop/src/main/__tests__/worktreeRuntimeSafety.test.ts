@@ -26,12 +26,36 @@ describe('worktree runtime evidence and physical locks', () => {
   });
 
   it('publishes a root lease before using a descendant and wakes retries only on actual release', async () => {
-    await acquireWorktreeRuntimeLease('one', path.join(worktree, 'src'));
+    const lease = (await acquireWorktreeRuntimeLease('one', path.join(worktree, 'src')))!;
     expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
-    await releaseWorktreeRuntimeLease('one');
-    await releaseWorktreeRuntimeLease('one');
+    await releaseWorktreeRuntimeLease(lease);
+    await releaseWorktreeRuntimeLease(lease);
     expect(await readWorktreeRuntimePaths()).toEqual(new Set());
     expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the replacement runtime protected when an older close finishes late', async () => {
+    const oldLease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    const replacementLease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    expect(oldLease.file).not.toBe(replacementLease.file);
+    await releaseWorktreeRuntimeLease(oldLease);
+    await releaseWorktreeRuntimeLease(oldLease);
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
+    await releaseWorktreeRuntimeLease(replacementLease);
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set());
+  });
+
+  it('cleans only the failed acquisition when publishing a replacement lease fails', async () => {
+    const oldLease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    const write = fs.writeFile.bind(fs);
+    vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (...args) => {
+      await write(...args);
+      throw Object.assign(new Error('lease write interrupted'), { code: 'EIO' });
+    });
+    await expect(acquireWorktreeRuntimeLease('one', worktree)).rejects.toThrow('lease write interrupted');
+    expect(await fs.readdir(path.dirname(oldLease.file))).toEqual([path.basename(oldLease.file)]);
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
+    await releaseWorktreeRuntimeLease(oldLease);
   });
 
   it('preserves when another live instance cannot publish runtime evidence', async () => {
@@ -52,6 +76,25 @@ describe('worktree runtime evidence and physical locks', () => {
     const root = path.join(state.root, 'worktree-runtime-leases');
     const [name] = await fs.readdir(root);
     await fs.writeFile(path.join(root, name), '{');
+    expect(await readWorktreeRuntimePaths()).toBeNull();
+  });
+
+  it('keeps a crashed owner lease protective because its child may still run', async () => {
+    const lease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('owner is gone'), { code: 'ESRCH' });
+    });
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
+    await releaseWorktreeRuntimeLease(lease);
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set());
+  });
+
+  it('does not treat a crashed owner partial lease as evidence of an idle directory', async () => {
+    const lease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    await fs.writeFile(lease.file, '{');
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('owner is gone'), { code: 'ESRCH' });
+    });
     expect(await readWorktreeRuntimePaths()).toBeNull();
   });
 

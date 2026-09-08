@@ -22,7 +22,9 @@ vi.mock('../localDb/client/current', () => ({ getDbClient: () => ({ readLocalWor
 vi.mock('../worktree/runtimeLeases', () => ({ readWorktreeRuntimePaths: async () => new Set() }));
 vi.mock('../worktree/gitExec', async (original) => {
   const actual = await original<typeof import('../worktree/gitExec')>();
-  return { ...actual, gitExec: vi.fn(actual.gitExec) };
+  return { ...actual, gitExec: vi.fn<typeof actual.gitExec>((args, cwd, options) => actual.gitExec(args, cwd, {
+    ...options, extraEnv: { ...options?.extraEnv, GIT_CONFIG_GLOBAL: path.join(state.root, 'git-global'), GIT_CONFIG_NOSYSTEM: '1' },
+  })) };
 });
 
 import { recycleManagedWorktree } from '../worktree/managedRecycle';
@@ -86,6 +88,7 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     expect(archivedTree).not.toContain('untracked.txt');
     expect(await restoreRecordedWorktree(meta.sessionId, worktree)).toBe(true);
     expect(await git(worktree, 'rev-parse', 'HEAD')).toBe(head);
+    await expect(git(worktree, 'symbolic-ref', '--quiet', 'HEAD')).rejects.toThrow();
     expect(await git(worktree, 'show', ':tracked.txt')).toBe('staged');
     expect(await fs.readFile(path.join(worktree, 'tracked.txt'), 'utf8')).toBe('unstaged\n');
     expect(await fs.readFile(path.join(worktree, '.env'), 'utf8')).toBe('INVALID_TEST_SECRET=keep-me\n');
@@ -94,6 +97,42 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     expect(await git(worktree, 'status', '--porcelain')).toContain('MM tracked.txt');
     expect((await readRecycleRecord(worktree))?.phase).toBe('restored');
   }, 60_000);
+
+  it('restores an attached branch and advances it with subsequent commits', async () => {
+    const meta = await createFixture('attached');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    expect((await readRecycleRecord(meta.path))?.snapshot?.headRef).toBe('refs/heads/cindy/attached');
+    expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(true);
+    expect(await git(meta.path, 'symbolic-ref', 'HEAD')).toBe('refs/heads/cindy/attached');
+    await git(meta.path, 'add', 'draft.txt');
+    await git(meta.path, 'commit', '-m', 'continue restored work');
+    expect(await git(repo, 'rev-parse', 'cindy/attached')).toBe(await git(meta.path, 'rev-parse', 'HEAD'));
+  }, 30_000);
+
+  it('keeps an advanced branch and its missing worktree untouched', async () => {
+    const meta = await createFixture('advanced');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    const { stdout } = await exec('git', ['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'external advance'], {
+      cwd: repo, windowsHide: true, env: { ...process.env, GIT_CONFIG_GLOBAL: path.join(state.root, 'git-global'), GIT_CONFIG_NOSYSTEM: '1' },
+    });
+    const advanced = stdout.trim();
+    await git(repo, 'update-ref', 'refs/heads/cindy/advanced', advanced);
+    expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(false);
+    expect(await git(repo, 'rev-parse', 'cindy/advanced')).toBe(advanced);
+    await expect(fs.stat(meta.path)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 30_000);
+
+  it('does not take a saved branch from another worktree', async () => {
+    const meta = await createFixture('occupied');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    const elsewhere = path.join(state.root, 'branch-occupant');
+    await git(repo, 'worktree', 'add', elsewhere, 'cindy/occupied');
+    await fs.writeFile(path.join(elsewhere, 'user-edit.txt'), 'keep occupant\n');
+    await expect(restoreRecordedWorktree(meta.sessionId, meta.path)).rejects.toThrow();
+    expect(await git(elsewhere, 'symbolic-ref', 'HEAD')).toBe('refs/heads/cindy/occupied');
+    expect(await fs.readFile(path.join(elsewhere, 'user-edit.txt'), 'utf8')).toBe('keep occupant\n');
+    expect(state.registry.has(meta.sessionId)).toBe(false);
+  }, 30_000);
 
   it('taking a snapshot never modifies the original index or working files', async () => {
     const worktree = path.join(repo, '.cindy-worktrees', 'snapshot');
@@ -170,5 +209,29 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     expect((await readRecycleRecord(previous.path, previous.sessionId))?.generation).toBe(previous.generation);
     expect(await restoreRecordedWorktree(previous.sessionId, previous.path)).toBe(true);
     expect(await fs.readFile(path.join(previous.path, 'draft.txt'), 'utf8')).toBe('history contents\n');
+  }, 30_000);
+
+  it('preserves submodule-only commits whose Git objects lie outside the archived directory', async () => {
+    const origin = path.join(state.root, 'child-origin');
+    await fs.mkdir(origin);
+    await git(origin, 'init', '-b', 'main');
+    await git(origin, 'config', 'user.name', 'Recovery Test');
+    await git(origin, 'config', 'user.email', 'recovery-test@localhost');
+    await fs.writeFile(path.join(origin, 'child.txt'), 'base\n');
+    await git(origin, 'add', '.'); await git(origin, 'commit', '-m', 'child fixture');
+    const meta = await createFixture('submodule');
+    await git(meta.path, '-c', 'protocol.file.allow=always', 'submodule', 'add', origin, 'child');
+    await git(meta.path, 'commit', '-am', 'add child');
+    const child = path.join(meta.path, 'child');
+    await git(child, 'config', 'user.name', 'Recovery Test');
+    await git(child, 'config', 'user.email', 'recovery-test@localhost');
+    await fs.writeFile(path.join(child, 'child.txt'), 'child-only work\n');
+    await git(child, 'commit', '-am', 'child-only commit');
+    const childHead = await git(child, 'rev-parse', 'HEAD');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(false);
+    expect(state.registry.has(meta.sessionId)).toBe(true);
+    expect(await git(child, 'rev-parse', 'HEAD')).toBe(childHead);
+    expect(await fs.readFile(path.join(child, 'child.txt'), 'utf8')).toBe('child-only work\n');
+    expect((await readRecycleRecord(meta.path))?.archive).toBeUndefined();
   }, 30_000);
 });

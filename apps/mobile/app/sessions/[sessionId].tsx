@@ -1018,9 +1018,6 @@ export default function SessionScreen() {
     if (messageScreenFocusedRef.current && messageAppActiveRef.current) historyView.view.setActive(true);
   }, [connectionEpoch, messageReloadRevision, historyView.view]);
   const sessions = useRemoteSessions();
-  useEffect(() => {
-    if (messageReloadRevision > 0) historyView.view.reset();
-  }, [messageReloadRevision, historyView.view]);
   const rawMessages = useSessionMessages(sessionId, deviceId);
   const historyHandoff = useMemo(() => new HistoryViewHandoff<RemoteMessage>(
     (row) => row.agentMeta?.isStreaming === true,
@@ -3255,7 +3252,7 @@ export default function SessionScreen() {
     const storedMessagesAtStart = remoteSessionStore.getMessages(sessionId);
     const storedSessionAtStart = remoteSessionStore.getSessions().find((item) => item.id === sessionId) ?? null;
     const isReopen = !options.replaceMessages
-      && storedMessagesAtStart.length > 0
+      && (historyView.view.getSnapshot().ready || storedMessagesAtStart.length > 0)
       && storedSessionAtStart !== null;
     const prepareLinkAndSubscription = async () => {
       await retryRemoteSyncRead(syncRun, () => openLink(deviceId));

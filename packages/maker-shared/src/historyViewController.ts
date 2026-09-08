@@ -113,7 +113,16 @@ export class HistoryViewController<T extends HistoryMessageSource> {
         if (boundary > 0) items = [...this.state.items.slice(0, boundary), ...items];
       }
       const retainedPrefix = !older && items.length > page.items.length;
-      this.publish({ items, ready: true, loading: false,
+      // A background validation of the same page must not replace rendering
+      // identities. Applies to both Mobile and Desktop history consumers.
+      const previous = new Map(this.state.items.map((item) => [item.key, item]));
+      items = items.map((item) => {
+        const cached = previous.get(item.key);
+        return cached && JSON.stringify(cached) === JSON.stringify(item) ? cached : item;
+      });
+      const stableItems = items.length === this.state.items.length
+        && items.every((item, index) => item === this.state.items[index]) ? this.state.items : items;
+      this.publish({ items: stableItems, ready: true, loading: false,
         hasMore: retainedPrefix ? this.state.hasMore : page.hasMore,
         nextCursor: retainedPrefix ? this.state.nextCursor : page.nextCursor });
       for (const summary of historyWorkSummaries(items)) {

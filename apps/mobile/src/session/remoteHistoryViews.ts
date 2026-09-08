@@ -1,0 +1,80 @@
+import { HistoryViewController } from '@cindy/maker-shared/message-window';
+import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
+import type { RemoteMessage } from './types';
+
+// Retain only recently visited views in memory. The existing account/device and
+// session reclamation boundaries own invalidation; no second disk cache.
+export const MAX_INACTIVE_HISTORY_VIEWS = 8;
+const MAX_INACTIVE_HISTORY_BYTES = 4 * 1024 * 1024;
+type Reader = Pick<MobileMakerTransport, 'readHistoryView' | 'readWorkDetails' | 'setHistoryExpanded'>;
+type Entry = { deviceId: string; sessionId: string; reader: Reader;
+  view: HistoryViewController<RemoteMessage>; consumers: number; bytes: number };
+const views = new Map<string, Entry>();
+const keyFor = (deviceId: string, sessionId: string) => JSON.stringify([deviceId, sessionId]);
+
+export function findRemoteHistoryView(deviceId: string, sessionId: string) {
+  return views.get(keyFor(deviceId, sessionId))?.view;
+}
+
+export function getRemoteHistoryView(deviceId: string, sessionId: string, reader: Reader): Entry {
+  const key = keyFor(deviceId, sessionId);
+  const existing = views.get(key);
+  if (existing) return existing;
+  const entry: Entry = { deviceId, sessionId, reader, consumers: 0, bytes: 0,
+    view: new HistoryViewController<RemoteMessage>({
+      page: (before) => entry.reader.readHistoryView(sessionId, before),
+      details: (ref, after) => entry.reader.readWorkDetails(sessionId, ref, after),
+      expanded: (refs) => entry.reader.setHistoryExpanded(sessionId, refs),
+    }) };
+  return entry;
+}
+
+export function mountRemoteHistoryView(entry: Entry, reader: Reader, active: boolean) {
+  // Register only after React commits. An abandoned render must not retain a
+  // controller or replace the transport used by the currently visible page.
+  views.set(keyFor(entry.deviceId, entry.sessionId), entry);
+  entry.reader = reader;
+  entry.consumers++;
+  entry.view.setActive(active);
+  return () => {
+    if (--entry.consumers > 0) return;
+    entry.view.setActive(false);
+    const key = keyFor(entry.deviceId, entry.sessionId);
+    if (views.get(key) !== entry) return;
+    const snapshot = entry.view.getSnapshot();
+    // Wire data is JSON. Count UTF-16 conservatively without retaining another copy.
+    entry.bytes = 2 * JSON.stringify([snapshot.items, [...snapshot.details], [...snapshot.expanded]]).length;
+    views.delete(key);
+    views.set(key, entry);
+    let count = 0;
+    let bytes = 0;
+    for (const candidate of views.values()) {
+      if (!candidate.consumers) { count++; bytes += candidate.bytes; }
+    }
+    for (const [candidateKey, candidate] of views) {
+      if (count <= MAX_INACTIVE_HISTORY_VIEWS && bytes <= MAX_INACTIVE_HISTORY_BYTES) break;
+      if (candidate.consumers) continue;
+      views.delete(candidateKey);
+      count--; bytes -= candidate.bytes;
+    }
+  };
+}
+
+/** Hard boundaries also invalidate reads already held by mounted consumers. */
+export function resetRemoteHistoryViews(deviceId: string | undefined, sessionId: string): void {
+  for (const entry of views.values()) {
+    if (entry.sessionId === sessionId && (deviceId === undefined || entry.deviceId === deviceId)) entry.view.reset();
+  }
+}
+
+export function clearRemoteHistoryViews(deviceId?: string, sessionId?: string): void {
+  for (const [key, entry] of views) {
+    if (deviceId !== undefined && entry.deviceId !== deviceId) continue;
+    if (sessionId !== undefined && entry.sessionId !== sessionId) continue;
+    // A blurred screen may remain mounted. Keep its registration so later focus
+    // and ingress address the same (now empty) controller.
+    if (!entry.consumers) views.delete(key);
+    entry.view.setActive(false);
+    entry.view.reset();
+  }
+}

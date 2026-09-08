@@ -23,6 +23,32 @@ function mount(entry: ReturnType<typeof getRemoteHistoryView>, source = reader()
 afterEach(() => { releases.splice(0).forEach(release => release()); clearRemoteHistoryViews(); });
 
 describe('history reentry', () => {
+  it.each(['invoke', 'push', 'initial-invoke', 'initial-push'])('retires deleted history through %s without another notification', async (operation) => {
+    const source = reader();
+    let settle!: (value: HistoryViewPage<RemoteMessage>) => void;
+    const delayed = new Promise<HistoryViewPage<RemoteMessage>>(resolve => { settle = resolve; });
+    source.readHistoryView.mockImplementationOnce(() => delayed);
+    const entry = getRemoteHistoryView('delete-device', 'delete-session', source);
+    mount(entry, source);
+    const pending = entry.view.refresh();
+    if (!operation.startsWith('initial')) { settle(page('deleted')); await pending; }
+    const other = getRemoteHistoryView('other-device', 'delete-session', reader());
+    mount(other); await other.view.refresh();
+    source.readHistoryView.mockResolvedValue({ ...page(), items: [] });
+    if (operation.endsWith('push')) {
+      remoteSessionStore.applyRemotePush('delete-device', 'local-db:messages:deleted', {
+        sessionId: 'delete-session', clientIds: ['a'],
+      });
+    } else remoteSessionStore.removeMessages('delete-session', ['a'], 'delete-device');
+    expect(entry.view.getSnapshot()).toMatchObject({ ready: false, items: [] });
+    expect(other.view.getSnapshot().ready).toBe(true);
+    settle(page('deleted')); await pending;
+    expect(entry.view.getSnapshot().items).toEqual([]);
+    expect(entry.view.isActive()).toBe(true);
+    await entry.view.refresh();
+    expect(entry.view.getSnapshot()).toMatchObject({ ready: true, items: [] });
+  });
+
   it('does not register abandoned renders', () => {
     getRemoteHistoryView('d', 's', reader());
     expect(findRemoteHistoryView('d', 's')).toBeUndefined();

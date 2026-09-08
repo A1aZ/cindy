@@ -4178,9 +4178,15 @@ function WorkGroupCard({
           <View style={styles.workGroupStack}>
             {item.deferred?.loading && <CompactActivityIndicator color={colors.textTertiary} size={header.iconSize} />}
             {item.deferred?.failed && (
-              <Pressable onPress={item.deferred.retry} accessibilityRole="button">
-                <Text style={{ color: colors.textSecondary }}>{t('message.renderer.retryPreview')}</Text>
-              </Pressable>
+              <MessageListActionButton
+                accessibilityLabel={t('message.renderer.retryPreview')}
+                disabled={item.deferred.loading}
+                onPress={item.deferred.retry}
+                style={[styles.payloadOpenButton, { minHeight: MESSAGE_CONTROL_TOUCH_SIZE, minWidth: MESSAGE_CONTROL_TOUCH_SIZE }]}
+                testID="message.workDetailsRetry"
+              >
+                <Text style={styles.payloadOpenButtonText}>{t('message.renderer.retryPreview')}</Text>
+              </MessageListActionButton>
             )}
             {item.children.map((child) => {
               if (child.type === 'thinking') {

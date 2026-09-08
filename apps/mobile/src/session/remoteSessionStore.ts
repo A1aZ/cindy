@@ -3765,6 +3765,7 @@ export const remoteSessionStore = {
     if (messagesChanged) {
       applyMessageWriteRetention(sessionId);
     }
+    resetRemoteHistoryViews(deviceId, sessionId);
     if (!messagesChanged && !tasksChanged && !projectionSettled) return;
     bumpMessageVersion(sessionId);
     emit();

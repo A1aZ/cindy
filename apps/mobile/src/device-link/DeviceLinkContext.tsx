@@ -1402,8 +1402,6 @@ export function routeFrame(env: Envelope, handlers: {
     // Retire that mirror too so a failed refresh cannot reveal pre-clear messages.
     remoteSessionStore.invalidateSessionMessageWindow(historySessionId as string, env.src);
     historyView.reset();
-  } else if (historyView && push.channel === 'local-db:messages:deleted') {
-    historyView.reset();
   } else if (historyView?.getSnapshot().ready && (push.channel === 'local-db:messages:created' || push.channel === 'maker:status-changed')) historyView.invalidate();
 }
 

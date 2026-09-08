@@ -309,37 +309,34 @@ describe('production session recovery callbacks', () => {
 
 // Run the production push routing tail with real projection generations.
 describe('destructive remote history pushes', () => {
-  it.each(['delete', 'clear', 'archive', 'initial-delete'])('retires old pages on %s without an unrelated activity event', async (operation) => {
+  // Delete (including initial-page races) is exercised through the real store in remoteHistoryReentry.test.ts.
+  it.each(['clear', 'archive'])('retires old pages on %s without an unrelated activity event', async (operation) => {
     const context = readFileSync(resolve(process.cwd(), 'src/device-link/DeviceLinkContext.tsx'), 'utf8');
     const body = context.slice(context.indexOf('  const historySessionId ='), context.indexOf('/** provider revision')).trim().slice(0, -1);
     const stale = { id: 'old', clientId: 'old', role: 'user', content: 'old', createdAt: '2026-09-08T00:00:00Z' };
     const oldPage = { version: 1 as const, items: projectHistoryView([stale], false), hasMore: false, nextCursor: null };
-    const delayed = deferred<typeof oldPage>();
     let reads = 0;
     const view = new HistoryViewController({
-      page: async () => ++reads === 1 ? (operation === 'initial-delete' ? delayed.promise : oldPage)
+      page: async () => ++reads === 1 ? oldPage
         : { ...oldPage, items: [] },
       details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
       expanded: async () => undefined,
     });
     const first = view.refresh();
-    if (operation !== 'initial-delete') await first;
+    await first;
     let raw = [stale];
     const store = {
       applyRemotePush: vi.fn(() => { if (operation !== 'clear') raw = []; }),
       invalidateSessionMessageWindow: vi.fn(() => { raw = []; }),
     };
-    const push = operation === 'clear' || operation === 'archive'
-      ? { channel: 'local-db:sessions:patched', payload: { sessionId: 's', patch: operation === 'clear'
-        ? { clearedAt: '2026-09-08T01:00:00Z' } : { status: 'archived' } } }
-      : { channel: 'local-db:messages:deleted', payload: { sessionId: 's', clientIds: ['old'] } };
+    const push = { channel: 'local-db:sessions:patched', payload: { sessionId: 's', patch: operation === 'clear'
+      ? { clearedAt: '2026-09-08T01:00:00Z' } : { status: 'archived' } } };
     const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     const route = new Function('push', 'env', 'findRemoteHistoryView', 'remoteSessionStore', compiled);
     route(push, { src: 'device-a' }, (device: string, session: string) => device === 'device-a' && session === 's' ? view : undefined, store);
     expect(raw).toEqual([]);
     expect(view.getSnapshot().items).toEqual([]);
     expect(view.getSnapshot().details.size).toBe(0);
-    if (operation === 'initial-delete') delayed.resolve(oldPage);
     await first; await tick();
     expect(view.getSnapshot().items).toEqual([]);
     expect(view.isActive()).toBe(operation !== 'archive');

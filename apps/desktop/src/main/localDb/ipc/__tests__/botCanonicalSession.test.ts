@@ -9,7 +9,7 @@ import { BOT_TEMPLATE_PRESET_IDENTITIES } from '../../../../shared/botTemplatePr
 import { createBotModelRouteReconciler } from '../../../maker-ipc/botModelRouteReconciler';
 import type { BotModelRoute } from '../../../../shared/botModelChain';
 import type { AgentKind } from '@cindy/maker-core';
-import { createBotCapabilityService } from '../../../maker-ipc/botCapabilityService';
+import { createBotCapabilityService, type BotCapabilityUpdate } from '../../../maker-ipc/botCapabilityService';
 import { buildBotMcpCatalog } from '../../../maker-host/botMcpCatalog';
 import { CustomMcpProvider } from '../../../mcp-integrations/custom-mcp-provider';
 import type { McpProvider } from '@cindy/maker-core';
@@ -65,6 +65,7 @@ const h = await vi.hoisted(async () => {
   ensureDialogue: vi.fn((sessionId: string) => join(userDataDir, sessionId)),
   searchConversations: vi.fn(),
   requestRuntimeRefresh: vi.fn(),
+  validateCapabilityAdditions: vi.fn(async (_update: BotCapabilityUpdate) => {}),
   seedTemplateSkills: vi.fn(async () => ({ completedNow: true, skills: [] })),
   toolsetsAvailable: false,
   customMcpConfigs: [] as CustomMcpConfig[],
@@ -112,6 +113,7 @@ vi.mock('../../../maker-host/custom-mcp-store.js', async (importOriginal) => ({
   listCustomMcpServers: async () => h.customMcpConfigs,
 }));
 vi.mock('../../../maker-host/index.js', () => ({
+  validateBotCapabilityAdditions: h.validateCapabilityAdditions,
   getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
   getPluginRegistry: () => ({
     getPlugins: () => ['memory', 'xdt_helper', 'contacts', 'lsp'].map((id) => ({ id, name: id, description: id })),
@@ -424,6 +426,7 @@ const { list: findBotCapabilities, select: selectBotCapability } = createBotCapa
 
 beforeEach(async () => {
   h.toolsetsAvailable = false;
+  h.validateCapabilityAdditions.mockReset().mockResolvedValue(undefined);
   h.customMcpConfigs = [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.invalid/private', headers: { Authorization: 'FAKE_SECRET' } }];
   h.mcpProviders = [
     { name: 'cindy_helper', toClaudeSdkConfig: () => ({ type: 'sdk' }) },
@@ -1655,6 +1658,95 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
     await expect(selectBotCapability({ callerSessionId, kind: 'mcp', id: 'shared-docs', joined: false })).resolves.toMatchObject({ ok: true, joined: false });
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
+  });
+
+  it.each(['skill', 'toolset-global', 'toolset-provider', 'mcp'] as const)(
+    'revalidates newly added %s at the settings save boundary without blocking old references', async (scenario) => {
+      const created = await invoke('local-db:bots:create-canonical-session', {
+        botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1,
+      });
+      let available = true;
+      const kind = scenario.startsWith('toolset') ? 'toolset' as const : scenario as 'skill' | 'mcp';
+      const id = kind === 'skill' ? 'release-check' : kind === 'toolset' ? 'contacts' : 'shared-docs';
+      const field = kind === 'skill' ? 'skills' : kind === 'toolset' ? 'toolsets' : 'mcpServers';
+      const patch = (ids: string[]) => kind === 'skill' ? { skills: ids } : { capabilities: { [field]: ids } };
+      const listAgentSkills = vi.fn(async (_agentKind: AgentKind, opts: { forceReload?: boolean }) => ({
+        skills: available || !opts.forceReload
+          ? [{ kind: 'agent-skill' as const, source: 'user' as const, name: 'release-check', enabled: true }] : [],
+      }));
+      const resolveBotAgentKind = vi.fn(capabilityDeps.resolveBotAgentKind);
+      const service = createBotCapabilityService({
+        ...capabilityDeps, resolveBotAgentKind,
+        getMaker: () => ({ listAgentSkills }),
+        getPluginRegistry: () => ({
+          getPlugins: getPluginRegistry().getPlugins,
+          getEnableState: async (id, workingDir) => ({
+            ...await getPluginRegistry().getEnableState(id, workingDir),
+            effectiveEnabled: scenario !== 'toolset-global' || available,
+          }),
+        }),
+        isBotToolsetAvailable: () => scenario !== 'toolset-provider' || available,
+        listMcpServers: async (input) => available ? capabilityDeps.listMcpServers(input) : [],
+      });
+      h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+      await expect(service.list({ callerSessionId: created.session.id, kind })).resolves.toMatchObject({
+        capabilities: expect.arrayContaining([expect.objectContaining({ id, available: true })]),
+      });
+      available = false;
+      await expect(service.select({ callerSessionId: created.session.id, kind, id, joined: true }))
+        .resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+      await expect(invoke('local-db:bots:update', { id: 'bot-1', name: 'Unsaved name', ...patch([id]) }))
+        .rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      expect(h.sqlite!.prepare('SELECT current_version, display_name FROM bot_profiles WHERE id = ?').get('bot-1'))
+        .toEqual({ current_version: 1, display_name: 'Release Bot' });
+      if (kind === 'skill') expect(listAgentSkills).toHaveBeenLastCalledWith('pi', expect.objectContaining({ forceReload: true }));
+      available = true;
+      await expect(invoke('local-db:bots:update', { id: 'bot-1', ...patch([id]) })).resolves.toMatchObject({ currentVersion: 2 });
+      available = false;
+      resolveBotAgentKind.mockClear();
+      // Retaining a now-unavailable reference must not prevent an unrelated edit or removal.
+      await expect(invoke('local-db:bots:update', { id: 'bot-1', name: 'Saved name', ...patch([id]) })).resolves.toMatchObject({ name: 'Saved name' });
+      await expect(invoke('local-db:bots:update', { id: 'bot-1', ...patch([]) })).resolves.toBeTruthy();
+      expect(resolveBotAgentKind).not.toHaveBeenCalled();
+    },
+  );
+
+  it('validates a settings grant against the model chain saved in the same update', async () => {
+    h.customMcpConfigs.push({ id: 'events', name: 'Events', transport: 'sse', url: 'https://example.invalid/sse', headers: {} });
+    await refreshCustomMcpProviders();
+    const chain: BotModelRoute[] = [{ harness: 'claude', model: 'claude-x', providerId: null, effort: '', fastMode: false }];
+    await invoke('local-db:bots:update', { id: 'bot-1', capabilities: { modelChain: chain } });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    const apply = vi.fn();
+    const reconcile = createBotModelRouteReconciler({ ownerEpoch: () => h.ownerScopeKey,
+      read: async () => ({ chain, current: { agentKind: 'claude-code', model: 'claude-x', providerId: null, effort: null, fastMode: false }, hasRuntimeOverride: true }), apply });
+    const resolveBotAgentKind = vi.fn(async (id: string, draft?: BotModelRoute[]) => (await reconcile.preview(id, draft))?.agentKind ?? null);
+    const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind });
+    h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+    const next = [{ ...chain[0]!, harness: 'codex', model: 'codex-x' }];
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { modelChain: next, mcpServers: ['events'] } }))
+      .rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(resolveBotAgentKind).toHaveBeenLastCalledWith(created.session.id, next);
+    expect(h.sqlite!.prepare('SELECT current_version FROM bot_profiles WHERE id = ?').pluck().get('bot-1')).toBe(2);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it.each(['owner', 'version'])('does not commit a validated settings grant after an in-flight %s change', async (change) => {
+    await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1,
+    });
+    const service = createBotCapabilityService({ ...capabilityDeps,
+      listMcpServers: async (input) => {
+        if (change === 'owner') h.ownerScopeKey = 'another-owner';
+        else h.sqlite!.prepare('UPDATE bot_profiles SET current_version = current_version + 1 WHERE id = ?').run('bot-1');
+        return capabilityDeps.listMcpServers(input);
+      },
+    });
+    h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] } })).rejects.toBeTruthy();
+    expect(h.sqlite!.prepare('SELECT COUNT(*) FROM bot_profile_versions WHERE bot_id = ?').pluck().get('bot-1')).toBe(1);
   });
 
   it('validates model-side grants against the next configured route while the old turn is running', async () => {

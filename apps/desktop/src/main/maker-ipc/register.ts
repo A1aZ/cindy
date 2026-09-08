@@ -10659,8 +10659,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   });
 
-  setBotCapabilityAgentKindResolver(async (sessionId) =>
-    (await reconcileBotModelRoute.preview(sessionId))?.agentKind ?? null);
+  setBotCapabilityAgentKindResolver(async (sessionId, chain) =>
+    (await reconcileBotModelRoute.preview(sessionId, chain))?.agentKind ?? null);
 
   const readBotFallbackCandidate = async (
     sessionId: string,

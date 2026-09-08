@@ -57,7 +57,7 @@ import {
 } from '../maker-ipc/botProfileRuntime.js';
 import { collectBotOwnSkillMounts } from '../maker-ipc/botSkillService.js';
 import { buildBotMcpCatalog } from './botMcpCatalog.js';
-import { createBotCapabilityService, type BotCapabilityServiceDeps } from '../maker-ipc/botCapabilityService.js';
+import { createBotCapabilityService, type BotCapabilityServiceDeps, type BotCapabilityUpdate } from '../maker-ipc/botCapabilityService.js';
 import {
   botProfileDir,
   ensureBotContentDirs,
@@ -746,6 +746,19 @@ export async function listBotRuntimeMcpServers({ agentKind }: { agentKind: Agent
   });
 }
 
+function createDesktopBotCapabilityService() {
+  return createBotCapabilityService({
+    getMaker, getPluginRegistry, isBotToolsetAvailable,
+    listMcpServers: listBotRuntimeMcpServers,
+    resolveBotAgentKind: async (sessionId, chain) => _resolveBotCapabilityAgentKind?.(sessionId, chain) ?? null,
+  });
+}
+
+/** Settings IPC reuses the model-side catalog at its save boundary. */
+export async function validateBotCapabilityAdditions(update: BotCapabilityUpdate): Promise<void> {
+  await createDesktopBotCapabilityService().validateAdditions(update);
+}
+
 /** Get the plugin registry singleton (delegates to plugins/index.ts module-level cache). */
 export function getPluginRegistry() {
   return createPluginRegistry();
@@ -863,11 +876,7 @@ export function getMaker(): Maker {
     };
 
     const makerMemoryProviderDeps = {
-      botCapabilities: createBotCapabilityService({
-        getMaker, getPluginRegistry, isBotToolsetAvailable,
-        listMcpServers: listBotRuntimeMcpServers,
-        resolveBotAgentKind: async (sessionId) => _resolveBotCapabilityAgentKind?.(sessionId) ?? null,
-      }),
+      botCapabilities: createDesktopBotCapabilityService(),
       createMediaDownloadContext: (sessionId: string, sessionInstanceId: string) => {
         const session = _maker?.getSession(sessionId);
         if (!session || session.instanceId !== sessionInstanceId) return undefined;

@@ -78,7 +78,7 @@ import {
 import { botSessionLinks, sessions } from '../localDb/schema.js';
 
 export interface DesktopMcpProvidersDeps {
-  botCapabilities: ReturnType<typeof createBotCapabilityService>;
+  botCapabilities: Pick<ReturnType<typeof createBotCapabilityService>, 'list' | 'select'>;
   createMediaDownloadContext?: CindyGhostsHostDeps['createMediaDownloadContext'];
   /** 当前 Desktop 版本，供 Forge 为具体插件包生成默认 minCindyVersion。 */
   getAppVersion?: () => string;

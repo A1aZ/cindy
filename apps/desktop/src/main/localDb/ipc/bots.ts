@@ -84,7 +84,8 @@ import { BOT_DELEGATION_CLIENT_ID } from '../../../shared/botCollaboration.js';
 
 import { botInvitationProgress } from '../../../shared/botInvitation.js';
 import { queueBotInvitation as enqueueBotInvitation } from '../../maker-ipc/botInvitation.js';
-import { getMakerIfReady } from '../../maker-host/index.js';
+import { getMakerIfReady, validateBotCapabilityAdditions } from '../../maker-host/index.js';
+import type { BotCapabilityUpdate } from '../../maker-ipc/botCapabilityService.js';
 import { getResolvedMainLocale } from '../../i18n.js';
 import { broadcastBotRemoteResourceChanged } from '../../maker-ipc/botRemoteResourceInvalidation.js';
 
@@ -1078,7 +1079,8 @@ export async function createBotProfile(raw: unknown) {
 }
 
 /** Shared profile mutation for trusted settings and owner-bound capability selection. */
-export async function updateBotProfile(raw: unknown, expectedVersion?: number) {
+export async function updateBotProfile(raw: unknown, expectedVersion?: number,
+  validateAdditions?: (update: BotCapabilityUpdate) => Promise<void>) {
   const body =
     raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const id = readText(body.id, 'botId', 128, true);
@@ -1191,6 +1193,11 @@ export async function updateBotProfile(raw: unknown, expectedVersion?: number) {
     previousIdentitySource: version?.identitySource ?? '',
     nextIdentitySource,
   });
+  // Only the renderer save boundary needs this hook; model-side selections already validate
+  // before calling this function. Both paths retain the transaction's profile-version CAS.
+  await validateAdditions?.({ botId: id, canonicalSessionId: current.canonicalSessionId,
+    previous, next: normalizedNextConfig });
+  owner.assertCurrent();
   await client.tx('bots.updateProfile', {
     id,
     ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
@@ -1425,7 +1432,7 @@ export function registerBotIpc(): void {
 
   ipcMain.handle('local-db:bots:update', async (event, raw: unknown) => {
     assertTrustedAppRendererEvent(event);
-    return updateBotProfile(raw);
+    return updateBotProfile(raw, undefined, validateBotCapabilityAdditions);
   });
 
   const createBotCanonicalSessionUnlocked = async (

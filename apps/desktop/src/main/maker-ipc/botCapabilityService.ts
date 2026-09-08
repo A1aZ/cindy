@@ -9,16 +9,25 @@ import type { AgentKind, Maker } from '@cindy/maker-core';
 import type { PluginRegistry } from '../maker-host/plugins/plugin-registry.js';
 import type { BotToolsetContext } from '../../shared/botRemoteCapabilities.js';
 import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
+import type { BotModelRoute } from '../../shared/botModelChain.js';
+import { readEffectiveBotModelChain } from '../maker-host/bot-model-chain-settings-store.js';
+import { throwIpcError } from '../utils/ipcValidate.js';
 
 type Kind = 'skill' | 'mcp' | 'toolset';
 type Input = { callerSessionId: string; kind: Kind };
 type Entry = { id: string; name: string; description: string; available: boolean; joined: boolean };
 export interface BotCapabilityServiceDeps {
   getMaker: () => Pick<Maker, 'listAgentSkills'>;
-  resolveBotAgentKind: (sessionId: string) => Promise<AgentKind | null>;
+  resolveBotAgentKind: (sessionId: string, modelChain?: BotModelRoute[]) => Promise<AgentKind | null>;
   getPluginRegistry: () => Pick<PluginRegistry, 'getPlugins' | 'getEnableState'>;
   isBotToolsetAvailable: (input: BotToolsetContext & { toolsetId: string }) => boolean;
   listMcpServers: NonNullable<BotProfileRuntimeDeps['listMcpServers']>;
+}
+export interface BotCapabilityUpdate {
+  botId: string;
+  canonicalSessionId: string | null;
+  previous: Record<string, unknown>;
+  next: Record<string, unknown>;
 }
 const fields: Record<Kind, { list: string; mode: string }> = {
   skill: { list: 'skills', mode: 'skillMode' },
@@ -83,13 +92,14 @@ async function context(callerSessionId: string) {
   return { ...row, config, assertOwner };
 }
 
-async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>, deps: BotCapabilityServiceDeps): Promise<Entry[]> {
+async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>, deps: BotCapabilityServiceDeps,
+  options?: { modelChain?: BotModelRoute[]; forceReload?: boolean }): Promise<Entry[]> {
   const joined = new Set(strings(ctx.config[fields[input.kind].list]).filter(
     (id) => input.kind !== 'toolset' || !BOT_BASELINE_PLUGIN_IDS.has(id),
   ));
   const { getMaker, getPluginRegistry, isBotToolsetAvailable } = deps;
   // Grants apply next turn, so use the same preview as settings and send-time reconciliation.
-  const agentKind = await deps.resolveBotAgentKind(input.callerSessionId);
+  const agentKind = await deps.resolveBotAgentKind(input.callerSessionId, options?.modelChain);
   ctx.assertOwner();
   if (!agentKind) throw new Error('Bot next-turn route is unavailable');
   const workingDir = ctx.workingDir ?? '';
@@ -98,6 +108,7 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>, d
     const result = await getMaker().listAgentSkills(agentKind, {
       workingDir,
       remoteHostId: ctx.remoteHostId ?? undefined,
+      ...(options?.forceReload ? { forceReload: true } : {}),
     });
     items = result.skills.map((skill) => ({
       id: skill.name,
@@ -181,7 +192,7 @@ async function selectBotCapability(input: Input & { id: string; joined: boolean 
     const field = fields[input.kind];
     const previous = strings(ctx.config[field.list]);
     if (input.joined) {
-      const item = (await catalog(input, ctx, deps)).find((entry) => entry.id === input.id);
+      const item = (await catalog(input, ctx, deps, { forceReload: true })).find((entry) => entry.id === input.id);
       if (!item?.available)
         return {
           ok: false as const,
@@ -213,5 +224,30 @@ export function createBotCapabilityService(deps: BotCapabilityServiceDeps) {
   return {
     list: (input: Input & { query?: string }) => findBotCapabilities(input, deps),
     select: (input: Input & { id: string; joined: boolean }) => selectBotCapability(input, deps),
+    /** Renderer saves may contain stale selections; validate only new references before persistence. */
+    async validateAdditions(update: BotCapabilityUpdate): Promise<void> {
+      const additions = (Object.keys(fields) as Kind[]).map((kind) => {
+        const field = fields[kind].list;
+        const previous = new Set(strings(update.previous[field]));
+        return { kind, ids: strings(update.next[field]).filter((id) => !previous.has(id)) };
+      }).filter((entry) => entry.ids.length > 0);
+      if (additions.length === 0) return;
+      try {
+        if (!update.canonicalSessionId) throw new Error('Missing canonical task');
+        const ctx = await context(update.canonicalSessionId);
+        if (ctx.botId !== update.botId) throw new Error('Canonical task owner mismatch');
+        const modelChain = readEffectiveBotModelChain(update.next);
+        for (const { kind, ids } of additions) {
+          const entries = await catalog({ callerSessionId: update.canonicalSessionId, kind }, ctx, deps,
+            { modelChain, forceReload: true });
+          if (ids.some((id) => !entries.some((entry) => entry.id === id && entry.available))) {
+            throw new Error('Capability unavailable');
+          }
+        }
+        ctx.assertOwner();
+      } catch {
+        throwIpcError('PRECONDITION_FAILED', '所选能力已不可用或伙伴状态已变化，请刷新后重试');
+      }
+    },
   };
 }

@@ -105,6 +105,19 @@ describe('mobile:sim takeover and JSON arguments', () => {
       platform: 'linux',
     })).toEqual({ confirmed: true, worktree: '/Repo', isTarget: false });
   });
+
+  it('restarts a target Metro when its persisted region differs', () => {
+    expect(resolveSimMetroHandoff({
+      currentSource: 'branch@commit', runningSource: 'branch@commit',
+      currentRegion: 'global', runningRegion: 'cn',
+      listener: { confirmed: true, isTarget: true }, listenerWorktreeExists: true,
+    })).toMatchObject({ action: 'refuse', code: 'target-region-stale' });
+    expect(resolveSimMetroHandoff({
+      takeover: true, currentSource: 'branch@commit', runningSource: 'branch@commit',
+      currentRegion: 'global', runningRegion: 'cn',
+      listener: { confirmed: true, isTarget: true }, listenerWorktreeExists: true,
+    })).toMatchObject({ action: 'restart', code: 'target-region' });
+  });
 });
 
 describe('mobile:sim Metro handoff', () => {

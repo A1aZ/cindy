@@ -155,6 +155,7 @@ export function probeMetroOwnership(port, options = {}) {
     launcherPid: Number.isInteger(owner.launcherPid) ? owner.launcherPid : owner.pid,
     cwd: owner.worktreeRoot ? join(owner.worktreeRoot, 'apps/mobile') : null,
     source: owner.source ?? null,
+    region: owner.region ?? null,
   };
 }
 

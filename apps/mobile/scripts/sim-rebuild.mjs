@@ -199,6 +199,12 @@ async function ensureMetroOwnershipBeforeLaunch(packageName) {
     console.error('Restart Metro with pnpm mobile:sim:start before launching the app.');
     return false;
   }
+  if (ownership.region !== region) {
+    console.log(`\nNative package installed (${packageName}).`);
+    console.error(`Metro on 8081 uses region ${ownership.region || '(unknown)'}, but this build requested ${region}.`);
+    console.error('Restart Metro with the matching --region before launching the app.');
+    return false;
+  }
   return true;
 }
 

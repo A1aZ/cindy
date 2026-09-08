@@ -123,6 +123,8 @@ if (portArgs.port === DEFAULT_PORT) {
       envChanged,
       currentSource: sourceIdentity,
       runningSource,
+      currentRegion: process.platform === 'win32' ? region : undefined,
+      runningRegion: process.platform === 'win32' ? ownership?.region : undefined,
       listener,
       listenerWorktreeExists,
     });
@@ -192,6 +194,7 @@ if (portArgs.port === DEFAULT_PORT && Number.isInteger(child.pid)) {
     pid: child.pid,
     launcherPid: child.pid,
     source: sourceIdentity,
+    region,
     worktreeRoot,
   });
   child.once('exit', () => clearMetroOwner(DEFAULT_PORT, child.pid));

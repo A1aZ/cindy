@@ -65,6 +65,8 @@ describe('sim-rebuild script invariants', () => {
     expect(source).toContain('const ownership = probeMetroOwnership(8081);');
     expect(source).toContain('if (!await portInUse(8081)) return true;');
     expect(source).toContain('Metro on 8081 is occupied, but its listener PID could not be verified.');
+    expect(source).toContain('Metro on 8081 uses region');
+    expect(source).toContain('ownership.region');
     expect(source).toContain("import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';");
     expect(source).toContain('const androidTools = process.platform === \'win32\'');
     expect(source).toContain('requireTools: !buildOnly');

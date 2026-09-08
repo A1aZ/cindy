@@ -139,6 +139,8 @@ export function resolveSimMetroHandoff({
   envChanged = false,
   currentSource,
   runningSource,
+  currentRegion,
+  runningRegion,
   listener,
   listenerWorktreeExists = false,
 } = {}) {
@@ -158,18 +160,19 @@ export function resolveSimMetroHandoff({
 
   if (listener.isTarget) {
     if (runningSource === currentSource) {
-      if (envChanged && !takeover) {
+      const regionChanged = currentRegion !== undefined && runningRegion !== currentRegion;
+      if ((envChanged || regionChanged) && !takeover) {
         return {
           action: 'refuse',
-          code: 'target-env-stale',
+          code: regionChanged ? 'target-region-stale' : 'target-env-stale',
           lines: [
             `✗ 已补/改 apps/mobile/.env,但 ${port} 上的 Metro 是用旧 env 启动的(env 在 bundle 时注入)。`,
             '  需要刷新 env 时传 `--takeover` 重起,新 env 才会生效。',
           ],
         };
       }
-      if (envChanged && takeover) {
-        return { action: 'restart', code: 'target-env', lines: [] };
+      if ((envChanged || regionChanged) && takeover) {
+        return { action: 'restart', code: regionChanged ? 'target-region' : 'target-env', lines: [] };
       }
       return {
         action: 'reuse',

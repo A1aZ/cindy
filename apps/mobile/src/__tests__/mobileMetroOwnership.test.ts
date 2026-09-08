@@ -22,7 +22,7 @@ function probe(processes: ProcessEntry[], metadata: object | null = owner, liste
 describe('Windows Metro owner and listener association', () => {
   it('recognizes a listener beneath the pnpm and shell wrappers', () => {
     expect(probe([launcher, wrapper, listener])).toEqual({
-      pid: '300', launcherPid: 100, cwd: join(worktreeRoot, 'apps/mobile'), source: owner.source,
+      pid: '300', launcherPid: 100, cwd: join(worktreeRoot, 'apps/mobile'), source: owner.source, region: null,
     });
   });
 
@@ -80,6 +80,10 @@ describe('Windows Metro owner and listener association', () => {
     })).toBeNull();
     expect(readOwner).not.toHaveBeenCalled();
     expect(processSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('preserves the recorded Metro region for rebuild gates', () => {
+    expect(probe([launcher, wrapper, listener], { ...owner, region: 'cn' })?.region).toBe('cn');
   });
 });
 

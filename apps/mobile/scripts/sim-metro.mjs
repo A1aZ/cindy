@@ -51,6 +51,21 @@ export function listenerPid(port) {
 
 const metroOwnerDir = join(tmpdir(), 'cindy-metro-owners');
 
+/**
+ * Hash the public bundle environment and local config inputs without persisting
+ * their values in the owner file. The owner only needs to answer whether the
+ * running Metro was started with the same inputs as the next invocation.
+ */
+export function metroEnvironmentFingerprint({ env = {}, files = {} } = {}) {
+  const ordered = (value) => Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return createHash('sha256')
+    .update(JSON.stringify({ env: ordered(env), files: ordered(files) }))
+    .digest('hex')
+    .slice(0, 16);
+}
+
 function metroOwnerPath(port) {
   return join(metroOwnerDir, `port-${port}.json`);
 }
@@ -143,7 +158,19 @@ export function probeMetroOwnership(port, options = {}) {
   const pid = (options.listenerPid ?? listenerPid)(port);
   if (!pid) return null;
   if ((options.platform ?? process.platform) !== 'win32') {
-    return { pid, cwd: cwdOfPid(pid), source: gitSourceOfPid(pid) };
+    const cwd = cwdOfPid(pid);
+    const source = gitSourceOfPid(pid);
+    const owner = (options.readOwner ?? readMetroOwner)(port);
+    const worktreeRoot = cwd ? path.resolve(cwd, '../..') : null;
+    const ownerRoot = owner?.worktreeRoot ? path.resolve(owner.worktreeRoot) : null;
+    return {
+      pid,
+      cwd,
+      source,
+      envFingerprint: ownerRoot && ownerRoot === worktreeRoot && owner?.source === source
+        ? owner.envFingerprint ?? null
+        : null,
+    };
   }
   const owner = (options.readOwner ?? readMetroOwner)(port);
   if (!owner || !windowsOwnerOwnsListener(owner, pid,
@@ -156,6 +183,7 @@ export function probeMetroOwnership(port, options = {}) {
     cwd: owner.worktreeRoot ? join(owner.worktreeRoot, 'apps/mobile') : null,
     source: owner.source ?? null,
     region: owner.region ?? null,
+    envFingerprint: owner.envFingerprint ?? null,
   };
 }
 

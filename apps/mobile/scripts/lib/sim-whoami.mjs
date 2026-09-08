@@ -141,6 +141,8 @@ export function resolveSimMetroHandoff({
   runningSource,
   currentRegion,
   runningRegion,
+  currentEnvFingerprint,
+  runningEnvFingerprint,
   listener,
   listenerWorktreeExists = false,
 } = {}) {
@@ -161,7 +163,9 @@ export function resolveSimMetroHandoff({
   if (listener.isTarget) {
     if (runningSource === currentSource) {
       const regionChanged = currentRegion !== undefined && runningRegion !== currentRegion;
-      if ((envChanged || regionChanged) && !takeover) {
+      const environmentChanged = currentEnvFingerprint !== undefined
+        && runningEnvFingerprint !== currentEnvFingerprint;
+      if ((envChanged || regionChanged || environmentChanged) && !takeover) {
         return {
           action: 'refuse',
           code: regionChanged ? 'target-region-stale' : 'target-env-stale',
@@ -171,7 +175,7 @@ export function resolveSimMetroHandoff({
           ],
         };
       }
-      if ((envChanged || regionChanged) && takeover) {
+      if ((envChanged || regionChanged || environmentChanged) && takeover) {
         return { action: 'restart', code: regionChanged ? 'target-region' : 'target-env', lines: [] };
       }
       return {

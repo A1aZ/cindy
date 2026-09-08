@@ -1,10 +1,11 @@
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { probeMetroOwnership, windowsProcessSnapshot } from '../../scripts/sim-metro.mjs';
+import { metroEnvironmentFingerprint, probeMetroOwnership, windowsProcessSnapshot } from '../../scripts/sim-metro.mjs';
 import { classifySimMetroListener, resolveSimMetroHandoff } from '../../scripts/lib/sim-whoami.mjs';
 
 const worktreeRoot = join('/worktrees', 'metro-owner');
-const owner = { pid: 100, launcherPid: 100, worktreeRoot, source: 'branch@commit', recordedAtMs: 1500 };
+const owner = { pid: 100, launcherPid: 100, worktreeRoot, source: 'branch@commit', recordedAtMs: 1500,
+  envFingerprint: 'env-1' };
 type ProcessEntry = { pid: number; parentPid: number; startedAtMs: number };
 const launcher = { pid: 100, parentPid: 1, startedAtMs: 1000 };
 const wrapper = { pid: 200, parentPid: 100, startedAtMs: 1100 };
@@ -22,7 +23,8 @@ function probe(processes: ProcessEntry[], metadata: object | null = owner, liste
 describe('Windows Metro owner and listener association', () => {
   it('recognizes a listener beneath the pnpm and shell wrappers', () => {
     expect(probe([launcher, wrapper, listener])).toEqual({
-      pid: '300', launcherPid: 100, cwd: join(worktreeRoot, 'apps/mobile'), source: owner.source, region: null,
+      pid: '300', launcherPid: 100, cwd: join(worktreeRoot, 'apps/mobile'), source: owner.source,
+      region: null, envFingerprint: owner.envFingerprint,
     });
   });
 
@@ -84,6 +86,32 @@ describe('Windows Metro owner and listener association', () => {
 
   it('preserves the recorded Metro region for rebuild gates', () => {
     expect(probe([launcher, wrapper, listener], { ...owner, region: 'cn' })?.region).toBe('cn');
+  });
+
+  it('preserves the recorded environment fingerprint for reuse gates', () => {
+    expect(probe([launcher, wrapper, listener], { ...owner, envFingerprint: 'env-2' })?.envFingerprint)
+      .toBe('env-2');
+  });
+});
+
+describe('Metro environment fingerprint', () => {
+  it('is stable for reordered inputs and changes when local config changes', () => {
+    const first = metroEnvironmentFingerprint({
+      env: { REGION: 'cn', MANIFEST: 'https://one.invalid' },
+      files: { '.env': 'REGION=cn\n', 'scripts/self-host-regions.json': '{"cn":1}' },
+    });
+    expect(metroEnvironmentFingerprint({
+      env: { MANIFEST: 'https://one.invalid', REGION: 'cn' },
+      files: { 'scripts/self-host-regions.json': '{"cn":1}', '.env': 'REGION=cn\n' },
+    })).toBe(first);
+    expect(metroEnvironmentFingerprint({
+      env: { REGION: 'cn', MANIFEST: 'https://two.invalid' },
+      files: { '.env': 'REGION=cn\n', 'scripts/self-host-regions.json': '{"cn":1}' },
+    })).not.toBe(first);
+    expect(metroEnvironmentFingerprint({
+      env: { REGION: 'cn', MANIFEST: 'https://one.invalid' },
+      files: { '.env': 'REGION=cn\n', 'scripts/self-host-regions.json': '{"cn":2}' },
+    })).not.toBe(first);
   });
 });
 

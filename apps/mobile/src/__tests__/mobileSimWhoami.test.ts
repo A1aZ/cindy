@@ -118,6 +118,19 @@ describe('mobile:sim takeover and JSON arguments', () => {
       listener: { confirmed: true, isTarget: true }, listenerWorktreeExists: true,
     })).toMatchObject({ action: 'restart', code: 'target-region' });
   });
+
+  it('restarts a target Metro when its persisted environment fingerprint differs', () => {
+    expect(resolveSimMetroHandoff({
+      currentSource: 'branch@commit', runningSource: 'branch@commit',
+      currentEnvFingerprint: 'env-new', runningEnvFingerprint: 'env-old',
+      listener: { confirmed: true, isTarget: true }, listenerWorktreeExists: true,
+    })).toMatchObject({ action: 'refuse', code: 'target-env-stale' });
+    expect(resolveSimMetroHandoff({
+      takeover: true, currentSource: 'branch@commit', runningSource: 'branch@commit',
+      currentEnvFingerprint: 'env-new', runningEnvFingerprint: 'env-old',
+      listener: { confirmed: true, isTarget: true }, listenerWorktreeExists: true,
+    })).toMatchObject({ action: 'restart', code: 'target-env' });
+  });
 });
 
 describe('mobile:sim Metro handoff', () => {

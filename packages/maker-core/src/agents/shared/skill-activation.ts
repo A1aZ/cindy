@@ -27,6 +27,21 @@ export function snapshotDisabledSkillLaunch(paths: readonly string[]): DisabledS
     .map((source) => Object.freeze({ path: source, identity: canonicalSkillPath(source) }))) });
 }
 
+/** Add discovery aliases without changing already-frozen source bindings. */
+export function extendDisabledSkillLaunchPaths(
+  snapshot: DisabledSkillLaunchSnapshot,
+  discovered: readonly string[],
+): DisabledSkillLaunchSnapshot {
+  const paths = new Map(snapshot.paths.map((entry) => [entry.path, entry]));
+  for (const source of discovered) {
+    const identity = canonicalSkillPath(source);
+    if (!paths.has(source) && snapshot.identities.includes(identity)) {
+      paths.set(source, Object.freeze({ path: source, identity }));
+    }
+  }
+  return Object.freeze({ identities: snapshot.identities, paths: Object.freeze([...paths.values()]) });
+}
+
 /** Drop stale/retargeted lexical paths immediately before native configuration. */
 export function currentDisabledSkillLaunchPaths(snapshot: DisabledSkillLaunchSnapshot): string[] {
   return snapshot.paths.filter((entry) => canonicalSkillPath(entry.path) === entry.identity)

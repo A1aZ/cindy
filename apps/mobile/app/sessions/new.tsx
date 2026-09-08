@@ -698,6 +698,7 @@ export default function NewRemoteSessionScreen() {
   const userTouchedWorkspaceRef = useRef(false);
   const firstMessageRef = useRef(draft.firstMessage);
   const firstMessageSelectionRef = useRef({ start: draft.firstMessage.length, end: draft.firstMessage.length });
+  const [firstMessageSelection, setFirstMessageSelection] = useState(firstMessageSelectionRef.current);
   const firstMessageInputRef = useRef<NativeTextInput>(null);
   const voiceDraftScrollRef = useRef<ScrollView>(null);
   const voiceRecordingActiveRef = useRef(false);
@@ -3219,7 +3220,10 @@ export default function NewRemoteSessionScreen() {
         localVoiceInputHistory,
         readCurrentDraft: () => firstMessageRef.current,
         onDraftChanged: (text, selection) => {
-          if (selection) firstMessageSelectionRef.current = selection;
+          if (selection) {
+            firstMessageSelectionRef.current = selection;
+            setFirstMessageSelection(selection);
+          }
           setFirstMessageDraft(text);
         },
         onStateChanged: setVoiceState,
@@ -5866,7 +5870,9 @@ export default function NewRemoteSessionScreen() {
                   onChangeText={setFirstMessageDraft}
                   onSelectionChange={(event) => {
                     if (!voiceRecordingActiveRef.current && !voiceStopInFlightRef.current) {
-                      firstMessageSelectionRef.current = event.nativeEvent.selection;
+                      const selection = event.nativeEvent.selection;
+                      firstMessageSelectionRef.current = selection;
+                      setFirstMessageSelection(selection);
                     }
                   }}
                   onContentSizeChange={handleFirstMessageInputContentSizeChange}
@@ -5881,6 +5887,7 @@ export default function NewRemoteSessionScreen() {
                   placeholderTextColor={colors.textTertiary}
                   resizeHandle={composerCardActive ? renderComposerResizeHandle() : null}
                   scrollEnabled={composerInputScrollEnabled}
+                  selection={firstMessageSelection}
                   selectionColor={colors.inputCaret}
                   testID="newSession.actions"
                   toolbar={renderComposerToolbar()}

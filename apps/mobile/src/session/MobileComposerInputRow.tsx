@@ -154,6 +154,7 @@ export interface MobileComposerInputRowProps {
   onPressIn?: TextInputProps['onPressIn'];
   placeholder: string;
   placeholderTextColor: string;
+  selection?: TextInputProps['selection'];
   /** 顶部居中的拖拽调高 grabber（ComposerResizeGrabber），absolute 定位不占布局空间。 */
   resizeHandle?: ReactNode;
   rowStyle?: StyleProp<ViewStyle>;
@@ -215,6 +216,7 @@ export function MobileComposerInputRow({
   onPressIn,
   placeholder,
   placeholderTextColor,
+  selection,
   resizeHandle,
   rowStyle,
   scrollEnabled,
@@ -271,6 +273,7 @@ export function MobileComposerInputRow({
       placeholder={placeholder}
       placeholderTextColor={placeholderTextColor}
       scrollEnabled={scrollEnabled}
+      selection={selection}
       selectionColor={selectionColor}
       style={[
         styles.input,

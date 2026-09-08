@@ -64,7 +64,7 @@ const hiddenStyle = findOne((node): node is ts.PropertyAssignment =>
   ts.isPropertyAssignment(node) && node.name.getText(source) === 'inputVoiceHidden');
 const composer = findOne((node): node is ts.JsxSelfClosingElement =>
   ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'MobileComposerInputRow');
-const propNames = ['inputStyle', 'caretHidden', 'value', 'placeholder', 'onPressIn'];
+const propNames = ['inputStyle', 'caretHidden', 'value', 'placeholder', 'selection', 'onPressIn'];
 const expressions = propNames.map((name) => {
   const prop = composer.attributes.properties.find((node) =>
     ts.isJsxAttribute(node) && node.name.getText(source) === name);
@@ -75,7 +75,7 @@ const expressions = propNames.map((name) => {
   return `${name}: ${prop.initializer.expression.getText(source)}`;
 });
 const compiled = ts.transpileModule(`function pageProps(bindings) {
-  const { Platform, voiceIsListening, draft, finishVoiceRecording, composerPlaceholder } = bindings;
+  const { Platform, voiceIsListening, draft, finishVoiceRecording, composerPlaceholder, firstMessageSelection } = bindings;
   const styles = { inputVoiceHidden: ${hiddenStyle.initializer.getText(source)} };
   return { ${expressions.join(',\n')} };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -91,14 +91,15 @@ function mountInput() {
   const ref = createRef<HTMLTextAreaElement>();
   const finishVoiceRecording = vi.fn();
   root = createRoot(container);
-  function render(listening: boolean, draft: string) {
+  function render(listening: boolean, draft: string, selection = { start: draft.length, end: draft.length }) {
     const colors = palettes[native.mode];
     act(() => root!.render(createElement(MobileComposerInputRow, {
       accessibilityLabel: 'Draft', inputTestID: 'draft', inputRef: ref,
       placeholder: 'Draft', placeholderTextColor: colors.textTertiary,
       value: draft, onChangeText: vi.fn(), onPasteImages: vi.fn(),
       ...pageProps({ Platform: { OS: native.platform }, voiceIsListening: listening,
-        draft: { firstMessage: draft }, finishVoiceRecording, composerPlaceholder: 'Draft' }),
+        draft: { firstMessage: draft }, firstMessageSelection: selection,
+        finishVoiceRecording, composerPlaceholder: 'Draft' }),
       inputOverlay: listening ? createElement('span', { 'data-testid': 'preview' }, draft) : null,
     })));
   }
@@ -128,6 +129,7 @@ describe.each(['light', 'dark'] as const)('new-session dictation input (%s)', (m
       expect(input.inputStyle().display).not.toBe('none');
       expect(native.props.caretHidden).toBe(true);
       expect(native.props.placeholder).toBe('');
+      expect(native.props.selection).toEqual({ start: draft.length, end: draft.length });
       expect(input.container.querySelector('[data-testid="preview"]')?.textContent).toBe(draft);
     }
     act(() => original!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
@@ -139,6 +141,7 @@ describe.each(['light', 'dark'] as const)('new-session dictation input (%s)', (m
     expect(input.inputStyle().opacity ?? 1).toBe(1);
     expect(input.inputStyle().color).toBe(palettes[mode].textPrimary);
     expect(native.props.caretHidden).toBe(false);
+    expect(native.props.selection).toEqual({ start: 'before hello\nworld suffix'.length, end: 'before hello\nworld suffix'.length });
     expect(input.container.querySelector('[data-testid="preview"]')).toBeNull();
     act(() => original!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
     expect(input.finishVoiceRecording).toHaveBeenCalledOnce();
@@ -153,5 +156,15 @@ describe.each(['light', 'dark'] as const)('new-session dictation input (%s)', (m
     expect(input.inputStyle().opacity ?? 1).toBe(1);
     input.render(false, 'dictation');
     expect(input.inputStyle().color).toBe(palettes[mode].textPrimary);
+  });
+
+  it('keeps the post-dictation insertion point when Android returns to typing', () => {
+    native.platform = 'android';
+    native.mode = mode;
+    const input = mountInput();
+    input.render(true, '甲新词乙', { start: 4, end: 4 });
+    expect(native.props.selection).toEqual({ start: 4, end: 4 });
+    input.render(false, '甲新词乙', { start: 4, end: 4 });
+    expect(native.props.selection).toEqual({ start: 4, end: 4 });
   });
 });

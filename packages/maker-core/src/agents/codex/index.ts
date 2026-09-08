@@ -41,7 +41,7 @@ import {
   type SendOptions,
   type TurnPermissionPolicy,
 } from '../base-agent.js';
-import { skillEntryPath } from '../shared/skill-activation.js';
+import { skillEntryPath, snapshotDisabledSkillPaths } from '../shared/skill-activation.js';
 import type { AgentCredentialMode } from '../../interfaces/auth-adapter.js';
 import type {
   Capabilities,
@@ -4824,6 +4824,7 @@ export class CodexAgent extends BaseAgent {
     );
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
+    const disabledSkillSnapshot = snapshotDisabledSkillPaths(disabledSkillPaths);
     if (disabledSkillPaths.length > 0) {
       try {
         const response = await host.request<{ config?: Record<string, unknown> }>(
@@ -11940,7 +11941,7 @@ export class CodexAgent extends BaseAgent {
     }
     // ── AgentSessionHandle ──────────────────────────────────────────────────
     const handle: AgentSessionHandle = {
-      disabledSkillPaths: Object.freeze([...disabledSkillPaths]),
+      disabledSkillPaths: disabledSkillSnapshot,
       reviewAutoPermissionAction: async (action) => {
         const decision = await reviewAutoAction(action);
         if (decision.unavailable) autoReviewUnavailableNotice.notify();

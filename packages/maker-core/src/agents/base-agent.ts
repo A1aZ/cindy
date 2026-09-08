@@ -7,7 +7,7 @@
  * - 持有依赖注入的 deps，但具体使用由子类决定
  */
 
-import { isSkillDisabled } from './shared/skill-activation.js';
+import { canonicalSkillPath, isSkillDisabled } from './shared/skill-activation.js';
 
 import type {
   AgentEvent,
@@ -1947,7 +1947,7 @@ export interface CodexContextWindowInfo {
  * 上层 Session 类持有此句柄并对外暴露 UI 友好的 API。
  */
 export interface AgentSessionHandle {
-  /** Cindy Skill preference snapshot used to configure this native runtime. */
+  /** Canonical physical Skill identities frozen at native runtime startup. */
   readonly disabledSkillPaths?: readonly string[];
   getCodexContextWindowInfo?(): Promise<CodexContextWindowInfo | null>;
   /** SDK 内部 sessionId，session.started 后会回填 */
@@ -2327,7 +2327,8 @@ export abstract class BaseAgent {
   filterActiveSkillCommands(result: ListAgentSkillsResult, remoteHostId?: string, snapshot?: readonly string[]): ListAgentSkillsResult {
     const disabled = remoteHostId ? [] : snapshot ?? this.deps.getDisabledSkillPaths?.() ?? [];
     if (disabled.length === 0) return result;
-    return { ...result, skills: result.skills.filter((skill) => !skill.path || !isSkillDisabled(skill.path, disabled)) };
+    return { ...result, skills: result.skills.filter((skill) => !skill.path || !(snapshot
+      ? disabled.includes(canonicalSkillPath(skill.path)) : isSkillDisabled(skill.path, disabled))) };
   }
 
 

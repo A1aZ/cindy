@@ -4,12 +4,15 @@ import {
   mkdtempSync,
   promises as fsPromises,
   realpathSync,
+  symlinkSync,
+  unlinkSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { snapshotDisabledSkillPaths } from './agents/shared/skill-activation.js';
 import { Maker, type CreateSessionOptions } from './maker.js';
 import { Session } from './session.js';
 import { createAsyncQueue } from './agents/shared/async-queue.js';
@@ -137,7 +140,7 @@ describe('Maker Pi managed-package skill boundary', () => {
     let disabled: string[] = [source];
     const agent = createAgent(async (opts) => ({
       ...createHandle({ id: opts.sessionId ?? 'fixture', agentKind }),
-      disabledSkillPaths: Object.freeze([...disabled]),
+      disabledSkillPaths: snapshotDisabledSkillPaths(disabled),
     }), agentKind);
     agent.listAgentSkills = vi.fn(async () => ({ skills: [{
       kind: 'agent-skill' as const, name: 'demo', source: 'skill' as const, path: source,
@@ -155,6 +158,36 @@ describe('Maker Pi managed-package skill boundary', () => {
     expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo' })).skills).toEqual([]);
     expect((await maker.listAgentSkills(agentKind, { workingDir: '/repo', sessionId: 'enabled-start' })).skills).toHaveLength(1);
     await maker.shutdown();
+  });
+
+  it.each(['claude-code', 'codex', 'pi'] as const)('keeps %s disabled identities stable after alias retargeting', async (agentKind) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cindy-disabled-snapshot-'));
+    const a = path.join(root, 'a');
+    const b = path.join(root, 'b');
+    const alias = path.join(root, 'alias');
+    mkdirSync(a);
+    mkdirSync(b);
+    symlinkSync(a, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const agent = createAgent(async (opts) => ({
+      ...createHandle({ id: opts.sessionId ?? 'fixture', agentKind }),
+      disabledSkillPaths: snapshotDisabledSkillPaths([alias]),
+    }), agentKind);
+    agent.listAgentSkills = vi.fn(async () => ({ skills: [a, b].map((source) => ({
+      kind: 'agent-skill' as const, name: path.basename(source), source: 'skill' as const, path: source,
+    })) }));
+    agent.filterActiveSkillCommands = (result, remoteHostId, snapshot) => BaseAgent.prototype.filterActiveSkillCommands.call(
+      { deps: { getDisabledSkillPaths: () => [alias] } } as unknown as BaseAgent, result, remoteHostId, snapshot,
+    );
+    const maker = new Maker({ agents: { [agentKind]: agent }, storage: createStorage(), logger: createLogger() });
+    try {
+      await maker.createSession({ id: 'stable-disabled', agentKind, workingDir: root, model: 'm' });
+      unlinkSync(alias);
+      symlinkSync(b, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      const live = await maker.listAgentSkills(agentKind, { workingDir: root, sessionId: 'stable-disabled' });
+      expect(live.skills.map((skill) => skill.name)).toEqual(['b']);
+      const preview = await maker.listAgentSkills(agentKind, { workingDir: root });
+      expect(preview.skills.map((skill) => skill.name)).toEqual(['a']);
+    } finally { await maker.shutdown(); rmSync(root, { recursive: true, force: true }); }
   });
 
   it('allows package skills only for previews and ordinary local Pi tasks', async () => {

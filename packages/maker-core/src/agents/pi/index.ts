@@ -1,3 +1,4 @@
+import { snapshotDisabledSkillPaths } from '../shared/skill-activation.js';
 /**
  * PiAgent —— pi coding agent(earendil-works/pi)接入。
  *
@@ -3047,6 +3048,7 @@ export class PiAgent extends BaseAgent {
     // approval from permission mode, MCP/plugin state, or caller vendor options.
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
+    const disabledSkillSnapshot = snapshotDisabledSkillPaths(disabledSkillPaths);
     let projectResourceAssembly = unavailablePiProjectResourceAssembly(
       reviewMode ? 'review-mode-project-resources-disabled' : 'approval-resolver-unavailable',
     );
@@ -5812,7 +5814,7 @@ export class PiAgent extends BaseAgent {
       getRuntimeCapabilities() {
         return runtimeCapabilityManifest;
       },
-      disabledSkillPaths: Object.freeze([...disabledSkillPaths]),
+      disabledSkillPaths: disabledSkillSnapshot,
       onRuntimeCapabilitiesChange(listener) {
         if (closed) {
           notifyRuntimeCapabilityListener(listener, undefined);

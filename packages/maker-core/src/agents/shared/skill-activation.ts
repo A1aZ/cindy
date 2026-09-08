@@ -10,6 +10,11 @@ export function canonicalSkillPath(value: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+/** Freeze physical identities before asynchronous native runtime startup. */
+export function snapshotDisabledSkillPaths(paths: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set(paths.map(canonicalSkillPath))]);
+}
+
 export function isSkillDisabled(source: string, disabledPaths: readonly string[]): boolean {
   const key = canonicalSkillPath(source);
   return disabledPaths.some((candidate) => canonicalSkillPath(candidate) === key);

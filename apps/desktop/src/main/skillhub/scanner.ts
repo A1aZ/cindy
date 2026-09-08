@@ -1,5 +1,5 @@
 import { isCindySkillEnabled, renameSkillWithActivation } from './activationPreferences';
-import { tryAcquireSkillInstallLock } from './installLock';
+import { skillInstallLockKey, tryAcquireSkillInstallLock } from './installLock';
 import { inspectLocalSkillTarget, isPluginManagedSkillPath } from './localSkillTarget';
 /**
  * SkillHub Scanner — 商店层 (registry / market) 视图组装。
@@ -872,7 +872,7 @@ export async function renameLocalSkill(params: {
   }
 
   const releases: Array<() => void> = [];
-  for (const name of [oldName, newName]) {
+  for (const name of new Set([oldName, newName].map(skillInstallLockKey))) {
     const release = tryAcquireSkillInstallLock(name, 'local-rename');
     if (!release) {
       releases.forEach((unlock) => unlock());

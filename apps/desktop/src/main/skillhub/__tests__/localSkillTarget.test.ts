@@ -58,6 +58,33 @@ describe('local Skill removal targets', () => {
     });
   });
 
+  it.each([
+    ['.agents', 'skills'], ['.claude', 'skills'], ['.codex', 'skills'],
+    ['.pi', 'skills'], ['.pi', 'agent', 'skills'], ['codex-home', 'skills'], ['pi-agent-home', 'skills'],
+  ])('rejects symlinks in any discovery layout segment (%s)', (...segments) => {
+    for (let linkedIndex = 0; linkedIndex < segments.length; linkedIndex += 1) {
+      const key = `${segments.join('-')}-${linkedIndex}`;
+      const source = directory(`root-checkout-${key}`, ...segments, 'source');
+      const owner = path.join(root, `root-import-${key}`);
+      const linkedAncestor = path.join(owner, ...segments.slice(0, linkedIndex + 1));
+      const actualAncestor = path.join(root, `root-checkout-${key}`, ...segments.slice(0, linkedIndex + 1));
+      fs.mkdirSync(path.dirname(linkedAncestor), { recursive: true });
+      fs.symlinkSync(actualAncestor, linkedAncestor, process.platform === 'win32' ? 'junction' : 'dir');
+      const entry = path.join(owner, ...segments, 'source');
+      expect(fs.lstatSync(entry).isSymbolicLink()).toBe(false);
+      expect(inspectLocalSkillTarget(source, [entry])).toBeNull();
+      expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('test');
+    }
+  });
+
+  it('allows a tracked project alias above the discovery layout', () => {
+    const source = directory('direct-project', '.agents', 'skills', 'source');
+    const projectAlias = path.join(root, 'project-alias');
+    fs.symlinkSync(path.join(root, 'direct-project'), projectAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(inspectLocalSkillTarget(source, [path.join(projectAlias, '.agents', 'skills', 'source')]))
+      .toMatchObject({ operationPath: fs.realpathSync.native(source), linkOnly: false });
+  });
+
   it('detects replacement of a directory after the confirmation snapshot', () => {
     const dir = directory('.claude', 'skills', 'replace');
     const target = inspectLocalSkillTarget(dir, [dir])!;

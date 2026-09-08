@@ -10,9 +10,24 @@ export interface LocalSkillTarget {
   aliases: string[];
 }
 
+const standaloneSkillSuffix = /\/(?:\.(?:claude|agents|codex|pi)\/skills|\.pi\/agent\/skills|(?:codex-home|pi-agent-home)\/skills)\/[^/.][^/]*$/i;
+
 function isStandaloneSkillPath(value: string): boolean {
   const normalized = path.resolve(value).replace(/\\/g, '/');
-  return /\/(?:\.(?:claude|agents|codex|pi)\/skills|\.pi\/agent\/skills|(?:codex-home|pi-agent-home)\/skills)\/[^/.][^/]*$/i.test(normalized);
+  return standaloneSkillSuffix.test(normalized);
+}
+
+function isDirectSkillEntry(value: string): boolean {
+  let current = path.resolve(value);
+  const suffix = current.replace(/\\/g, '/').match(standaloneSkillSuffix)?.[0];
+  if (!suffix) return false;
+  // Check the entry, discovery root and engine config directories. The owner
+  // prefix may itself be a tracked project alias or an OS path such as /var.
+  for (const _segment of suffix.split('/').filter(Boolean)) {
+    if (fs.lstatSync(current).isSymbolicLink()) return false;
+    current = path.dirname(current);
+  }
+  return true;
 }
 
 function targetIdentity(operationPath: string): string {
@@ -51,7 +66,7 @@ export function inspectLocalSkillTarget(source: string, discoveryPaths: readonly
     });
     let operationPath = sourcePath;
     let linkOnly = false;
-    const hasDirectEntry = aliases.some((value) => !fs.lstatSync(value).isSymbolicLink());
+    const hasDirectEntry = aliases.some(isDirectSkillEntry);
     if (!isStandaloneSkillPath(sourcePath) || !hasDirectEntry) {
       // A link into an external checkout is an import reference, not ownership of that checkout.
       // The checkout's own directory layout does not establish local ownership.

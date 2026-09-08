@@ -40,7 +40,7 @@ import {
 import { registryService } from './registry';
 import type { StoredInstall } from './registry/types';
 import { computeFolderHash } from './folderHash';
-import { getSkillInstallLockOwner, tryAcquireSkillInstallLock } from './installLock';
+import { getSkillInstallLockOwner, skillInstallLockKey, tryAcquireSkillInstallLock } from './installLock';
 import {
   prepareSharedGlobalSkillLinks,
   prepareSharedProjectSkillLinks,
@@ -952,7 +952,7 @@ export async function uninstall(
   const releaseLocks: Array<() => void> = [];
   // An imported discovery link can have a different name from its source. Install
   // replaces that entry under its discovery name, so hold both locks through trash.
-  for (const lockName of new Set([skillName, path.basename(target?.operationPath ?? absolutePath)])) {
+  for (const lockName of new Set([skillName, path.basename(target?.operationPath ?? absolutePath)].map(skillInstallLockKey))) {
     const release = tryAcquireSkillInstallLock(lockName, 'market-uninstall');
     if (!release) {
       for (const unlock of releaseLocks) unlock();

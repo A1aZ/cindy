@@ -161,6 +161,9 @@ async function rollbackFailedReuse(meta: WorktreeMeta, newBranch: string): Promi
   const record = await readRecycleRecord(meta.path, meta.sessionId);
   const snapshot = record?.snapshot;
   if (!snapshot) return;
+  // A conflicting file may be a partial copy or a new user edit; we cannot tell.
+  // Let checkout refuse it, preserving the directory, registration and checkpoint.
+  // Do not force checkout or clean unknown files to make rollback succeed.
   if (snapshot.headRef) {
     await gitExec(['checkout', snapshot.headRef.slice('refs/heads/'.length)], meta.path);
   } else {

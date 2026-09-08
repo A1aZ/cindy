@@ -8,6 +8,12 @@ import os from 'node:os';
 import type { WorktreeMeta } from '../worktree/types';
 
 const state = vi.hoisted(() => ({ root: '', refs: [] as unknown[], registry: new Map<string, WorktreeMeta>() }));
+const managerMocks = vi.hoisted(() => ({ copy: vi.fn(), create: vi.fn() }));
+vi.mock('../worktree/WorktreeManager', () => ({
+  copyClaudeSiviDirs: managerMocks.copy,
+  createWorktree: managerMocks.create,
+  resolveAvailableWorktreeName: async (_repo: string, name: string) => name,
+}));
 vi.mock('electron', () => ({
   app: { getPath: () => state.root },
   safeStorage: { encryptString: (text: string) => Buffer.from(text), decryptString: (bytes: Buffer) => bytes.toString() },
@@ -31,7 +37,9 @@ import { recycleManagedWorktree } from '../worktree/managedRecycle';
 import { restoreRecordedWorktree } from '../worktree/restoreRecovery';
 import { readRecycleRecord, writeRecycleRecord } from '../worktree/recycleJournal';
 import { captureWorktreeContent } from '../worktree/contentSnapshot';
-import { gitExec } from '../worktree/gitExec';
+import { GitExecError, gitExec } from '../worktree/gitExec';
+import { acquireWorktree, releaseWorktree, parkAll } from '../worktree/WorktreePool';
+import { extractRecoveryArchive } from '../worktree/recoveryArchive';
 
 const exec = promisify(execFile);
 describe('worktree recovery with real Git and encrypted archives', () => {
@@ -120,6 +128,66 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(false);
     expect(await git(repo, 'rev-parse', 'cindy/advanced')).toBe(advanced);
     await expect(fs.stat(meta.path)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 30_000);
+
+  it('recreates a deleted saved branch at its original HEAD before restoring files', async () => {
+    const meta = await createFixture('deleted-branch');
+    await git(meta.path, 'commit', '--allow-empty', '-m', 'saved branch head');
+    const head = await git(meta.path, 'rev-parse', 'HEAD');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    await git(repo, 'branch', '-D', meta.branch);
+
+    expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(true);
+    expect(await git(meta.path, 'symbolic-ref', 'HEAD')).toBe(`refs/heads/${meta.branch}`);
+    expect(await git(meta.path, 'rev-parse', 'HEAD')).toBe(head);
+    expect(await fs.readFile(path.join(meta.path, 'draft.txt'), 'utf8')).toBe('deleted-branch contents\n');
+  }, 30_000);
+
+  it('does not overwrite a branch created concurrently with missing-branch recovery', async () => {
+    const meta = await createFixture('branch-race');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    await git(repo, 'branch', '-D', meta.branch);
+    const advanced = await git(repo, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'concurrent branch');
+    const headRef = `refs/heads/${meta.branch}`;
+    const originalGit = vi.mocked(gitExec).getMockImplementation()!;
+    let raced = false;
+    vi.mocked(gitExec).mockImplementation(async (args, cwd, options) => {
+      if (args[0] === 'update-ref' && args.includes(headRef)) {
+        raced = true;
+        await git(repo, 'update-ref', headRef, advanced);
+      }
+      return originalGit(args, cwd, options);
+    });
+    try {
+      await expect(restoreRecordedWorktree(meta.sessionId, meta.path)).rejects.toThrow();
+      expect(raced).toBe(true);
+      expect(await git(repo, 'rev-parse', headRef)).toBe(advanced);
+      await expect(fs.stat(meta.path)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await readRecycleRecord(meta.path))?.phase).toBe('removed');
+    } finally {
+      vi.mocked(gitExec).mockImplementation(originalGit);
+    }
+  }, 30_000);
+
+  it('does not treat a failed branch lookup as evidence that the branch is missing', async () => {
+    const meta = await createFixture('branch-read-error');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    await git(repo, 'branch', '-D', meta.branch);
+    const headRef = `refs/heads/${meta.branch}`;
+    const originalGit = vi.mocked(gitExec).getMockImplementation()!;
+    vi.mocked(gitExec).mockImplementation(async (args, cwd, options) => {
+      if (args[0] === 'show-ref' && args.includes(headRef)) {
+        throw new GitExecError({ args, exitCode: 128, stdout: '', stderr: 'cannot read refs' });
+      }
+      return originalGit(args, cwd, options);
+    });
+    try {
+      await expect(restoreRecordedWorktree(meta.sessionId, meta.path)).rejects.toThrow('cannot read refs');
+      await expect(git(repo, 'show-ref', '--verify', '--quiet', headRef)).rejects.toThrow();
+      await expect(fs.stat(meta.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      vi.mocked(gitExec).mockImplementation(originalGit);
+    }
   }, 30_000);
 
   it('does not take a saved branch from another worktree', async () => {
@@ -222,6 +290,53 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     await fs.mkdir(meta.path);
     expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(true);
     expect((await readRecycleRecord(meta.path))?.phase).toBe('restored');
+  }, 30_000);
+
+  it('preserves conflicting copy artifacts and user edits when failed pool reuse cannot roll back', async () => {
+    const meta = await createFixture('copy-conflict');
+    meta.ephemeral = true;
+    await fs.mkdir(path.join(meta.path, '.claude'));
+    const conflictPath = path.join(meta.path, '.claude', 'config.txt');
+    await fs.writeFile(conflictPath, 'original tracked config\n');
+    await git(meta.path, 'add', '.');
+    await git(meta.path, 'commit', '-m', 'old pool contents');
+    const oldHead = await git(meta.path, 'rev-parse', 'HEAD');
+    await fs.writeFile(path.join(meta.path, '.env'), 'original ignored bytes\n');
+    const fallback = { ok: false, error: { kind: 'unknown', message: 'fresh creation unavailable' } };
+    managerMocks.create.mockResolvedValueOnce(fallback);
+    managerMocks.copy.mockImplementationOnce(async (_repo: string, worktree: string) => {
+      await fs.mkdir(path.join(worktree, '.claude'));
+      await fs.writeFile(path.join(worktree, '.claude', 'config.txt'), 'partial copy\n');
+      await fs.writeFile(path.join(worktree, 'late-user-edit.txt'), 'new user bytes\n');
+      throw new Error('copy interrupted');
+    });
+    const req = { sessionId: 'copy-next', name: 'copy-next', baseRepo: repo, sourceBranch: 'main', ephemeral: true };
+    try {
+      expect(await releaseWorktree(meta.sessionId)).toBe('pooled');
+      expect(await acquireWorktree(req)).toEqual(fallback);
+      expect(managerMocks.copy).toHaveBeenCalledWith(repo, meta.path);
+      expect(managerMocks.create).toHaveBeenCalledWith(req);
+      expect(await git(meta.path, 'symbolic-ref', 'HEAD')).toBe('refs/heads/cindy/copy-next');
+      expect(await git(repo, 'rev-parse', meta.branch)).toBe(oldHead);
+      expect(state.registry.get(meta.sessionId)).toEqual(meta);
+      expect(state.registry.has(req.sessionId)).toBe(false);
+      const record = (await readRecycleRecord(meta.path, meta.sessionId))!;
+      expect(record.phase).toBe('removed');
+      expect(record.generation).toBe(meta.generation);
+      expect(await git(repo, 'rev-parse', record.snapshot!.ref)).toBe(record.snapshot!.commit);
+      const saved = path.join(state.root, 'copy-conflict-saved');
+      await fs.mkdir(saved);
+      await extractRecoveryArchive(record.archive!, saved);
+      expect(await fs.readFile(path.join(saved, '.claude', 'config.txt'), 'utf8')).toBe('original tracked config\n');
+      expect(await fs.readFile(path.join(saved, '.env'), 'utf8')).toBe('original ignored bytes\n');
+      expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(false);
+      expect(await fs.readFile(conflictPath, 'utf8')).toBe('partial copy\n');
+      expect(await fs.readFile(path.join(meta.path, 'late-user-edit.txt'), 'utf8')).toBe('new user bytes\n');
+    } finally {
+      parkAll();
+      managerMocks.copy.mockReset();
+      managerMocks.create.mockReset();
+    }
   }, 30_000);
 
   it('preserves submodule-only commits whose Git objects lie outside the archived directory', async () => {

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { gitExec } from './gitExec';
+import { GitExecError, gitExec } from './gitExec';
 import { readRecycleRecord, writeRecycleRecord, worktreeGeneration } from './recycleJournal';
 import { extractRecoveryArchive, inventoryWorktree, sameWorktreeFiles, verifyRecoveryArchive } from './recoveryArchive';
 import { physicalWorktreeKey, withWorktreeResourceLock } from './resourceLock';
@@ -81,7 +81,16 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     }
     if (hasLiveSessionReference(record.meta, await loadLiveSessionPathKeys({ excludeSessionId: sessionId }))) return false;
     await verifyRecoveryArchive(record.archive);
+    if (!legacyGuardHeld()) return false;
     if (headRef) {
+      try {
+        await gitExec(['show-ref', '--verify', '--quiet', headRef], record.meta.baseRepo);
+      } catch (error) {
+        if (!(error instanceof GitExecError) || error.exitCode !== 1) throw error;
+        // Recreate only a missing ref. A concurrent creator must never be overwritten,
+        // nor may a symbolic ref redirect this write to another branch.
+        await gitExec(['update-ref', '--no-deref', headRef, record.snapshot.head, '0'.repeat(record.snapshot.head.length)], record.meta.baseRepo);
+      }
       // Never reset a branch that advanced or was replaced while this task was archived.
       const { stdout: branchHead } = await gitExec(['rev-parse', '--verify', `${headRef}^{commit}`], record.meta.baseRepo);
       if (branchHead.trim() !== record.snapshot.head) return false;

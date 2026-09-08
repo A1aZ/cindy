@@ -3,9 +3,10 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { join, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // 连接探测:连得上 = 有进程在监听。比 listen(127.0.0.1) 可靠 —— Metro 监听 *:port(可能带
 // SO_REUSEADDR),用 listen 探测会误判成空闲。
@@ -20,13 +21,89 @@ export function portInUse(port) {
 }
 
 // 监听该端口的第一个进程 pid(LISTEN)。
+export function parseWindowsNetstatListener(output, port) {
+  for (const line of String(output).split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    if (columns[0] !== 'TCP' || columns[3] !== 'LISTENING') continue;
+    if (!columns[1]?.endsWith(`:${port}`)) continue;
+    return columns[4] || null;
+  }
+  return null;
+}
+
 export function listenerPid(port) {
+  if (process.platform === 'win32') {
+    try {
+      const output = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' });
+      return parseWindowsNetstatListener(output, port);
+    } catch {
+      // Fall through to the platform-neutral unknown-owner result.
+    }
+    return null;
+  }
   try {
     return execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' })
       .trim().split('\n')[0] || null;
   } catch {
     return null;
   }
+}
+
+const metroOwnerDir = join(tmpdir(), 'cindy-metro-owners');
+
+function metroOwnerPath(port) {
+  return join(metroOwnerDir, `port-${port}.json`);
+}
+
+export function writeMetroOwner(port, owner) {
+  mkdirSync(metroOwnerDir, { recursive: true });
+  writeFileSync(metroOwnerPath(port), `${JSON.stringify(owner)}\n`, 'utf8');
+}
+
+export function clearMetroOwner(port, pid) {
+  const path = metroOwnerPath(port);
+  try {
+    const owner = JSON.parse(readFileSync(path, 'utf8'));
+    if (owner.pid !== pid) return;
+    unlinkSync(path);
+  } catch {
+    // A missing or malformed owner file is already fail-closed to callers.
+  }
+}
+
+function readMetroOwner(port) {
+  try {
+    return JSON.parse(readFileSync(metroOwnerPath(port), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Probe a Metro listener with a worktree/source identity on every host OS. */
+export function probeMetroOwnership(port) {
+  const pid = listenerPid(port);
+  if (!pid) return null;
+  if (process.platform !== 'win32') {
+    return { pid, cwd: cwdOfPid(pid), source: gitSourceOfPid(pid) };
+  }
+  const owner = readMetroOwner(port);
+  const listenerMatchesOwner = Number(owner?.pid) === Number(pid);
+  const ownerProcessAlive = Number.isInteger(owner?.launcherPid)
+    ? processAlive(owner.launcherPid)
+    : listenerMatchesOwner && processAlive(owner.pid);
+  if (!owner || !Number.isInteger(owner.pid) || !ownerProcessAlive) {
+    return { pid, cwd: null, source: null };
+  }
+  return { pid, cwd: owner.worktreeRoot ?? null, source: owner.source ?? null };
 }
 
 // 进程工作目录(用 cwd 判 worktree,而非解析命令行 —— 命令行常是 `pnpm exec expo`、取不到

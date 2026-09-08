@@ -54,13 +54,13 @@ import {
   formatMobileLocalConfigStatus,
 } from './lib/mobile-local-config.mjs';
 import {
-  cwdOfPid,
+  clearMetroOwner,
   gitSourceIdentity,
-  gitSourceOfPid,
   isMetroPid,
-  listenerPid,
   portInUse,
+  probeMetroOwnership,
   terminateMetro,
+  writeMetroOwner,
 } from './sim-metro.mjs';
 
 const mobileDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -106,9 +106,10 @@ async function ensureAndroidTarget() {
 const args = ['exec', 'expo', 'start', '--dev-client', ...portArgs.passthrough];
 if (portArgs.port === DEFAULT_PORT) {
   if (await portInUse(DEFAULT_PORT)) {
-    const pid = listenerPid(DEFAULT_PORT);
-    const cwd = pid ? cwdOfPid(pid) : null;
-    const runningSource = pid ? gitSourceOfPid(pid) : null;
+    const ownership = probeMetroOwnership(DEFAULT_PORT);
+    const pid = ownership?.pid ?? null;
+    const cwd = ownership?.cwd ?? null;
+    const runningSource = ownership?.source ?? null;
     const listener = classifySimMetroListener({
       cwd,
       source: runningSource,
@@ -182,6 +183,16 @@ const child = spawn(invocation.command, invocation.args, {
   shell: invocation.shell,
   windowsVerbatimArguments: invocation.windowsVerbatimArguments,
 });
+
+if (portArgs.port === DEFAULT_PORT && Number.isInteger(child.pid)) {
+  writeMetroOwner(DEFAULT_PORT, {
+    pid: child.pid,
+    launcherPid: child.pid,
+    source: sourceIdentity,
+    worktreeRoot,
+  });
+  child.once('exit', () => clearMetroOwner(DEFAULT_PORT, child.pid));
+}
 
 child.once('error', (error) => {
   console.error(`✗ 无法启动 Metro: ${error.message}`);

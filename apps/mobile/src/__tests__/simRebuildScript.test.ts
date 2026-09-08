@@ -61,6 +61,8 @@ describe('sim-rebuild script invariants', () => {
 
   it('uses the Android debug client on Windows without invoking xcrun', () => {
     expect(source).toContain("import { ensureWindowsAndroidEmulator } from './lib/android-simulator.mjs';");
+    expect(source).toContain("probeMetroOwnership");
+    expect(source).toContain('const ownership = probeMetroOwnership(8081);');
     expect(source).toContain("import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';");
     expect(source).toContain("if (process.platform === 'win32') {");
     expect(source).toContain('await rebuildAndroidSimulator();');

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   gitSourceIdentity,
   isDedicatedMetroProcessGroup,
+  parseWindowsNetstatListener,
   terminateMetro,
 } from '../../scripts/sim-metro.mjs';
 
@@ -48,6 +49,15 @@ describe('mobile simulator source identity', () => {
 });
 
 describe('mobile simulator Metro takeover', () => {
+  it('parses a Windows netstat listener without accepting another port', () => {
+    const output = [
+      '  TCP    0.0.0.0:8081    0.0.0.0:0    LISTENING    4242',
+      '  TCP    0.0.0.0:8082    0.0.0.0:0    LISTENING    4343',
+    ].join('\r\n');
+    expect(parseWindowsNetstatListener(output, 8081)).toBe('4242');
+    expect(parseWindowsNetstatListener(output, 8083)).toBeNull();
+  });
+
   it('recognizes only dedicated Metro process groups', () => {
     expect(isDedicatedMetroProcessGroup([
       'pnpm mobile:sim:start',

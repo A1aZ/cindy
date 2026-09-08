@@ -78,6 +78,7 @@ import {
   gitSourceOfPid,
   isInside,
   listenerPid,
+  probeMetroOwnership,
 } from './sim-metro.mjs';
 
 const mobileDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -170,11 +171,12 @@ if (!buildOnly) {
 }
 
 function ensureMetroOwnershipBeforeLaunch(packageName) {
-  const metroPid = listenerPid(8081);
+  const ownership = probeMetroOwnership(8081);
+  const metroPid = ownership?.pid ?? null;
   if (!metroPid) return true;
-  const metroCwd = cwdOfPid(metroPid);
+  const metroCwd = ownership.cwd;
   const foreign = !metroCwd || !isInside(worktreeRoot, metroCwd);
-  const runningSource = gitSourceOfPid(metroPid);
+  const runningSource = ownership.source;
   if (foreign || runningSource !== currentSource) {
     const why = foreign
       ? `foreign worktree (${metroCwd || 'unknown'})`

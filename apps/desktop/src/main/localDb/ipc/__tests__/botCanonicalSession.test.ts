@@ -6,9 +6,13 @@ import { rmSync } from 'node:fs';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOT_TEMPLATE_PRESET_IDENTITIES } from '../../../../shared/botTemplatePreset';
-import { findBotCapabilities, selectBotCapability } from '../../../maker-ipc/botCapabilityService';
+import { createBotCapabilityService } from '../../../maker-ipc/botCapabilityService';
 import { buildBotMcpCatalog } from '../../../maker-host/botMcpCatalog';
 import { CustomMcpProvider } from '../../../mcp-integrations/custom-mcp-provider';
+import type { McpProvider } from '@cindy/maker-core';
+import type { CustomMcpConfig } from '../../../../shared/customMcp';
+import { getMaker, getPluginRegistry, isBotToolsetAvailable } from '../../../maker-host/index';
+import { getBuiltinMcpServerNames, refreshCustomMcpProviders, registerCustomMcpArrays, resetCustomMcpRegistry } from '../../../mcp-integrations/custom-mcp-registry';
 
 import {
   botDelegations,
@@ -58,6 +62,8 @@ const h = await vi.hoisted(async () => {
   requestRuntimeRefresh: vi.fn(),
   seedTemplateSkills: vi.fn(async () => ({ completedNow: true, skills: [] })),
   toolsetsAvailable: false,
+  customMcpConfigs: [] as CustomMcpConfig[],
+  mcpProviders: [] as McpProvider[],
   ownerScopeKey: 'owner-a:1',
   ownerBoundaryPending: false,
 });
@@ -96,8 +102,9 @@ vi.mock('../../../git-snapshot/projectGitBootstrap.js', () => ({
 vi.mock('../../../maker-host/git-safety-settings-store.js', () => ({
   readGitSafetySettings: () => ({ autoSnapshotEnabled: true }),
 }));
-vi.mock('../../../maker-host/custom-mcp-store.js', () => ({
-  listCustomMcpServers: async () => [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.invalid/private', headers: { Authorization: 'FAKE_SECRET' } }],
+vi.mock('../../../maker-host/custom-mcp-store.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../maker-host/custom-mcp-store.js')>(),
+  listCustomMcpServers: async () => h.customMcpConfigs,
 }));
 vi.mock('../../../maker-host/index.js', () => ({
   getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
@@ -400,8 +407,23 @@ async function invoke(channel: string, body: unknown): Promise<any> {
   if (!handler) throw new Error(`${channel} handler not registered`);
   return handler({}, body);
 }
+const { list: findBotCapabilities, select: selectBotCapability } = createBotCapabilityService({
+  getMaker, getPluginRegistry, isBotToolsetAvailable,
+  listMcpServers: async ({ agentKind }) => buildBotMcpCatalog({
+    agentKind, providers: h.mcpProviders, builtinNames: getBuiltinMcpServerNames(),
+    customServers: h.customMcpConfigs.map((config) => ({ ...config, updatedAt: 1 })),
+  }),
+});
+
 beforeEach(async () => {
   h.toolsetsAvailable = false;
+  h.customMcpConfigs = [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.invalid/private', headers: { Authorization: 'FAKE_SECRET' } }];
+  h.mcpProviders = [
+    { name: 'cindy_helper', toClaudeSdkConfig: () => ({ type: 'sdk' }) },
+    new CustomMcpProvider(h.customMcpConfigs[0]!, () => null),
+  ];
+  resetCustomMcpRegistry();
+  registerCustomMcpArrays(h.mcpProviders);
   vi.clearAllMocks();
   h.handlers.clear();
   h.nextSession = 0;
@@ -1614,6 +1636,34 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
     await expect(selectBotCapability({ callerSessionId, kind: 'mcp', id: 'shared-docs', joined: false })).resolves.toMatchObject({ ok: true, joined: false });
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
+  });
+
+  it.each(['cindy_helper', '__proto__', 'constructor', 'bad_header'])('rejects MCP %s quarantined by the actual registry while keeping its saved reference removable', async (id) => {
+    h.customMcpConfigs.push({
+      id, name: 'Legacy MCP', transport: 'http', url: 'https://example.invalid/legacy',
+      headers: id === 'bad_header' ? { 'X-Name': '中文' } : {},
+    });
+    await refreshCustomMcpProviders();
+    expect(h.mcpProviders.filter((provider) => provider instanceof CustomMcpProvider).map((provider) => provider.name)).toEqual(['shared-docs']);
+    await invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: [id], mcpMode: 'allowlist' },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    const input = { callerSessionId: created.session.id, kind: 'mcp' as const };
+    const discovered = await findBotCapabilities(input);
+    expect(discovered).toMatchObject({
+      ok: true, capabilities: expect.arrayContaining([
+        { id, name: 'Legacy MCP', description: 'http', available: false, joined: true },
+        { id: 'shared-docs', name: 'Shared Docs', description: 'http', available: true, joined: false },
+      ]),
+    });
+    expect(JSON.stringify(discovered)).not.toMatch(/FAKE_SECRET|example.invalid|Authorization/);
+    await expect(selectBotCapability({ ...input, id, joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    expect(h.sqlite!.prepare('SELECT current_version FROM bot_profiles WHERE id = ?').pluck().get('bot-1')).toBe(2);
+    await expect(selectBotCapability({ ...input, id, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+    await expect(selectBotCapability({ ...input, id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: true, joined: true });
   });
 
   it('revalidates saved MCP transports on fallback and restores them when switching back', async () => {
@@ -3723,6 +3773,7 @@ describe('Bot Session task end-to-end runtime', () => {
 });
 
 afterAll(() => {
+  resetCustomMcpRegistry();
   h.sqlite?.close();
   rmSync(h.userDataDir, { recursive: true, force: true });
 });

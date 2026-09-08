@@ -5,10 +5,20 @@ import { updateBotProfile } from '../localDb/ipc/bots.js';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { listCustomMcpServers } from '../maker-host/custom-mcp-store.js';
 import { BOT_BASELINE_PLUGIN_IDS } from '../maker-host/plugins/types.js';
+import type { Maker } from '@cindy/maker-core';
+import type { PluginRegistry } from '../maker-host/plugins/plugin-registry.js';
+import type { BotToolsetContext } from '../../shared/botRemoteCapabilities.js';
+import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
 
 type Kind = 'skill' | 'mcp' | 'toolset';
 type Input = { callerSessionId: string; kind: Kind };
 type Entry = { id: string; name: string; description: string; available: boolean; joined: boolean };
+interface BotCapabilityServiceDeps {
+  getMaker: () => Pick<Maker, 'getSession' | 'listAgentSkills'>;
+  getPluginRegistry: () => Pick<PluginRegistry, 'getPlugins' | 'getEnableState'>;
+  isBotToolsetAvailable: (input: BotToolsetContext & { toolsetId: string }) => boolean;
+  listMcpServers: NonNullable<BotProfileRuntimeDeps['listMcpServers']>;
+}
 const fields: Record<Kind, { list: string; mode: string }> = {
   skill: { list: 'skills', mode: 'skillMode' },
   mcp: { list: 'mcpServers', mode: 'mcpMode' },
@@ -73,11 +83,11 @@ async function context(callerSessionId: string) {
   return { ...row, config, assertOwner };
 }
 
-async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): Promise<Entry[]> {
+async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>, deps: BotCapabilityServiceDeps): Promise<Entry[]> {
   const joined = new Set(strings(ctx.config[fields[input.kind].list]).filter(
     (id) => input.kind !== 'toolset' || !BOT_BASELINE_PLUGIN_IDS.has(id),
   ));
-  const { getMaker, getPluginRegistry, isBotToolsetAvailable } = await import('../maker-host/index.js');
+  const { getMaker, getPluginRegistry, isBotToolsetAvailable } = deps;
   const agentKind =
     getMaker().getSession(input.callerSessionId)?.agentKind ??
     (ctx.agentKind === 'cc' ? 'claude-code' : ctx.agentKind === 'pi' ? 'pi' : 'codex');
@@ -95,12 +105,18 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): 
       available: skill.enabled !== false && skill.runtimeStatus !== 'failed',
     }));
   } else if (input.kind === 'mcp') {
+    const runtimeCatalog = await deps.listMcpServers({
+      agentKind, workingDir, remoteHostId: ctx.remoteHostId ?? undefined,
+    });
+    const available = new Set(runtimeCatalog
+      .filter((entry) => entry.source === 'custom' && entry.available !== false)
+      .map((entry) => entry.name));
     // Project only display metadata. URLs, headers and tokens never enter tool results.
     items = (await listCustomMcpServers()).map((mcp) => ({
       id: mcp.id,
       name: mcp.name,
       description: mcp.transport,
-      available: agentKind !== 'codex' || mcp.transport !== 'sse',
+      available: available.has(mcp.id),
     }));
   } else {
     const registry = getPluginRegistry();
@@ -133,11 +149,11 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): 
   return result;
 }
 
-export async function findBotCapabilities(input: Input & { query?: string }) {
+async function findBotCapabilities(input: Input & { query?: string }, deps: BotCapabilityServiceDeps) {
   try {
     const ctx = await context(input.callerSessionId);
     const query = input.query?.trim().toLocaleLowerCase() ?? '';
-    const capabilities = (await catalog(input, ctx)).filter(
+    const capabilities = (await catalog(input, ctx, deps)).filter(
       (item) =>
         !query || `${item.id} ${item.name} ${item.description}`.toLocaleLowerCase().includes(query),
     );
@@ -151,7 +167,7 @@ export async function findBotCapabilities(input: Input & { query?: string }) {
   }
 }
 
-export async function selectBotCapability(input: Input & { id: string; joined: boolean }) {
+async function selectBotCapability(input: Input & { id: string; joined: boolean }, deps: BotCapabilityServiceDeps) {
   try {
     const ctx = await context(input.callerSessionId);
     if (input.kind === 'toolset' && BOT_BASELINE_PLUGIN_IDS.has(input.id)) {
@@ -164,7 +180,7 @@ export async function selectBotCapability(input: Input & { id: string; joined: b
     const field = fields[input.kind];
     const previous = strings(ctx.config[field.list]);
     if (input.joined) {
-      const item = (await catalog(input, ctx)).find((entry) => entry.id === input.id);
+      const item = (await catalog(input, ctx, deps)).find((entry) => entry.id === input.id);
       if (!item?.available)
         return {
           ok: false as const,
@@ -189,4 +205,12 @@ export async function selectBotCapability(input: Input & { id: string; joined: b
       message: '伙伴状态或配置已变化，请重新查询后重试',
     };
   }
+}
+
+/** Host callbacks are bound at initialization, without importing the host singleton. */
+export function createBotCapabilityService(deps: BotCapabilityServiceDeps) {
+  return {
+    list: (input: Input & { query?: string }) => findBotCapabilities(input, deps),
+    select: (input: Input & { id: string; joined: boolean }) => selectBotCapability(input, deps),
+  };
 }

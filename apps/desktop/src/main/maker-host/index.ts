@@ -56,6 +56,7 @@ import {
 } from '../maker-ipc/botProfileRuntime.js';
 import { collectBotOwnSkillMounts } from '../maker-ipc/botSkillService.js';
 import { buildBotMcpCatalog } from './botMcpCatalog.js';
+import { createBotCapabilityService } from '../maker-ipc/botCapabilityService.js';
 import {
   botProfileDir,
   ensureBotContentDirs,
@@ -839,7 +840,22 @@ export function getMaker(): Maker {
       return getIOSSimulatorPluginAccessDecision(workingDir);
     };
 
+    // These callbacks run after all three runtime provider arrays are registered.
+    const listBotRuntimeMcpServers: NonNullable<BotProfileRuntimeDeps['listMcpServers']> = async ({ agentKind }) => {
+      const providers = agentKind === 'claude-code' ? claudeMcpProviders
+        : agentKind === 'codex' ? codexMcpProviders : piMcpProviders;
+      return buildBotMcpCatalog({
+        agentKind,
+        providers,
+        builtinNames: getBuiltinMcpServerNames(),
+        customServers: await listCustomMcpRuntimeGenerations(),
+      });
+    };
     const makerMemoryProviderDeps = {
+      botCapabilities: createBotCapabilityService({
+        getMaker, getPluginRegistry, isBotToolsetAvailable,
+        listMcpServers: listBotRuntimeMcpServers,
+      }),
       createMediaDownloadContext: (sessionId: string, sessionInstanceId: string) => {
         const session = _maker?.getSession(sessionId);
         if (!session || session.instanceId !== sessionInstanceId) return undefined;
@@ -2293,20 +2309,7 @@ export function getMaker(): Maker {
         });
         return result.skills;
       },
-      listMcpServers: async ({ agentKind }) => {
-        const providers =
-          agentKind === 'claude-code'
-            ? claudeMcpProviders
-            : agentKind === 'codex'
-              ? codexMcpProviders
-              : piMcpProviders;
-        return buildBotMcpCatalog({
-          agentKind,
-          providers,
-          builtinNames: getBuiltinMcpServerNames(),
-          customServers: await listCustomMcpRuntimeGenerations(),
-        });
-      },
+      listMcpServers: listBotRuntimeMcpServers,
       listToolsets: async ({ botId, agentKind, workingDir, remoteHostId }) => {
         const registry = getPluginRegistry();
         return Promise.all(

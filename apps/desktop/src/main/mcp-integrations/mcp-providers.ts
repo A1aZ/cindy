@@ -1,4 +1,4 @@
-import { findBotCapabilities, selectBotCapability } from '../maker-ipc/botCapabilityService.js';
+import type { createBotCapabilityService } from '../maker-ipc/botCapabilityService.js';
 import { join as pathJoin } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 
@@ -78,6 +78,7 @@ import {
 import { botSessionLinks, sessions } from '../localDb/schema.js';
 
 export interface DesktopMcpProvidersDeps {
+  botCapabilities: ReturnType<typeof createBotCapabilityService>;
   createMediaDownloadContext?: CindyGhostsHostDeps['createMediaDownloadContext'];
   /** 当前 Desktop 版本，供 Forge 为具体插件包生成默认 minCindyVersion。 */
   getAppVersion?: () => string;
@@ -602,7 +603,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         },
       },
       // 伙伴自己沉淀的真技能。归属同样由 callerSessionId 反查,工具面不收 botId。
-      botCapabilities: { list: findBotCapabilities, select: selectBotCapability },
+      botCapabilities: deps.botCapabilities,
       botSkills: {
         save: (params) => saveBotSkillForSession(params),
         list: (params) => listBotSkillsForSession(params),

@@ -34,6 +34,8 @@ export interface RoutineState {
   runs: RoutineRun[];
   receipts: Record<string, number>;
   next: Record<string, number>;
+  /** Lifecycle suspension preserves each routine's own enabled preference. */
+  pausedBotIds?: string[];
 }
 
 export interface RoutineEngineDeps {
@@ -66,6 +68,8 @@ export class RoutineEngine {
   };
   private readonly sources = new Map<string, RoutineSource>();
   private readonly active = new Map<string, AbortController>();
+  private readonly activeTasks = new Map<string, Promise<void>>();
+  private readonly blockedBots = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
   // Keep the outcome after execute returns: a failed save must retry persistence,
   // never execution. The durable running row also blocks dispatch until settled.
@@ -77,7 +81,7 @@ export class RoutineEngine {
 
   constructor(private readonly deps: RoutineEngineDeps) {}
 
-  async start(): Promise<void> {
+  async start(botStates?: ReadonlyMap<string, "active" | "paused" | "deleted">): Promise<void> {
     const saved = await this.deps.load();
     if (saved) {
       if (
@@ -90,6 +94,11 @@ export class RoutineEngine {
       for (const routine of saved.routines) parseRoutineInput(routine);
       this.state = saved;
     }
+    for (const [botId, status] of botStates ?? []) this.applyBotState(this.state, botId, status);
+    for (const botId of this.state.pausedBotIds ?? []) this.blockedBots.add(botId);
+    // Removed rules have no history entry point; do not retain their event payloads.
+    const retainedIds = new Set(this.state.routines.map((routine) => routine.id));
+    this.state.runs = this.state.runs.filter((run) => retainedIds.has(run.routineId));
     // A crash may follow an external side effect: never automatically replay an ambiguous run.
     for (const run of this.state.runs) {
       if (run.status === "running") {
@@ -155,6 +164,7 @@ export class RoutineEngine {
   async put(botId: string, raw: RoutineInput, id?: string): Promise<Routine> {
     const input = parseRoutineInput(raw);
     return this.change((state) => {
+      if (this.blockedBots.has(botId)) throw new Error("The teammate is paused");
       const existing = id
         ? state.routines.find(
             (routine) => routine.id === id && routine.botId === botId,
@@ -213,11 +223,63 @@ export class RoutineEngine {
       )
         throw new Error("Routine not found");
       state.routines = state.routines.filter((routine) => routine.id !== id);
-      this.cancelQueued(state, id);
+      state.runs = state.runs.filter((run) => run.routineId !== id);
       for (const key of Object.keys(state.next))
         if (key.startsWith(`${id}:`)) delete state.next[key];
     });
     this.active.get(id)?.abort();
+  }
+
+  private applyBotState(state: RoutineState, botId: string, status: "active" | "paused" | "deleted"): void {
+    const paused = new Set(state.pausedBotIds ?? []);
+    const wasPaused = paused.has(botId);
+    if (status === "paused") paused.add(botId);
+    else paused.delete(botId);
+    state.pausedBotIds = [...paused];
+    const routines = state.routines.filter((routine) => routine.botId === botId);
+    const ids = new Set(routines.map((routine) => routine.id));
+    if (status === "deleted") {
+      state.routines = state.routines.filter((routine) => !ids.has(routine.id));
+      state.runs = state.runs.filter((run) => !ids.has(run.routineId));
+    }
+    if (status !== "active" || wasPaused) {
+      for (const key of Object.keys(state.next))
+        if (routines.some((routine) => key.startsWith(`${routine.id}:`))) delete state.next[key];
+      for (const routine of routines) {
+        this.cancelQueued(state, routine.id);
+        if (status === "active" && routine.enabled) {
+          for (const trigger of routine.triggers) {
+            const next = nextRoutineTriggerAt(trigger, this.deps.now());
+            if (next !== undefined) state.next[`${routine.id}:${trigger.id}`] = next;
+          }
+        }
+      }
+    }
+  }
+
+  async setBotPaused(botId: string, paused: boolean): Promise<void> {
+    const ids = this.state.routines.filter((routine) => routine.botId === botId).map((routine) => routine.id);
+    if (paused) {
+      // Block immediately, including when the durable pause write itself fails.
+      this.blockedBots.add(botId);
+      for (const id of ids) this.active.get(id)?.abort();
+    }
+    try {
+      await this.change((state) => this.applyBotState(state, botId, paused ? "paused" : "active"));
+      if (!paused) this.blockedBots.delete(botId);
+    } finally {
+      if (paused) await Promise.all(ids.map((id) => this.activeTasks.get(id)));
+    }
+  }
+
+  /** Called only after host-owned backing schedules have been stopped and removed. */
+  async removeBot(botId: string): Promise<void> {
+    await this.setBotPaused(botId, true);
+    const ids = new Set(this.state.routines.filter((routine) => routine.botId === botId).map((routine) => routine.id));
+    await this.change((state) => this.applyBotState(state, botId, "deleted"));
+    for (const id of ids) this.retryAfter.delete(id);
+    for (const [id, pending] of this.pendingSettlements)
+      if (ids.has(pending.routineId)) this.pendingSettlements.delete(id);
   }
 
   async publish(
@@ -242,6 +304,7 @@ export class RoutineEngine {
       if (Object.hasOwn(state.receipts, receipt))
         return { accepted: 0, duplicate: true };
       const matches = state.routines
+        .filter((routine) => !this.blockedBots.has(routine.botId))
         .map((routine) => ({
           routine,
           ids: matchesRoutineEvent(routine, sourceId, event),
@@ -259,6 +322,7 @@ export class RoutineEngine {
 
   async runNow(botId: string, id: string): Promise<void> {
     await this.change((state) => {
+      if (this.blockedBots.has(botId)) throw new Error("The teammate is paused");
       const routine = state.routines.find(
         (row) => row.id === id && row.botId === botId,
       );
@@ -276,6 +340,7 @@ export class RoutineEngine {
     if (!Object.values(this.state.next).some((time) => time <= now)) return;
     await this.change((state) => {
       for (const routine of state.routines) {
+        if (this.blockedBots.has(routine.botId)) continue;
         for (const trigger of routine.triggers) {
           const key = `${routine.id}:${trigger.id}`;
           if (state.next[key] === undefined || state.next[key] > now) continue;
@@ -350,7 +415,9 @@ export class RoutineEngine {
     for (const pending of this.state.runs.filter(
       (run) => run.status === "queued",
     )) {
+      const owner = this.state.routines.find((routine) => routine.id === pending.routineId)?.botId;
       if (
+        (owner !== undefined && this.blockedBots.has(owner)) ||
         this.active.has(pending.routineId) ||
         this.state.runs.some(
           (run) => run.routineId === pending.routineId && run.status === "running",
@@ -361,7 +428,7 @@ export class RoutineEngine {
       const controller = new AbortController();
       this.active.set(pending.routineId, controller);
       let succeeded = false;
-      void this.dispatch(pending.id, controller)
+      const task = this.dispatch(pending.id, controller)
         .then(() => {
           succeeded = true;
         })
@@ -371,8 +438,10 @@ export class RoutineEngine {
         })
         .finally(() => {
           this.active.delete(pending.routineId);
+          this.activeTasks.delete(pending.routineId);
           if (succeeded) this.pump();
         });
+      this.activeTasks.set(pending.routineId, task);
     }
   }
 
@@ -400,8 +469,9 @@ export class RoutineEngine {
       const run = state.runs.find((row) => row.id === id);
       if (!run || run.status !== "queued") return null;
       const routine = state.routines.find((row) => row.id === run.routineId);
-      if (!routine) {
+      if (!routine || this.blockedBots.has(routine.botId) || controller.signal.aborted) {
         run.status = "cancelled";
+        run.finishedAt = this.deps.now();
         return null;
       }
       run.status = "running";

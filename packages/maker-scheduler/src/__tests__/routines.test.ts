@@ -338,3 +338,76 @@ it('keeps a deferred batch after a failed save and waits for durable requeue bef
   expect(execute).toHaveBeenCalledTimes(2);
   await engine.stop();
 });
+
+
+it('pauses all Bot triggers, aborts active work, and resumes only the originally enabled rules', async () => {
+  const aborted = vi.fn();
+  const execute = vi.fn<RoutineEngineDeps['execute']>()
+    .mockImplementationOnce(async (_routine, _run, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => { aborted(); resolve(); }, { once: true }));
+      return {};
+    }).mockResolvedValue({});
+  const f = await fixture(execute);
+  const enabled = await f.engine.put('bot', input);
+  const disabled = await f.engine.put('bot', { ...input, enabled: false });
+  await f.engine.publish('github', event());
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+  await f.engine.publish('github', event('queued'));
+  await f.engine.setBotPaused('bot', true);
+  expect(aborted).toHaveBeenCalledOnce();
+  expect(f.engine.history(enabled.id).every((run) => run.status === 'cancelled')).toBe(true);
+  const historyLength = f.engine.history(enabled.id).length;
+  f.advance(86_400_000);
+  await f.engine.tick();
+  expect(await f.engine.publish('github', event('paused'))).toMatchObject({ accepted: 0 });
+  await expect(f.engine.runNow('bot', enabled.id)).rejects.toThrow('paused');
+  expect(f.engine.history(enabled.id)).toHaveLength(historyLength);
+  expect(f.snapshot()?.next).toEqual({});
+  expect(f.engine.list('bot').map((routine) => routine.enabled)).toEqual([true, false]);
+  const saved = f.snapshot();
+  await f.engine.stop();
+  const restarted = await fixture(vi.fn(async () => ({})), saved);
+  await expect(restarted.engine.runNow('bot', enabled.id)).rejects.toThrow('paused');
+  await restarted.engine.setBotPaused('bot', false);
+  await restarted.engine.tick();
+  expect(restarted.execute).not.toHaveBeenCalled();
+  restarted.advance(3_600_000);
+  await restarted.engine.tick();
+  await vi.waitFor(() => expect(restarted.execute).toHaveBeenCalledOnce());
+  expect(restarted.engine.history(disabled.id)).toEqual([]);
+  await restarted.engine.stop();
+});
+
+it('purges a deleted Bot and its event history while preserving other Bots', async () => {
+  const f = await fixture();
+  const removed = await f.engine.put('removed-bot', input);
+  const retained = await f.engine.put('retained-bot', input);
+  await f.engine.publish('github', event());
+  await vi.waitFor(() => expect(f.engine.history(removed.id)[0].status).toBe('success'));
+  await f.engine.removeBot('removed-bot');
+  expect(f.engine.list('removed-bot')).toEqual([]);
+  expect(f.engine.history(removed.id)).toEqual([]);
+  expect(f.snapshot()?.runs.every((run) => run.routineId !== removed.id)).toBe(true);
+  expect(Object.keys(f.snapshot()!.next).every((key) => !key.startsWith(removed.id))).toBe(true);
+  expect(f.engine.list('retained-bot')).toHaveLength(1);
+  expect(f.engine.history(retained.id)).toHaveLength(1);
+  await f.engine.remove('retained-bot', retained.id);
+  expect(f.engine.history(retained.id)).toEqual([]);
+  await f.engine.stop();
+});
+
+it('blocks new dispatch even if persisting the Bot pause fails', async () => {
+  let fail = false;
+  const f = await fixture(vi.fn(async () => ({})), null, async () => {
+    if (fail) throw new Error('disk full');
+  });
+  const routine = await f.engine.put('bot', input);
+  fail = true;
+  await expect(f.engine.setBotPaused('bot', true)).rejects.toThrow('disk full');
+  fail = false;
+  f.advance(3_600_000);
+  await f.engine.tick();
+  await expect(f.engine.runNow('bot', routine.id)).rejects.toThrow('paused');
+  expect(f.execute).not.toHaveBeenCalled();
+  await f.engine.stop();
+});

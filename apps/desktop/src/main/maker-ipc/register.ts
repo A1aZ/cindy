@@ -9058,6 +9058,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerBotLifecycleHandlers({
     maker,
     getDelegationService: () => botDelegationServiceHolder,
+    onPaused: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'pause'),
+    onResumed: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'resume'),
+    onBeforeDelete: async (botId) => (await import('../routines/service.js')).updateBotRoutineLifecycle(botId, 'delete'),
   });
   const delegationForRestore = botDelegationServiceHolder;
   void restoreBotRuntimeForCurrentOwner();

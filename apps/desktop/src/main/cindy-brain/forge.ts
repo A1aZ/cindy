@@ -1456,6 +1456,7 @@ export const FORGE_GUIDE = `# 意识(Ghost)编写手册
 ## 本地例行任务事件
 
 插件通过 schemaVersion 3 的 routineEvents 声明事件来源：
+声明后，宿主在启动、启用和恢复时自动运行插件的浏览器逻辑页并保持监听，即使 launch 省略或为 on-demand；停用插件仍会停止监听。Node 常驻仍独立要求 node.lifecycle: resident。
 
     "routineEvents": { "events": [{ "type": "message.received", "name": "新消息", "fields": ["chatId", "senderId"] }] }
 

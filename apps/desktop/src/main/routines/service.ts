@@ -124,8 +124,29 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
       current = undefined;
     }
     const store = new RoutineFileStore(ownerScopedUserDataPath('routines'));
+    const saved = await store.load();
+    assertScope(scope);
+    if (epoch !== generation) throw new Error('Routine service was reset');
+    const botStates = new Map<string, 'active' | 'paused' | 'deleted'>();
+    if (saved?.routines.length) {
+      const { getDbClient } = await import('../localDb/client/current.js');
+      const { botProfiles } = await import('../localDb/schema.js');
+      assertScope(scope);
+      const profiles = await getDbClient().drizzle
+        .select({ id: botProfiles.id, status: botProfiles.status }).from(botProfiles);
+      assertScope(scope);
+      for (const routine of saved.routines) {
+        const profile = profiles.find((row) => row.id === routine.botId);
+        botStates.set(routine.botId, !profile ? 'deleted' : profile.status === 'active' ? 'active' : 'paused');
+      }
+      // Recover an interrupted lifecycle before the first queued run can be dispatched.
+      for (const routine of saved.routines) {
+        const status = botStates.get(routine.botId);
+        if (status !== 'active') await cleanBackingSchedules(scope, [routine.id], status === 'deleted');
+      }
+    }
     const engine = new RoutineEngine({
-      load: () => store.load(),
+      load: async () => saved,
       save: async (state) => {
         assertScope(scope);
         if (epoch !== generation) throw new Error('Routine service was reset');
@@ -152,7 +173,7 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
       onError: (error) => log.warn('routine operation failed', { error: String(error) }),
     });
     try {
-      await engine.start();
+      await engine.start(botStates);
       assertScope(scope);
       if (epoch !== generation) throw new Error('Routine service was reset');
     } catch (error) {
@@ -195,6 +216,41 @@ export async function stopRoutines(): Promise<void> {
     await current.engine.stop();
     current = undefined;
   }
+}
+
+async function cleanBackingSchedules(scope: string, ids: string[], remove: boolean): Promise<void> {
+  if (!ids.length) return;
+  const { getScheduler, getScheduleStorage } = await import('../scheduler-host/index.js');
+  assertScope(scope);
+  const scheduler = getScheduler();
+  const storage = getScheduleStorage();
+  for (const id of ids) {
+    const scheduleId = `routine-${id}`;
+    const schedule = await storage.get(scheduleId);
+    assertScope(scope);
+    if (!schedule) continue;
+    if (remove) await scheduler.delete(scheduleId, { internalRoutine: true });
+    else await scheduler.pause(scheduleId, { internalRoutine: true });
+    assertScope(scope);
+  }
+}
+
+/** Invoked inside the Bot lifecycle lock, including before permanent profile deletion. */
+export async function updateBotRoutineLifecycle(botId: string, action: 'pause' | 'resume' | 'delete'): Promise<void> {
+  const scope = activeOwnerScopeKey();
+  assertScope(scope);
+  const engine = await getRoutineEngine();
+  assertScope(scope);
+  const ids = engine.list(botId).map((routine) => routine.id);
+  if (action === 'resume') {
+    await engine.setBotPaused(botId, false);
+  } else {
+    await engine.setBotPaused(botId, true);
+    assertScope(scope);
+    await cleanBackingSchedules(scope, ids, action === 'delete');
+    if (action === 'delete') await engine.removeBot(botId);
+  }
+  assertScope(scope);
 }
 
 /** Local UI CRUD uses fixed IPC methods; publishers cannot reach these via the event protocol. */

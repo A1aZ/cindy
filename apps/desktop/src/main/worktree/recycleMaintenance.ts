@@ -10,6 +10,7 @@ import { hasLiveSessionReference, loadLiveSessionPathKeys, pathKey } from './liv
 import * as store from './worktreeStore';
 import { physicalWorktreeKey } from './resourceLock';
 import { subscribeWorktreeRecycleEvents } from './recycleEvents';
+import { retryPendingWorktreeRuntimeLeaseReleases } from './runtimeLeases';
 
 const log = createLogger('worktreeRecycleMaintenance');
 let maintenance: WorktreeRecycleMaintenance | null = null;
@@ -127,6 +128,10 @@ export class WorktreeRecycleMaintenance {
     if (!this.options.isReady()) return;
     await this.ensureWatcher();
     if (this.stopped) return;
+    let pendingLeaseReleases = 0;
+    try { pendingLeaseReleases = await retryPendingWorktreeRuntimeLeaseReleases(); }
+    catch (error) { log.warn('worktree runtime lease release retry postponed', { code: (error as NodeJS.ErrnoException).code ?? 'unavailable' }); pendingLeaseReleases = 1; }
+    if (pendingLeaseReleases > 0) this.schedule(Date.now() + retryDelay(1));
     const records = await listRecycleRecords();
     const wakeIds = new Set(this.wakeIds);
     this.wakeIds.clear();

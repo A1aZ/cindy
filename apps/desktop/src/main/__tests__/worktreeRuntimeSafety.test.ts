@@ -8,7 +8,7 @@ const notify = vi.hoisted(() => vi.fn());
 vi.mock('electron', () => ({ app: { getPath: () => state.root } }));
 vi.mock('../worktree/recycleEvents', () => ({ notifyWorktreeRecycleOpportunity: notify }));
 
-import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, readWorktreeRuntimePaths } from '../worktree/runtimeLeases';
+import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, readWorktreeRuntimePaths, retryPendingWorktreeRuntimeLeaseReleases } from '../worktree/runtimeLeases';
 import { physicalWorktreeKey, withWorktreeResourceLock } from '../worktree/resourceLock';
 
 describe('worktree runtime evidence and physical locks', () => {
@@ -43,6 +43,19 @@ describe('worktree runtime evidence and physical locks', () => {
     expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
     await releaseWorktreeRuntimeLease(replacementLease);
     expect(await readWorktreeRuntimePaths()).toEqual(new Set());
+  });
+
+  it('persists a failed release and retries it without treating a dead PID as idle', async () => {
+    const lease = (await acquireWorktreeRuntimeLease('one', worktree))!;
+    const unlink = vi.spyOn(fs, 'unlink').mockImplementationOnce(async () => {
+      throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    });
+    await expect(releaseWorktreeRuntimeLease(lease)).rejects.toMatchObject({ code: 'EBUSY' });
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set([await physicalWorktreeKey(worktree)]));
+    expect(await retryPendingWorktreeRuntimeLeaseReleases()).toBe(0);
+    expect(await readWorktreeRuntimePaths()).toEqual(new Set());
+    expect(notify).toHaveBeenCalledTimes(2);
+    unlink.mockRestore();
   });
 
   it('cleans only the failed acquisition when publishing a replacement lease fails', async () => {

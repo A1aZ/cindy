@@ -60,7 +60,15 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    if (identity !== null && identity !== record.directoryIdentity) return false;
+    const reservedRecoveryDirectory = record.phase === 'restoring' && record.directoryIdentity == null;
+    if (identity !== null && !reservedRecoveryDirectory && identity !== record.directoryIdentity) return false;
+    if (identity !== null && reservedRecoveryDirectory) {
+      // A crash may have happened after mkdir and before its identity was journaled.
+      // Only an empty directory can be adopted; user bytes always stop recovery.
+      if ((await fs.readdir(worktreePath)).length !== 0) return false;
+      record.directoryIdentity = identity;
+      await writeRecycleRecord(record);
+    }
     if (identity !== null) {
       if (record.phase === 'snapshotted') {
         // Snapshotting never mutates the live checkout. Cancelling recycling needs no apply.
@@ -80,6 +88,10 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     }
     if (!legacyGuardHeld()) return false;
     if (identity === null) {
+      record.phase = 'restoring';
+      record.restoredGeneration ??= randomUUID();
+      record.directoryIdentity = null;
+      await writeRecycleRecord(record);
       await fs.mkdir(worktreePath, { recursive: false });
       const stat = await fs.lstat(worktreePath);
       record.directoryIdentity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;

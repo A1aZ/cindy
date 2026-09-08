@@ -27,6 +27,9 @@ function leaseFile(sessionId: string): string {
   return path.join(runtimeRoot(), `${process.pid}-${key}.json`);
 }
 
+const leaseNamePattern = /^\d+-[a-f0-9]{64}\.json$/;
+const releaseRequestPattern = /^\d+-[a-f0-9]{64}\.json\.release$/;
+
 /** A startup owns its own file, even when the business task id is reused. */
 export interface WorktreeRuntimeLease {
   readonly file: string;
@@ -58,10 +61,54 @@ export async function acquireWorktreeRuntimeLease(sessionId: string, cwd: string
 
 export async function releaseWorktreeRuntimeLease(lease: WorktreeRuntimeLease): Promise<void> {
   try { await fs.unlink(lease.file); } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      await fs.unlink(`${lease.file}.release`).catch(() => undefined);
+      return;
+    }
+    // Keep an explicit, durable intent. The lease itself remains protective until
+    // a later maintenance pass can prove that this terminal cleanup succeeded.
+    try {
+      await fs.mkdir(runtimeRoot(), { recursive: true });
+      await fs.writeFile(`${lease.file}.release`, JSON.stringify({ version: 1, file: lease.file, path: lease.physicalPath }), { flag: 'wx', mode: 0o600 });
+    } catch { /* preserving the lease is the safe fallback */ }
+    // Wake the event-driven maintenance loop; it will retry the durable intent
+    // while the still-present lease continues to protect the worktree.
+    notifyWorktreeRecycleOpportunity(lease.physicalPath);
     throw error;
   }
+  await fs.unlink(`${lease.file}.release`).catch(() => undefined);
   notifyWorktreeRecycleOpportunity(lease.physicalPath);
+}
+
+/** Retry only release intents written by a terminal close path. Unknown files stay protective. */
+export async function retryPendingWorktreeRuntimeLeaseReleases(): Promise<number> {
+  let names: string[];
+  try { names = await fs.readdir(runtimeRoot()); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+  let pending = 0;
+  for (const name of names.filter((value) => releaseRequestPattern.test(value))) {
+    const requestFile = path.join(runtimeRoot(), name);
+    try {
+      const request = JSON.parse(await fs.readFile(requestFile, 'utf8')) as { version?: number; file?: string; path?: string };
+      if (request.version !== 1 || typeof request.file !== 'string' || typeof request.path !== 'string'
+        || path.dirname(request.file) !== runtimeRoot() || !leaseNamePattern.test(path.basename(request.file))) {
+        pending++;
+        continue;
+      }
+      try { await fs.unlink(request.file); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { pending++; continue; }
+      }
+      await fs.unlink(requestFile).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
+      notifyWorktreeRecycleOpportunity(request.path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') pending++;
+    }
+  }
+  return pending;
 }
 
 function pidMayBeAlive(pid: number): boolean {
@@ -116,7 +163,7 @@ export async function readWorktreeRuntimePaths(): Promise<Set<string> | null> {
   }
   const paths = new Set<string>();
   for (const name of leases) {
-    const match = /^(\d+)-[a-f0-9]{64}\.json$/.exec(name);
+    const match = leaseNamePattern.exec(name);
     if (!match) continue;
     // Main may have crashed while a detached child still uses the directory.
     // Only explicit lease release proves that startup stopped; a dead owner PID

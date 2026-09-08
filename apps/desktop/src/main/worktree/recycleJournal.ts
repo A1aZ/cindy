@@ -23,7 +23,8 @@ export interface WorktreeRecycleRecord {
   attempts: number;
   nextAttemptAt: number;
   reason?: string;
-  directoryIdentity?: string;
+  /** null is a durable marker that recovery has reserved a previously absent directory. */
+  directoryIdentity?: string | null;
   snapshot?: { head: string; headRef?: string | null; tree: string; indexTree: string; commit: string; ref: string; indexHash: string };
   restoredGeneration?: string;
   archive?: WorktreeRecoveryArchive;

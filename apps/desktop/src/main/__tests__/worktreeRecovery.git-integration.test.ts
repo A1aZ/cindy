@@ -29,7 +29,7 @@ vi.mock('../worktree/gitExec', async (original) => {
 
 import { recycleManagedWorktree } from '../worktree/managedRecycle';
 import { restoreRecordedWorktree } from '../worktree/restoreRecovery';
-import { readRecycleRecord } from '../worktree/recycleJournal';
+import { readRecycleRecord, writeRecycleRecord } from '../worktree/recycleJournal';
 import { captureWorktreeContent } from '../worktree/contentSnapshot';
 import { gitExec } from '../worktree/gitExec';
 
@@ -209,6 +209,19 @@ describe('worktree recovery with real Git and encrypted archives', () => {
     expect((await readRecycleRecord(previous.path, previous.sessionId))?.generation).toBe(previous.generation);
     expect(await restoreRecordedWorktree(previous.sessionId, previous.path)).toBe(true);
     expect(await fs.readFile(path.join(previous.path, 'draft.txt'), 'utf8')).toBe('history contents\n');
+  }, 30_000);
+
+  it('resumes after a crash between recovery mkdir and directory identity journal', async () => {
+    const meta = await createFixture('mkdir-crash');
+    expect(await recycleManagedWorktree(meta, { canRemove: async () => true })).toBe(true);
+    const record = (await readRecycleRecord(meta.path))!;
+    record.phase = 'restoring';
+    record.directoryIdentity = null;
+    record.restoredGeneration = 'resume-generation';
+    await writeRecycleRecord(record);
+    await fs.mkdir(meta.path);
+    expect(await restoreRecordedWorktree(meta.sessionId, meta.path)).toBe(true);
+    expect((await readRecycleRecord(meta.path))?.phase).toBe('restored');
   }, 30_000);
 
   it('preserves submodule-only commits whose Git objects lie outside the archived directory', async () => {

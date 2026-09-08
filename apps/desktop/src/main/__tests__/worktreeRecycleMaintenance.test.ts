@@ -14,6 +14,7 @@ const read = vi.hoisted(() => vi.fn());
 const watch = vi.hoisted(() => vi.fn());
 const closeWatch = vi.hoisted(() => vi.fn());
 const client = vi.hoisted(() => ({ readLocalWorktreeReferences: vi.fn() }));
+vi.mock('../worktree/runtimeLeases', () => ({ retryPendingWorktreeRuntimeLeaseReleases: vi.fn(async () => 0) }));
 vi.mock('../localDb/client/current', () => ({ getDbClient: () => client }));
 vi.mock('../worktree/managedRecycle', () => ({ recycleManagedWorktree: remove }));
 vi.mock('../worktree/worktreeStore', () => ({ get: () => null, getAll: () => [] }));

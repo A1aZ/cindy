@@ -7,6 +7,8 @@
  * （`mcp_token_<id>`，见 providerSecrets 的 customMcpSecretStorageKey）。
  */
 
+import type { AgentKind } from '@cindy/maker-core';
+
 /** 支持的 transport 类型。 */
 export const MCP_TRANSPORTS = ['http', 'sse'] as const;
 export type McpTransport = (typeof MCP_TRANSPORTS)[number];
@@ -23,4 +25,14 @@ export interface CustomMcpConfig {
   url: string;
   /** 额外请求头（不含鉴权 token）。 */
   headers: Record<string, string>;
+}
+
+/** Optional runtime projection for capability pickers; omitted for configuration CRUD. */
+export interface CustomMcpListContext {
+  agentKind: AgentKind;
+}
+
+export interface CustomMcpListEntry extends CustomMcpConfig {
+  /** Present only when a runtime context was requested. */
+  available?: boolean;
 }

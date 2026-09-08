@@ -411,6 +411,7 @@ import {
   getMakerIfReady,
   getPluginRegistry,
   isBotToolsetAvailable,
+  listBotRuntimeMcpServers,
   preflightBotRuntimeResources,
   prepareCodexForAuthModeChange,
   prepareCodexForCustomProviderHostChange,
@@ -5491,6 +5492,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 自定义 MCP 服务器 CRUD —— CRUD 成功后刷新三个 agent 的 mcpProviders 数组
   // （下次新建会话生效）并广播 MCP_CHANGED 让设置页列表 live 刷新。
   registerMcpHandlers(createElectronIpcHandlerRegistry(), {
+    listMcpServers: listBotRuntimeMcpServers,
     refreshProviders: () => refreshCustomMcpProviders(),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.MCP_CHANGED, {}),
     // 内置 server 名对自定义 MCP 是保留名：撞名会在装配层顶替内置 server 并继承

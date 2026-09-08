@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BotCapabilities, BotProfile } from '../botStore';
+import type { CustomMcpListContext, CustomMcpListEntry } from '../../../../shared/customMcp';
 
 const translate = (key: string, opts?: Record<string, unknown>) =>
   opts ? `${key}:${JSON.stringify(opts)}` : key;
@@ -11,6 +12,7 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   initialSearch: '' as string,
+  listCustomMcpServers: vi.fn<(context?: CustomMcpListContext) => Promise<{ servers: CustomMcpListEntry[] }>>(),
   updateBotProfile: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({
     id: 'bot-1',
     currentVersion: 1,
@@ -153,11 +155,16 @@ beforeEach(() => {
   mocks.openPath.mockReset();
   mocks.openPath.mockResolvedValue({ success: true });
   mocks.initialSearch = '';
+  mocks.listCustomMcpServers.mockReset();
+  mocks.listCustomMcpServers.mockResolvedValue({ servers: [
+    { id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.com/mcp', headers: {}, available: true },
+    { id: 'bad-headers', name: 'Legacy MCP', transport: 'http', url: 'https://example.com/mcp', headers: {}, available: false },
+  ] });
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     openPath: mocks.openPath,
     maker: {
       listAgentSkills: async () => ({ success: true, skills: [{ name: 'release-check' }] }),
-      listCustomMcpServers: async () => ({ servers: [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http' }] }),
+      listCustomMcpServers: mocks.listCustomMcpServers,
       plugins: { list: async () => [
         { id: 'docs', name: 'Documents', effectiveEnabled: true, available: true },
         { id: 'scheduler', name: 'Scheduler', effectiveEnabled: true, available: true },
@@ -292,6 +299,29 @@ describe('same-Bot capability updates while editing settings', () => {
     { name: 'Shared Docs', selected: { capabilities: capabilities({ mcpMode: 'allowlist', mcpServers: ['shared-docs'] }) }, empty: { capabilities: capabilities({ mcpMode: 'allowlist' }) }, patch: { capabilities: { mcpServers: [] } }, addPatch: { capabilities: { mcpServers: ['shared-docs'] } } },
     { name: 'Documents', selected: { capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) }, empty: { capabilities: capabilities({ toolsetMode: 'allowlist' }) }, patch: { capabilities: { toolsets: [] } }, addPatch: { capabilities: { toolsets: ['docs'] } } },
   ];
+
+  it.each(['claude', 'codex', 'pi'] as const)('uses the %s runtime catalog and keeps unavailable MCP references removable', async (harness) => {
+    vi.useFakeTimers();
+    const profile = capabilities({ harness, mcpMode: 'allowlist' });
+    const view = renderSettings({ capabilities: profile });
+    await openCapabilities();
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledWith({ agentKind: harness === 'claude' ? 'claude-code' : harness });
+    const unavailable = screen.getByRole('checkbox', { name: /Legacy MCP/ }) as HTMLInputElement;
+    expect(unavailable.disabled).toBe(true);
+    expect(unavailable.checked).toBe(false);
+    unavailable.click();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    expect((screen.getByRole('checkbox', { name: 'Shared Docs' }) as HTMLInputElement).disabled).toBe(false);
+
+    view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: { ...profile, mcpServers: ['bad-headers'] } })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    expect(unavailable.disabled).toBe(false);
+    expect(unavailable.checked).toBe(true);
+    fireEvent.click(unavailable);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] } });
+    expect(unavailable.disabled).toBe(true);
+  });
 
   it.each(cases)('can remove externally joined $name and add it back after external removal', async ({ name, selected, empty, patch, addPatch }) => {
     vi.useFakeTimers();

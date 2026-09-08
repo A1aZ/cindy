@@ -21,6 +21,7 @@ import {
   ClaudeCodeAgent,
   CodexAgent,
   configureDefaultImageResizer,
+  type AgentKind,
   type McpProvider,
 } from '@cindy/maker-core';
 import type { ProviderView } from '@cindy/model-providers';
@@ -467,10 +468,10 @@ export function refreshProviderAccessAfterAuthChange(): void {
  */
 let _codexAgent: CodexAgent | null = null;
 /**
- * codexMcpProviders 的模块级引用 —— 供 ensureCodexMcpBridgeStartedForRemote()
- * 在远端 daemon MCP 注入链路里懒启动 bridge 时取用。getMaker() 构造后回填。
+ * Actual provider array references, shared by runtime catalogs and the lazy Codex bridge.
+ * Custom MCP refresh mutates these arrays in place; resetMaker drops every reference.
  */
-let _codexMcpProviders: McpProvider[] | null = null;
+let _mcpProviders: Partial<Record<AgentKind, McpProvider[]>> = {};
 /**
  * 本进程已对哪些 cc session 做过 bridge MCP 的强制 fresh start。bridge 是
  * 进程内存态, 随 app 重启清空 — 重启后首轮注入重新强制 fresh; SSH 断线
@@ -616,10 +617,10 @@ export async function ensureCodexMcpBridgeStartedForRemote(): Promise<{
   bridgeInstanceId: string;
   bridge: CodexHttpBridge;
 } | null> {
-  if (!_codexMcpProviders) return null;
+  if (!_mcpProviders.codex) return null;
   try {
     const cfg = await getCodexExtraSpawnConfig({
-      mcpProviders: _codexMcpProviders,
+      mcpProviders: _mcpProviders.codex,
       logger: desktopMakerLogger,
     });
     if (!cfg.bridge) return null;
@@ -721,7 +722,17 @@ function getLspPool(): LspServerPool {
 
 /** Same Desktop provider instances used by the runtimes, evaluated for this Bot. */
 export function isBotToolsetAvailable(input: BotToolsetContext & { toolsetId: string }): boolean {
-  return isBotToolsetProviderAvailable(_codexMcpProviders ?? [], input);
+  return isBotToolsetProviderAvailable(_mcpProviders.codex ?? [], input);
+}
+
+/** Shared by Bot tools, settings and hydration; never infer registration from raw DB rows. */
+export async function listBotRuntimeMcpServers({ agentKind }: { agentKind: AgentKind }) {
+  return buildBotMcpCatalog({
+    agentKind,
+    providers: _mcpProviders[agentKind] ?? [],
+    builtinNames: getBuiltinMcpServerNames(),
+    customServers: await listCustomMcpRuntimeGenerations(),
+  });
 }
 
 /** Get the plugin registry singleton (delegates to plugins/index.ts module-level cache). */
@@ -840,17 +851,6 @@ export function getMaker(): Maker {
       return getIOSSimulatorPluginAccessDecision(workingDir);
     };
 
-    // These callbacks run after all three runtime provider arrays are registered.
-    const listBotRuntimeMcpServers: NonNullable<BotProfileRuntimeDeps['listMcpServers']> = async ({ agentKind }) => {
-      const providers = agentKind === 'claude-code' ? claudeMcpProviders
-        : agentKind === 'codex' ? codexMcpProviders : piMcpProviders;
-      return buildBotMcpCatalog({
-        agentKind,
-        providers,
-        builtinNames: getBuiltinMcpServerNames(),
-        customServers: await listCustomMcpRuntimeGenerations(),
-      });
-    };
     const makerMemoryProviderDeps = {
       botCapabilities: createBotCapabilityService({
         getMaker, getPluginRegistry, isBotToolsetAvailable,
@@ -1021,6 +1021,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
+    _mcpProviders['claude-code'] = claudeMcpProviders;
     // agent Bash 命令的全局并发闸门(跨所有本地 cc session / worker / subagent 共享)。
     // 上限每次准入判断现读设置文件,热更即刻生效;默认 0 = 不限 = 不排队。
     const commandConcurrencyGate = createCommandConcurrencyGate({
@@ -1326,7 +1327,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
-    _codexMcpProviders = codexMcpProviders;
+    _mcpProviders.codex = codexMcpProviders;
     const resolveDesiredCodexSubagentRoutingSignature = async (ctx: {
       credentialMode?: 'oauth-bearer' | 'gateway-key' | 'provider-oauth';
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
@@ -1982,6 +1983,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
+    _mcpProviders.pi = piMcpProviders;
     // 用户自定义 MCP:三个 agent 都必须注册其实际持有的数组引用，再统一做初始 refresh。
     // localDb onReady 可能在 Maker 构造前就已触发（此时 registry 无数组，refresh 空跑）；
     // 在此补一次 refresh，若 DB 尚未就绪则 refreshCustomMcpProviders 内部 catch 后静默跳过。
@@ -2678,6 +2680,7 @@ export function resetMaker(): void {
   botRuntimeResourcePreflight = null;
   _registerPiAgent = null;
   _codexAgent = null;
+  _mcpProviders = {};
   // coordinator 闭包捕获了刚作废的那个 maker —— 不清掉的话,换账号窗口期内到达的 auth
   // 事件会拿旧实例去拉模型清单(串号)。下次 getMaker() 会带着干净记账重建它。
   _codexModelBackfill = null;

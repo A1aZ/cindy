@@ -45,7 +45,7 @@ export function BotCapabilitySettings({
           workingDir: session.workingDir ?? undefined,
           remoteHostId: session.remoteHostId ?? undefined,
         }),
-        api.listCustomMcpServers(),
+        api.listCustomMcpServers({ agentKind }),
         api.plugins.list(session.workingDir ?? undefined, true, {
           botId: bot.id, agentKind, remoteHostId: session.remoteHostId,
         }),
@@ -63,7 +63,7 @@ export function BotCapabilitySettings({
         next.mcp = mcpResult.value.servers.map((item) => ({
           id: item.id,
           name: item.name,
-          available: agentKind !== 'codex' || item.transport !== 'sse',
+          available: item.available === true,
         }));
       if (toolsetResult.status === 'fulfilled')
         next.toolset = toolsetResult.value

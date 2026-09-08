@@ -11,7 +11,9 @@
  * handler body 可脱 Electron 用 IpcHarness + 内存 db 直接 invoke 单测（规则 14）。
  */
 
-import { throwIpcError } from '../utils/ipcValidate.js';
+import { requireEnum, requireObject, throwIpcError } from '../utils/ipcValidate.js';
+import type { CustomMcpListContext } from '../../shared/customMcp.js';
+import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
 import {
   createCustomMcpServer,
   customMcpServerExists,
@@ -25,6 +27,8 @@ import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 export interface McpHandlerDeps {
+  /** Same registered runtime catalog used by Bot capability tools and hydration. */
+  listMcpServers(context: CustomMcpListContext): ReturnType<NonNullable<BotProfileRuntimeDeps['listMcpServers']>>;
   /** CRUD 成功后刷新 agent mcpProviders 数组（生产 = refreshCustomMcpProviders）。 */
   refreshProviders(): Promise<void>;
   /** CRUD 成功后广播变更（生产 = 向所有窗口 send MCP_CHANGED）。 */
@@ -48,9 +52,17 @@ export interface McpHandlerDeps {
 }
 
 export function registerMcpHandlers(registry: IpcHandlerRegistry, deps: McpHandlerDeps): void {
-  registry.handle(MAKER_INVOKE.MCP_CUSTOM_LIST, async () => {
+  registry.handle(MAKER_INVOKE.MCP_CUSTOM_LIST, async (_event, context: unknown) => {
+    const agentKind = context === undefined ? undefined : requireEnum(
+      requireObject(context, 'context').agentKind, ['claude-code', 'codex', 'pi'] as const, 'agentKind',
+    );
     const servers = await listCustomMcpServers();
-    return { servers };
+    if (agentKind === undefined) return { servers };
+    const catalog = await deps.listMcpServers({ agentKind });
+    const available = new Set(catalog
+      .filter((entry) => entry.source === 'custom' && entry.available !== false)
+      .map((entry) => entry.name));
+    return { servers: servers.map((server) => ({ ...server, available: available.has(server.id) })) };
   });
 
   // CRUD 成功后统一收尾：刷新 provider 数组 + 广播 + 失效 Codex app-server。

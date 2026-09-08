@@ -61,11 +61,15 @@ export function resolveAndroidSdkTools({
   for (const sdkRoot of [...new Set(candidates)]) {
     const adb = win32Path.join(sdkRoot, 'platform-tools', 'adb.exe');
     const emulator = win32Path.join(sdkRoot, 'emulator', 'emulator.exe');
-    if (!requireTools || (exists(adb) && exists(emulator))) return { sdkRoot, adb, emulator };
+    if (requireTools ? (exists(adb) && exists(emulator)) : exists(sdkRoot)) {
+      return { sdkRoot, adb, emulator };
+    }
   }
 
   throw new Error(
-    '未找到完整 Android SDK。请设置 ANDROID_SDK_ROOT / ANDROID_HOME，或通过 Android Studio 安装 Platform Tools 与 Emulator。',
+    requireTools
+      ? '未找到完整 Android SDK。请设置 ANDROID_SDK_ROOT / ANDROID_HOME，或通过 Android Studio 安装 Platform Tools 与 Emulator。'
+      : '未找到 Android SDK 目录。请设置有效的 ANDROID_SDK_ROOT / ANDROID_HOME，或通过 Android Studio 安装 SDK。',
   );
 }
 

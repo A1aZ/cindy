@@ -714,6 +714,7 @@ export default function NewRemoteSessionScreen() {
   const voicePermissionRequestAbortRef = useRef<AbortController | null>(null);
   const voiceStartupInFlightRef = useRef(false);
   const voiceStopInFlightRef = useRef(false);
+  const voiceSelectionUserOwnedRef = useRef(false);
   const voiceStartupSeqRef = useRef(0);
   const voiceControllerSessionRef = useRef<MobileVoiceControllerSession | null>(null);
   const voiceDictionaryLearningTrackerRef = useRef<MobileVoiceDictionaryLearningTracker | null>(null);
@@ -3209,6 +3210,7 @@ export default function NewRemoteSessionScreen() {
       }
       const selectionBefore = takeRefinementContextTail(currentDraft.slice(0, initialSelection.start));
       const selectionAfter = currentDraft.slice(initialSelection.end, initialSelection.end + 1200);
+      voiceSelectionUserOwnedRef.current = false;
       const controller = createMobileVoiceControllerSession({
         credential,
         ...(prewarmedVoice ? { asr: prewarmedVoice.asr } : {}),
@@ -3227,10 +3229,8 @@ export default function NewRemoteSessionScreen() {
         localVoiceInputHistory,
         readCurrentDraft: () => firstMessageRef.current,
         onDraftChanged: (text, selection) => {
-          // Once stopping starts, the user owns the native selection. The
-          // final ASR/refinement callback must not move it back to the
-          // dictation insertion point after the user has edited the draft.
-          if (selection && !voiceStopInFlightRef.current) {
+          // Follow final ASR/refinement until a native edit claims the caret.
+          if (selection && !voiceSelectionUserOwnedRef.current) {
             firstMessageSelectionRef.current = selection;
             setFirstMessageSelection(selection);
           }
@@ -5889,12 +5889,23 @@ export default function NewRemoteSessionScreen() {
                     // 失焦收起与「点别处收键盘」同语义:语音结束 hold 一并解除。
                     setComposerVoiceHoldArmed(false);
                   }}
-                  onChangeText={setFirstMessageDraft}
+                  onChangeText={(text) => {
+                    if (voiceStopInFlightRef.current && text !== firstMessageRef.current) {
+                      voiceSelectionUserOwnedRef.current = true;
+                    }
+                    setFirstMessageDraft(text);
+                  }}
                   onSelectionChange={(event) => {
                     // finishVoiceRecording marks recording inactive before awaiting
                     // ASR/refinement teardown, so native cursor edits remain user-owned.
                     if (!voiceRecordingActiveRef.current) {
                       const selection = event.nativeEvent.selection;
+                      const previous = firstMessageSelectionRef.current;
+                      // A matching native echo of a controlled selection is not a user move.
+                      if (voiceStopInFlightRef.current
+                        && (selection.start !== previous.start || selection.end !== previous.end)) {
+                        voiceSelectionUserOwnedRef.current = true;
+                      }
                       firstMessageSelectionRef.current = selection;
                       setFirstMessageSelection(selection);
                     }

@@ -12,6 +12,7 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
+type BotToolsetContext = import('../shared/botRemoteCapabilities').BotToolsetContext;
 type AgentProxyPrefPayload = import('../shared/agentProxyConfig').SshHostAgentProxyPref;
 type AgentProxyTunnelStatePayload = import('../shared/agentProxyConfig').AgentProxyTunnelState;
 type ModelAccessStatusPayload = import('../shared/modelAccess').ModelAccessStatus;
@@ -989,6 +990,8 @@ interface CrossAgentStepEvent {
 }
 
 interface PluginListItem {
+  /** Present only when queried for a Bot runtime context. */
+  available?: boolean;
   id: string;
   name: string;
   description: string;
@@ -6511,7 +6514,7 @@ interface ElectronAPI {
     };
 
     plugins: {
-      list: (workingDir?: string, includeHidden?: boolean) => Promise<PluginListItem[]>;
+      list: (workingDir?: string, includeHidden?: boolean, botContext?: Omit<BotToolsetContext, 'workingDir'>) => Promise<PluginListItem[]>;
       getState: (
         id: string,
         workingDir?: string,

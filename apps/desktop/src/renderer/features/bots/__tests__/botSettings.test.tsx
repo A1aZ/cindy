@@ -74,6 +74,8 @@ vi.mock('@/state/newMakerDraft', () => ({
   }),
 }));
 
+vi.mock('@/lib/sessionService', () => ({ get: async () => ({ workingDir: '/bot/workspace' }) }));
+
 import { BotSettings } from '../BotsHomeView';
 
 function capabilities(overrides: Partial<BotCapabilities> = {}): BotCapabilities {
@@ -151,7 +153,18 @@ beforeEach(() => {
   mocks.openPath.mockReset();
   mocks.openPath.mockResolvedValue({ success: true });
   mocks.initialSearch = '';
-  (window as unknown as { electronAPI: unknown }).electronAPI = { openPath: mocks.openPath };
+  (window as unknown as { electronAPI: unknown }).electronAPI = {
+    openPath: mocks.openPath,
+    maker: {
+      listAgentSkills: async () => ({ success: true, skills: [{ name: 'release-check' }] }),
+      listCustomMcpServers: async () => ({ servers: [{ id: 'shared-docs', name: 'Shared Docs', transport: 'http' }] }),
+      plugins: { list: async () => [
+        { id: 'docs', name: 'Documents', effectiveEnabled: true, available: true },
+        { id: 'scheduler', name: 'Scheduler', effectiveEnabled: true, available: true },
+        { id: 'contacts', name: 'Contacts', effectiveEnabled: true, available: false },
+      ] },
+    },
+  };
 });
 
 afterEach(() => {
@@ -262,5 +275,103 @@ describe('Bot settings unified autosave', () => {
     expect(mocks.updateBotProfile.mock.calls[0]?.[1]).toMatchObject({
       capabilities: expect.objectContaining({ memory: true }),
     });
+  });
+});
+
+
+describe('same-Bot capability updates while editing settings', () => {
+  async function openCapabilities() {
+    const details = screen.getByText('bots.capabilities.title').parentElement as HTMLDetailsElement;
+    await act(async () => {
+      details.open = true;
+      fireEvent(details, new Event('toggle'));
+    });
+  }
+  const cases = [
+    { name: 'release-check', selected: { skills: ['release-check'], capabilities: capabilities({ skillMode: 'allowlist' }) }, empty: { skills: [], capabilities: capabilities({ skillMode: 'allowlist' }) }, patch: { skills: [] }, addPatch: { skills: ['release-check'] } },
+    { name: 'Shared Docs', selected: { capabilities: capabilities({ mcpMode: 'allowlist', mcpServers: ['shared-docs'] }) }, empty: { capabilities: capabilities({ mcpMode: 'allowlist' }) }, patch: { capabilities: { mcpServers: [] } }, addPatch: { capabilities: { mcpServers: ['shared-docs'] } } },
+    { name: 'Documents', selected: { capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) }, empty: { capabilities: capabilities({ toolsetMode: 'allowlist' }) }, patch: { capabilities: { toolsets: [] } }, addPatch: { capabilities: { toolsets: ['docs'] } } },
+  ];
+
+  it.each(cases)('can remove externally joined $name and add it back after external removal', async ({ name, selected, empty, patch, addPatch }) => {
+    vi.useFakeTimers();
+    const view = renderSettings(empty);
+    await openCapabilities();
+    const rerender = (profile: Partial<BotProfile>) => view.rerender(
+      <BotSettings bot={bot(profile)} onBack={view.onBack} onOpenSession={view.onOpenSession} />,
+    );
+    rerender({ ...selected, currentVersion: 2 });
+    expect((screen.getByRole('checkbox', { name }) as HTMLInputElement).checked).toBe(true);
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('checkbox', { name }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', patch);
+    // Restore externally, then remove externally: re-adding must also be dirty.
+    rerender({ ...selected, currentVersion: 3 });
+    rerender({ ...empty, currentVersion: 4 });
+    expect((screen.getByRole('checkbox', { name }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenCalledTimes(2);
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', addPatch);
+    expect((screen.getByRole('checkbox', { name }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('preserves pending text and per-item choices while incorporating external additions', async () => {
+    vi.useFakeTimers();
+    const view = renderSettings({ capabilities: capabilities({ toolsetMode: 'allowlist' }) });
+    await openCapabilities();
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Local name' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Scheduler' }));
+    view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    expect((screen.getByLabelText('bots.nameLabel') as HTMLInputElement).value).toBe('Local name');
+    expect((screen.getByRole('checkbox', { name: 'Documents' }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('checkbox', { name: 'Scheduler' }) as HTMLInputElement).checked).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { name: 'Local name', capabilities: { toolsets: ['docs', 'scheduler'] } });
+  });
+
+  it('keeps edits made during a successful save and adopts concurrent capability updates', async () => {
+    vi.useFakeTimers();
+    let finishSave!: (value: { id: string; currentVersion: number; name: string }) => void;
+    mocks.updateBotProfile.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    const view = renderSettings();
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'First name' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    view.rerender(<BotSettings bot={bot({ name: 'First name' })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Second name' } });
+    view.rerender(<BotSettings bot={bot({ name: 'First name', currentVersion: 3, skills: ['release-check'] })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    await act(async () => { finishSave({ id: 'bot-1', currentVersion: 2, name: 'First name' }); });
+    expect((screen.getByLabelText('bots.nameLabel') as HTMLInputElement).value).toBe('Second name');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { name: 'Second name' });
+    expect((screen.getByRole('checkbox', { name: /release-check/ }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('keeps a failed optimistic edit dirty and retries it after a profile rollback', async () => {
+    vi.useFakeTimers();
+    let rejectSave!: (error: Error) => void;
+    mocks.updateBotProfile.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSave = reject; }));
+    const view = renderSettings();
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Local name' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    view.rerender(<BotSettings bot={bot({ name: 'Local name' })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Newer local name' } });
+    view.rerender(<BotSettings bot={bot({ currentVersion: 2, skills: ['release-check'] })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    await act(async () => { rejectSave(new Error('save failed')); });
+    expect((screen.getByLabelText('bots.nameLabel') as HTMLInputElement).value).toBe('Newer local name');
+    fireEvent.click(screen.getByRole('button', { name: 'bots.autosave.retry' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { name: 'Newer local name' });
+  });
+
+  it('uses host availability and still allows removing a joined unavailable toolset', async () => {
+    const view = renderSettings();
+    await openCapabilities();
+    expect((screen.getByRole('checkbox', { name: /Contacts/ }) as HTMLInputElement).disabled).toBe(true);
+    view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['contacts'] }) })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
+    expect((screen.getByRole('checkbox', { name: /Contacts/ }) as HTMLInputElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Contacts/ }));
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { toolsets: [] } }));
   });
 });

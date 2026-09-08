@@ -243,7 +243,8 @@ import {
 } from '../mcp-integrations/codexEnvironment.js';
 import type { CodexHttpBridge } from '../mcp-integrations/codexHttpBridge.js';
 import { setRemoteMcpBridgeTokenRotatedHook } from '../mcp-integrations/remoteMcpBridgeToken.js';
-import { isBotToolsetAvailableOnTarget } from '../../shared/botRemoteCapabilities.js';
+import type { BotToolsetContext } from '../../shared/botRemoteCapabilities.js';
+import { isBotToolsetProviderAvailable } from './botToolsetAvailability.js';
 import {
   ensureRemoteMcpForward,
   setRemoteMcpForwardRearmedHook,
@@ -714,6 +715,11 @@ function getLspPool(): LspServerPool {
     logger: desktopMakerLogger.child('lsp-pool'),
   });
   return lspPool;
+}
+
+/** Same Desktop provider instances used by the runtimes, evaluated for this Bot. */
+export function isBotToolsetAvailable(input: BotToolsetContext & { toolsetId: string }): boolean {
+  return isBotToolsetProviderAvailable(_codexMcpProviders ?? [], input);
 }
 
 /** Get the plugin registry singleton (delegates to plugins/index.ts module-level cache). */
@@ -2314,7 +2320,7 @@ export function getMaker(): Maker {
           ]),
         ).values()];
       },
-      listToolsets: async ({ agentKind, workingDir, remoteHostId }) => {
+      listToolsets: async ({ botId, agentKind, workingDir, remoteHostId }) => {
         const registry = getPluginRegistry();
         return Promise.all(
           registry.getPlugins().map(async (plugin) => {
@@ -2325,7 +2331,9 @@ export function getMaker(): Maker {
               essential: ESSENTIAL_PLUGIN_IDS.has(plugin.id),
               available:
                 state.effectiveEnabled &&
-                isBotToolsetAvailableOnTarget({
+                isBotToolsetAvailable({
+                  botId,
+                  workingDir,
                   agentKind,
                   remoteHostId,
                   toolsetId: plugin.id,

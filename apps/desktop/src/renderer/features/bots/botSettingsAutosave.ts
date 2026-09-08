@@ -140,6 +140,33 @@ export function botSettingsChanges(previous: BotSettingsPayload, next: BotSettin
   return { ...changed, ...(Object.keys(capabilityChanges).length ? { capabilities: capabilityChanges } : {}) };
 }
 
+/** Advance untouched fields to a live profile without discarding pending local edits. */
+export function reconcileBotSettingsDraft(
+  baseline: BotSettingsPayload,
+  draft: BotSettingsDraft,
+  incoming: BotSettingsPayload,
+): BotSettingsDraft {
+  const normalized = normalizeBotSettingsPayload(draft, baseline.name);
+  const changes = botSettingsChanges(baseline, normalized);
+  const reconcileList = (previous: string[], local: string[], remote: string[]) => [
+    ...remote.filter((id) => !previous.includes(id) || local.includes(id)),
+    ...local.filter((id) => !previous.includes(id) && !remote.includes(id)),
+  ];
+  return {
+    ...incoming,
+    ...Object.fromEntries(Object.keys(changes)
+      .filter((key) => key !== 'capabilities')
+      .map((key) => [key, draft[key as keyof BotSettingsDraft]])),
+    skills: reconcileList(baseline.skills, draft.skills, incoming.skills),
+    capabilities: {
+      ...incoming.capabilities,
+      ...changes.capabilities,
+      mcpServers: reconcileList(baseline.capabilities.mcpServers, draft.capabilities.mcpServers, incoming.capabilities.mcpServers),
+      toolsets: reconcileList(baseline.capabilities.toolsets, draft.capabilities.toolsets, incoming.capabilities.toolsets),
+    },
+  };
+}
+
 /** 自动保存对用户可见的状态。`saved` 由 UI 侧短暂显示后淡出,不常驻。 */
 export type BotAutosaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 

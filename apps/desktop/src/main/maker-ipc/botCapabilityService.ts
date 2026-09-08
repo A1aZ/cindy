@@ -4,7 +4,6 @@ import { getDbClient } from '../localDb/client/current.js';
 import { updateBotProfile } from '../localDb/ipc/bots.js';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { listCustomMcpServers } from '../maker-host/custom-mcp-store.js';
-import { isBotToolsetAvailableOnTarget } from '../../shared/botRemoteCapabilities.js';
 
 type Kind = 'skill' | 'mcp' | 'toolset';
 type Input = { callerSessionId: string; kind: Kind };
@@ -75,7 +74,7 @@ async function context(callerSessionId: string) {
 
 async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): Promise<Entry[]> {
   const joined = new Set(strings(ctx.config[fields[input.kind].list]));
-  const { getMaker, getPluginRegistry } = await import('../maker-host/index.js');
+  const { getMaker, getPluginRegistry, isBotToolsetAvailable } = await import('../maker-host/index.js');
   const agentKind =
     getMaker().getSession(input.callerSessionId)?.agentKind ??
     (ctx.agentKind === 'cc' ? 'claude-code' : ctx.agentKind === 'pi' ? 'pi' : 'codex');
@@ -112,7 +111,9 @@ async function catalog(input: Input, ctx: Awaited<ReturnType<typeof context>>): 
           description: plugin.description,
           available:
             (await registry.getEnableState(plugin.id, workingDir)).effectiveEnabled &&
-            isBotToolsetAvailableOnTarget({
+            isBotToolsetAvailable({
+              botId: ctx.botId,
+              workingDir,
               agentKind,
               remoteHostId: ctx.remoteHostId,
               toolsetId: plugin.id,

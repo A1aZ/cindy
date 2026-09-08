@@ -55,6 +55,7 @@ const h = await vi.hoisted(async () => {
   searchConversations: vi.fn(),
   requestRuntimeRefresh: vi.fn(),
   seedTemplateSkills: vi.fn(async () => ({ completedNow: true, skills: [] })),
+  toolsetsAvailable: false,
   ownerScopeKey: 'owner-a:1',
   ownerBoundaryPending: false,
 });
@@ -98,7 +99,11 @@ vi.mock('../../../maker-host/custom-mcp-store.js', () => ({
 }));
 vi.mock('../../../maker-host/index.js', () => ({
   getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
-  getPluginRegistry: () => ({ getPlugins: () => [], getEnableState: async () => ({ effectiveEnabled: true }) }),
+  getPluginRegistry: () => ({
+    getPlugins: () => ['contacts', 'lsp'].map((id) => ({ id, name: id, description: id })),
+    getEnableState: async () => ({ effectiveEnabled: true }),
+  }),
+  isBotToolsetAvailable: () => h.toolsetsAvailable,
   getMakerIfReady: () => ({
     isSessionAlive: h.isSessionAlive,
     closeSession: h.closeSession,
@@ -394,6 +399,7 @@ async function invoke(channel: string, body: unknown): Promise<any> {
   return handler({}, body);
 }
 beforeEach(async () => {
+  h.toolsetsAvailable = false;
   vi.clearAllMocks();
   h.handlers.clear();
   h.nextSession = 0;
@@ -1606,6 +1612,19 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
     await expect(selectBotCapability({ callerSessionId, kind: 'mcp', id: 'shared-docs', joined: false })).resolves.toMatchObject({ ok: true, joined: false });
     await expect(findBotCapabilities({ callerSessionId, kind: 'skill' })).resolves.toMatchObject({ capabilities: [{ id: 'release-check', joined: true }] });
+  });
+
+  it.each(['contacts', 'lsp'])('rejects gated %s despite registry enablement and keeps joined references removable', async (id) => {
+    const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1 });
+    const input = { callerSessionId: created.session.id, kind: 'toolset' as const, id };
+    await expect(findBotCapabilities(input)).resolves.toMatchObject({
+      ok: true, capabilities: expect.arrayContaining([{ id, name: id, description: id, available: false, joined: false }]),
+    });
+    await expect(selectBotCapability({ ...input, joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    h.toolsetsAvailable = true;
+    await expect(selectBotCapability({ ...input, joined: true })).resolves.toMatchObject({ ok: true });
+    h.toolsetsAvailable = false;
+    await expect(selectBotCapability({ ...input, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
   });
 
   it('refuses absent capabilities and callers without an active canonical Bot', async () => {

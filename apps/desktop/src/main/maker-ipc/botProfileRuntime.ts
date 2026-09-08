@@ -100,6 +100,7 @@ export interface BotProfileRuntimeDeps {
     remoteHostId?: string;
   }) => Promise<BotMcpCatalogItem[]>;
   listToolsets?: (input: {
+    botId: string;
     agentKind: MakerSessionCreateOpts['agentKind'];
     workingDir: string;
     remoteHostId?: string;
@@ -759,6 +760,7 @@ export async function hydrateBotProfileRuntime(
     runtimeToolsetMode = 'allowlist';
     try {
       toolsetCatalog = await deps.listToolsets({
+        botId: row.botId,
         agentKind: opts.agentKind,
         workingDir: opts.workingDir,
         remoteHostId: opts.remoteHostId,

@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { useBotTranslation } from './botPronounContext';
 import type { BotCapabilities, BotProfile } from './botStore';
 import * as sessionService from '@/lib/sessionService';
-import { isBotToolsetAvailableOnTarget } from '../../../shared/botRemoteCapabilities';
 import {
   getDataOwnerGeneration,
   isDataOwnerGenerationCurrent,
@@ -47,7 +46,9 @@ export function BotCapabilitySettings({
           remoteHostId: session.remoteHostId ?? undefined,
         }),
         api.listCustomMcpServers(),
-        api.plugins.list(session.workingDir ?? undefined, true),
+        api.plugins.list(session.workingDir ?? undefined, true, {
+          botId: bot.id, agentKind, remoteHostId: session.remoteHostId,
+        }),
       ]);
       if (!isDataOwnerGenerationCurrent(owner)) return;
       const [skillResult, mcpResult, toolsetResult] = results;
@@ -70,9 +71,7 @@ export function BotCapabilitySettings({
           .map((item) => ({
             id: item.id,
             name: item.name,
-            available: item.effectiveEnabled && isBotToolsetAvailableOnTarget({
-              agentKind, remoteHostId: session.remoteHostId, toolsetId: item.id,
-            }),
+            available: item.available === true,
           }));
       setEntries(next);
       setError(kinds.some((kind) => !next[kind]));

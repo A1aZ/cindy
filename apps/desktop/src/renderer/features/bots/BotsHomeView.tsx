@@ -32,7 +32,7 @@ import { BotLifecycleSettings } from './BotLifecycleSettings';
 import { BotInvitationWelcome } from './BotInvitationWelcome';
 import { BotModelChainEditor } from './BotModelChainEditor';
 import { BotCapabilitySettings } from './BotCapabilitySettings';
-import { botSettingsChanges, normalizeBotSettingsPayload, type BotSettingsPayload } from './botSettingsAutosave';
+import { botSettingsChanges, normalizeBotSettingsPayload, reconcileBotSettingsDraft, type BotSettingsPayload } from './botSettingsAutosave';
 import { useBotSettingsAutosave } from './useBotSettingsAutosave';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -86,31 +86,19 @@ export function BotSettings({
     if (!availableAgentsLoaded) return [];
     return (['cc', 'codex', 'pi'] as const).filter((item) => !availableVendors.has(item));
   }, [availableAgentsLoaded, availableVendors]);
-  // 只在切到另一个 Bot 时重灌表单。自动保存下 `bot` 每次落库(以及失败回滚)都会
-  // 换一个新对象,若仍按对象身份重灌,用户在提交在途期间敲的字会被服务端快照盖掉,
-  // 失败回滚时更会把刚改的内容整批还原 —— 那是比「忘记点保存」更严重的丢字。
-  // 页面挂载期间本地 state 才是编辑权威;`bot.channels` / `bot.sessions` 等非表单
-  // 字段仍直接读 prop,保持实时。
   const botIdentityRef = useRef(bot.id);
-  useEffect(() => {
-    if (botIdentityRef.current === bot.id) return;
-    botIdentityRef.current = bot.id;
-    setName(bot.name);
-    setDescription(bot.description);
-    setIdentitySource(bot.identitySource ?? '');
-    setUserContextSource(bot.userContextSource ?? '');
-    setAvatar(bot.avatar);
-    setAvatarColor(bot.avatarColor);
-    setSelectedSkills(bot.skills);
-    setCapabilities(bot.capabilities);
-    savedSettingsRef.current = normalizeBotSettingsPayload({ name: bot.name, description: bot.description, identitySource: bot.identitySource ?? '', userContextSource: bot.userContextSource ?? '', avatar: bot.avatar, avatarColor: bot.avatarColor, capabilities: bot.capabilities, skills: bot.skills }, bot.name);
-  }, [bot]);
-
+  const reconciledBotRef = useRef(bot);
+  const savingProfileRef = useRef(false);
   const savedSettingsRef = useRef(normalizeBotSettingsPayload({ name, description, identitySource, userContextSource, avatar, avatarColor, capabilities, skills: selectedSkills }, bot.name));
   const commitProfile = useCallback(
     async (payload: BotSettingsPayload) => {
-      await updateBotProfile(bot.id, botSettingsChanges(savedSettingsRef.current, payload));
-      savedSettingsRef.current = payload;
+      savingProfileRef.current = true;
+      try {
+        await updateBotProfile(bot.id, botSettingsChanges(savedSettingsRef.current, payload));
+        savedSettingsRef.current = payload;
+      } finally {
+        savingProfileRef.current = false;
+      }
     },
     [bot.id],
   );
@@ -129,8 +117,33 @@ export function BotSettings({
     fallbackName: bot.name,
     // 归档 bot 的设置页是只读的(不渲染任何表单字段),自动保存不得为它引入写入。
     enabled: bot.status !== 'archived',
+    baseline: savedSettingsRef,
     commit: commitProfile,
   });
+
+  useEffect(() => {
+    // Store props include optimistic writes and rollback. Reconcile only after
+    // our save settles, retaining edits typed while that request was in flight.
+    if (savingProfileRef.current || reconciledBotRef.current === bot) return;
+    const incoming = normalizeBotSettingsPayload({ ...bot, identitySource: bot.identitySource ?? '', userContextSource: bot.userContextSource ?? '' }, bot.name);
+    const next = botIdentityRef.current === bot.id
+      ? reconcileBotSettingsDraft(savedSettingsRef.current, {
+        name, description, identitySource, userContextSource, avatar, avatarColor,
+        capabilities, skills: selectedSkills,
+      }, incoming)
+      : incoming;
+    botIdentityRef.current = bot.id;
+    reconciledBotRef.current = bot;
+    savedSettingsRef.current = incoming;
+    setName(next.name);
+    setDescription(next.description);
+    setIdentitySource(next.identitySource);
+    setUserContextSource(next.userContextSource);
+    setAvatar(next.avatar);
+    setAvatarColor(next.avatarColor);
+    setSelectedSkills(next.skills);
+    setCapabilities(next.capabilities);
+  }, [bot, autosave.status]);
 
   const updateCapability = <K extends keyof BotCapabilities>(key: K, value: BotCapabilities[K]) => {
     setCapabilities((current) => ({
@@ -323,8 +336,8 @@ export function BotSettings({
 
         <BotCapabilitySettings
           bot={bot}
-          capabilities={{ ...bot.capabilities, ...botSettingsChanges(savedSettingsRef.current, { ...savedSettingsRef.current, capabilities }).capabilities }}
-          skills={JSON.stringify(selectedSkills) === JSON.stringify(savedSettingsRef.current.skills) ? bot.skills : selectedSkills}
+          capabilities={capabilities}
+          skills={selectedSkills}
           onChange={(kind, values) => {
             if (kind === 'skill') setSelectedSkills(values);
             setCapabilities((current) => ({

@@ -1,3 +1,4 @@
+import type { BotToolsetContext } from '../shared/botRemoteCapabilities';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { DEVICE_LINK_PUSH } from '../shared/deviceLinkIpc';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
@@ -820,6 +821,8 @@ interface CrossAgentMigrationItem {
 }
 
 interface PluginListItem {
+  /** Present only when queried for a Bot runtime context. */
+  available?: boolean;
   id: string;
   name: string;
   description: string;
@@ -7189,8 +7192,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // ── Plugin system (Phase 1) ──────────────────────────────────────────
     plugins: {
-      list: (workingDir?: string, includeHidden?: boolean): Promise<PluginListItem[]> =>
-        ipcRenderer.invoke('maker:plugins:list', workingDir, includeHidden),
+      list: (workingDir?: string, includeHidden?: boolean, botContext?: Omit<BotToolsetContext, 'workingDir'>): Promise<PluginListItem[]> =>
+        ipcRenderer.invoke('maker:plugins:list', workingDir, includeHidden, botContext),
       getState: (
         id: string,
         workingDir?: string,

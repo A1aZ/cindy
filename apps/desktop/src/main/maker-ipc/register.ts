@@ -1,3 +1,4 @@
+import { registerPluginListHandler } from './pluginListHandler.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
  * registerMakerIpc — 把 Maker Core 的能力暴露为 maker:* IPC channel。
@@ -409,6 +410,7 @@ import {
   getMaker,
   getMakerIfReady,
   getPluginRegistry,
+  isBotToolsetAvailable,
   preflightBotRuntimeResources,
   prepareCodexForAuthModeChange,
   prepareCodexForCustomProviderHostChange,
@@ -16834,9 +16836,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   // ── Plugin system (Phase 1) ──────────────────────────────────────────────
-  ipcMain.handle(MAKER_INVOKE.PLUGINS_LIST, async (_e, workingDir: unknown, includeHidden: unknown) => {
-    const wd = typeof workingDir === 'string' ? workingDir : undefined;
-    return getPluginRegistry().listPlugins(wd, includeHidden === true);
+  registerPluginListHandler(createElectronIpcHandlerRegistry(), {
+    getPluginRegistry,
+    isBotToolsetAvailable,
+    assertBotQuery: (event) => {
+      if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+    },
   });
 
   // Read one plugin's enable state by id. Unlike PLUGINS_LIST this does NOT skip

@@ -78,6 +78,7 @@ import {
   gitSourceOfPid,
   isInside,
   listenerPid,
+  portInUse,
   probeMetroOwnership,
 } from './sim-metro.mjs';
 
@@ -170,10 +171,16 @@ if (!buildOnly) {
   }
 }
 
-function ensureMetroOwnershipBeforeLaunch(packageName) {
+async function ensureMetroOwnershipBeforeLaunch(packageName) {
+  if (!await portInUse(8081)) return true;
   const ownership = probeMetroOwnership(8081);
   const metroPid = ownership?.pid ?? null;
-  if (!metroPid) return true;
+  if (!metroPid) {
+    console.log(`\nNative package installed (${packageName}).`);
+    console.error('Metro on 8081 is occupied, but its listener PID could not be verified.');
+    console.error('Refusing to launch until the port owner can be identified.');
+    return false;
+  }
   const metroCwd = ownership.cwd;
   const foreign = !metroCwd || !isInside(worktreeRoot, metroCwd);
   const runningSource = ownership.source;
@@ -252,7 +259,7 @@ async function rebuildAndroidSimulator() {
   console.log(`› 安装 Android debug 包到 ${serial}`);
   run(adb, [...target, 'install', '-r', apk]);
   run(adb, [...target, 'shell', 'am', 'force-stop', packageName]);
-  if (!ensureMetroOwnershipBeforeLaunch(packageName)) return;
+  if (!await ensureMetroOwnershipBeforeLaunch(packageName)) return;
   run(adb, [...target, 'shell', 'monkey', '-p', packageName, '1']);
   console.log(`\n✓ 完成: ${packageName} 已重装并启动。JS 改动直接由 Metro Fast Refresh 提供。`);
 }

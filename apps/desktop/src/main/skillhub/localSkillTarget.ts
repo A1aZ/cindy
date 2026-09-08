@@ -12,7 +12,7 @@ export interface LocalSkillTarget {
 
 function isStandaloneSkillPath(value: string): boolean {
   const normalized = path.resolve(value).replace(/\\/g, '/');
-  return /\/(?:\.(?:claude|agents|codex|pi)\/skills|\.pi\/agent\/skills|(?:codex-home|pi-agent-home)\/skills)\/[^/.][^/]*$/.test(normalized);
+  return /\/(?:\.(?:claude|agents|codex|pi)\/skills|\.pi\/agent\/skills|(?:codex-home|pi-agent-home)\/skills)\/[^/.][^/]*$/i.test(normalized);
 }
 
 function targetIdentity(operationPath: string): string {

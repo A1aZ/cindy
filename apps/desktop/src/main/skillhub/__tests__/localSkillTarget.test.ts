@@ -23,6 +23,19 @@ describe('local Skill removal targets', () => {
     expect(inspectLocalSkillTarget(path.dirname(dir), [path.dirname(dir)])).toBeNull();
   });
 
+  it.each([
+    ['.Agents', 'Skills'], ['.Claude', 'Skills'], ['.Codex', 'Skills'],
+    ['.Pi', 'Skills'], ['.Pi', 'Agent', 'Skills'], ['Codex-Home', 'Skills'], ['Pi-Agent-Home', 'Skills'],
+  ])('accepts mixed-case discovery segments: %s', (...segments) => {
+    const dir = directory(`case-${segments.join('-')}`, ...segments, 'mixed-case-skill');
+    expect(inspectLocalSkillTarget(dir, [dir])).toMatchObject({
+      operationPath: fs.realpathSync.native(dir), linkOnly: false,
+    });
+    expect(inspectLocalSkillTarget(path.dirname(dir), [path.dirname(dir)])).toBeNull();
+    const system = directory(`case-${segments.join('-')}`, ...segments, '.System', 'builtin');
+    expect(inspectLocalSkillTarget(system, [system])).toBeNull();
+  });
+
   it('does not permit deleting a package root or a system Skill', () => {
     const packageRoot = directory('package');
     expect(inspectLocalSkillTarget(packageRoot, [packageRoot])).toBeNull();

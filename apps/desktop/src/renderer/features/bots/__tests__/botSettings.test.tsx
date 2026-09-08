@@ -3,7 +3,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BotCapabilities, BotProfile } from '../botStore';
-import type { CustomMcpListContext, CustomMcpListEntry } from '../../../../shared/customMcp';
+import type { CustomMcpListContext, CustomMcpListResult } from '../../../../shared/customMcp';
+import type { Session } from '@/lib/ccAgent.types';
 
 const translate = (key: string, opts?: Record<string, unknown>) =>
   opts ? `${key}:${JSON.stringify(opts)}` : key;
@@ -12,7 +13,11 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }));
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   initialSearch: '' as string,
-  listCustomMcpServers: vi.fn<(context?: CustomMcpListContext) => Promise<{ servers: CustomMcpListEntry[] }>>(),
+  listCustomMcpServers: vi.fn<(context?: CustomMcpListContext) => Promise<CustomMcpListResult>>(),
+  getSession: vi.fn<() => Promise<Partial<Session>>>(),
+  onSessionPatched: vi.fn(),
+  listAgentSkills: vi.fn(),
+  listToolsets: vi.fn(),
   updateBotProfile: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({
     id: 'bot-1',
     currentVersion: 1,
@@ -60,7 +65,7 @@ vi.mock('../BotLifecycleSettings', () => ({
   BotLifecycleSettings: () => <div data-testid="bot-lifecycle-settings" />,
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: () => <div data-testid="model-selector" />,
+  ModelSelector: ({ onUnifiedSelect }: { onUnifiedSelect: (selection: unknown) => void }) => <button data-testid="model-selector" onClick={() => onUnifiedSelect({ engine: 'codex', modelId: 'codex-x', providerId: null, effort: 'medium', fast: false })}>Select Codex</button>,
 }));
 vi.mock('@/hooks/useAvailableAgents', () => ({
   useAvailableAgents: () => ({ availableVendors: new Set(['cc', 'codex', 'pi']), loaded: true }),
@@ -76,7 +81,7 @@ vi.mock('@/state/newMakerDraft', () => ({
   }),
 }));
 
-vi.mock('@/lib/sessionService', () => ({ get: async () => ({ workingDir: '/bot/workspace' }) }));
+vi.mock('@/lib/sessionService', () => ({ get: mocks.getSession }));
 
 import { BotSettings } from '../BotsHomeView';
 
@@ -155,21 +160,29 @@ beforeEach(() => {
   mocks.openPath.mockReset();
   mocks.openPath.mockResolvedValue({ success: true });
   mocks.initialSearch = '';
+  mocks.getSession.mockReset().mockResolvedValue({ agentKind: 'cc', workingDir: '/bot/workspace' });
+  mocks.onSessionPatched.mockReset().mockReturnValue(vi.fn());
+  mocks.listAgentSkills.mockReset().mockResolvedValue({ success: true, skills: [{ name: 'release-check' }] });
+  mocks.listToolsets.mockReset().mockResolvedValue([
+    { id: 'docs', name: 'Documents', effectiveEnabled: true, available: true },
+    { id: 'scheduler', name: 'Scheduler', effectiveEnabled: true, available: true },
+    { id: 'contacts', name: 'Contacts', effectiveEnabled: true, available: false },
+  ]);
   mocks.listCustomMcpServers.mockReset();
-  mocks.listCustomMcpServers.mockResolvedValue({ servers: [
+  mocks.listCustomMcpServers.mockImplementation(async (context) => ({
+    agentKind: context?.modelChain?.[0]?.harness === 'codex' ? 'codex'
+      : context?.modelChain?.[0]?.harness === 'pi' ? 'pi' : 'claude-code',
+    servers: [
     { id: 'shared-docs', name: 'Shared Docs', transport: 'http', url: 'https://example.com/mcp', headers: {}, available: true },
     { id: 'bad-headers', name: 'Legacy MCP', transport: 'http', url: 'https://example.com/mcp', headers: {}, available: false },
-  ] });
+  ] }));
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     openPath: mocks.openPath,
+    localDb: { sessionsPush: { onPatched: mocks.onSessionPatched } },
     maker: {
-      listAgentSkills: async () => ({ success: true, skills: [{ name: 'release-check' }] }),
+      listAgentSkills: mocks.listAgentSkills,
       listCustomMcpServers: mocks.listCustomMcpServers,
-      plugins: { list: async () => [
-        { id: 'docs', name: 'Documents', effectiveEnabled: true, available: true },
-        { id: 'scheduler', name: 'Scheduler', effectiveEnabled: true, available: true },
-        { id: 'contacts', name: 'Contacts', effectiveEnabled: true, available: false },
-      ] },
+      plugins: { list: mocks.listToolsets },
     },
   };
 });
@@ -300,12 +313,72 @@ describe('same-Bot capability updates while editing settings', () => {
     { name: 'Documents', selected: { capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) }, empty: { capabilities: capabilities({ toolsetMode: 'allowlist' }) }, patch: { capabilities: { toolsets: [] } }, addPatch: { capabilities: { toolsets: ['docs'] } } },
   ];
 
+  function sseCatalog(agentKind: 'claude-code' | 'codex'): CustomMcpListResult {
+    return { agentKind, servers: [{ id: 'events', name: 'SSE Events', transport: 'sse', url: 'https://example.com/mcp', headers: {}, available: agentKind !== 'codex' }] };
+  }
+
+  it('uses the effective canonical fallback for every catalog despite a Claude primary', async () => {
+    mocks.getSession.mockResolvedValue({ agentKind: 'cc', workingDir: '/bot/workspace', runtimeEffective: { agentKind: 'codex', model: 'codex-x', providerId: null, effort: 'medium', fastMode: false } });
+    mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('codex'));
+    renderSettings();
+    await openCapabilities();
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ agentKind: 'codex', botSessionId: 'bot-1-chat', modelChain: capabilities().modelChain }));
+    expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('codex', expect.anything());
+    expect(mocks.listToolsets).toHaveBeenLastCalledWith('/bot/workspace', true, expect.objectContaining({ agentKind: 'codex' }));
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('refreshes an open panel on pending fallback and ignores unrelated session pushes', async () => {
+    mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('claude-code'));
+    renderSettings();
+    await openCapabilities();
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(false);
+    const patched = mocks.onSessionPatched.mock.calls[0]![0];
+    await act(async () => {
+      patched({ sessionId: 'other', patch: { agentKind: 'codex' } });
+      patched({ sessionId: 'bot-1-chat', patch: { totalCostUsd: 1 } });
+    });
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledTimes(1);
+    const pending = { generation: 2, source: 'fallback' as const, profile: { agentKind: 'codex' as const, model: 'codex-x', providerId: null, effort: 'medium' as const, fastMode: false } };
+    mocks.getSession.mockResolvedValue({ agentKind: 'cc', workingDir: '/bot/workspace', runtimePending: pending });
+    mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('codex'));
+    await act(async () => { patched({ sessionId: 'bot-1-chat', patch: { runtimePending: pending } }); });
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledTimes(2);
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ agentKind: 'codex' }));
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('refreshes on a local model-chain edit and discards the preceding catalog response', async () => {
+    let finishOld!: (value: CustomMcpListResult) => void;
+    mocks.listCustomMcpServers.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue(sseCatalog('codex'));
+    mocks.updateBotProfile.mockImplementationOnce(() => new Promise(() => {}));
+    renderSettings();
+    await openCapabilities();
+    await act(async () => { fireEvent.click(screen.getByTestId('model-selector')); });
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ modelChain: [expect.objectContaining({ harness: 'codex' })] }));
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+    await act(async () => { finishOld(sseCatalog('claude-code')); });
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+    expect(mocks.listAgentSkills).toHaveBeenCalledTimes(1);
+    expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('codex', expect.anything());
+  });
+
+  it('refreshes when an external model-chain update arrives without reopening the panel', async () => {
+    const view = renderSettings();
+    await openCapabilities();
+    const chain = [{ ...capabilities().modelChain[0]!, harness: 'pi' as const, model: 'pi-x' }];
+    await act(async () => { view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: capabilities({ harness: 'pi', modelChain: chain }) })} onBack={view.onBack} onOpenSession={view.onOpenSession} />); });
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ modelChain: chain }));
+    expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('pi', expect.anything());
+  });
+
   it.each(['claude', 'codex', 'pi'] as const)('uses the %s runtime catalog and keeps unavailable MCP references removable', async (harness) => {
     vi.useFakeTimers();
-    const profile = capabilities({ harness, mcpMode: 'allowlist' });
+    const profile = capabilities({ harness, modelChain: [{ ...capabilities().modelChain[0]!, harness }], mcpMode: 'allowlist' });
     const view = renderSettings({ capabilities: profile });
     await openCapabilities();
-    expect(mocks.listCustomMcpServers).toHaveBeenCalledWith({ agentKind: harness === 'claude' ? 'claude-code' : harness });
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledWith({ agentKind: 'claude-code', botSessionId: 'bot-1-chat', modelChain: profile.modelChain });
     const unavailable = screen.getByRole('checkbox', { name: /Legacy MCP/ }) as HTMLInputElement;
     expect(unavailable.disabled).toBe(true);
     expect(unavailable.checked).toBe(false);

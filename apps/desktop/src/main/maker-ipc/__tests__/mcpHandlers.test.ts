@@ -66,6 +66,7 @@ function mountDb(): void {
 function makeDeps(over: Partial<McpHandlerDeps> = {}): McpHandlerDeps {
   return {
     listMcpServers: vi.fn(async () => []),
+    resolveBotAgentKind: vi.fn(async () => 'claude-code' as const),
     refreshProviders: vi.fn(async () => {}),
     broadcastChanged: vi.fn(() => {}),
     invalidateCodex: vi.fn(async () => {}),
@@ -116,13 +117,41 @@ describe('mcp:custom:* CRUD handlers', () => {
 
       const result = await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, { agentKind });
       expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind });
-      expect(result).toEqual({ servers: rawList.map((server) => ({
+      expect(result).toEqual({ agentKind, servers: rawList.map((server) => ({
         ...server, available: server.id === 'mytools' || (server.id === 'events' && agentKind !== 'codex'),
       })) });
     },
   );
 
-  it.each([null, {}, { agentKind: 'unknown' }])('rejects an invalid catalog context: %j', async (context) => {
+  it('uses the canonical next-turn route instead of the renderer hint', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const chain = [{ harness: 'claude' as const, model: 'claude-x', providerId: null, effort: '', fastMode: false }];
+    const deps = makeDeps({ resolveBotAgentKind: vi.fn(async () => 'codex' as const) });
+    registerMcpHandlers(harness, deps);
+    expect(await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
+      agentKind: 'claude-code', botSessionId: 'canonical', modelChain: chain,
+    })).toEqual({ agentKind: 'codex', servers: [] });
+    expect(deps.resolveBotAgentKind).toHaveBeenCalledWith('canonical', chain);
+    expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind: 'codex' });
+    expect(deps.refreshProviders).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to a renderer hint for a missing canonical task', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const deps = makeDeps({ resolveBotAgentKind: vi.fn(async () => null) });
+    registerMcpHandlers(harness, deps);
+    await expect(harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
+      agentKind: 'claude-code', botSessionId: 'other-task',
+    })).rejects.toThrow(/NOT_FOUND/);
+    expect(deps.listMcpServers).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { agentKind: 'unknown' },
+    { agentKind: 'codex', modelChain: [] },
+    { agentKind: 'codex', botSessionId: 'canonical', modelChain: [{ harness: 'unknown', model: 'x' }] },
+  ])('rejects an invalid catalog context: %j', async (context) => {
     mountDb();
     const harness = new IpcHarness();
     const deps = makeDeps();

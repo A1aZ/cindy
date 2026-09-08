@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBotTranslation } from './botPronounContext';
 import type { BotCapabilities, BotProfile } from './botStore';
 import * as sessionService from '@/lib/sessionService';
+import { onPatch } from '@/lib/sessionsBus';
+import type { Session } from '@/lib/ccAgent.types';
 import {
   getDataOwnerGeneration,
   isDataOwnerGenerationCurrent,
+  isDataOwnerPushCurrent,
 } from '@/contexts/dataOwnerGeneration';
 
 type Kind = 'skill' | 'mcp' | 'toolset';
@@ -24,68 +27,106 @@ export function BotCapabilitySettings({
   onChange: (kind: Kind, values: string[]) => void;
 }) {
   const { t } = useBotTranslation();
-  const [entries, setEntries] = useState<Partial<Record<Kind, Entry[]>>>({});
+  const [catalog, setCatalog] = useState<{ key: string; entries: Partial<Record<Kind, Entry[]>> }>({ key: '', entries: {} });
+  const [open, setOpen] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const requestRef = useRef(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const [query, setQuery] = useState('');
   const selected = { skill: skills, mcp: capabilities.mcpServers, toolset: capabilities.toolsets };
-  const load = async () => {
-    if (busy) return;
+  const modelChainKey = JSON.stringify(capabilities.modelChain);
+  const catalogKey = JSON.stringify([bot.id, bot.canonicalSessionId, modelChainKey, revision, open]);
+  // Invalidate during render as well as effect cleanup: stale checkboxes must never stay selectable.
+  const entries = catalog.key === catalogKey ? catalog.entries : {};
+  const refresh = useCallback(() => {
+    requestRef.current += 1;
+    setRevision((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const changed = (sessionId: string, patch: Partial<Session>) => {
+      if (sessionId !== bot.canonicalSessionId) return;
+      if (['agentKind', 'model', 'providerId', 'effort', 'fastMode', 'runtimeGeneration',
+        'runtimeEffective', 'runtimePending', 'workingDir', 'remoteHostId'].some((key) => key in patch)) refresh();
+    };
+    const offLocal = onPatch(changed);
+    const offPush = window.electronAPI.localDb?.sessionsPush?.onPatched(({ sessionId, patch }, stamp) => {
+      if (isDataOwnerPushCurrent(stamp)) changed(sessionId, patch);
+    });
+    return () => { offLocal(); offPush?.(); };
+  }, [open, bot.canonicalSessionId, refresh]);
+
+  useEffect(() => {
+    if (!open) return;
+    const request = ++requestRef.current;
     const owner = getDataOwnerGeneration();
+    const isCurrent = () => requestRef.current === request && isDataOwnerGenerationCurrent(owner);
     setBusy(true);
     setError(false);
-    try {
-      if (!bot.canonicalSessionId) throw new Error('Missing canonical task');
-      const session = await sessionService.get(bot.canonicalSessionId);
-      if (!isDataOwnerGenerationCurrent(owner)) return;
-      const agentKind = capabilities.harness === 'claude' ? 'claude-code' : capabilities.harness;
-      const api = window.electronAPI.maker;
-      const results = await Promise.allSettled([
-        api.listAgentSkills(agentKind, {
-          workingDir: session.workingDir ?? undefined,
-          remoteHostId: session.remoteHostId ?? undefined,
-        }),
-        api.listCustomMcpServers({ agentKind }),
-        api.plugins.list(session.workingDir ?? undefined, true, {
-          botId: bot.id, agentKind, remoteHostId: session.remoteHostId,
-        }),
-      ]);
-      if (!isDataOwnerGenerationCurrent(owner)) return;
-      const [skillResult, mcpResult, toolsetResult] = results;
-      const next: Partial<Record<Kind, Entry[]>> = {};
-      if (skillResult.status === 'fulfilled' && skillResult.value.success)
-        next.skill = (skillResult.value.skills ?? []).map((item) => ({
-          id: item.name,
-          name: item.name,
-          available: item.enabled !== false && item.runtimeStatus !== 'failed',
-        }));
-      if (mcpResult.status === 'fulfilled')
-        next.mcp = mcpResult.value.servers.map((item) => ({
+    const load = async () => {
+      try {
+        if (!bot.canonicalSessionId) throw new Error('Missing canonical task');
+        const session = await sessionService.get(bot.canonicalSessionId);
+        if (!isCurrent()) return;
+        const api = window.electronAPI.maker;
+        const mcpResult = await api.listCustomMcpServers({
+          agentKind: session.runtimePending?.profile.agentKind ?? session.runtimeEffective?.agentKind
+            ?? (session.agentKind === 'codex' || session.agentKind === 'pi' ? session.agentKind : 'claude-code'),
+          botSessionId: bot.canonicalSessionId,
+          modelChain: JSON.parse(modelChainKey),
+        });
+        if (!isCurrent()) return;
+        const agentKind = mcpResult.agentKind;
+        if (!agentKind) throw new Error('Missing next-turn route');
+        const results = await Promise.allSettled([
+          api.listAgentSkills(agentKind, {
+            workingDir: session.workingDir ?? undefined,
+            remoteHostId: session.remoteHostId ?? undefined,
+          }),
+          api.plugins.list(session.workingDir ?? undefined, true, {
+            botId: bot.id, agentKind, remoteHostId: session.remoteHostId,
+          }),
+        ]);
+        if (!isCurrent()) return;
+        const [skillResult, toolsetResult] = results;
+        const next: Partial<Record<Kind, Entry[]>> = {};
+        if (skillResult.status === 'fulfilled' && skillResult.value.success)
+          next.skill = (skillResult.value.skills ?? []).map((item) => ({
+            id: item.name,
+            name: item.name,
+            available: item.enabled !== false && item.runtimeStatus !== 'failed',
+          }));
+        next.mcp = mcpResult.servers.map((item) => ({
           id: item.id,
           name: item.name,
           available: item.available === true,
         }));
-      if (toolsetResult.status === 'fulfilled')
-        next.toolset = toolsetResult.value
-          .filter((item) => !['memory', 'xdt_helper', 'collab'].includes(item.id))
-          .map((item) => ({
-            id: item.id,
-            name: item.name,
-            available: item.available === true,
-          }));
-      setEntries(next);
-      setError(kinds.some((kind) => !next[kind]));
-    } catch {
-      if (isDataOwnerGenerationCurrent(owner)) setError(true);
-    } finally {
-      if (isDataOwnerGenerationCurrent(owner)) setBusy(false);
-    }
-  };
+        if (toolsetResult.status === 'fulfilled')
+          next.toolset = toolsetResult.value
+            .filter((item) => !['memory', 'xdt_helper', 'collab'].includes(item.id))
+            .map((item) => ({
+              id: item.id,
+              name: item.name,
+              available: item.available === true,
+            }));
+        setCatalog({ key: catalogKey, entries: next });
+        setError(kinds.some((kind) => !next[kind]));
+      } catch {
+        if (isCurrent()) setError(true);
+      } finally {
+        if (isCurrent()) setBusy(false);
+      }
+    };
+    void load();
+    return () => { requestRef.current += 1; };
+  }, [open, catalogKey, bot.id, bot.canonicalSessionId, modelChainKey]);
   return (
     <details
       className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
       onToggle={(event) => {
-        if (event.currentTarget.open) void load();
+        setOpen(event.currentTarget.open);
       }}
     >
       <summary className="cursor-pointer px-4 py-3 text-12 font-medium text-[var(--text-secondary)]">
@@ -105,7 +146,7 @@ export function BotCapabilitySettings({
         {error ? (
           <button
             type="button"
-            onClick={() => void load()}
+            onClick={refresh}
             className="rounded-full px-4 py-2 text-12 text-[var(--text-danger)]"
           >
             {t('bots.retry')}

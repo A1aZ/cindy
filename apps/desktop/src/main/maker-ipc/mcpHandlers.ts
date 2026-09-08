@@ -11,8 +11,10 @@
  * handler body 可脱 Electron 用 IpcHarness + 内存 db 直接 invoke 单测（规则 14）。
  */
 
-import { requireEnum, requireObject, throwIpcError } from '../utils/ipcValidate.js';
+import { z } from 'zod';
+import { throwIpcError } from '../utils/ipcValidate.js';
 import type { CustomMcpListContext } from '../../shared/customMcp.js';
+import { BOT_MODEL_CHAIN_MAX, type BotModelRoute } from '../../shared/botModelChain.js';
 import type { BotProfileRuntimeDeps } from './botProfileRuntime.js';
 import {
   createCustomMcpServer,
@@ -29,6 +31,7 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 export interface McpHandlerDeps {
   /** Same registered runtime catalog used by Bot capability tools and hydration. */
   listMcpServers(context: CustomMcpListContext): ReturnType<NonNullable<BotProfileRuntimeDeps['listMcpServers']>>;
+  resolveBotAgentKind(sessionId: string, chain?: BotModelRoute[]): Promise<CustomMcpListContext['agentKind'] | null>;
   /** CRUD 成功后刷新 agent mcpProviders 数组（生产 = refreshCustomMcpProviders）。 */
   refreshProviders(): Promise<void>;
   /** CRUD 成功后广播变更（生产 = 向所有窗口 send MCP_CHANGED）。 */
@@ -51,18 +54,33 @@ export interface McpHandlerDeps {
   getReservedMcpIds?(): string[];
 }
 
+const listContextSchema = z.object({
+  agentKind: z.enum(['claude-code', 'codex', 'pi']),
+  botSessionId: z.string().min(1).optional(),
+  modelChain: z.array(z.object({
+    harness: z.enum(['claude', 'codex', 'pi']),
+    model: z.string().trim().min(1),
+    providerId: z.string().nullable(),
+    effort: z.string(),
+    fastMode: z.boolean(),
+  })).min(1).max(BOT_MODEL_CHAIN_MAX).optional(),
+}).refine((value) => value.modelChain === undefined || value.botSessionId !== undefined);
+
 export function registerMcpHandlers(registry: IpcHandlerRegistry, deps: McpHandlerDeps): void {
   registry.handle(MAKER_INVOKE.MCP_CUSTOM_LIST, async (_event, context: unknown) => {
-    const agentKind = context === undefined ? undefined : requireEnum(
-      requireObject(context, 'context').agentKind, ['claude-code', 'codex', 'pi'] as const, 'agentKind',
-    );
+    const parsed = context === undefined ? undefined : listContextSchema.safeParse(context);
+    if (parsed && !parsed.success) throwIpcError('INVALID_PARAMS', 'Invalid MCP catalog context');
+    const input = parsed?.data;
+    const agentKind = input?.botSessionId
+      ? await deps.resolveBotAgentKind(input.botSessionId, input.modelChain) : input?.agentKind;
+    if (input?.botSessionId && !agentKind) throwIpcError('NOT_FOUND', 'Canonical Bot task not found');
     const servers = await listCustomMcpServers();
-    if (agentKind === undefined) return { servers };
+    if (!agentKind) return { servers };
     const catalog = await deps.listMcpServers({ agentKind });
     const available = new Set(catalog
       .filter((entry) => entry.source === 'custom' && entry.available !== false)
       .map((entry) => entry.name));
-    return { servers: servers.map((server) => ({ ...server, available: available.has(server.id) })) };
+    return { agentKind, servers: servers.map((server) => ({ ...server, available: available.has(server.id) })) };
   });
 
   // CRUD 成功后统一收尾：刷新 provider 数组 + 广播 + 失效 Codex app-server。

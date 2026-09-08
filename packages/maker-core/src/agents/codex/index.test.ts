@@ -8985,8 +8985,11 @@ describe('CodexAgent MCP thread context hooks', () => {
       });
     }
 
-    it('arms HTTP fallback and retries the same zero-output turn once', async () => {
-      const armCodexHttpRecovery = vi.fn(() => 'encrypted_content');
+    it.each([
+      ['encrypted_content', ENCRYPTED_ERROR],
+      ['tool_item_id', "Invalid 'input[285].id': 'fc_legacy'. Expected an ID that begins with 'ctc'."],
+    ])('arms HTTP fallback and retries the same zero-output turn once (%s)', async (reason, recoveryError) => {
+      const armCodexHttpRecovery = vi.fn(() => reason);
       const agent = new CodexAgent(createDeps({}, { armCodexHttpRecovery }));
       const host = installRecoveryHost(agent);
       const handle = await agent.startSession({
@@ -9009,7 +9012,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         willRetry: false,
         error: {
           message: 'Bad request',
-          additionalDetails: ENCRYPTED_ERROR,
+          additionalDetails: recoveryError,
           codexErrorInfo: 'badRequest',
         },
       });
@@ -9021,7 +9024,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         turn: {
           id: 'turn-1',
           status: 'failed',
-          error: { message: ENCRYPTED_ERROR },
+          error: { message: recoveryError },
         },
       });
 
@@ -9035,7 +9038,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         sessionId: 'session-ws-body-recovery',
         threadId: 'start-thread-id',
         message: 'Bad request',
-        additionalDetails: ENCRYPTED_ERROR,
+        additionalDetails: recoveryError,
       });
       expect(
         events.some(
@@ -9051,7 +9054,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         turn: {
           id: 'turn-1',
           status: 'failed',
-          error: { message: ENCRYPTED_ERROR },
+          error: { message: recoveryError },
         },
       });
       expect(handle.getCurrentTurnId?.()).toBe('turn-2');
@@ -9370,8 +9373,11 @@ describe('CodexAgent MCP thread context hooks', () => {
       await handle.close();
     });
 
-    it('does not replay a recovery error after the turn has produced output', async () => {
-      const armCodexHttpRecovery = vi.fn(() => 'image_generation_id');
+    it.each([
+      ['image_generation_id', 'Image generation items without `id` are not supported for this request.'],
+      ['tool_item_id', "Invalid 'input[285].id': 'fc_legacy'. Expected an ID that begins with 'ctc'."],
+    ])('does not replay a recovery error after the turn has produced output (%s)', async (reason, recoveryError) => {
+      const armCodexHttpRecovery = vi.fn(() => reason);
       const agent = new CodexAgent(createDeps({}, { armCodexHttpRecovery }));
       const host = installRecoveryHost(agent);
       const handle = await agent.startSession({
@@ -9395,7 +9401,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         turnId: 'turn-1',
         willRetry: false,
         error: {
-          message: 'Image generation items without `id` are not supported for this request.',
+          message: recoveryError,
           codexErrorInfo: 'badRequest',
         },
       });

@@ -76,3 +76,9 @@ describe('resolveMobileSessionRightStatus', () => {
     expect(resolveMobileSessionRightStatus(base)).toBe('time');
   });
 });
+
+it('unread failed automation is red even without a live activity, and clears after read', () => {
+  expect(resolveMobileSessionRightStatus({ ...base, scheduleUnreadCount: 1, scheduleHasUnreadFailedRun: true })).toBe('error');
+  expect(resolveMobileSessionRightStatus({ ...base, scheduleUnreadCount: 1, scheduleHasUnreadFailedRun: true, running: true })).toBe('error');
+  expect(resolveMobileSessionRightStatus({ ...base, scheduleUnreadCount: 0, scheduleHasUnreadFailedRun: false })).toBe('time');
+});

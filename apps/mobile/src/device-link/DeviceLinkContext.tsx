@@ -73,6 +73,7 @@ import {
   type PeerRecoveryResult,
 } from '@/device-link/peerRecoveryScheduler';
 import {
+  clearSessionScheduleIndexCache,
   invalidateOfflineScheduleIndexFailureFor,
   invalidateScheduleIndexForDevice,
   invalidateTransientScheduleIndexFailureFor,
@@ -383,6 +384,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
 
   const clearPerAccountDeviceLinkState = useCallback(() => {
     remoteSessionStore.clear();
+    clearSessionScheduleIndexCache();
     remoteScheduleEventStore.clearAll();
     revokedDevicesStore.clearAll();
     resetDeviceResponsivenessTracking();

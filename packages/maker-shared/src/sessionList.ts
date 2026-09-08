@@ -2,8 +2,8 @@ import { messageContentToPreview } from './messageNormalize.js';
 import { stripTrailingPathSeparators } from './pathText.js';
 import { presentationDate, presentationText, type PresentationLocalizer } from './presentationLocalization.js';
 import { isSyntheticTriggerText } from './syntheticTrigger.js';
-import type { RemoteSchedule, RemoteScheduleRun, RemoteScheduleRunStatus } from './scheduleTypes.js';
-import { toMillis } from './scheduleModel.js';
+import type { RemoteSchedule, RemoteScheduleRun } from './scheduleTypes.js';
+import { toMillis, isUnreadScheduleRun, isUnreadFailedScheduleRun } from './scheduleModel.js';
 import { sessionCollaborationLabel, sessionWorktreeLabel } from './sessionIdentity.js';
 import { isDefaultDraftSessionTitle } from './sessionTitle.js';
 import { getSessionListCollapseView } from './sessionListCollapse.js';
@@ -112,6 +112,7 @@ export interface RemoteSessionScheduleInfo {
   /** 同一会话的所有已知 schedule 绑定都已 paused / expired 时为 true；缺失按 false。 */
   allSchedulesStopped?: boolean;
   unreadRunIds: string[];
+  hasUnreadFailedRun?: boolean;
   unreadCount: number;
   running: boolean;
   latestRunAt: number;
@@ -633,7 +634,7 @@ export function buildSessionScheduleIndex(
       const firedAt = toMillis(run.firedAt);
       const existing = index.get(run.sessionId);
       const unreadRunIds = existing ? [...existing.unreadRunIds] : [];
-      if (isUnreadRunStatus(run.status) && !run.readAt) unreadRunIds.push(run.id);
+      if (isUnreadScheduleRun(run)) unreadRunIds.push(run.id);
       const running = (existing?.running ?? false) || run.status === 'running';
       const isLatest = !existing || firedAt >= existing.latestRunAt;
       index.set(run.sessionId, {
@@ -643,6 +644,7 @@ export function buildSessionScheduleIndex(
         allSchedulesStopped: false,
         unreadRunIds,
         unreadCount: unreadRunIds.length,
+        hasUnreadFailedRun: existing?.hasUnreadFailedRun === true || isUnreadFailedScheduleRun(run),
         running,
         latestRunAt: Math.max(existing?.latestRunAt ?? 0, firedAt),
       });
@@ -908,14 +910,12 @@ function toAutomationGroupListItem(
 
 /**
  * 组的 primary(收起组"点行直开"的目标,也是组行的图标 / 预览来源):
- * 待处理交互 > 运行中 > 有未读 > 最新。待处理交互最优先 —— 它在等用户行动才能推进,
- * 组行的红点也来自它,点行必须落在这条上,否则用户要的确认被藏进展开列表。
+ * 与桌面折叠组一致：未读失败优先，其余打开最新运行；等待交互仍在展开子行显示。
  */
 function pickAutomationPrimaryItem(group: readonly RemoteSessionListItem[]): RemoteSessionListItem {
-  return group.find((item) => item.pendingInteractionCount > 0)
-    ?? group.find((item) => item.scheduleInfo?.running)
-    ?? group.find((item) => (item.scheduleInfo?.unreadCount ?? 0) > 0)
-    ?? group[0];
+  return group.find((item) => item.scheduleInfo?.hasUnreadFailedRun
+    || (item.liveActivity?.phase === 'error' && item.liveActivity.attention))
+    ?? group.reduce((a, b) => lastActivity(b.session) > lastActivity(a.session) ? b : a);
 }
 
 function mergeScheduleInfo(group: readonly RemoteSessionListItem[]): RemoteSessionScheduleInfo | null {
@@ -928,13 +928,10 @@ function mergeScheduleInfo(group: readonly RemoteSessionListItem[]): RemoteSessi
     allSchedulesStopped: group.every((item) => item.scheduleInfo?.allSchedulesStopped === true),
     unreadRunIds,
     unreadCount: unreadRunIds.length,
+    hasUnreadFailedRun: group.some((item) => item.scheduleInfo?.hasUnreadFailedRun === true),
     running: group.some((item) => item.scheduleInfo?.running),
     latestRunAt: Math.max(...group.map((item) => item.scheduleInfo?.latestRunAt ?? 0)),
   };
-}
-
-function isUnreadRunStatus(status: RemoteScheduleRunStatus): boolean {
-  return status === 'success' || status === 'failed' || status === 'aborted' || status === 'interrupted';
 }
 
 function agentLabel(agentKind: RemoteSession['agentKind']): string {

@@ -1958,12 +1958,12 @@ export function CCAgentSessionView({
   const scheduleSessionInfo = useAutomationScheduleSessionInfo(sessionId);
   const unreadFailedScheduleRunIds =
     scheduleSessionInfo?.unreadFailedRunIds ?? EMPTY_UNREAD_FAILED_RUN_IDS;
-  useReadFailedScheduleRuns(unreadFailedScheduleRunIds, viewVisible && historyLoaded);
+  useReadFailedScheduleRuns(unreadFailedScheduleRunIds, viewVisible && historyLoaded, remoteDeviceId ?? undefined);
   const currentUnreadFailedRunId =
     scheduleSessionInfo?.latestUnreadFailedRunId ?? unreadFailedScheduleRunIds[0];
   const markCurrentUnreadFailedScheduleRun = useCallback(async (): Promise<boolean> => {
     if (!currentUnreadFailedRunId) return true;
-    const { failed, firstError } = await markScheduleRunsReadAndSync([currentUnreadFailedRunId]);
+    const { failed, firstError } = await markScheduleRunsReadAndSync([currentUnreadFailedRunId], remoteDeviceId ?? undefined);
     if (failed.length === 0) return true;
     toast.error(
       t('ccAgent.layout.markAllReadFailed', {
@@ -1971,7 +1971,7 @@ export function CCAgentSessionView({
       }),
     );
     return false;
-  }, [currentUnreadFailedRunId, t]);
+  }, [currentUnreadFailedRunId, remoteDeviceId, t]);
   const errorTailMsg = useMemo(() => {
     const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
     return last &&

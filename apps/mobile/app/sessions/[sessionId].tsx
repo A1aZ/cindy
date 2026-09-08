@@ -727,7 +727,7 @@ function measureViewInWindow(view: View | null): Promise<{
 }
 
 /** 会话已读回执的驻留门槛:聚焦本会话且消息已渲染后停满这段时间才算「真实看到」。 */
-const SESSION_READ_ACK_DWELL_MS = 1_200;
+const SESSION_READ_ACK_DWELL_MS = 200;
 
 /** 旧被控端没有 update-content 通道时的降级判定(与 mobileVoiceInput 同款字符串匹配)。 */
 function isChannelNotAllowedError(err: unknown): boolean {

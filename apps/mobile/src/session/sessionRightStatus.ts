@@ -14,12 +14,18 @@
  *     手机端只消费,不自己猜。
  *   - pendingInteractionCount:实时待处理交互数(ask-user / 权限 / 计划审阅)——
  *     即使 liveActivity 缺失(relay 断连)也能点亮 awaiting。
- *   - scheduleUnreadCount:定时任务未读运行数(schedule 索引)。注意手机端的
- *     schedule 索引暂不带"失败结局"信息,失败未读会落绿档(桌面是红);
- *     等共享层补充 hasUnreadFailedRun 后在这里升红。
+ *   - scheduleUnreadCount / scheduleHasUnreadFailedRun:同桌面自动化运行账本。
  */
+import { projectSessionActivity, resolveSessionRightStatus, resolveCollapsedGroupRightStatus, type SessionRightStatus } from '@cindy/maker-shared/session-activity';
 
-export type MobileSessionRightStatus = 'error' | 'awaiting' | 'running' | 'done' | 'time';
+type SessionRow = import('@cindy/maker-shared/session-list').RemoteSessionListItem;
+export type MobileSessionRightStatus = SessionRightStatus;
+
+export function latestMobileSessionRow(item: SessionRow): SessionRow {
+  return item.automationGroup?.items.reduce((a, b) =>
+    Date.parse(b.session.userSendAt ?? b.session.updatedAt ?? b.session.createdAt) > Date.parse(a.session.userSendAt ?? a.session.updatedAt ?? a.session.createdAt) ? b : a,
+  ) ?? item;
+}
 
 export interface MobileSessionRightStatusInput {
   /** liveActivity.phase(缺失 = 无 relay 数据)。 */
@@ -32,6 +38,7 @@ export interface MobileSessionRightStatusInput {
   running: boolean;
   /** 定时任务未读运行数。 */
   scheduleUnreadCount: number;
+  scheduleHasUnreadFailedRun?: boolean;
 }
 
 export function resolveMobileSessionRightStatus({
@@ -40,12 +47,42 @@ export function resolveMobileSessionRightStatus({
   pendingInteractionCount,
   running,
   scheduleUnreadCount,
+  scheduleHasUnreadFailedRun = false,
 }: MobileSessionRightStatusInput): MobileSessionRightStatus {
-  if (liveAttention && livePhase === 'error') return 'error';
-  if (pendingInteractionCount > 0 || (liveAttention && livePhase === 'needs-interaction')) {
-    return 'awaiting';
-  }
-  if (running) return 'running';
-  if (scheduleUnreadCount > 0 || (liveAttention && livePhase === 'completed')) return 'done';
-  return 'time';
+  return resolveSessionRightStatus(projectSessionActivity({
+    sessionId: '',
+    livePhase,
+    running,
+    waitingForUser: pendingInteractionCount > 0,
+    terminal: scheduleHasUnreadFailedRun ? 'error' : scheduleUnreadCount > 0 ? 'completed' : null,
+    attention: liveAttention || pendingInteractionCount > 0 || scheduleUnreadCount > 0 || scheduleHasUnreadFailedRun,
+  }));
+}
+
+/** Group header mirrors the latest run; collapsed errors remain discoverable. */
+export function resolveMobileSessionRowStatus(
+  item: import('@cindy/maker-shared/session-list').RemoteSessionListItem,
+  running: boolean,
+  expanded = false,
+): { status: MobileSessionRightStatus; target: import('@cindy/maker-shared/session-list').RemoteSessionListItem } {
+  const children = item.automationGroup?.items;
+  const latest = latestMobileSessionRow(item);
+  const statusOf = (row: typeof item, isRunning: boolean) => resolveMobileSessionRightStatus({
+    livePhase: row.liveActivity?.phase,
+    liveAttention: row.liveActivity?.attention === true,
+    pendingInteractionCount: row.pendingInteractionCount,
+    running: isRunning || row.liveActivity?.phase === 'running' || row.scheduleInfo?.running === true,
+    scheduleUnreadCount: row.scheduleInfo?.unreadCount ?? 0,
+    scheduleHasUnreadFailedRun: row.scheduleInfo?.hasUnreadFailedRun,
+  });
+  const error = children?.find((row) => statusOf(row, false) === 'error');
+  const hasDone = children?.some((row) => statusOf(row, false) === 'done');
+  return {
+    status: resolveCollapsedGroupRightStatus({
+      collapsed: !expanded,
+      latestKind: statusOf(latest, running),
+      tone: error ? 'error' : hasDone ? 'done' : null,
+    }),
+    target: !expanded && error ? error : latest,
+  };
 }

@@ -8,6 +8,19 @@
 
 type OpenValue<Known extends string> = Known | (string & Record<never, never>);
 
+export type SessionRightStatus = 'error' | 'awaiting' | 'running' | 'done' | 'time';
+
+/** Shared by local desktop and every remote controller. */
+export function resolveSessionRightStatus(
+  activity: Pick<SessionActivitySnapshot, 'phase' | 'attention'>,
+): SessionRightStatus {
+  if (activity.phase === 'error' && activity.attention) return 'error';
+  if (activity.phase === 'needs-interaction') return 'awaiting';
+  if (activity.phase === 'running') return 'running';
+  if (activity.phase === 'completed' && activity.attention) return 'done';
+  return 'time';
+}
+
 export type SessionActivityPhase = OpenValue<
   'idle' | 'running' | 'needs-interaction' | 'completed' | 'error'
 >;
@@ -167,4 +180,19 @@ export function isSessionActivityWaitingForUser(
   activity: Pick<SessionActivitySnapshot, 'phase'>,
 ): boolean {
   return activity.phase === 'needs-interaction';
+}
+
+export function resolveCollapsedGroupRightStatus({
+  collapsed,
+  latestKind,
+  tone,
+}: {
+  collapsed: boolean;
+  latestKind: SessionRightStatus;
+  tone: 'error' | 'done' | null;
+}): SessionRightStatus {
+  if (!collapsed) return latestKind;
+  if (tone === 'error') return 'error';
+  if (tone === 'done' && latestKind === 'time') return 'done';
+  return latestKind;
 }

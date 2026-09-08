@@ -229,7 +229,7 @@ import {
   replaceSessionScheduleIndexEntries,
 } from '@/session/scheduleIndex';
 import { createScheduleIndexDeferRegistry } from '@/session/scheduleIndexDefer';
-import { resolveMobileSessionRightStatus } from '@/session/sessionRightStatus';
+import { latestMobileSessionRow, resolveMobileSessionRowStatus } from '@/session/sessionRightStatus';
 import { AutomationTimerIcon } from '@/session/AutomationTimerIcon';
 import { RenameSessionModal } from '@/session/RenameSessionModal';
 import { SessionOptionsPresenter } from '@/session/SessionOptionsExpoSheet';
@@ -3795,24 +3795,21 @@ function HomeSessionRowInner({
   const { colors } = useTheme();
   const { t } = useTranslation();
   // 运行态走订阅而非命令式读取:行已 memo 化,父层不再逐 emit 重渲染,命令式读取会 stale。
-  const sessionIsRunning = useSessionRunning(item.session.id);
+  const latestItem = latestMobileSessionRow(item);
+  const sessionIsRunning = useSessionRunning(latestItem.session.id);
   // 已加载消息的预览按 session 订阅。普通流式 token 只让对应的可见行更新，首页根层、
   // sections 和其它任务行都保持原引用。
   const loadedMessagePreview = useRemoteSessionMessagePreview(item.session.id);
-  const running = sessionIsRunning || !!item.scheduleInfo?.running;
+  const running = sessionIsRunning || !!latestItem.scheduleInfo?.running;
   // attention 合并 main 的 #368:liveActivity.attention 也点亮关注态(组行直开 primary 的判定沿用)。
   const attention = item.pendingInteractionCount > 0
     || (item.scheduleInfo?.unreadCount ?? 0) > 0
     || item.liveActivity?.attention === true;
   // 右侧状态槽(替代时间位):与桌面侧栏同一套五档优先级与色表
   // (error 红 > awaiting TapTap 蓝 > running spinner > 完成未读绿 > 时间)。
-  const rightStatus = resolveMobileSessionRightStatus({
-    liveAttention: item.liveActivity?.attention === true,
-    livePhase: item.liveActivity?.phase,
-    pendingInteractionCount: item.pendingInteractionCount,
-    running,
-    scheduleUnreadCount: item.scheduleInfo?.unreadCount ?? 0,
-  });
+  const group = onToggleAutomationGroup ? item.automationGroup : undefined;
+  const groupExpanded = !!group && !!expandedAutomationGroups?.includes(group.key);
+  const { status: rightStatus, target: statusTarget } = resolveMobileSessionRowStatus(item, sessionIsRunning, groupExpanded);
   const showDraftIndicator = readBooleanField(item.session, 'hasDraft')
     || readBooleanField(item.session, 'hasPausedQueue')
     || readBooleanField(item.session, 'composerDraft');
@@ -3823,8 +3820,6 @@ function HomeSessionRowInner({
   const showPinned = !!item.session.pinnedAt;
   // 自动化组行:同一任务的多次运行折叠而成(共享层 groupAutomationListItems 产出)。
   // 没接展开回调的调用点退化为普通行为(点击打开 primary 会话)。
-  const group = onToggleAutomationGroup ? item.automationGroup : undefined;
-  const groupExpanded = !!group && !!expandedAutomationGroups?.includes(group.key);
   // 块模式:组行 + 展开的子行整体包在一个上下全宽线的块里;组行自身不再画缩进分割线
   // (收起时块底线紧贴行底,展开时组头与子行之间保持连续无线,均与项目组语义一致)。
   const blockMode = asBlock && !!group;
@@ -3846,7 +3841,7 @@ function HomeSessionRowInner({
   // 无需关注内容或已展开时,点行仍是展开 / 收起。
   const openGroupPrimary = () => {
     if (!group) return;
-    const primary = group.items.find((child) => child.session.id === group.primarySessionId) ?? group.items[0];
+    const primary = statusTarget;
     if (primary) onOpenSession(primary);
   };
   const groupRowOpensPrimary = !!group && attention && !groupExpanded;

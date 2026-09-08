@@ -562,8 +562,20 @@ function formatTimestamp(value: RemoteTimestamp, localizer?: PresentationLocaliz
   return `${month}-${day} ${hour}:${minute}`;
 }
 
+export function isFailedScheduleRun(run: { status: string }): boolean {
+  return run.status === 'failed' || run.status === 'interrupted';
+}
+
+export function isUnreadFailedScheduleRun(run: { status: string; readAt?: unknown }): boolean {
+  return !run.readAt && isFailedScheduleRun(run);
+}
+
+export function isUnreadScheduleRun(run: { status: string; readAt?: unknown }): boolean {
+  return !run.readAt && (run.status === 'success' || isFailedScheduleRun(run));
+}
+
 function isUnreadRun(run: RemoteScheduleRun, now = Date.now()): boolean {
-  if (run.status === 'running') return false;
+  if (!isUnreadScheduleRun(run)) return false;
   const firedAt = toMillis(run.firedAt);
   if (!firedAt || firedAt > now) return false;
   return !toMillis(run.readAt);

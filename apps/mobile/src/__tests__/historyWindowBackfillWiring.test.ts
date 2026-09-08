@@ -64,6 +64,7 @@ describe('history window backfill wiring', () => {
   });
 
   it('不变量 3：同步门槛按 session + 连接代，不用屏幕级 lastSyncedAt', () => {
+    expect(source).toContain('const SESSION_READ_ACK_DWELL_MS = 200;');
     expect(source).toContain('if (readAckSyncedKey !== `${sessionId}:${connectionEpoch}`) return;');
     expect(source).not.toContain('|| lastSyncedAt === null) return;');
   });

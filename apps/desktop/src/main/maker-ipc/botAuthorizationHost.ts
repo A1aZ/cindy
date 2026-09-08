@@ -1,6 +1,6 @@
 import { shell } from 'electron';
 import { t } from '../i18n.js';
-import { and, eq, isNull, ne } from 'drizzle-orm';
+import { and, eq, isNull, ne, or, gt, like, desc } from 'drizzle-orm';
 import { getDbClient } from '../localDb/client/current.js';
 import { botSessionLinks, botProfiles, sessions, messages } from '../localDb/schema.js';
 import {
@@ -265,23 +265,46 @@ export function initializeBotAuthorizationHost(
       const [row] = await getDbClient()
         .drizzle.select({ sessionId: messages.sessionId, meta: messages.agentMeta })
         .from(messages)
+        .innerJoin(sessions, eq(sessions.id, messages.sessionId))
         .where(
-          and(eq(messages.clientId, `bot-authorization:${requestId}`), isNull(messages.rewindAt)),
+          and(
+            eq(messages.clientId, `bot-authorization:${requestId}`),
+            isNull(messages.rewindAt),
+            or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)),
+          ),
         )
         .limit(1);
       if (!row) return null;
-      let meta: unknown;
-      try {
-        meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
-      } catch {
-        return null;
+      const card = readStoredAuthorization(row);
+      return card?.snapshot.requestId === requestId ? card : null;
+    },
+    async findPending(sessionId, target) {
+      await assertSession(sessionId);
+      const rows = await getDbClient()
+        .drizzle.select({ sessionId: messages.sessionId, meta: messages.agentMeta })
+        .from(messages)
+        .innerJoin(sessions, eq(sessions.id, messages.sessionId))
+        .where(
+          and(
+            eq(messages.sessionId, sessionId),
+            like(messages.clientId, 'bot-authorization:%'),
+            isNull(messages.rewindAt),
+            or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)),
+          ),
+        )
+        .orderBy(desc(messages.createdAt));
+      await assertSession(sessionId);
+      for (const row of rows) {
+        const card = readStoredAuthorization(row);
+        if (
+          card &&
+          !card.snapshot.terminal &&
+          card.target.kind === target.kind &&
+          card.target.id === target.id
+        )
+          return card;
       }
-      const card = readBotAuthorizationCard(
-        (meta as Record<string, unknown> | null)?.botAuthorization,
-      );
-      return card?.sessionId === row.sessionId && card.snapshot.requestId === requestId
-        ? card
-        : null;
+      return null;
     },
     async resume(card) {
       await assertSession(card.sessionId);
@@ -299,4 +322,18 @@ export function initializeBotAuthorizationHost(
     openExternal: (url) => shell.openExternal(url),
     warn: () => log.warn('Authorization card operation failed'),
   });
+}
+
+function readStoredAuthorization(row: {
+  sessionId: string;
+  meta: unknown;
+}): BotAuthorizationCard | null {
+  let meta: unknown;
+  try {
+    meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+  } catch {
+    return null;
+  }
+  const card = readBotAuthorizationCard((meta as Record<string, unknown> | null)?.botAuthorization);
+  return card?.sessionId === row.sessionId ? card : null;
 }

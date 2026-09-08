@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
 import type {
   GhostSetupAllowedAction,
   GhostSetupAssessment,
@@ -16,6 +17,18 @@ import type {
   BotAuthorizationTarget,
 } from '../../shared/botAuthorization.js';
 
+/** Display names are untrusted plugin text and must never become model instructions. */
+export function buildBotAuthorizationContinuation(card: BotAuthorizationCard) {
+  const message =
+    'An account connection requested in this conversation has completed authorization. Tell the user it is connected, then continue the work paused for this connection. Do not assume any other account or model was changed.';
+  return {
+    targetSessionId: card.sessionId,
+    message,
+    persistedContent: `${UI_ACTION_TRIGGER_PREFIX}${message}`,
+    clientId: `bot-authorization-resume:${card.snapshot.requestId}`,
+  };
+}
+
 export interface BotAuthorizationAdapter {
   identity: { id: string; name: string; iconDataUrl?: string };
   assess(): Promise<GhostSetupAssessment>;
@@ -31,6 +44,10 @@ export interface BotAuthorizationDeps {
   adapter(sessionId: string, target: BotAuthorizationTarget): Promise<BotAuthorizationAdapter>;
   save(card: BotAuthorizationCard): Promise<void>;
   load(requestId: string): Promise<BotAuthorizationCard | null>;
+  findPending(
+    sessionId: string,
+    target: BotAuthorizationTarget,
+  ): Promise<BotAuthorizationCard | null>;
   resume(card: BotAuthorizationCard): Promise<void>;
   warn(error: unknown): void;
   openExternal(url: string): Promise<void>;
@@ -70,7 +87,23 @@ export class BotAuthorizationService {
   private restoring = new Map<string, Promise<Entry | null>>();
   constructor(private readonly deps: BotAuthorizationDeps) {}
 
-  async request(sessionId: string, target: BotAuthorizationTarget, plan?: GhostSetupPlan) {
+  private requests = new Map<string, ReturnType<BotAuthorizationService['requestCard']>>();
+  request(sessionId: string, target: BotAuthorizationTarget, plan?: GhostSetupPlan) {
+    const key = `${this.epoch}:${sessionId}:${target.kind}:${target.id}`;
+    const existing = this.requests.get(key);
+    if (existing) return existing;
+    const pending = this.requestCard(sessionId, target, plan).finally(() =>
+      this.requests.delete(key),
+    );
+    this.requests.set(key, pending);
+    return pending;
+  }
+
+  private async requestCard(
+    sessionId: string,
+    target: BotAuthorizationTarget,
+    plan?: GhostSetupPlan,
+  ) {
     const epoch = this.epoch;
     const adapter = await this.deps.adapter(sessionId, target);
     const assessment = await adapter.assess();
@@ -86,8 +119,19 @@ export class BotAuthorizationService {
     );
     if (existing) {
       await existing.writes;
-      return this.waitingResult(existing.card);
+      const visible = await this.deps.load(existing.card.snapshot.requestId);
+      if (epoch !== this.epoch) throw new Error('Authorization context changed');
+      if (visible && !visible.snapshot.terminal) return this.waitingResult(existing.card);
+      this.close(existing);
     }
+    // Watcher expiry is not card expiry: reuse the durable visible request.
+    const retained = await this.deps.findPending(sessionId, target);
+    if (epoch !== this.epoch) throw new Error('Authorization context changed');
+    if (retained) {
+      const restored = await this.get(retained.snapshot.requestId);
+      if (restored) return this.waitingResult(restored.card);
+    }
+    if (epoch !== this.epoch) throw new Error('Authorization context changed');
     const requestId = randomUUID();
     const snapshot = toSnapshot(
       requestId,
@@ -162,7 +206,10 @@ export class BotAuthorizationService {
       flight = (async () => {
         const card = await this.deps.load(requestId);
         if (!card || card.snapshot.terminal) return null;
-        const adapter = await this.deps.adapter(card.sessionId, card.target);
+        const adapter = await this.deps.adapter(
+          card.sessionId,
+          card.completionPending ? { ...card.target, reauthorize: false } : card.target,
+        );
         // A retained card can start a fresh flow; an old browser URL is never persisted.
         card.snapshot = { ...card.snapshot, reopenActionId: undefined };
         const assessment = await adapter.assess();
@@ -394,7 +441,7 @@ export class BotAuthorizationService {
       this.stopPoll(entry);
       entry.unsubscribe();
       const beforeCompletion = entry.card.snapshot;
-      entry.card.snapshot = {
+      const completedSnapshot: BotAuthorizationCard['snapshot'] = {
         ...entry.card.snapshot,
         revision: entry.card.snapshot.revision + 1,
         terminal: true,
@@ -406,11 +453,20 @@ export class BotAuthorizationService {
         })),
       };
       try {
+        // Commit the idempotent continuation durably before retiring the card.
+        // A crash before that boundary leaves the existing nonterminal card recoverable;
+        // a crash after it can safely retry the same continuation clientId.
+        entry.card.completionPending = true;
         await this.save(entry);
         if (entry.closed || entry.cancelled) return;
         await this.deps.resume(entry.card);
+        if (entry.closed || entry.cancelled) return;
+        entry.card.snapshot = completedSnapshot;
+        delete entry.card.completionPending;
+        await this.save(entry);
       } catch (error) {
         if (entry.closed || entry.cancelled) throw error;
+        entry.card.completionPending = true;
         entry.card.snapshot = {
           ...beforeCompletion,
           revision: entry.card.snapshot.revision,

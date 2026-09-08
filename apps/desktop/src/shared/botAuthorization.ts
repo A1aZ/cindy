@@ -25,6 +25,8 @@ export type BotAuthorizationTarget =
   | { kind: 'host'; id: 'grok'; reauthorize?: boolean };
 export interface BotAuthorizationCard {
   v: 1;
+  /** Authorization was verified; continuation has not been durably finalized yet. */
+  completionPending?: true;
   sessionId: string;
   target: BotAuthorizationTarget;
   snapshot: AuthorizationSnapshot;

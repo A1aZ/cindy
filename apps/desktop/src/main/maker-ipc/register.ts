@@ -1,6 +1,5 @@
 import { initializeBotAuthorizationHost } from './botAuthorizationHost.js';
-import { getBotAuthorizationService } from './botAuthorizationService.js';
-import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
+import { buildBotAuthorizationContinuation, getBotAuthorizationService } from './botAuthorizationService.js';
 import { registerSessionSetModelHandler } from './sessionSetModelHandler.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
@@ -8536,9 +8535,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 失败时 shouldQueueNewTurn 仍返回 true(未恢复即入队),消息不丢。
       lockStage = 'queue-restore';
       await inputCoordinator.ensureQueueRestored(targetSessionId).catch(() => undefined);
-      // Private messages always use the durable coordinator, including an idle
+      // Private messages and authorization continuations use the durable coordinator, including an idle
       // recipient. This preserves input provenance and one recovery/dispatch path.
-      if (explicitClientId?.startsWith('bot-dm:') || inputCoordinator.shouldQueueNewTurn(targetSessionId)) {
+      if (explicitClientId?.startsWith('bot-dm:') || explicitClientId?.startsWith('bot-authorization-resume:') || inputCoordinator.shouldQueueNewTurn(targetSessionId)) {
         lockStage = 'enqueue-queued-message';
         const qClientId = explicitClientId ?? createId();
         await enqueueSendToSessionMessage({
@@ -8952,10 +8951,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   };
 
   initializeBotAuthorizationHost(async (card) => {
-    const prompt = `The ${JSON.stringify(card.snapshot.ghost.name)} connection finished authorizing. Tell the user it is connected, then continue the work paused for this connection. Do not assume any other account or model was changed.`;
-    const result = await dispatchBotSessionMessage({ targetSessionId: card.sessionId, message: prompt,
-      persistedContent: `${UI_ACTION_TRIGGER_PREFIX}${prompt}`, clientId: `bot-authorization-resume:${card.snapshot.requestId}` });
+    await inputCoordinator.ensureQueueRestored(card.sessionId);
+    const result = await dispatchBotSessionMessage(buildBotAuthorizationContinuation(card));
     if (!result.ok) throw new Error('Authorization continuation not accepted');
+    await awaitAgentInputQueueSnapshotPersistence(card.sessionId);
   });
 
   botDirectMessageServiceHolder = createBotDirectMessageService({

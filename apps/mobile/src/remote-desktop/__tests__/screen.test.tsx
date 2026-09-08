@@ -568,6 +568,36 @@ describe("remote desktop controls", () => {
     expect(fixture.invoke).toHaveBeenCalledTimes(1);
     expect(requests().some((r) => r.op === "start")).toBe(false);
   });
+  it.each([
+    ["ACCESS_REVOKED", "accessRevoked"],
+    ["REMOTE_DISABLED", "remoteDisabled"],
+  ])("stops automatic recovery for %s while retaining manual retry", async (code, hint) => {
+    const original = fixture.invoke.getMockImplementation()!;
+    for (const structured of [false, true]) {
+      for (const stage of ["openLink", "invoke"] as const) {
+        const failure = structured
+          ? Object.assign(new Error("Rejected by host"), { code })
+          : new Error(`Remote invoke failed: ${code}`);
+        fixture.openLink.mockResolvedValue({});
+        fixture.invoke.mockImplementation(original);
+        if (stage === "openLink") fixture.openLink.mockRejectedValue(failure);
+        else fixture.invoke.mockRejectedValue(failure);
+        await connect();
+        act(() => button("connect").click());
+        await act(async () => {});
+        expect(host.textContent).toContain(`deviceLink.remoteError.${hint}`);
+        const calls = fixture.openLink.mock.calls.length;
+        await act(async () => vi.advanceTimersByTimeAsync(30_000));
+        expect(fixture.openLink).toHaveBeenCalledTimes(calls);
+        fixture.openLink.mockResolvedValue({});
+        fixture.invoke.mockImplementation(original);
+        act(() => button("connect").click());
+        await act(async () => {});
+        expect(fixture.openLink.mock.calls.length).toBeGreaterThan(calls);
+        expect(host.textContent).not.toContain(`deviceLink.remoteError.${hint}`);
+      }
+    }
+  });
   it("marks retries as recovery even when the first start reply was lost", async () => {
     const original = fixture.invoke.getMockImplementation()!;
     fixture.invoke.mockImplementation((...args) =>

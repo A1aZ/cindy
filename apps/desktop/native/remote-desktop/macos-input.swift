@@ -2,6 +2,110 @@ import Foundation
 import ApplicationServices
 import AppKit
 import IOKit.graphics
+import Security
+
+// libuv creates AF_UNIX socket pairs for child stdio on macOS. Authenticate
+// their kernel-supplied audit tokens, not argv, environment, PID alone or a
+// caller-supplied secret. All three channels must belong to the same Main.
+struct DesktopInputCaller {
+  let token: Data
+  let parent: pid_t
+  let requirement: SecRequirement
+
+  static func signingInfo(_ code: SecCode) -> [String: Any]? {
+    var value: SecStaticCode?
+    var information: CFDictionary?
+    guard SecCodeCopyStaticCode(code, [], &value) == errSecSuccess, let value = value,
+      SecCodeCopySigningInformation(value, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess else { return nil }
+    return information as? [String: Any]
+  }
+
+  static func hasSealedHelper(_ code: SecCode, executable: URL) -> Bool {
+    var value: SecStaticCode?
+    guard SecCodeCopyStaticCode(code, [], &value) == errSecSuccess, let value = value,
+      let bytes = try? Data(contentsOf: executable) else { return false }
+    // Bind the shipped pair: a same-team older app must not gain this helper's
+    // privileges by transplanting it into an app with weaker Electron fuses.
+    return SecCodeValidateFileResource(value,
+      "Resources/tools/remote-desktop/cindy-macos-desktop-input" as CFString,
+      bytes as CFData, []) == errSecSuccess
+  }
+
+  static func peer(_ descriptor: Int32) -> Data? {
+    var token = audit_token_t()
+    var size = socklen_t(MemoryLayout<audit_token_t>.size)
+    guard getsockopt(descriptor, 0 /* SOL_LOCAL */, 6 /* LOCAL_PEERTOKEN */, &token, &size) == 0,
+      size == MemoryLayout<audit_token_t>.size else { return nil }
+    return withUnsafeBytes(of: token) { Data($0) }
+  }
+
+  func code() -> SecCode? {
+    guard getppid() == parent else { return nil }
+    var code: SecCode?
+    let attributes = [kSecGuestAttributeAudit: token] as CFDictionary
+    guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+      let code = code, SecCodeCheckValidity(code, [], requirement) == errSecSuccess else { return nil }
+    return code
+  }
+
+  static func authenticate() -> DesktopInputCaller? {
+    guard let token = peer(STDIN_FILENO), peer(STDOUT_FILENO) == token,
+      peer(STDERR_FILENO) == token else { return nil }
+    let words = token.withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
+    let parent = getppid()
+    guard parent > 1, words[5] == UInt32(parent), words[1] == geteuid() else { return nil }
+    var requirement: SecRequirement?
+    let executable: URL
+#if DESKTOP_INPUT_DEVELOPMENT
+    // Development runs writable JS in generic Electron with an inspector.
+    // This is only an exact runtime binding, NOT a production security boundary.
+    // Main fills this compile-time value; no environment/CLI downgrade exists.
+    let encodedExecutable = "DESKTOP_INPUT_DEVELOPMENT_EXECUTABLE"
+    guard let data = Data(base64Encoded: encodedExecutable),
+      let value = String(data: data, encoding: .utf8), value.hasPrefix("/") else { return nil }
+    executable = URL(fileURLWithPath: value).resolvingSymlinksInPath()
+    var expected: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(executable as CFURL, [], &expected) == errSecSuccess,
+      let expected = expected,
+      SecCodeCopyDesignatedRequirement(expected, [], &requirement) == errSecSuccess else { return nil }
+#else
+    var own: SecCode?
+    guard SecCodeCopySelf([], &own) == errSecSuccess, let own = own,
+      SecCodeCheckValidity(own, [], nil) == errSecSuccess,
+      let info = signingInfo(own),
+      let team = info[kSecCodeInfoTeamIdentifier as String] as? String,
+      team.range(of: "^[A-Z0-9]+$", options: .regularExpression) != nil,
+      let ownExecutable = info[kSecCodeInfoMainExecutable as String] as? URL else { return nil }
+    // Only the Main executable in this helper's enclosing, signed app may call
+    // it. Another signed application (even from our team) is not Cindy Main.
+    var appURL = ownExecutable.resolvingSymlinksInPath()
+    for _ in 0..<5 { appURL.deleteLastPathComponent() }
+    guard let bundle = Bundle(url: appURL), let identifier = bundle.bundleIdentifier,
+      ["com.xd.cindy", "com.xd.cindycn"].contains(identifier),
+      let mainExecutable = bundle.executableURL else { return nil }
+    executable = mainExecutable.resolvingSymlinksInPath()
+    let rule = "anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(team)\""
+    guard SecRequirementCreateWithString(rule as CFString, [], &requirement) == errSecSuccess else { return nil }
+#endif
+    guard let requirement = requirement else { return nil }
+    let caller = DesktopInputCaller(token: token, parent: parent, requirement: requirement)
+    guard let code = caller.code(), let info = signingInfo(code),
+      let actual = info[kSecCodeInfoMainExecutable as String] as? URL,
+      actual.resolvingSymlinksInPath() == executable else { return nil }
+#if !DESKTOP_INPUT_DEVELOPMENT
+    guard let flags = info[kSecCodeInfoFlags as String] as? UInt32,
+      flags & 0x10000 /* kSecCodeSignatureRuntime */ != 0,
+      flags & 0x0002 /* kSecCodeSignatureAdhoc */ == 0,
+      hasSealedHelper(code, executable: ownExecutable) else { return nil }
+#endif
+    return caller
+  }
+}
+
+#if !DESKTOP_INPUT_TEST
+// This guard precedes every entrypoint, including selection and permission UI.
+guard let inputCaller = DesktopInputCaller.authenticate() else { exit(77) }
+#endif
 
 // Expose only the clipboard change counter, never clipboard content on stdout.
 if CommandLine.arguments.count == 2 && ["--clipboard-version", "--clipboard-content-version"].contains(CommandLine.arguments[1]) {
@@ -193,6 +297,7 @@ let watchdog = DispatchSource.makeTimerSource(queue: .global())
 watchdog.schedule(deadline: .now() + 1, repeating: 1)
 watchdog.setEventHandler {
   lock.lock(); defer { lock.unlock() }
+  if inputCaller.code() == nil { releaseAll(); exit(77) }
   if !AXIsProcessTrusted() { releaseAll(); print("error"); fflush(stdout); exit(2) }
   if Date().timeIntervalSince(lastSeen) > 5 { releaseAll() }
 }
@@ -202,6 +307,7 @@ let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .globa
 termination.setEventHandler { lock.lock(); releaseAll(); lock.unlock(); exit(0) }
 termination.resume()
 while let line = readLine() {
+  guard inputCaller.code() != nil else { lock.lock(); releaseAll(); lock.unlock(); exit(77) }
   guard line.utf8.count <= 65536, let data = line.data(using: .utf8), let events = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { continue }
   lock.lock(); lastSeen = Date()
   for event in events { apply(event) }

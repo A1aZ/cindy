@@ -34,6 +34,7 @@ async function resolveBinary(prepare = true): Promise<string> {
       .update(await fs.readFile(source))
       .update(process.arch)
       .update('v1-O');
+    if (process.platform === 'darwin') digest.update(process.execPath).update('dev-caller-v1');
     if (process.platform === 'win32') {
       digest.update(await fs.readFile(path.join(sourceRoot, 'windows-input', 'src', 'desktop.rs')));
       digest.update(
@@ -55,7 +56,22 @@ async function resolveBinary(prepare = true): Promise<string> {
     await fs.mkdir(directory, { recursive: true });
     const temporary = `${binary}.${process.pid}.tmp`;
     if (process.platform === 'darwin') {
-      await exec('swiftc', [source, '-O', '-o', temporary], { timeout: 120_000 });
+      // Only source-mode Electron uses this build. Packaged helpers always use
+      // Apple's signing identity check; no runtime flag can downgrade it.
+      const buildDirectory = await fs.mkdtemp(path.join(directory, 'compile-'));
+      try {
+        const main = path.join(buildDirectory, 'main.swift');
+        const program = (await fs.readFile(source, 'utf8')).replace(
+          '"DESKTOP_INPUT_DEVELOPMENT_EXECUTABLE"',
+          JSON.stringify(Buffer.from(process.execPath).toString('base64')),
+        );
+        await fs.writeFile(main, program);
+        await exec('swiftc', ['-D', 'DESKTOP_INPUT_DEVELOPMENT', main, '-O', '-o', temporary], {
+          timeout: 120_000,
+        });
+      } finally {
+        await fs.rm(buildDirectory, { recursive: true, force: true });
+      }
     } else {
       const manifest = path.join(sourceRoot, 'windows-input', 'Cargo.toml');
       await exec(
@@ -345,16 +361,31 @@ export async function readDesktopClipboardVersion(portable = false): Promise<str
   if (process.platform !== 'darwin' && process.platform !== 'win32')
     throw new Error('DESKTOP_CLIPBOARD_UNAVAILABLE');
   try {
-    const { stdout } = await exec(await resolveBinary(), [portable && process.platform === 'darwin' ? '--clipboard-content-version' : '--clipboard-version'], {
-      timeout: 2000,
-      maxBuffer: 128,
-      windowsHide: true,
-    });
+    const { stdout } = await exec(
+      await resolveBinary(),
+      [
+        portable && process.platform === 'darwin'
+          ? '--clipboard-content-version'
+          : '--clipboard-version',
+      ],
+      {
+        timeout: 2000,
+        maxBuffer: 128,
+        windowsHide: true,
+      },
+    );
     const version = stdout.trim();
     if (!/^[0-9]+$/.test(version)) throw new Error('DESKTOP_CLIPBOARD_UNAVAILABLE');
     return version;
   } catch (error) {
-    if (portable && process.platform === 'darwin' && error && typeof error === 'object' && 'code' in error && error.code === 3)
+    if (
+      portable &&
+      process.platform === 'darwin' &&
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 3
+    )
       throw new Error('CLIPBOARD_UNSUPPORTED');
     throw new Error('DESKTOP_CLIPBOARD_UNAVAILABLE');
   }
@@ -362,11 +393,15 @@ export async function readDesktopClipboardVersion(portable = false): Promise<str
 
 export async function readDesktopSelection(portable = false): Promise<string> {
   try {
-    const { stdout } = await exec(await resolveBinary(), [portable ? '--clipboard-content-selection' : '--clipboard-selection'], {
-      timeout: 3000,
-      maxBuffer: 128_000,
-      windowsHide: true,
-    });
+    const { stdout } = await exec(
+      await resolveBinary(),
+      [portable ? '--clipboard-content-selection' : '--clipboard-selection'],
+      {
+        timeout: 3000,
+        maxBuffer: 128_000,
+        windowsHide: true,
+      },
+    );
     const value: unknown = JSON.parse(stdout);
     if (
       !value ||

@@ -370,25 +370,29 @@ export default function RemoteDesktopScreen() {
         typeof cause.code === "string"
           ? cause.code
           : message.match(
-              /\b(?:DESKTOP|CHANNEL|DEVICE|INVOKE|REMOTE)_[A-Z_]+\b/,
+              /\b(?:DESKTOP|CHANNEL|DEVICE|INVOKE|REMOTE|ACCESS)_[A-Z_]+\b/,
             )?.[0];
       // Keep diagnostics free of device names, input and signaling payloads.
       console.debug("[remote-desktop] connection failed", {
         code: code && /^[A-Z_]+$/.test(code) ? code : "UNKNOWN",
       });
       const blocked =
-        code === "DESKTOP_BUSY"
-          ? "connectionBusy"
-          : code === "CHANNEL_NOT_ALLOWED"
-            ? "upgrade"
-            : message.includes("DESKTOP_DISABLED")
-              ? "disabled"
-              : message.includes("PERMISSION") ||
-                  message.includes("ACCESSIBILITY")
-                ? "permissionHint"
-                : message.includes("DESKTOP_STOPPED")
-                  ? "disconnected"
-                  : null;
+        code === "ACCESS_REVOKED"
+          ? "accessRevoked"
+          : code === "REMOTE_DISABLED"
+            ? "remoteDisabled"
+            : code === "DESKTOP_BUSY"
+              ? "connectionBusy"
+              : code === "CHANNEL_NOT_ALLOWED"
+                ? "upgrade"
+                : message.includes("DESKTOP_DISABLED")
+                  ? "disabled"
+                  : message.includes("PERMISSION") ||
+                      message.includes("ACCESSIBILITY")
+                    ? "permissionHint"
+                    : message.includes("DESKTOP_STOPPED")
+                      ? "disconnected"
+                      : null;
       stop(!blocked);
       setError(blocked);
       if (blocked) recovery.current.enabled = false;
@@ -1288,7 +1292,9 @@ export default function RemoteDesktopScreen() {
                   accessibilityRole={error ? "alert" : undefined}
                   style={styles.caption}
                 >
-                  {t(`remoteDesktop.${error === "connectionBusy" && caps?.connectionTakeover ? "connectionBusyTakeover" : error ?? status}`)}
+                  {t(error === "accessRevoked" || error === "remoteDisabled"
+                    ? `deviceLink.remoteError.${error}`
+                    : `remoteDesktop.${error === "connectionBusy" && caps?.connectionTakeover ? "connectionBusyTakeover" : error ?? status}`)}
                 </Text>
               )}
               {error &&

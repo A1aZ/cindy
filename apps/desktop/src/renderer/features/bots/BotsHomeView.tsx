@@ -385,7 +385,7 @@ export function BotsHomeView() {
   const { botId, sessionId } = useParams();
   const [searchParams] = useSearchParams();
   const bots = useBotProfiles();
-  const providerOnboarding = useProviderOnboarding();
+  const providerOnboarding = useProviderOnboarding({ dismissible: false });
   useProviders();
   useAvailableAgents();
   const hasDefaultModel = useSyncExternalStore(
@@ -601,7 +601,7 @@ export function BotsHomeView() {
   }, [addRequested, createCanonicalSession, selectedBot, sessionId, settingsOpen, navigate, providerOnboarding.visible, needsModelSelection]);
 
   if (providerOnboarding.visible && !settingsOpen) {
-    return <main className="flex h-full items-center justify-center px-6" role="main"><ConnectProviderCard /></main>;
+    return <main className="flex h-full items-center justify-center px-6" role="main"><ConnectProviderCard dismissible={false} /></main>;
   }
 
   if (!selectedBot) {

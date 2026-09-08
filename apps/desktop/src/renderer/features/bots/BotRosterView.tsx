@@ -42,7 +42,7 @@ export function BotRosterView({ onCreated, onClose, restoreFocus }: BotRosterVie
   const { t } = useTranslation();
   const navigate = useNavigate();
   const bots = useBotProfiles();
-  const providerOnboarding = useProviderOnboarding();
+  const providerOnboarding = useProviderOnboarding({ dismissible: false });
   const [invited, setInvited] = useState<BotProfile | null>(null);
   useEffect(() => {
     if (!invited) return;
@@ -201,7 +201,7 @@ export function BotRosterView({ onCreated, onClose, restoreFocus }: BotRosterVie
           {providerOnboarding.visible ? (
             <>
               <Dialog.Title className="sr-only">{t('onboarding.connectProvider.title')}</Dialog.Title>
-              <ConnectProviderCard />
+              <ConnectProviderCard dismissible={false} />
             </>
           ) : invitedBot ? (
             <>

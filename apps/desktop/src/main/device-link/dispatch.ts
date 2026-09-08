@@ -931,6 +931,13 @@ const makerEventBatchStages = new Map<string, MakerEventBatchStage>();
 // Bound live traffic before it enters the shared socket FIFO. Only opt-in
 // controllers can repair skipped deltas from the authoritative in-flight block.
 const MAKER_EVENT_WINDOW_SOFT_CAP = 16;
+// Recheck the existing repair stage promptly after the window drains. Waiting
+// two seconds here also suppresses healthy later deltas for those two seconds.
+// The peer/window gates still run before reading or sending any snapshot.
+const SESSION_SYNC_RETRY_MS = 250;
+// Keep the original pacing when reading/admitting a snapshot actually fails:
+// socket bytes or the authorization queue can be full even below the soft cap.
+const SESSION_SYNC_FAILURE_RETRY_MS = 2_000;
 function isNonFinalTextPush(payload: unknown): boolean {
   const event = (payload as { event?: { type?: unknown; data?: { isFinal?: unknown } } } | null)?.event;
   return event?.type === 'text' && event.data?.isFinal === false;
@@ -940,6 +947,7 @@ const sessionSyncStages = new Map<string, {
   sessions: Map<string, boolean>;
   timer: ReturnType<typeof setTimeout> | null;
   ownerStamp?: PushOwnerStamp;
+  startedAt: number;
 }>();
 
 function clearSessionSyncStage(dst: string): void {
@@ -948,18 +956,26 @@ function clearSessionSyncStage(dst: string): void {
   sessionSyncStages.delete(dst);
 }
 
-function stageSessionSync(dst: string, sessionId: string, historyRequired = true): void {
+function stageSessionSync(dst: string, sessionId: string, historyRequired = true, retryDelayMs = SESSION_SYNC_RETRY_MS): void {
   if (!subscriptions.controllerSupports(dst, CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1)) return;
   let stage = sessionSyncStages.get(dst);
   if (!stage) {
-    stage = { sessions: new Map(), timer: null, ownerStamp: broadcastTap.getSafeDataOwnerPushStamp?.() };
+    stage = { sessions: new Map(), timer: null, ownerStamp: broadcastTap.getSafeDataOwnerPushStamp?.(), startedAt: Date.now() };
     sessionSyncStages.set(dst, stage);
+    log.debug(`session sync repair queued to=${shortId(dst)}`
+      + ` queueDepth=${activeClient?.getReliableSendQueueDepth?.(dst) ?? 0}`
+      + ` writable=${activeClient?.canSendPush?.(dst) !== false}`);
   }
   stage.sessions.set(sessionId, historyRequired || stage.sessions.get(sessionId) === true);
   if (stage.sessions.size > SESSION_ACTIVITY_STAGE_MAX_KEYS) {
     stage.sessions.delete(stage.sessions.keys().next().value!);
   }
-  if (stage.timer) return;
+  if (stage.timer) {
+    if (retryDelayMs !== SESSION_SYNC_FAILURE_RETRY_MS) return;
+    // Flushing an older batch may have re-armed the fast check. A subsequent
+    // admission failure must retain the original, slower retry interval.
+    clearTimeout(stage.timer);
+  }
   stage.timer = setTimeout(() => {
     stage.timer = null;
     if (!activeClient || activeClient.getStatus() !== 'online'
@@ -991,24 +1007,30 @@ function stageSessionSync(dst: string, sessionId: string, historyRequired = true
         let admissionFailed = false;
         sendBotCheckedPush(dst, SESSION_SYNC_CHANNEL, payload,
           (projected) => {
-            if (subscriptions.controllerHasTopic(dst, `session:${sid}`)) {
-              activeClient?.sendPush(dst, SESSION_SYNC_CHANNEL, projected, ownerStamp);
+            if (activeClient && subscriptions.controllerHasTopic(dst, `session:${sid}`)) {
+              activeClient.sendPush(dst, SESSION_SYNC_CHANNEL, projected, ownerStamp);
+              // Admission is not delivery/ACK. Log once per admitted repair,
+              // never per retry or token, and never include the snapshot body.
+              log.debug(`session sync repair admitted to=${shortId(dst)}`
+                + ` session=${shortId(sid)} stageAgeMs=${Date.now() - stage.startedAt}`
+                + ` resyncRequired=${payload.resyncRequired}`);
             }
           },
           () => {
             admissionFailed = true;
-            stageSessionSync(dst, sid, payload.resyncRequired);
+            stageSessionSync(dst, sid, payload.resyncRequired, SESSION_SYNC_FAILURE_RETRY_MS);
           });
         if (admissionFailed) break;
         stage.sessions.delete(sid);
       } catch {
+        stageSessionSync(dst, sid, stage.sessions.get(sid), SESSION_SYNC_FAILURE_RETRY_MS);
         break;
       }
     }
     const next = stage.sessions.entries().next().value;
     if (next) stageSessionSync(dst, next[0], next[1]);
     else clearSessionSyncStage(dst);
-  }, 2_000);
+  }, retryDelayMs);
   (stage.timer as unknown as { unref?: () => void }).unref?.();
 }
 

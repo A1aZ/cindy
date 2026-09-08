@@ -1532,9 +1532,10 @@ async function rebuildSessionSnapshot(
     if (historyView) {
       if (!historyView.isActive()) return false;
       await historyView.refresh();
+      if (!isCurrent() || !historyView.isActive()
+        || findRemoteHistoryView(deviceId, sessionId) !== historyView) return false;
       const snapshot = historyView.getSnapshot();
-      if (!snapshot.error && snapshot.ready) return isCurrent() && historyView.isActive()
-        && findRemoteHistoryView(deviceId, sessionId) === historyView;
+      if (!snapshot.error && snapshot.ready) return true;
       if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
     }
     return applyHistory(await readRawHistory());

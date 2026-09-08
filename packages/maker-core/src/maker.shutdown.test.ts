@@ -87,6 +87,33 @@ function createAgent(handle: AgentSessionHandle): BaseAgent {
 }
 
 describe('Maker.shutdown', () => {
+  it('waits for session lifecycle cleanup hooks before resolving', async () => {
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    let cleanupEntered = false;
+    const maker = new Maker({
+      agents: { 'claude-code': createAgent(createHandle({})) },
+      storage: createStorage(),
+      logger,
+      lifecycleHooks: {
+        onClose: async () => {
+          cleanupEntered = true;
+          await cleanupGate;
+        },
+      },
+    });
+    await maker.createSession({ id: 's-cleanup', agentKind: 'claude-code', workingDir: '/w', model: 'm' });
+
+    let shutdownSettled = false;
+    const shutdown = maker.shutdown().then(() => { shutdownSettled = true; });
+    await vi.waitFor(() => expect(cleanupEntered).toBe(true));
+    expect(shutdownSettled).toBe(false);
+
+    releaseCleanup();
+    await shutdown;
+    expect(shutdownSettled).toBe(true);
+  });
+
   it('detaches remote-capable sessions instead of full-closing them', async () => {
     const close = vi.fn(async () => undefined);
     const detach = vi.fn(async () => undefined);

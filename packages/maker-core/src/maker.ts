@@ -431,6 +431,8 @@ export class Maker {
   private readonly invalidSdkSessionIds = new Map<string, Set<string>>();
   /** Explicit close cause keyed by the exact Session instance that will emit closed. */
   private readonly closeReasons = new WeakMap<Session, MakerSessionCloseReason>();
+  /** Host cleanup hooks must settle before Maker.shutdown() releases its process barrier. */
+  private readonly pendingLifecycleCloses = new Set<Promise<void>>();
   /** Maker Memory 顶层单例 (可选). undefined 时 maker memory 功能整体禁用. */
   public readonly makerMemory: MakerMemoryManager | undefined;
   /** 视觉桥钩子（层 B）全局默认（可选）。见 MakerDeps.visionBridge。 */
@@ -1025,11 +1027,15 @@ export class Maker {
         // delete / emit 之后调 —— 钩子里的逻辑可能对外发 IPC 或读 maker state, 让 Maker
         // 自己的 invariant 先一致。
         if (this.lifecycleHooks.onClose) {
-          void Promise.resolve()
+          const cleanup = Promise.resolve()
             .then(() => this.lifecycleHooks.onClose!(meta.id, startOpts))
             .catch((err) => {
               this.logger.warn('lifecycleHooks.onClose threw', { sessionId: meta.id, error: String(err) });
             });
+          this.pendingLifecycleCloses.add(cleanup);
+          void cleanup.then(() => {
+            this.pendingLifecycleCloses.delete(cleanup);
+          });
         }
       }
     });
@@ -1281,6 +1287,13 @@ export class Maker {
       ...failedHandleCloses,
       ...lateSessionDetaches,
     ]);
+
+    // Session close notifications enqueue host-owned cleanup (for example
+    // runtime worktree lease release). Keep the quit barrier open until every
+    // hook that was queued by a detach has settled.
+    while (this.pendingLifecycleCloses.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingLifecycleCloses));
+    }
 
     if (errors.length > 0) {
       // Maker 没注入 logger; host 端 stdout 能看到 (before-quit 阶段, 不阻塞流程)

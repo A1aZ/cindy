@@ -1,4 +1,5 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import Database from 'better-sqlite3';
 
 import { createLogger } from '../../logger.js';
 import { ensureReady, getDrizzle, getRawDb } from '../index.js';
@@ -12,6 +13,7 @@ import { createDrizzleProxy } from './drizzleProxy.js';
 import type { DbTxArgsByName, DbTxName, DbTxResultByName } from './tx/types.js';
 import { tx as runInprocTx } from '../worker/opHandlers/tx.js';
 import type { LocalWorktreeReference } from '../worker/worktreeReferences.js';
+import { readLocalWorktreeReferences } from '../worker/worktreeReferences.js';
 
 export interface DbClient {
   /** Optional only for legacy transports; callers must preserve on absence. */
@@ -121,6 +123,8 @@ export async function createInprocDbClient(opts: CreateDbClientOptions = {}): Pr
   }
 
   return {
+    readLocalWorktreeReferences: async () =>
+      readLocalWorktreeReferences(getRawDb(), Database, opts.nativeBinding),
     query: async <T = unknown>(sql: string, params: unknown[] = []) =>
       getRawDb().prepare(sql).all(...params) as T[],
     queryOne: async <T = unknown>(sql: string, params: unknown[] = []) =>

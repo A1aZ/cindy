@@ -73,7 +73,7 @@ import {
   invalidateOfflineScheduleIndexFailureFor,
   invalidateScheduleIndexForDevice,
   invalidateTransientScheduleIndexFailureFor,
-  invalidateTransientScheduleIndexFailures,
+  invalidateScheduleIndexesAfterLinkRecovery,
 } from '@/session/scheduleIndex';
 import { isTransientRemoteError } from '@/device-link/remoteRetry';
 import {
@@ -699,10 +699,9 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     if (targetDeviceId) {
       scheduler?.request(targetDeviceId);
     } else {
-      // Relay 重连 / App 回前台是共享生命周期事件：即使某设备此刻没有持有
-      // topic，它此前因 WSS 掉线留下的 NOT_CONNECTED 负缓存也已经失效。
-      // 单 peer 恢复不会走这里，仍只清自己的缓存。
-      invalidateTransientScheduleIndexFailures();
+      // Relay 重连 / App 回前台可能漏过日程推送:在通知页面恢复前统一失效
+      // 旧成功快照和本机断线负缓存。单 peer 恢复仍只清自己的缓存。
+      invalidateScheduleIndexesAfterLinkRecovery();
       const deviceIds = new Set(registryRef.current.deviceIds());
       for (const deviceId of forcedPeerRecoveryIntentRef.current.deviceIds()) {
         deviceIds.add(deviceId);

@@ -7,7 +7,7 @@ import {
   invalidateRunningSessionScheduleEntries,
   invalidateScheduleIndexForDevice,
   invalidateTransientScheduleIndexFailureFor,
-  invalidateTransientScheduleIndexFailures,
+  invalidateScheduleIndexesAfterLinkRecovery,
   loadSessionScheduleIndex,
   loadSessionScheduleIndexThrottled,
   replaceSessionScheduleIndexEntries,
@@ -318,7 +318,7 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     expect(loadSessionScheduleIndexThrottled('dev-1', load, options)).toBe(first);
   });
 
-  it.each([false, true])('coalesces invalidated scans after the old scan settles (rejected=%s)', async (rejected) => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])('coalesces invalidated scans after the old scan settles (rejected=%s, recovered=%s)', async (rejected, recovered) => {
     resetScheduleIndexThrottleForTesting();
     let finish!: (index: Map<string, RemoteSessionScheduleInfo>) => void;
     let fail!: (error: Error) => void;
@@ -327,7 +327,8 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
       .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
       .mockResolvedValue(fresh);
     const old = loadSessionScheduleIndexThrottled('dev-1', load).catch(() => undefined);
-    invalidateScheduleIndexForDevice('dev-1');
+    if (recovered) invalidateScheduleIndexesAfterLinkRecovery();
+    else invalidateScheduleIndexForDevice('dev-1');
     const home = loadSessionScheduleIndexThrottled('dev-1', load);
     const task = loadSessionScheduleIndexThrottled('dev-1', load);
     expect(load).toHaveBeenCalledTimes(1);
@@ -454,7 +455,7 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     });
     expect(load).toHaveBeenCalledTimes(1);
     // 重连(rehydrate 开始)→ 瞬态负缓存失效 → 立即重拉
-    invalidateTransientScheduleIndexFailures();
+    invalidateScheduleIndexesAfterLinkRecovery();
     await expect(loadSessionScheduleIndexThrottled('dev-n', load, { now })).resolves.toBeInstanceOf(Map);
     expect(load).toHaveBeenCalledTimes(2);
     },
@@ -499,8 +500,8 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
       code: 'DEVICE_OFFLINE',
     });
     await Promise.resolve();
-    // 全局重连钩子(NOT_CONNECTED 类专用)不清 DEVICE_OFFLINE 负缓存
-    invalidateTransientScheduleIndexFailures();
+    // 全局重连钩子保留逐设备的 DEVICE_OFFLINE 负缓存
+    invalidateScheduleIndexesAfterLinkRecovery();
     await expect(loadSessionScheduleIndexThrottled('dev-o', load, { now })).rejects.toMatchObject({
       code: 'DEVICE_OFFLINE',
     });
@@ -571,6 +572,8 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
         code: 'DEVICE_UNRESPONSIVE',
       });
       await Promise.resolve();
+      // Relay 恢复不代表目标设备响应恢复,仍复用熔断负缓存。
+      invalidateScheduleIndexesAfterLinkRecovery();
       // 熔断仍 open:失败 TTL 内复用负缓存,不压请求
       await expect(loadSessionScheduleIndexThrottled('dev-1', load, { now })).rejects.toMatchObject({
         code: 'DEVICE_UNRESPONSIVE',

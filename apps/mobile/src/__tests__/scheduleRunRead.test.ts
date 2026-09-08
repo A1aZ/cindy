@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectScheduleEvent } from '@cindy/maker-shared/schedule-events';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { markSessionScheduleRunsRead, unreadRunIdFromProjection } from '@/session/scheduleRunRead';
-import { invalidateScheduleIndexForDevice, loadSessionScheduleIndex, loadSessionScheduleIndexThrottled, loadSharedSessionScheduleIndex, resetScheduleIndexThrottleForTesting } from '@/session/scheduleIndex';
+import { invalidateScheduleIndexForDevice, invalidateScheduleIndexesAfterLinkRecovery, loadSessionScheduleIndex, loadSessionScheduleIndexThrottled, loadSharedSessionScheduleIndex, resetScheduleIndexThrottleForTesting } from '@/session/scheduleIndex';
 
 function makerWith(
   runs: readonly Record<string, unknown>[],
@@ -24,6 +24,21 @@ function transientError(message = 'target timed out'): Error & { code: string } 
 
 describe('markSessionScheduleRunsRead', () => {
   beforeEach(resetScheduleIndexThrottleForTesting);
+  it('finds runs completed while disconnected even when the old success cache is still fresh', async () => {
+    const mark = vi.fn(async () => undefined);
+    const listRuns = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([
+      { id: 'run-offline', scheduleId: 'sched-1', sessionId: 'session-1', status: 'success', firedAt: 1 },
+    ]);
+    const maker = makerWith([], mark, listRuns);
+    await loadSharedSessionScheduleIndex('dev-1', maker);
+    // No completed push arrives during disconnection. Recovery alone must refresh.
+    invalidateScheduleIndexesAfterLinkRecovery();
+    const home = loadSharedSessionScheduleIndex('dev-1', maker);
+    await expect(markSessionScheduleRunsRead(maker, 'session-1', 'dev-1')).resolves.toEqual(['run-offline']);
+    await home;
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    expect(mark).toHaveBeenCalledExactlyOnceWith('run-offline');
+  });
   it('retries a transient scan inside the shared load before caching failure', async () => {
     const mark = vi.fn(async () => undefined);
     const listRuns = vi.fn().mockRejectedValueOnce(transientError()).mockResolvedValue([

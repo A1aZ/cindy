@@ -201,17 +201,14 @@ export function loadSessionScheduleIndexThrottled(
 }
 
 /**
- * 重连恢复钩子(review P1):普通断线(NOT_CONNECTED 等瞬态失败)产生的负缓存
- * 在链路恢复后立即失效——否则 30s 失败 TTL 内重连触发的 reseed 会吃到旧的
- * rejected promise,设备详情页把索引替换成空集、首页保留陈旧数据,且没有任何
- * 定时器在 TTL 过期后补拉。由 DeviceLinkContext 在每轮 rehydrate(只在 online
- * 时运行,重连必经)的共享生命周期入口调用;单 peer 恢复使用下方逐设备版本，
- * 熔断类负缓存不受影响(走各自的恢复旁路)。
+ * Relay 重连或回前台可能漏过 completed/read 推送,成功缓存也必须重新对账。
+ * 由共享恢复入口统一失效,在途扫描仍先结束再合并重拉。普通本机断线负缓存
+ * 同时清除;设备离线、熔断和请求超时的负缓存继续走各自的恢复旁路。
  */
-export function invalidateTransientScheduleIndexFailures(): void {
+export function invalidateScheduleIndexesAfterLinkRecovery(): void {
   for (const [key, entry] of scheduleIndexThrottleEntries) {
-    if (entry.failedAt !== null && entry.failedTransient) {
-      scheduleIndexThrottleEntries.delete(key);
+    if (entry.failedAt === null || entry.failedTransient) {
+      invalidateScheduleIndexForDevice(key);
     }
   }
 }

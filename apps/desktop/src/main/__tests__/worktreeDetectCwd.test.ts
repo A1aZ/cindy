@@ -82,6 +82,26 @@ describe('detectCwd → isInsideWorktree (I-1 fix)', () => {
     expect(gitExecMock).toHaveBeenCalledTimes(6);
   });
 
+  it('coalesces concurrent directory probes but reads fresh Git state after completion', async () => {
+    const wtPath = path.resolve('/tmp/feature');
+    const gitState = {
+      toplevel: wtPath,
+      gitDir: path.resolve('/tmp/repo/.git/worktrees/feature'),
+      gitCommonDir: path.resolve('/tmp/repo/.git'),
+      branch: 'before',
+    };
+    setupGitMock(gitState);
+    const first = detectCwd(wtPath);
+    const duplicate = detectCwd(path.join(wtPath, '.'));
+    expect(duplicate).toBe(first);
+    expect((await first).currentBranch).toBe('before');
+    expect(gitExecMock).toHaveBeenCalledTimes(6);
+
+    setupGitMock({ ...gitState, branch: 'after' });
+    expect((await detectCwd(wtPath)).currentBranch).toBe('after');
+    expect(gitExecMock).toHaveBeenCalledTimes(12);
+  });
+
   it('returns isInsideWorktree=true for a Cindy-created worktree', async () => {
     const baseRepo = path.resolve('/tmp/repo');
     const wtPath = path.join(baseRepo, '.cindy-worktrees', 'jolly-turing');

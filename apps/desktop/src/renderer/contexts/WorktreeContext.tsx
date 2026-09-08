@@ -8,7 +8,7 @@
  *   - Scheduler / hook 等 main 侧后台创建完成后，复用 sessions:created 按
  *     sessionId 增量发现 worktree
  *   - 归档/删除的 worktree 回收跑完后，由 main 的 `worktree:changed` 推送按
- *     sessionId 增量更新；启动和窗口聚焦时才做全量存活校验
+ *     sessionId 增量更新；启动先显示快照，低频、有界校验兜底外部删除，不随聚焦扫描
  *
  * 与项目内 AuthContext / EnvCheckContext 同
  * Provider+hooks 范式，不引入新状态库。
@@ -29,8 +29,8 @@ import type { WorktreeMeta } from '@/lib/worktree.types';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('WorktreeContext');
-const FOREGROUND_REFRESH_INTERVAL_MS = 15_000;
-const VALIDATION_CONCURRENCY = 2;
+const BACKGROUND_CHECK_INTERVAL_MS = 5 * 60_000;
+const BACKGROUND_CHECK_CONCURRENCY = 4;
 
 /** store 仍可能留着已被 `git worktree remove` 的路径；探测失败不摘标，避免 IPC 抖动清空侧栏。 */
 async function isLiveOfficialPath(cwd: string): Promise<boolean> {
@@ -60,52 +60,50 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
   const fullRefreshGenerationRef = useRef(0);
   const eventGenerationRef = useRef(0);
   const sessionEventGenerationsRef = useRef(new Map<string, number>());
-  const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  const lastRefreshAtRef = useRef(-Infinity);
-
-  const refresh = useCallback(() => {
-    if (refreshInFlightRef.current) return refreshInFlightRef.current;
-    const pending = (async () => {
-      const myTurn = ++fullRefreshGenerationRef.current;
-      const eventGenerationAtStart = eventGenerationRef.current;
-      try {
-        const list = await window.electronAPI.worktreeListAll();
-        // 中间发生了更新的 refresh，丢弃本次结果
-        if (myTurn !== fullRefreshGenerationRef.current) return;
-        const next: Record<string, WorktreeMeta> = {};
-        let index = 0;
-        const validateNext = async () => {
-          while (index < (list?.length ?? 0)) {
-            if (myTurn !== fullRefreshGenerationRef.current) return;
-            const meta = list[index++];
-            if (!meta?.sessionId || !meta.path) continue;
-            if (!(await isLiveOfficialPath(meta.path))) continue;
-            next[meta.sessionId] = meta;
-          }
-        };
-        await Promise.all(Array.from({ length: VALIDATION_CONCURRENCY }, validateNext));
-        if (myTurn !== fullRefreshGenerationRef.current) return;
-        setMetas((current) => {
-          const merged = { ...next };
-          // 全量探测期间若某个 session 收到更晚的权威事件，只保留该 session 当前
-          // 的增量结果；未完成的增量请求随后会再落一次，不能让旧全量快照回写。
-          for (const [sessionId, generation] of sessionEventGenerationsRef.current) {
-            if (generation <= eventGenerationAtStart) continue;
-            if (current[sessionId]) merged[sessionId] = current[sessionId];
-            else delete merged[sessionId];
-          }
-          return merged;
-        });
-        lastRefreshAtRef.current = Date.now();
-      } catch (err) {
-        log.warn('refresh failed:', err);
+  const refresh = useCallback(async (showSnapshot: boolean) => {
+    const myTurn = ++fullRefreshGenerationRef.current;
+    const eventGenerationAtStart = eventGenerationRef.current;
+    try {
+      const list = await window.electronAPI.worktreeListAll();
+      // 中间发生了更新的 refresh，丢弃本次结果
+      if (myTurn !== fullRefreshGenerationRef.current) return;
+      const entries = (list ?? []).filter((meta) => meta?.sessionId && meta.path);
+      const mergeSnapshot = (next: Record<string, WorktreeMeta>) => setMetas((current) => {
+        if (myTurn !== fullRefreshGenerationRef.current) return current;
+        const merged = { ...next };
+        // 全量探测期间若某个 session 收到更晚的权威事件，只保留该 session 当前
+        // 的增量结果；未完成的增量请求随后会再落一次，不能让旧全量快照回写。
+        for (const [sessionId, generation] of sessionEventGenerationsRef.current) {
+          if (generation <= eventGenerationAtStart) continue;
+          if (current[sessionId]) merged[sessionId] = current[sessionId];
+          else delete merged[sessionId];
+        }
+        return merged;
+      });
+      if (showSnapshot) {
+        mergeSnapshot(Object.fromEntries(entries.map((meta) => [meta.sessionId, meta])));
       }
-    })();
-    refreshInFlightRef.current = pending;
-    void pending.finally(() => {
-      refreshInFlightRef.current = null;
-    });
-    return pending;
+      const next: Record<string, WorktreeMeta> = {};
+      let index = 0;
+      const checkNext = async () => {
+        while (myTurn === fullRefreshGenerationRef.current && index < entries.length) {
+          const meta = entries[index++];
+          // 已收到增量事件的条目由 refreshSession 负责；不再启动旧快照里的探测。
+          if ((sessionEventGenerationsRef.current.get(meta.sessionId) ?? 0) > eventGenerationAtStart) {
+            continue;
+          }
+          if (await isLiveOfficialPath(meta.path)) next[meta.sessionId] = meta;
+        }
+      };
+      await Promise.all(Array.from(
+        { length: Math.min(BACKGROUND_CHECK_CONCURRENCY, entries.length) },
+        checkNext,
+      ));
+      if (myTurn !== fullRefreshGenerationRef.current) return;
+      mergeSnapshot(next);
+    } catch (err) {
+      log.warn('refresh failed:', err);
+    }
   }, []);
 
   const refreshSession = useCallback(async (sessionId: string) => {
@@ -138,29 +136,18 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    let trailingRefresh: ReturnType<typeof setTimeout> | undefined;
-    void refresh();
-    const onFocus = () => {
-      const remaining = refreshInFlightRef.current
-        ? FOREGROUND_REFRESH_INTERVAL_MS
-        : FOREGROUND_REFRESH_INTERVAL_MS - (Date.now() - lastRefreshAtRef.current);
-      if (remaining <= 0) {
-        if (trailingRefresh !== undefined) clearTimeout(trailingRefresh);
-        trailingRefresh = undefined;
-        void refresh();
-      } else if (trailingRefresh === undefined) {
-        // A final focus within the cooldown still gets a trailing check, even
-        // if the user stays here. External worktree removal cannot stay stale.
-        trailingRefresh = setTimeout(() => {
-          trailingRefresh = undefined;
-          onFocus();
-        }, remaining);
-      }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const check = async (showSnapshot: boolean) => {
+      await refresh(showSnapshot);
+      // 从本轮完成后计时，慢扫描不会与下一轮重叠或积压。
+      if (!cancelled) timer = setTimeout(() => void check(false), BACKGROUND_CHECK_INTERVAL_MS);
     };
-    window.addEventListener('focus', onFocus);
+    void check(true);
     return () => {
-      window.removeEventListener('focus', onFocus);
-      if (trailingRefresh !== undefined) clearTimeout(trailingRefresh);
+      cancelled = true;
+      clearTimeout(timer);
+      fullRefreshGenerationRef.current++;
     };
   }, [refresh]);
 

@@ -25,6 +25,7 @@ import {
   validateWorktreeName,
 } from './nameGenerator';
 import { readAttachedWorktreeBranch } from './attachedBranch';
+import { createCwdProbeScheduler } from './cwdProbeScheduler';
 import { classifyError, type ClassifyInput } from './errorClassifier';
 import {
   gitExec,
@@ -395,7 +396,9 @@ async function withPrecreatedWorktreeOperationQueue<T>(
 /**
  * 探测 cwd 状态: 是否 git repo / 是否在 worktree 内 / git 是否可用 / 当前分支 / repo root
  */
-export async function detectCwd(cwd: string): Promise<DetectCwdResp> {
+export const detectCwd = createCwdProbeScheduler(detectCwdOnce);
+
+async function detectCwdOnce(cwd: string): Promise<DetectCwdResp> {
   // One Git process returns the same snapshot that previously needed five.
   // Unborn HEADs, older Git versions and newline-containing paths retain the
   // individual-query fallback below rather than changing the IPC contract.

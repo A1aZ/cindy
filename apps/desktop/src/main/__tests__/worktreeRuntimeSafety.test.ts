@@ -6,7 +6,7 @@ import path from 'node:path';
 const state = vi.hoisted(() => ({ root: '' }));
 const notify = vi.hoisted(() => vi.fn());
 vi.mock('electron', () => ({ app: { getPath: () => state.root } }));
-vi.mock('../worktree/recycleMaintenance', () => ({ notifyWorktreeRecycleOpportunity: notify }));
+vi.mock('../worktree/recycleEvents', () => ({ notifyWorktreeRecycleOpportunity: notify }));
 
 import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, readWorktreeRuntimePaths } from '../worktree/runtimeLeases';
 import { physicalWorktreeKey, withWorktreeResourceLock } from '../worktree/resourceLock';

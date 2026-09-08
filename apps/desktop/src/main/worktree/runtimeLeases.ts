@@ -5,6 +5,7 @@ import { app } from 'electron';
 
 import { physicalWorktreeKey, withWorktreeResourceLock } from './resourceLock';
 import { isManagedWorktreeDirectoryName } from '../../shared/managedWorktreePaths';
+import { notifyWorktreeRecycleOpportunity } from './recycleEvents';
 
 function runtimeRoot(): string {
   return path.join(app.getPath('userData'), 'worktree-runtime-leases');
@@ -50,7 +51,6 @@ export async function releaseWorktreeRuntimeLease(sessionId: string): Promise<vo
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  const { notifyWorktreeRecycleOpportunity } = await import('./recycleMaintenance');
   if (physicalPath) notifyWorktreeRecycleOpportunity(physicalPath);
 }
 

@@ -4,19 +4,18 @@ import { app } from 'electron';
 
 import { getDbClient } from '../localDb/client/current';
 import { createLogger } from '../logger';
-import { listRecycleRecords, readRecycleRecord, worktreeGeneration } from './recycleJournal';
+import { listRecycleRecords, readRecycleRecord, watchRecycleJournal, worktreeGeneration, type WorktreeRecycleRecord } from './recycleJournal';
 import { recycleManagedWorktree } from './managedRecycle';
 import { hasLiveSessionReference, loadLiveSessionPathKeys, pathKey } from './liveSessionRefs';
 import * as store from './worktreeStore';
-import { physicalWorktreeKey, worktreeResourceId } from './resourceLock';
+import { physicalWorktreeKey } from './resourceLock';
+import { subscribeWorktreeRecycleEvents } from './recycleEvents';
 
 const log = createLogger('worktreeRecycleMaintenance');
-let timer: ReturnType<typeof setInterval> | null = null;
-let running: Promise<void> | null = null;
-let pending = false;
-let pendingForce = false;
-let lastOptions: WorktreeMaintenanceOptions | null = null;
-const attemptsThisRun = new Map<string, number>();
+let maintenance: WorktreeRecycleMaintenance | null = null;
+const MAX_ATTEMPTS = 8;
+const EVENT_COALESCE_MS = 100;
+const retryDelay = (attempt: number): number => Math.min(30 * 60_000, 5_000 * 2 ** Math.min(attempt, 9));
 
 export interface WorktreeMaintenanceOptions {
   isReady(): boolean;
@@ -24,94 +23,189 @@ export interface WorktreeMaintenanceOptions {
   onAttemptComplete?(): Promise<void>;
 }
 
-/** Starts once both task storage and runtime-close services are usable. Repeated ready signals coalesce. */
-export function startWorktreeRecycleMaintenance(options: WorktreeMaintenanceOptions): void {
-  lastOptions = options;
-  if (!timer) {
-    timer = setInterval(() => { void runWorktreeRecycleMaintenance(options); }, 30_000);
-    timer.unref();
+/** Event-driven, single-flight maintenance with one timer for the earliest pending deadline. */
+export class WorktreeRecycleMaintenance {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timerAt = Infinity;
+  private running: Promise<void> | null = null;
+  private dirty = false;
+  private stopped = false;
+  private stopWatching: (() => void) | null = null;
+  private unsubscribe: (() => void) | null = null;
+  private watchFailures = 0;
+  private watchRetryAt = 0;
+  private scanFailures = 0;
+  private readonly wakeIds = new Set<string>();
+  private readonly attempts = new Map<string, { count: number; notBefore: number }>();
+
+  constructor(public options: WorktreeMaintenanceOptions) {}
+
+  start(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    this.unsubscribe ??= subscribeWorktreeRecycleEvents((event) => {
+      if (event.opportunity) this.wakeIds.add(event.resourceId);
+      this.changed();
+    });
+    return this.run();
   }
-  void runWorktreeRecycleMaintenance(options);
+
+  stop(): void {
+    this.stopped = true;
+    this.clearTimer();
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.stopWatching?.();
+    this.stopWatching = null;
+  }
+
+  private clearTimer(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.timerAt = Infinity;
+  }
+
+  private schedule(at: number): void {
+    if (this.stopped || !Number.isFinite(at) || (this.timer && this.timerAt <= at)) return;
+    this.clearTimer();
+    this.timerAt = at;
+    this.timer = setTimeout(() => { this.clearTimer(); void this.run(); }, Math.max(1, at - Date.now()));
+    this.timer.unref();
+  }
+
+  private changed(): void {
+    if (this.stopped) return;
+    if (this.running) this.dirty = true;
+    else this.schedule(Date.now() + EVENT_COALESCE_MS);
+  }
+
+  run(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.running) { this.dirty = true; return this.running; }
+    this.clearTimer();
+    this.dirty = false;
+    this.running = this.runPass().catch((error) => {
+      log.warn('worktree retry postponed', { code: (error as NodeJS.ErrnoException).code ?? 'unavailable' });
+      if (++this.scanFailures <= MAX_ATTEMPTS) this.schedule(Date.now() + retryDelay(this.scanFailures));
+    }).finally(() => {
+      this.running = null;
+      if (this.dirty) this.schedule(Date.now() + EVENT_COALESCE_MS);
+    });
+    return this.running;
+  }
+
+  private async ensureWatcher(): Promise<void> {
+    if (this.stopWatching || this.watchFailures >= MAX_ATTEMPTS || this.watchRetryAt > Date.now()) return;
+    const failed = (error: unknown) => {
+      this.stopWatching?.();
+      this.stopWatching = null;
+      log.warn('worktree journal watch postponed', { code: (error as NodeJS.ErrnoException).code ?? 'unavailable' });
+      this.watchRetryAt = Date.now() + retryDelay(++this.watchFailures);
+      if (this.watchFailures < MAX_ATTEMPTS) this.schedule(this.watchRetryAt);
+    };
+    try {
+      const close = await watchRecycleJournal(() => this.changed(), failed);
+      if (this.stopped) close();
+      else { this.stopWatching = close; this.watchFailures = 0; this.watchRetryAt = 0; }
+    } catch (error) { failed(error); }
+  }
+
+  private key(record: WorktreeRecycleRecord): string { return `${record.id}:${record.generation}`; }
+
+  private eligible(record: WorktreeRecycleRecord): boolean {
+    if (record.phase === 'restored' || record.phase === 'restoring' || record.meta.ephemeral) return false;
+    const current = store.get(record.meta.sessionId);
+    if (record.phase === 'removed' && !current) return false;
+    return (!current || worktreeGeneration(current) === record.generation)
+      && (this.attempts.get(this.key(record))?.count ?? 0) < MAX_ATTEMPTS;
+  }
+
+  private deadline(record: WorktreeRecycleRecord): number {
+    return Math.max(record.nextAttemptAt, this.attempts.get(this.key(record))?.notBefore ?? 0);
+  }
+
+  private async runPass(): Promise<void> {
+    if (!this.options.isReady()) return;
+    await this.ensureWatcher();
+    if (this.stopped) return;
+    const records = await listRecycleRecords();
+    const wakeIds = new Set(this.wakeIds);
+    this.wakeIds.clear();
+    for (const record of records) if (wakeIds.has(record.id)) this.attempts.delete(this.key(record));
+    const due = records.filter((record) => this.eligible(record)
+      && (wakeIds.has(record.id) || this.deadline(record) <= Date.now()));
+    // Empty queues and not-yet-due requests never open task databases.
+    if (due.length) {
+      for (const record of due) {
+        const count = (this.attempts.get(this.key(record))?.count ?? 0) + 1;
+        // Also back off errors before the removal core can persist nextAttemptAt.
+        this.attempts.set(this.key(record), { count, notBefore: Date.now() + retryDelay(count) });
+      }
+      await this.retry(due, wakeIds);
+    }
+    if (this.stopped || !this.options.isReady()) return;
+    this.scanFailures = 0;
+    // Removal and other instances may have changed these records while we waited.
+    const latest = due.length ? await listRecycleRecords() : records;
+    for (const record of latest) if (this.eligible(record)) this.schedule(this.deadline(record));
+    if (!this.stopWatching && this.watchFailures < MAX_ATTEMPTS) this.schedule(this.watchRetryAt);
+  }
+
+  private async retry(records: WorktreeRecycleRecord[], wakeIds: ReadonlySet<string>): Promise<void> {
+    const db = getDbClient();
+    if (!db.readLocalWorktreeReferences) return;
+    let attempted = false;
+    try {
+      const rows = await db.readLocalWorktreeReferences();
+      for (const record of records) {
+        if (this.stopped || !this.options.isReady() || getDbClient() !== db) return;
+        try {
+          const latest = await readRecycleRecord(record.meta.path);
+          if (this.stopped || !this.options.isReady() || getDbClient() !== db) return;
+          if (!latest || latest.generation !== record.generation
+            || latest.phase === 'restored' || latest.phase === 'restoring'
+            || (latest.phase === 'removed' && !store.get(latest.meta.sessionId))
+            || (!wakeIds.has(record.id) && latest.nextAttemptAt > Date.now())) continue;
+          const ownerRows = rows.filter((row) => row.id === record.meta.sessionId);
+          // Unknown is not an orphan, including after switching the selected account.
+          if (!ownerRows.length || ownerRows.some((row) => row.source === 'bot'
+            || (row.status !== 'archived' && row.status !== 'deleted'))) continue;
+          attempted = true;
+          const currentRow = ownerRows.find((row) => row.currentDatabase);
+          if (currentRow) {
+            await this.options.recycleCurrentSession(record.meta.sessionId, currentRow.status!);
+          } else {
+            // Other databases supply evidence only; never close their tasks through the selected DB.
+            await recycleManagedWorktree(record.meta, {
+              canRemove: async () => {
+                if (this.stopped || !this.options.isReady() || getDbClient() !== db) return false;
+                const refs = (await db.readLocalWorktreeReferences!()).filter((row) => row.id === record.meta.sessionId);
+                const request = await readRecycleRecord(record.meta.path);
+                return request?.generation === record.generation && refs.length > 0
+                  && refs.every((row) => row.source !== 'bot' && (row.status === 'archived' || row.status === 'deleted'));
+              },
+            });
+          }
+        } catch (error) {
+          log.warn('worktree request postponed', { resourceId: record.id, code: (error as NodeJS.ErrnoException).code ?? 'unavailable' });
+        }
+      }
+    } catch (error) {
+      log.warn('worktree references postponed', { code: (error as NodeJS.ErrnoException).code ?? 'unavailable' });
+    }
+    if (attempted && !this.stopped) await this.options.onAttemptComplete?.();
+  }
+}
+
+/** Starts once both task storage and runtime-close services are usable. */
+export function startWorktreeRecycleMaintenance(options: WorktreeMaintenanceOptions): void {
+  maintenance ??= new WorktreeRecycleMaintenance(options);
+  maintenance.options = options;
+  void maintenance.start();
 }
 
 export function stopWorktreeRecycleMaintenance(): void {
-  if (timer) clearInterval(timer);
-  timer = null;
-  attemptsThisRun.clear();
-  lastOptions = null;
-}
-
-/** A stopped runtime is new evidence, so it can wake a request held by backoff. */
-export function notifyWorktreeRecycleOpportunity(physicalPath: string): void {
-  if (!lastOptions) return;
-  const prefix = `${worktreeResourceId(physicalPath)}:`;
-  for (const key of attemptsThisRun.keys()) if (key.startsWith(prefix)) attemptsThisRun.delete(key);
-  void runWorktreeRecycleMaintenance(lastOptions, true);
-}
-
-export function runWorktreeRecycleMaintenance(options: WorktreeMaintenanceOptions, force = false): Promise<void> {
-  pendingForce ||= force;
-  if (running) {
-    pending = true;
-    return running;
-  }
-  running = (async () => {
-    do {
-      pending = false;
-      const forcePass = pendingForce;
-      pendingForce = false;
-      if (!options.isReady()) return;
-      try {
-        await retryRequestedWorktrees(options, forcePass);
-      } catch (error) {
-        log.warn('worktree retry postponed', error instanceof Error ? error.message : String(error));
-      }
-    } while (pending);
-  })().finally(() => { running = null; });
-  return running;
-}
-
-async function retryRequestedWorktrees(options: WorktreeMaintenanceOptions, force: boolean): Promise<void> {
-  const db = getDbClient();
-  if (!db.readLocalWorktreeReferences) return;
-  const rows = await db.readLocalWorktreeReferences();
-  let attempted = false;
-  for (const record of await listRecycleRecords()) {
-    if (!options.isReady() || getDbClient() !== db) return;
-    if (record.phase === 'restored' || record.phase === 'restoring') continue;
-    if (record.phase === 'removed' && !store.get(record.meta.sessionId)) continue;
-    if (!force && record.nextAttemptAt > Date.now()) continue;
-    const budgetKey = `${record.id}:${record.generation}`;
-    if ((attemptsThisRun.get(budgetKey) ?? 0) >= 8) continue;
-    const currentMeta = store.get(record.meta.sessionId);
-    if (currentMeta && worktreeGeneration(currentMeta) !== record.generation) continue;
-    const ownerRows = rows.filter((row) => row.id === record.meta.sessionId);
-    // Unknown is not an orphan, including after switching the selected account.
-    if (!ownerRows.length || ownerRows.some((row) => row.source === 'bot' || (row.status !== 'archived' && row.status !== 'deleted'))) continue;
-    attemptsThisRun.set(budgetKey, (attemptsThisRun.get(budgetKey) ?? 0) + 1);
-    attempted = true;
-    try {
-      const currentRow = ownerRows.find((row) => row.currentDatabase);
-      if (currentRow) {
-        await options.recycleCurrentSession(record.meta.sessionId, currentRow.status!);
-      } else {
-        // Other local databases contribute evidence only. Their runtimes must be
-        // absent by the machine-wide lease guard; never close a task through the wrong DB.
-        await recycleManagedWorktree(record.meta, {
-          canRemove: async () => {
-            if (!options.isReady() || getDbClient() !== db) return false;
-            const latest = (await db.readLocalWorktreeReferences!()).filter((row) => row.id === record.meta.sessionId);
-            const request = await readRecycleRecord(record.meta.path);
-            return request?.generation === record.generation && latest.length > 0
-              && latest.every((row) => row.source !== 'bot' && (row.status === 'archived' || row.status === 'deleted'));
-          },
-        });
-      }
-    } catch (error) {
-      log.warn('worktree request postponed', { resourceId: record.id, code: (error as NodeJS.ErrnoException).code ?? 'unavailable' });
-    }
-  }
-  if (attempted) await options.onAttemptComplete?.();
+  maintenance?.stop();
+  maintenance = null;
 }
 
 /** Read-only classification: upgrading never turns historical registrations into deletion requests. */

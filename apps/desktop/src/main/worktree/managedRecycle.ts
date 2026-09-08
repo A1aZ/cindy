@@ -16,6 +16,7 @@ import { assertManagedResourcePath, assertWorktreeGitIdentity } from './resource
 import * as store from './worktreeStore';
 import type { WorktreeMeta } from './types';
 import { withLegacyWorktreeRuntimeGuard } from './legacyRuntimeGuard';
+import { withWorktreeRecycleSlot } from './recycleQueue';
 
 export interface ManagedRecycleOptions {
   canRemove?: () => Promise<boolean>;
@@ -84,6 +85,10 @@ export async function requestWorktreeRecycle(sessionId: string, resourcePaths: r
 
 /** Complete a single durable request. Failure preserves registration and retry evidence. */
 export async function recycleManagedWorktree(meta: WorktreeMeta, options: ManagedRecycleOptions): Promise<boolean> {
+  return withWorktreeRecycleSlot(() => recycleManagedWorktreeInSlot(meta, options));
+}
+
+async function recycleManagedWorktreeInSlot(meta: WorktreeMeta, options: ManagedRecycleOptions): Promise<boolean> {
   return withWorktreeResourceLock(meta.path, () => withLegacyWorktreeRuntimeGuard(async (legacyGuardHeld) => {
     const registered = store.get(meta.sessionId);
     if (registered && worktreeGeneration(registered) !== worktreeGeneration(meta)) return false;

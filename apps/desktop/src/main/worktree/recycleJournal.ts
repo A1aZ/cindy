@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { watch } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
@@ -7,6 +8,7 @@ import { physicalWorktreeKey, worktreeResourceId } from './resourceLock';
 import type { WorktreeMeta } from './types';
 import type { WorktreeRecoveryArchive } from './recoveryArchive';
 import { createLogger } from '../logger';
+import { notifyWorktreeRecycleRecordChanged } from './recycleEvents';
 
 const log = createLogger('worktreeRecycleJournal');
 
@@ -86,6 +88,18 @@ export async function writeRecycleRecord(record: WorktreeRecycleRecord): Promise
     await writeRecordFile(path.join(history, `${record.id}-${key}.json`), record);
   }
   await writeRecordFile(path.join(root, `${record.id}.json`), record);
+  notifyWorktreeRecycleRecordChanged(record.id);
+}
+
+/** Watch atomic journal replacements, not archive bytes, temporary files or history. */
+export async function watchRecycleJournal(onChange: () => void, onError: (error: unknown) => void): Promise<() => void> {
+  const root = recycleJournalRoot();
+  await fs.mkdir(root, { recursive: true });
+  const watcher = watch(root, { persistent: false }, (_event, filename) => {
+    if (filename === null || /^[a-f0-9]{64}\.json$/.test(filename.toString())) onChange();
+  });
+  watcher.on('error', onError);
+  return () => watcher.close();
 }
 
 async function writeRecordFile(target: string, record: WorktreeRecycleRecord): Promise<void> {

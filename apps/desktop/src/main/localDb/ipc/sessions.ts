@@ -5,8 +5,10 @@
  * 失败时 throw `Error("[CODE] message")`，service 层包装回 `ApiError`。
  */
 
-import { withWorktreeResourceLocks } from '../../worktree/resourceLock';
+import { physicalWorktreeKey, withWorktreeResourceLocks } from '../../worktree/resourceLock';
 import { managedWorktreeRoot } from '../../worktree/runtimeLeases';
+import { queueSessionWorktreeRecycle } from '../../worktree/recycleQueue';
+import { notifyWorktreeRecycleOpportunity } from '../../worktree/recycleEvents';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -184,9 +186,12 @@ async function withStatusWriteLock<T>(
 ): Promise<T> {
   const write = async () => {
     const resources = status === undefined ? [] : await readSessionWorktreeResources(db, sessionId);
+    const physicalResources = await Promise.all(resources.map(physicalWorktreeKey));
     const mutate = async () => {
       if (status === 'archived' || status === 'deleted') await requestWorktreeRecycle(sessionId, resources);
-      return task();
+      const result = await task();
+      for (const resource of physicalResources) notifyWorktreeRecycleOpportunity(resource);
+      return result;
     };
     return withWorktreeMutation(resources, mutate);
   };
@@ -363,13 +368,26 @@ export async function recycleSessionWorktreeForStatusChange(
   capturedScope?: SessionRecycleScope,
 ): Promise<void> {
   if (status !== 'deleted' && status !== 'archived') return;
+  // Capture before queueing: an account switch while waiting cannot redirect cleanup.
+  try {
+    const scope = capturedScope ?? captureSessionRecycleScope();
+    await queueSessionWorktreeRecycle(() => recycleSessionWorktreeInQueue(sessionId, scope));
+  } catch (error) {
+    log.warn('worktree recycle scheduling postponed', {
+      sessionId, code: (error as NodeJS.ErrnoException).code ?? 'unavailable',
+    });
+  }
+}
+
+async function recycleSessionWorktreeInQueue(
+  sessionId: string,
+  capturedScope: SessionRecycleScope,
+): Promise<void> {
   const affectedWorktreeSessionIds = new Set<string>();
   try {
-    // Callers that already crossed an async status write pass the owner/DB
-    // captured at operation entry. The fallback is only for direct callers.
-    const ownerScope = capturedScope?.ownerScope ?? captureOwnerScope();
-    const mediaDb = capturedScope?.mediaDb ?? getDbClient().drizzle;
-    if (!isOwnerScopeCurrent(ownerScope)) return;
+    const { ownerScope, mediaDb } = capturedScope;
+    const ownerIsCurrent = (): boolean => isOwnerScopeCurrent(ownerScope) && getDbClient().drizzle === mediaDb;
+    if (!ownerIsCurrent()) return;
     const cancelOperations = sessionRemovalCancelOperations;
     const cleanupRemovedSession = sessionRemovalCleanup;
     if (!cancelOperations || !cleanupRemovedSession) {
@@ -379,7 +397,6 @@ export async function recycleSessionWorktreeForStatusChange(
       import('../../maker-host/index.js'),
       import('../../worktree/sessionRemovalRecycle.js'),
     ]);
-    const ownerIsCurrent = (): boolean => isOwnerScopeCurrent(ownerScope);
     const isStillRemovable = async (id: string): Promise<boolean> =>
       ownerIsCurrent() && recycle.isSessionStillRemovable(id, mediaDb);
     const closeAndRecycle = async (targetSessionId: string, scanOwners: boolean): Promise<void> => {
@@ -2114,6 +2131,7 @@ export async function setSessionsStatusInDb(
       perSession.set(id, paths);
       resources.push(...paths);
     }
+    const physicalResources = await Promise.all([...new Set(resources)].map(physicalWorktreeKey));
     return withWorktreeMutation(resources, async () => {
       if (status === 'archived') {
         for (const id of sessionIds) await requestWorktreeRecycle(id, perSession.get(id));
@@ -2129,6 +2147,7 @@ export async function setSessionsStatusInDb(
     for (const item of rows) {
       cleanupSessionRuntimeForTerminalStatus(item.sessionId, item.status);
     }
+    for (const resource of physicalResources) notifyWorktreeRecycleOpportunity(resource);
     return rows;
     });
   });

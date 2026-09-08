@@ -65,6 +65,28 @@ describe('shared worktree recycling', () => {
   });
   const recycle = () => recycleManagedWorktree(meta, { canRemove: async () => removable });
 
+  it('limits simultaneous recycling of distinct resources to one', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let active = 0;
+    let peak = 0;
+    let checked = 0;
+    const jobs = Array.from({ length: 12 }, (_, index) => {
+      const candidate = { ...meta, sessionId: `batch-${index}`, path: path.join(path.dirname(meta.path), `batch-${index}`) };
+      state.registry.set(candidate.sessionId, candidate);
+      return recycleManagedWorktree(candidate, { canRemove: async () => {
+        active++; peak = Math.max(peak, active); checked++;
+        try { await gate; return false; } finally { active--; }
+      } });
+    });
+    try {
+      await vi.waitFor(() => expect(active).toBe(1));
+      expect(checked).toBe(1);
+    } finally { release(); }
+    expect(await Promise.all(jobs)).toEqual(Array(12).fill(false));
+    expect(checked).toBe(12); expect(peak).toBe(1);
+  });
+
   it('keeps content recoverable and drops registration only after the directory is gone', async () => {
     const order: string[] = [];
     archive.mockImplementation(async () => { order.push('archive'); return { files: await inventoryWorktree(meta.path) }; });

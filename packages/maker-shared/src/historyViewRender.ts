@@ -1,5 +1,6 @@
 import { historyViewLeaves, type HistoryMessageSource, type HistoryWorkSummary, type DeferredHistoryWork } from './historyView.js';
 import type { HistoryViewController, HistoryViewSnapshot } from './historyViewController.js';
+import { liveContentWithHistoryOrder } from './historyViewHandoff.js';
 
 /** The original renderer owns all grouping. References only substitute unread bodies. */
 export function renderHistoryView<T extends HistoryMessageSource, TItem>(options: {
@@ -33,7 +34,8 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   for (const item of leaves) {
     if (item.type === 'messages') {
       for (const row of item.messages) {
-        rows.push(live.get(row.clientId) ?? row);
+        const current = live.get(row.clientId);
+        rows.push(current ? liveContentWithHistoryOrder(current, row) : row);
         seen.add(row.clientId);
         endMs = Math.max(endMs, Date.parse(row.createdAt));
       }

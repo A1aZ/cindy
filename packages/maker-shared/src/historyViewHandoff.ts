@@ -1,6 +1,12 @@
 import { historyViewLeaves, type HistoryMessageSource } from './historyView.js';
 import type { HistoryViewSnapshot } from './historyViewController.js';
 
+/** Live content may be newer, but its provisional timestamp must not replace known history order. */
+export function liveContentWithHistoryOrder<T extends HistoryMessageSource>(live: T, history: T): T {
+  if (live.createdAt === history.createdAt && live.rowid === history.rowid) return live;
+  return { ...live, createdAt: history.createdAt, rowid: history.rowid };
+}
+
 /** View-local identities only; message bodies remain in the existing raw store.
  * A finalized live row stays visible until history takes over. Removing it from
  * the raw store (delete/rewind/clear) cancels the handoff rather than reviving it.
@@ -26,7 +32,10 @@ export class HistoryViewHandoff<T extends HistoryMessageSource> {
     }
     const pending = new Set(this.pending);
     if (!snapshot.ready) return { messages: raw, pending };
-    for (const row of raw) if (pending.has(row.clientId)) history.set(row.clientId, row);
+    for (const row of raw) if (pending.has(row.clientId)) {
+      const known = history.get(row.clientId);
+      history.set(row.clientId, known ? liveContentWithHistoryOrder(row, known) : row);
+    }
     const messages = [...history.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.rowid ?? 0) - (b.rowid ?? 0));
     return { messages, pending };
   }

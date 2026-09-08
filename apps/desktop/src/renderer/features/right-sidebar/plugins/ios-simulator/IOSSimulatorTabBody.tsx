@@ -914,7 +914,22 @@ export function IOSSimulatorTabBody({
         );
       }
       const nextMutation = resultMutation(result);
-      if (!cancelled && nextMutation) setLiveMutation(nextMutation);
+      // Main re-reports the mutation state on every frame poll, each time as a
+      // fresh object. Compare by field so an unchanged poll does not defeat the
+      // viewport dedupe above and re-render the whole panel per cycle.
+      if (!cancelled && nextMutation) {
+        setLiveMutation((previous) =>
+          previous &&
+          previous.instanceId === nextMutation.instanceId &&
+          previous.activeSource === nextMutation.activeSource &&
+          previous.lastSource === nextMutation.lastSource &&
+          previous.queuedAgentMutations === nextMutation.queuedAgentMutations &&
+          previous.agentPaused === nextMutation.agentPaused &&
+          previous.takeoverPending === nextMutation.takeoverPending
+            ? previous
+            : nextMutation,
+        );
+      }
     };
     const attemptNativeRecovery = async (): Promise<IOSSimulatorToolResponse | null> => {
       if (

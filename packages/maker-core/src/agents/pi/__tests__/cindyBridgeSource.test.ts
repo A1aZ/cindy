@@ -158,7 +158,7 @@ function loadBashPackageHomeHelper(): {
       target: ts.ScriptTarget.ES2022,
     },
   }).outputText;
-  const context: Record<string, unknown> = {
+  const context: Record<string, unknown> & { process: { env: Record<string, string | undefined> } } = {
     process: { env: {} },
     path,
   };
@@ -2092,8 +2092,8 @@ it('routes Bot shortcuts through the scoped helper entry without exposing them t
   };
   runInNewContext(compiled, context);
   const calls: unknown[] = [];
-  const client = { request: async (method: string, params: unknown) => {
-    calls.push({ method, params });
+  const client = { request: async (method: string, params: unknown, signal?: AbortSignal) => {
+    calls.push({ method, params, signal });
     return { content: [{ type: 'text', text: 'ok' }] };
   } };
   const gateway = new context.Gateway();
@@ -2129,7 +2129,8 @@ it('routes Bot shortcuts through the scoped helper entry without exposing them t
     const resolved = gateway.resolveDirectHelperTool(name, args);
     expect(resolved.qualifiedName).toBe('mcp__cindy_helper__' + name);
     expect(resolved.args).toEqual(args); // Permission review retains the actual operation and arguments.
-    await tool.execute('call-1', args);
-    expect(calls.at(-1)).toEqual({ method: 'tools/call', params: { name: 'call_tool', arguments: { name, args } } });
+    const controller = new AbortController();
+    await tool.execute('call-1', args, controller.signal);
+    expect(calls.at(-1)).toEqual({ method: 'tools/call', params: { name: 'call_tool', arguments: { name, args } }, signal: controller.signal });
   }
 });

@@ -715,6 +715,7 @@ export default function NewRemoteSessionScreen() {
   const voiceStartupInFlightRef = useRef(false);
   const voiceStopInFlightRef = useRef(false);
   const voiceSelectionUserOwnedRef = useRef(false);
+  const voicePendingSelectionEchoesRef = useRef<Array<{ start: number; end: number }>>([]);
   // The press that stops dictation can emit one native selection event of its
   // own. Consume that event before allowing a real user move to claim control.
   const voiceStopGestureSelectionGuardRef = useRef(false);
@@ -3215,6 +3216,7 @@ export default function NewRemoteSessionScreen() {
       const selectionAfter = currentDraft.slice(initialSelection.end, initialSelection.end + 1200);
       voiceStopGestureSelectionGuardRef.current = false;
       voiceSelectionUserOwnedRef.current = false;
+      voicePendingSelectionEchoesRef.current = [];
       const controller = createMobileVoiceControllerSession({
         credential,
         ...(prewarmedVoice ? { asr: prewarmedVoice.asr } : {}),
@@ -3247,6 +3249,10 @@ export default function NewRemoteSessionScreen() {
             nextSelection = { start: rebaseOffset(current.start), end: rebaseOffset(current.end) };
           }
           if (nextSelection) {
+            const previous = firstMessageSelectionRef.current;
+            if (nextSelection.start !== previous.start || nextSelection.end !== previous.end) {
+              voicePendingSelectionEchoesRef.current.push(nextSelection);
+            }
             firstMessageSelectionRef.current = nextSelection;
             setFirstMessageSelection(nextSelection);
           }
@@ -5906,20 +5912,34 @@ export default function NewRemoteSessionScreen() {
                     setComposerVoiceHoldArmed(false);
                   }}
                   onChangeText={(text) => {
-                    if (voiceStopInFlightRef.current && text !== firstMessageRef.current) {
-                      voiceSelectionUserOwnedRef.current = true;
+                    if (text !== firstMessageRef.current) {
+                      voicePendingSelectionEchoesRef.current = [];
+                      if (voiceStopInFlightRef.current) voiceSelectionUserOwnedRef.current = true;
                     }
                     setFirstMessageDraft(text);
                   }}
+                  onKeyPress={() => { voicePendingSelectionEchoesRef.current = []; }}
                   onSelectionChange={(event) => {
+                    const selection = event.nativeEvent.selection;
+                    if (!voiceRecordingActiveRef.current && voiceStopGestureSelectionGuardRef.current) {
+                      voiceStopGestureSelectionGuardRef.current = false;
+                      return;
+                    }
+                    // Native may echo an earlier ASR/refinement update after JS has
+                    // already published the next one, even after stop() resolves.
+                    const pending = voicePendingSelectionEchoesRef.current;
+                    const echoIndex = pending.findIndex((value) =>
+                      value.start === selection.start && value.end === selection.end);
+                    if (echoIndex >= 0) {
+                      // Selection events can coalesce: acknowledging a newer write
+                      // also retires older writes that never emitted an event.
+                      pending.splice(0, echoIndex + 1);
+                      return;
+                    }
                     // finishVoiceRecording marks recording inactive before awaiting
                     // ASR/refinement teardown, so native cursor edits remain user-owned.
                     if (!voiceRecordingActiveRef.current) {
-                      const selection = event.nativeEvent.selection;
-                      if (voiceStopGestureSelectionGuardRef.current) {
-                        voiceStopGestureSelectionGuardRef.current = false;
-                        return;
-                      }
+                      voicePendingSelectionEchoesRef.current = [];
                       const previous = firstMessageSelectionRef.current;
                       // A matching native echo of a controlled selection is not a user move.
                       if (voiceStopInFlightRef.current
@@ -5942,6 +5962,10 @@ export default function NewRemoteSessionScreen() {
                         voiceStopGestureSelectionGuardRef.current = false;
                       }, 0);
                       void finishVoiceRecording();
+                    } else {
+                      // A new editing gesture can intentionally return to any old
+                      // controlled value; it must not be mistaken for its echo.
+                      voicePendingSelectionEchoesRef.current = [];
                     }
                   }}
                   placeholder={voiceIsListening ? '' : composerPlaceholder}

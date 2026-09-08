@@ -64,7 +64,7 @@ const hiddenStyle = findOne((node): node is ts.PropertyAssignment =>
   ts.isPropertyAssignment(node) && node.name.getText(source) === 'inputVoiceHidden');
 const composer = findOne((node): node is ts.JsxSelfClosingElement =>
   ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'MobileComposerInputRow');
-const propNames = ['inputStyle', 'caretHidden', 'value', 'placeholder', 'selection', 'onPressIn'];
+const propNames = ['inputStyle', 'caretHidden', 'value', 'placeholder', 'selection', 'onPressIn', 'onKeyPress'];
 function composerExpression(name: string) {
   const prop = composer.attributes.properties.find((node) =>
     ts.isJsxAttribute(node) && node.name.getText(source) === name);
@@ -77,7 +77,7 @@ function composerExpression(name: string) {
 const expressions = propNames.map((name) => `${name}: ${composerExpression(name)}`);
 const compiled = ts.transpileModule(`function pageProps(bindings) {
   const { Platform, voiceIsListening, draft, finishVoiceRecording, composerPlaceholder, firstMessageSelection,
-    voiceStopGestureSelectionGuardRef } = bindings;
+    voiceStopGestureSelectionGuardRef, voicePendingSelectionEchoesRef } = bindings;
   const styles = { inputVoiceHidden: ${hiddenStyle.initializer.getText(source)} };
   return { ${expressions.join(',\n')} };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -96,7 +96,7 @@ if (!stopCallback.initializer || !ts.isCallExpression(stopCallback.initializer))
 type Selection = { start: number; end: number };
 const compiledVoice = ts.transpileModule(`function voiceCallbacks(bindings) {
   const { voiceSelectionUserOwnedRef, voiceRecordingActiveRef, voiceStopInFlightRef,
-    voiceStopGestureSelectionGuardRef,
+    voiceStopGestureSelectionGuardRef, voicePendingSelectionEchoesRef,
     firstMessageRef, firstMessageSelectionRef, setFirstMessageSelection, setFirstMessageDraft,
     voiceControllerSessionRef, voiceStartupSeqRef, voiceStartupInFlightRef, voiceState,
     setVoiceState, setVoiceError, setAudioModeAsync, requestAnimationFrame,
@@ -106,6 +106,7 @@ const compiledVoice = ts.transpileModule(`function voiceCallbacks(bindings) {
     select: ${composerExpression('onSelectionChange')},
     type: ${composerExpression('onChangeText')},
     press: ${composerExpression('onPressIn')},
+    key: ${composerExpression('onKeyPress')},
     stop: ${stopCallback.initializer.arguments[0].getText(source)},
   };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -115,6 +116,7 @@ const voiceCallbacks = new Function(`${compiledVoice}; return voiceCallbacks;`)(
     select: (event: { nativeEvent: { selection: Selection } }) => void;
     type: (text: string) => void;
     press: () => void;
+    key: () => void;
     stop: () => Promise<string | null>;
   };
 
@@ -127,10 +129,11 @@ function pendingVoiceStop(initialDraft = '前后') {
   let activeStop: Promise<string | null> | undefined;
   const stopGate = new Promise<string>((resolve) => { completeStop = resolve; });
   const setNativeProps = vi.fn();
-  const callbacks = voiceCallbacks({
+  const bindings = {
     firstMessageRef, firstMessageSelectionRef,
     voiceSelectionUserOwnedRef: { current: false },
     voiceStopGestureSelectionGuardRef: { current: false },
+    voicePendingSelectionEchoesRef: { current: [] },
     voiceRecordingActiveRef: { current: true }, voiceStopInFlightRef: { current: false },
     voiceStartupSeqRef: { current: 1 }, voiceStartupInFlightRef: { current: false },
     voiceControllerSessionRef: { current: { stop: () => stopGate } },
@@ -144,19 +147,85 @@ function pendingVoiceStop(initialDraft = '前后') {
       activeStop = callbacks.stop();
       return activeStop;
     },
-  });
+  };
+  const callbacks = voiceCallbacks(bindings);
   return {
     ...callbacks,
     selection: () => controlledSelection,
     move: (start: number, end = start) => callbacks.select({ nativeEvent: { selection: { start, end } } }),
     complete: () => completeStop(firstMessageRef.current), setNativeProps,
     press: () => { callbacks.press(); return activeStop; },
+    pressToEdit: () => voiceCallbacks({ ...bindings, voiceIsListening: false }).press(),
     insert: (text: string) => firstMessageRef.current.slice(0, controlledSelection.start)
       + text + firstMessageRef.current.slice(controlledSelection.end),
   };
 }
 
 describe('new-session selection during dictation stop', () => {
+  it.each([false, true])('ignores a delayed ASR selection echo (stop completed=%s)', async (completed) => {
+    const voice = pendingVoiceStop();
+    const stop = voice.stop();
+    voice.publish('前原始转写后', { start: 5, end: 5 });
+    voice.publish('前润色后', { start: 3, end: 3 });
+    if (completed) {
+      voice.complete();
+      await stop;
+    }
+    voice.move(5); // the first controlled update arrives after the second JS update
+    expect(voice.selection()).toEqual({ start: 3, end: 3 });
+    if (!completed) {
+      voice.publish('前最终润色后', { start: 5, end: 5 });
+      voice.complete();
+      await stop;
+      expect(voice.selection()).toEqual({ start: 5, end: 5 });
+      expect(voice.insert('!')).toBe('前最终润色!后');
+    } else {
+      expect(voice.insert('!')).toBe('前润色!后');
+    }
+  });
+
+  it('ignores delayed echoes of a rebased user selection', async () => {
+    const voice = pendingVoiceStop('前后缀');
+    voice.publish('前识别后缀', { start: 3, end: 3 });
+    const stop = voice.stop();
+    voice.move(4);
+    voice.publish('前原始转写后缀', { start: 5, end: 5 }, { start: 1, end: 3, text: '原始转写' });
+    voice.publish('前词后缀', { start: 2, end: 2 }, { start: 1, end: 5, text: '词' });
+    voice.move(6); // echo of the first rebase, not another user move
+    expect(voice.selection()).toEqual({ start: 3, end: 3 });
+    voice.complete();
+    await stop;
+    expect(voice.insert('!')).toBe('前词后!缀');
+  });
+
+  it('retires skipped echoes when native acknowledges the latest controlled selection', async () => {
+    const voice = pendingVoiceStop();
+    const stop = voice.stop();
+    voice.publish('前原始转写后', { start: 5, end: 5 });
+    voice.publish('前润色后', { start: 3, end: 3 });
+    voice.move(3); // native coalesced the first event
+    voice.move(5); // now a genuine movement back to an old controlled value
+    voice.publish('前润色后', { start: 3, end: 3 });
+    voice.complete();
+    await stop;
+    expect(voice.selection()).toEqual({ start: 5, end: 5 });
+  });
+
+  it.each(['touch', 'key', 'typing'] as const)('accepts a user returning to a pending value via %s', async (action) => {
+    const voice = pendingVoiceStop();
+    const stop = voice.stop();
+    voice.publish('前原始转写后', { start: 5, end: 5 });
+    voice.publish('前润色后', { start: 3, end: 3 });
+    if (action === 'touch') voice.pressToEdit();
+    if (action === 'key') voice.key();
+    if (action === 'typing') voice.type('前润色!?后');
+    voice.move(5);
+    voice.publish(action === 'typing' ? '前润色!?后' : '前润色后', { start: 3, end: 3 });
+    voice.complete();
+    await stop;
+    expect(voice.selection()).toEqual({ start: 5, end: 5 });
+  });
+
   it.each([
     ['caret in suffix', [4, 4], [6, 6], [3, 3], '前词后!缀'],
     ['selected suffix', [3, 5], [5, 7], [2, 4], '前词!'],
@@ -282,7 +351,8 @@ function mountInput() {
       ...pageProps({ Platform: { OS: native.platform }, voiceIsListening: listening,
         draft: { firstMessage: draft }, firstMessageSelection: selection,
         finishVoiceRecording, composerPlaceholder: 'Draft',
-        voiceStopGestureSelectionGuardRef: { current: false } }),
+        voiceStopGestureSelectionGuardRef: { current: false },
+        voicePendingSelectionEchoesRef: { current: [] } }),
       inputOverlay: listening ? createElement('span', { 'data-testid': 'preview' }, draft) : null,
     })));
   }

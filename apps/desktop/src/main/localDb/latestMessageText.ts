@@ -121,10 +121,13 @@ interface RecentTitleDbRow {
   rowid: number;
 }
 
-function toTitleMessageCandidate(row: RecentTitleDbRow): TitleMessageCandidate | null {
+function toTitleMessageCandidate(
+  row: RecentTitleDbRow,
+  preferHookUserText: boolean,
+): TitleMessageCandidate | null {
   const role = row.role === 'user' ? 'user' : 'assistant';
   const agentMeta = parseTitleAgentMeta(row.agentMeta);
-  const text = extractTitleMessageText(row.content, role, agentMeta);
+  const text = extractTitleMessageText(row.content, role, agentMeta, preferHookUserText);
   if (!text) return null;
   return {
     role,
@@ -141,9 +144,16 @@ function extractTitleMessageText(
   content: string,
   role: 'user' | 'assistant',
   agentMeta: Record<string, unknown> | null,
+  preferHookUserText: boolean,
 ): string {
   const source = agentMeta?.hookSource;
-  if (role === 'user' && source && typeof source === 'object' && !Array.isArray(source)) {
+  if (
+    preferHookUserText &&
+    role === 'user' &&
+    source &&
+    typeof source === 'object' &&
+    !Array.isArray(source)
+  ) {
     const userText = (source as Record<string, unknown>).userText;
     if (typeof userText === 'string' && userText.trim()) {
       // Match hook dispatch's empty-body fallback and preserve the existing
@@ -229,6 +239,7 @@ async function recentMessagesWithClearedAt(
   clearedAt: number | null,
   snapshotUpperRowid: number | null,
   latestTurnIsInFlight: boolean,
+  preferHookUserText: boolean,
 ): Promise<RecentMessage[]> {
   if (limit <= 0 || snapshotUpperRowid == null) return [];
   const db = getDbClient().drizzle;
@@ -280,7 +291,7 @@ async function recentMessagesWithClearedAt(
     };
 
     const pageCandidates = rows
-      .map(toTitleMessageCandidate)
+      .map((row) => toTitleMessageCandidate(row, preferHookUserText))
       .filter((candidate): candidate is TitleMessageCandidate => candidate !== null);
     candidates.push(...pageCandidates);
     for (const candidate of pageCandidates) {
@@ -332,6 +343,7 @@ async function firstUserMessageWithClearedAt(
   sessionId: string,
   clearedAt: number | null,
   snapshotUpperRowid: number | null,
+  preferHookUserText: boolean,
 ): Promise<OpeningMessage> {
   if (snapshotUpperRowid == null) return { text: '', createdAt: null, rowid: null };
   const db = getDbClient().drizzle;
@@ -356,7 +368,7 @@ async function firstUserMessageWithClearedAt(
   for (const row of rows) {
     const agentMeta = parseTitleAgentMeta(row.agentMeta);
     if (!isVisibleTitleUser(agentMeta)) continue;
-    const text = extractTitleMessageText(row.content, 'user', agentMeta);
+    const text = extractTitleMessageText(row.content, 'user', agentMeta, preferHookUserText);
     if (text) return { text, createdAt: row.createdAt ?? null, rowid: row.rowid };
   }
   return { text: '', createdAt: null, rowid: null };
@@ -370,6 +382,8 @@ export async function regenerateTitleMaterial(
   sessionId: string,
   recentLimit: number,
   latestTurnIsInFlight: boolean | (() => boolean) = false,
+  // Prompt prediction also consumes this material and needs injected context.
+  options: { preferHookUserText?: boolean } = {},
 ): Promise<RegenerateTitleMaterial> {
   const readLatestTurnIsInFlight = (): boolean =>
     typeof latestTurnIsInFlight === 'function'
@@ -395,8 +409,14 @@ export async function regenerateTitleMaterial(
       clearedAt,
       snapshotUpperRowid,
       snapshotLatestTurnIsInFlight,
+      options.preferHookUserText === true,
     ),
-    firstUserMessageWithClearedAt(sessionId, clearedAt, snapshotUpperRowid),
+    firstUserMessageWithClearedAt(
+      sessionId,
+      clearedAt,
+      snapshotUpperRowid,
+      options.preferHookUserText === true,
+    ),
   ]);
   return { recent, opening };
 }

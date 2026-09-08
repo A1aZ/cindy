@@ -219,7 +219,13 @@ describe('regenerateTitleMaterial hook user text', () => {
           index * 2 + 2,
         );
       }
-      const material = await regenerateTitleMaterial('s1', 2);
+      const material = await regenerateTitleMaterial('s1', 2, false, { preferHookUserText: true });
+      const predictionMaterial = await regenerateTitleMaterial('s1', 2);
+      expect(predictionMaterial.opening.text).toBe(background + opening);
+      expect(predictionMaterial.recent.map((m) => m.text)).toEqual([
+        background + latest,
+        '已整理修改',
+      ]);
       expect(material.opening.text).toBe(opening);
       expect(material.recent.map((m) => m.text)).toEqual([latest, '已整理修改']);
       expect(material.recent[0].text.slice(0, 300)).toBe(latest);
@@ -245,7 +251,7 @@ describe('regenerateTitleMaterial hook user text', () => {
       VALUES ('u1', 'cu1', 's1', 'user', ?, ?, 1)`,
       )
       .run(JSON.stringify({ text: '原始用户正文' }), meta);
-    const material = await regenerateTitleMaterial('s1', 8);
+    const material = await regenerateTitleMaterial('s1', 8, false, { preferHookUserText: true });
     expect(material.opening.text).toBe('原始用户正文');
     expect(material.recent.map((m) => m.text)).toEqual(['原始用户正文']);
   });

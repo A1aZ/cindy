@@ -368,7 +368,14 @@ export class BotAuthorizationService {
         this.deps.warn(error);
         if (!entry.closed) {
           this.stopPoll(entry);
-          await this.phase(entry, 'failed', actionId, 'ACTION_FAILED');
+          try {
+            await this.phase(entry, 'failed', actionId, 'ACTION_FAILED');
+          } catch (recoveryError) {
+            // Owner/profile validation can reject the recovery write too. This
+            // detached action must settle without leaving a live invalid watcher.
+            this.close(entry);
+            this.deps.warn(recoveryError);
+          }
         }
       })
       .finally(() => {

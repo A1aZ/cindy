@@ -313,6 +313,29 @@ describe('Bot authorization transcript lifecycle (Grok parity)', () => {
     await restored.dispose();
   });
 
+  it.each(['resolve', 'submit'])('retires a rejected %s action when its recovery write also fails', async (operation) => {
+    const h = harness();
+    await h.service.request('s', { kind: 'plugin', id: 'p' });
+    const unavailable = new Error('Authorization owner or teammate is unavailable');
+    h.deps.adapter.mockRejectedValue(unavailable);
+    h.deps.save.mockRejectedValue(unavailable);
+    const accepted = operation === 'resolve' ? await h.click() : await h.service.submit(
+      h.card().snapshot.requestId,
+      { actionId: 'connect', expectedRevision: h.card().snapshot.revision, value: 'fake-secret' },
+    );
+    expect(accepted).toBe(true);
+    await flush();
+    await vi.advanceTimersByTimeAsync(0); // let detached rejection handlers settle
+    expect(h.deps.warn).toHaveBeenCalledWith(unavailable);
+    expect(h.listeners.size).toBe(0);
+    expect(h.adapter.execute).not.toHaveBeenCalled();
+    expect(h.deps.resume).not.toHaveBeenCalled();
+    // A subsequent click must revalidate restoration, not reuse the invalid entry.
+    await expect(h.click()).rejects.toThrow('teammate is unavailable');
+    expect(h.listeners.size).toBe(0);
+    await h.service.dispose();
+  });
+
   it('disposal suppresses a callback from an outstanding action', async () => {
     const h = harness();
     let finish!: () => void;

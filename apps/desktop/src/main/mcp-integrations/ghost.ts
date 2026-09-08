@@ -1559,7 +1559,7 @@ export function getCindyGhostsMcpDeps(
       const authorizationService = getBotAuthorizationService();
       if (authorizationService && authorizationSessionId && await isBotAuthorizationSession(authorizationSessionId)) {
         const service = authorizationService;
-        const card = await service.request(authorizationSessionId, { kind: 'plugin', id: ghostId, ...(setupPlan ? { reauthorize: true } : {}) }, setupPlan);
+        const card = await service.request(authorizationSessionId, { kind: 'plugin', id: ghostId, ...(setupPlan && getGhostSetupAssessment(ghostId).reauthSuggest ? { reauthorize: true } : {}) }, setupPlan);
         if (!card.ok) return card;
       }
       const setup = await setupCoordinator.ensureReady({

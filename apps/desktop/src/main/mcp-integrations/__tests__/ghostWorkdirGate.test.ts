@@ -133,7 +133,8 @@ vi.mock('../../logger.js', () => ({
 // Claude 走建线闭包 ctx；Codex / Pi 用此 mock 模拟 HTTP bridge 的 ALS 恢复。
 vi.mock('@cindy/mcps', () => ({ getLiziMcpSessionContext: () => alsSessionContextMock() }));
 
-vi.mock('../../maker-ipc/botAuthorizationHost.js', () => ({ isBotAuthorizationSession: async () => false }));
+const isAuthorizationSessionMock = vi.fn(async () => false);
+vi.mock('../../maker-ipc/botAuthorizationHost.js', () => ({ isBotAuthorizationSession: isAuthorizationSessionMock }));
 const authorizationRequestMock = vi.fn(async () => ({ ok: true as const }));
 vi.mock('../../maker-ipc/botAuthorizationService.js', () => ({
   getBotAuthorizationService: () => ({ request: authorizationRequestMock }),
@@ -306,6 +307,7 @@ function clearAllPrefs(): void {
 
 beforeEach(() => {
   authorizationRequestMock.mockClear();
+  isAuthorizationSessionMock.mockResolvedValue(false);
   fs.mkdirSync(outsideDir, { recursive: true });
   listMock.mockReset();
   listMock.mockReturnValue([chipGhost('art'), chipGhost('other')]);
@@ -2175,4 +2177,19 @@ describe('Host Auto review', () => {
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(grantAttachmentsMock).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])('only marks a teammate setup plan as reauthorization with a current suggestion (%s)', async (reauth) => {
+  listMock.mockReturnValue([chipGhost('art')]);
+  isAuthorizationSessionMock.mockResolvedValue(true);
+  const assessment = { state: 'ready' as const, revision: 1, groups: [],
+    ...(reauth ? { reauthSuggest: { ghostId: 'art', secretKey: 'account', missingScopes: ['write'],
+      missingScopeCount: 1, requirement: { ref: 'secret:account', kind: 'oauth' as const,
+        label: 'Account', action: { id: 'connect', kind: 'oauth_connect' as const } } } } : {}) };
+  setupAssessmentMock.mockReturnValue(assessment);
+  const setupPlan = { assessmentRevision: 1, steps: [] };
+  await makeDeps().callGhostTool({ ghostId: 'art', tool: 'run', args: {}, setupPlan });
+  expect(authorizationRequestMock).toHaveBeenCalledWith('s1', {
+    kind: 'plugin', id: 'art', ...(reauth ? { reauthorize: true } : {}),
+  }, setupPlan);
 });

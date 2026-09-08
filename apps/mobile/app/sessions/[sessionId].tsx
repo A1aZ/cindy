@@ -992,7 +992,7 @@ export default function SessionScreen() {
       setMessageReloadRevision((value) => value + 1);
     });
     return () => subscription.remove();
-  }, [sessionId]);
+  }, [deviceId, sessionId]);
   const auth = useAuth();
   const windowDimensions = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -4492,6 +4492,7 @@ export default function SessionScreen() {
     if (isScheduleDetail) return;
     if (historyView.snapshot.ready) {
       await historyView.view.refresh(true);
+      if (!historyView.view.isActive() || findRemoteHistoryView(deviceId, sessionId) !== historyView.view) return;
       const error = historyView.view.getSnapshot().error;
       setHistoryError(error ? formatRemoteError(error) : null);
       return;

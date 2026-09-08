@@ -11,6 +11,7 @@ export const DESKTOP_LOCAL = {
   STATE: 'remote-desktop:state',
   ENABLE: 'remote-desktop:enable',
   STOP: 'remote-desktop:stop',
+  CAPTURE_STOP: 'remote-desktop:capture-stop',
   REGISTER: 'remote-desktop:register-host',
   COMMAND: 'remote-desktop:host-command',
   REPLY: 'remote-desktop:host-reply',
@@ -61,6 +62,10 @@ export interface RemoteDesktopApi {
   permissions(): Promise<RemoteDesktopPermissions>;
   openPermission(permission: DesktopPermission): Promise<void>;
   dismissPermissionGuide(): Promise<void>;
+}
+/** Narrow bridge exposed only to the dedicated capture surface. */
+export interface DesktopCaptureApi {
+  stop(): Promise<void>;
   registerHost(): Promise<void>;
   onCommand(listener: (command: DesktopHostCommand) => void): () => void;
   reply(id: string, result: DesktopHostReply): Promise<void>;

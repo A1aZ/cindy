@@ -1,0 +1,241 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { DESKTOP_LOCAL } from '../../../shared/remoteDesktop';
+
+const h = vi.hoisted(() => ({
+  handlers: new Map<string, any>(),
+  windows: [] as any[],
+  deps: null as any,
+  lease: 'lease',
+  ready: false,
+  source: null as null | Promise<any[]>,
+  owner: null as any,
+  dispose: vi.fn(),
+  stop: vi.fn(),
+  nativeStop: vi.fn(),
+}));
+vi.mock('electron', () => ({
+  app: { on: vi.fn() },
+  powerMonitor: { on: vi.fn() },
+  shell: {},
+  nativeImage: {},
+  screen: { on: vi.fn(), getAllDisplays: () => [{ id: 1 }] },
+  systemPreferences: { getMediaAccessStatus: () => 'granted' },
+  desktopCapturer: {
+    getSources: () => h.source ?? Promise.resolve([{ id: 'screen:1', display_id: '1' }]),
+  },
+  ipcMain: { handle: (key: string, value: any) => h.handlers.set(key, value) },
+  powerSaveBlocker: { start: () => 1, stop: vi.fn() },
+  session: { defaultSession: {} },
+}));
+vi.mock('../capturePermissions', () => ({ denyAppDesktopCapture: vi.fn() }));
+vi.mock('../captureWindow', () => ({
+  DesktopCaptureWindow: class {
+    get contents() {
+      return h.owner;
+    }
+    assertSender(e: any) {
+      if (!h.owner || e.sender !== h.owner || e.senderFrame !== h.owner.mainFrame)
+        throw new Error('PERMISSION_DENIED');
+    }
+    registered(e: any) {
+      this.assertSender(e);
+      h.owner.ready();
+    }
+    start() {
+      const win = {
+        mainFrame: {},
+        isDestroyed: () => win.dead,
+        dead: false,
+        send: vi.fn(),
+        session: { setDisplayMediaRequestHandler: vi.fn() },
+        ready: () => {},
+        cancel: () => {},
+      };
+      h.windows.push(win);
+      h.owner = win;
+      return new Promise<void>((resolve, reject) => {
+        win.ready = resolve;
+        win.cancel = () => reject(new Error('DESKTOP_VIDEO_STOPPED'));
+      });
+    }
+    dispose() {
+      h.dispose();
+      const owner = h.owner;
+      h.owner = null;
+      if (owner) {
+        owner.dead = true;
+        owner.cancel();
+      }
+    }
+  },
+}));
+vi.mock('../controller', () => ({
+  RemoteDesktopController: class {
+    constructor(deps: any) {
+      h.deps = deps;
+    }
+    state = null;
+    hasLease(value: string) {
+      return value === h.lease;
+    }
+    stop() {
+      h.stop();
+      h.deps.stopVideo();
+    }
+    stopByUser() {
+      this.stop();
+    }
+    tick() {}
+    input = vi.fn();
+    viewHeartbeat = vi.fn();
+  },
+}));
+vi.mock('../nativeCapture', () => ({
+  NativeDesktopCapture: class {
+    stop = h.nativeStop;
+    frame = vi.fn(async () => 'frame');
+  },
+}));
+vi.mock('../inputHost', () => ({
+  DesktopInputHost: class {
+    stop = vi.fn();
+    input = vi.fn();
+  },
+  readDesktopDisplayModes: vi.fn(),
+  setDesktopDisplayMode: vi.fn(),
+  readDesktopInputPermission: vi.fn(),
+  requestDesktopInputPermission: vi.fn(),
+}));
+vi.mock('../permissions', () => ({
+  RemoteDesktopPermissionsService: class {
+    dismiss() {}
+  },
+}));
+vi.mock('../windowsHost', () => ({
+  readWindowsDesktopSupport: vi.fn(async () => 'ready'),
+  configureWindowsDesktopSupport: vi.fn(),
+}));
+vi.mock('../clipboard', () => ({
+  transferDesktopClipboard: vi.fn(),
+  transferDesktopClipboardContent: vi.fn(),
+}));
+vi.mock('../../device-link/settings-store', () => ({
+  readDeviceLinkSettings: () => ({}),
+  writeDeviceLinkSetting: vi.fn(),
+}));
+vi.mock('../../security/trustedAppRenderer', () => ({ assertTrustedAppRendererEvent: vi.fn() }));
+vi.mock('../../deepLink', () => ({ getDeepLinkMainWindow: vi.fn() }));
+vi.mock('../../computer-permission-guide/request', () => ({
+  MAC_ACCESSIBILITY_SETTINGS_URL: '',
+  MAC_SCREEN_RECORDING_SETTINGS_URL: '',
+}));
+vi.mock('../../utils/ipcValidate', () => ({
+  throwIpcError: () => {
+    throw new Error('PERMISSION_DENIED');
+  },
+}));
+import { registerRemoteDesktopIpc } from '../index';
+const event = (owner = h.owner) => ({ sender: owner, senderFrame: owner.mainFrame });
+const flush = async () => {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+};
+const offer = () =>
+  h.deps.offer({ lease: h.lease, display: { id: '1' } }, 'sdp', undefined, false, 'attempt');
+beforeEach(() => {
+  vi.useFakeTimers();
+  h.handlers.clear();
+  h.windows.length = 0;
+  h.source = null;
+  h.lease = 'lease';
+  h.dispose.mockClear();
+  h.stop.mockClear();
+  h.nativeStop.mockClear();
+  registerRemoteDesktopIpc();
+});
+afterEach(() => {
+  h.deps.stopVideo();
+  vi.clearAllTimers();
+  vi.useRealTimers();
+});
+
+it.each(['ready', 'sources'])(
+  'revocation during %s prevents late capture from reviving the old offer',
+  async (phase) => {
+    let finish!: (sources: any[]) => void;
+    if (phase === 'sources')
+      h.source = new Promise((resolve) => {
+        finish = resolve;
+      });
+    const pending = offer();
+    const rejected = expect(pending).rejects.toThrow(/DESKTOP_(VIDEO_STOPPED|LEASE_EXPIRED)/);
+    const old = h.owner;
+    if (phase === 'sources') {
+      h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+      await flush();
+    }
+    h.lease = 'replacement';
+    h.deps.stopVideo();
+    if (finish) finish([{ id: 'screen:1', display_id: '1' }]);
+    old.ready();
+    await rejected;
+    expect(old.dead).toBe(true);
+    expect(old.send).not.toHaveBeenCalled();
+    expect(h.owner).toBeNull();
+  },
+);
+
+it('denies main/child-frame capture IPC and forces disposal on offer timeout', async () => {
+  const pending = offer();
+  const rejected = expect(pending).rejects.toThrow('DESKTOP_VIDEO_TIMEOUT');
+  const owner = h.owner;
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  for (const key of [
+    DESKTOP_LOCAL.REGISTER,
+    DESKTOP_LOCAL.REPLY,
+    DESKTOP_LOCAL.INPUT,
+    DESKTOP_LOCAL.VIEW_HEARTBEAT,
+    DESKTOP_LOCAL.CAPTURE_STOP,
+  ]) {
+    for (const caller of [event({ mainFrame: {} }), { sender: owner, senderFrame: {} }])
+      expect(() => h.handlers.get(key)(caller, 'lease')).toThrow('PERMISSION_DENIED');
+  }
+  await expect(
+    h.handlers.get(DESKTOP_LOCAL.NATIVE_FRAME)(event({ mainFrame: {} }), 'lease'),
+  ).rejects.toThrow('PERMISSION_DENIED');
+  expect(owner.send).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(18_000);
+  await rejected;
+  expect(owner.dead).toBe(true);
+  expect(h.nativeStop).toHaveBeenCalled();
+});
+
+it('retains the capture owner on ICE timeout and rejects old-owner replies after replacement', async () => {
+  const pending = offer();
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  const old = h.owner;
+  const id = old.send.mock.calls[0][1].id;
+  h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), id, 'answer');
+  await expect(pending).resolves.toBe('answer');
+  const ice = h.deps.ice({
+    op: 'ice',
+    lease: 'lease',
+    attemptId: 'attempt',
+    after: 0,
+    candidates: [],
+  });
+  const rejected = expect(ice).rejects.toThrow('DESKTOP_VIDEO_TIMEOUT');
+  await vi.advanceTimersByTimeAsync(4000);
+  await rejected;
+  expect(old.dead).toBe(false);
+  const next = offer();
+  const nextRejected = expect(next).rejects.toThrow('DESKTOP_VIDEO_STOPPED');
+  expect(old.dead).toBe(true);
+  expect(() => h.handlers.get(DESKTOP_LOCAL.REPLY)(event(old), id, 'late answer')).toThrow(
+    'PERMISSION_DENIED',
+  );
+  expect(h.owner.dead).toBe(false);
+  h.deps.stopVideo();
+  await nextRejected;
+});

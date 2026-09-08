@@ -32,3 +32,38 @@ development flags, stale audit tokens, and signed-resource helper replacement.
 The resource fixture is ad-hoc signed: it verifies resource sealing, **not** the
 production Apple/team acceptance path. A signed application launch and TCC flow
 must still be checked during release validation.
+
+# Desktop capture process boundary
+
+Main creates one hidden, sandboxed capture renderer per media offer. It uses a
+separate in-memory session, dedicated preload and separate build entry. Packaged
+assets are served only by `cindy-desktop-capture://capture/`; the page cannot load
+chat/Markdown, navigate, open windows or use arbitrary HTTP/WebSocket requests.
+WebRTC remains the media transport. The main application preload exposes only
+remote-desktop settings/status/stop, never source IDs or raw frame reads.
+
+The owner lifecycle is `absent → starting → active → destroyed`. All capture IPC
+requires the exact Main-created webContents, its top-level frame and document URL.
+Main owns the single-use display grant and existing lease/offer generation. Stop,
+revocation, replacement and offer failure clear authority before destroying the
+window; late ready, source enumeration or replies cannot revive the old owner.
+Unexpected capture process failure ends only its desktop lease. ICE retries keep
+the existing process; there is no process restart loop or shared relay reset.
+This surface deliberately does not follow reusable UI-window hide semantics:
+destroying the renderer is necessary to end independently created media streams.
+
+The app session rejects both `getDisplayMedia` and legacy desktop capture. In
+Electron 41 those requests use `media` with an empty `mediaTypes` list; physical
+microphone/camera requests remain allowed. The capture session admits that empty
+media request only from its own exact main frame, then the display handler checks
+the lease and consumes its grant. Native fallback reads are gated by the same
+owner, lease and generation and remain in Main/native helpers.
+
+Validation covers cancellation during readiness/enumeration, foreign and child
+frame IPC, offer versus ICE timeout, forced destruction, and stale-owner events.
+Electron 41.10.3 was also exercised with the production capture bundle/preload and
+custom scheme: synthetic WebFrameMain video/audio → WebRTC answer/received track,
+main-page capture rejection, fake microphone capture, and webContents destruction.
+Mixed microphone/legacy-desktop requests were rejected by Chromium's bad-IPC
+validation before our permission callback. These synthetic tests do not replace
+real system audio, Windows lock/UAC or mobile cross-NAT release validation.

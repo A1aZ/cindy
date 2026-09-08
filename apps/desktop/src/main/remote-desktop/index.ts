@@ -1,12 +1,12 @@
 import {
   app,
-  BrowserWindow,
   desktopCapturer,
   ipcMain,
   nativeImage,
   powerMonitor,
   powerSaveBlocker,
   screen,
+  session,
   shell,
   systemPreferences,
   type WebContents,
@@ -26,10 +26,9 @@ import {
   type DesktopHostCommand,
   type DesktopHostReply,
 } from '../../shared/remoteDesktop';
-import {
-  assertTrustedAppRendererEvent,
-  isTrustedAppRendererWindow,
-} from '../security/trustedAppRenderer';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer';
+import { DesktopCaptureWindow } from './captureWindow';
+import { denyAppDesktopCapture } from './capturePermissions';
 import { readDeviceLinkSettings, writeDeviceLinkSetting } from '../device-link/settings-store';
 import { throwIpcError } from '../utils/ipcValidate';
 import { RemoteDesktopController } from './controller';
@@ -84,6 +83,7 @@ const permissions = new RemoteDesktopPermissionsService({
 });
 
 let host: WebContents | null = null;
+const captureWindow = new DesktopCaptureWindow(() => remoteDesktop.stop());
 const nativeCapture = new NativeDesktopCapture();
 let displayAwake: number | null = null;
 let nativeDisplay: string | null = null;
@@ -91,19 +91,15 @@ let windowsAvailable = false;
 let captureGrant: { source: DesktopCapturerSource; lease: string; audio: boolean } | null = null;
 const supportsSystemAudio =
   process.platform === 'win32' ||
-  (process.platform === 'darwin' && typeof process.getSystemVersion === 'function' &&
+  (process.platform === 'darwin' &&
+    typeof process.getSystemVersion === 'function' &&
     (() => {
       const [major, minor] = process.getSystemVersion().split('.').map(Number);
       return major > 14 || (major === 14 && minor >= 2);
     })());
 let videoLease: string | null = null;
-let onVideoActivityChanged = () => {};
-export function isRemoteDesktopVideoActive(): boolean {
-  return videoLease !== null;
-}
 function setVideoLease(lease: string | null): void {
   videoLease = lease;
-  onVideoActivityChanged();
 }
 let offerGeneration = 0;
 let nativeOverlay = false;
@@ -127,13 +123,9 @@ function stopVideo(): void {
   nativeDisplay = null;
   captureGrant = null;
   setVideoLease(null);
-  if (host && !host.isDestroyed()) {
-    if (isTrustedAppRendererWindow(BrowserWindow.fromWebContents(host)))
-      host.send(DESKTOP_LOCAL.COMMAND, {
-        id: randomUUID(),
-        op: 'stop',
-      } satisfies DesktopHostCommand);
-  }
+  host = null;
+  preparingOffer = false;
+  captureWindow.dispose();
   if (pending) {
     clearTimeout(pending.timer);
     pending.reject(new Error('DESKTOP_VIDEO_STOPPED'));
@@ -146,11 +138,15 @@ async function sources(thumbnail = false, timeoutMs = 5000) {
     systemPreferences.getMediaAccessStatus('screen') !== 'granted'
   )
     throw new Error('DESKTOP_SCREEN_PERMISSION_REQUIRED');
-  return enumerateDesktopSources(() => desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: thumbnail ? { width: 1280, height: 1280 } : { width: 0, height: 0 },
-    fetchWindowIcons: false,
-  }), timeoutMs);
+  return enumerateDesktopSources(
+    () =>
+      desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: thumbnail ? { width: 1280, height: 1280 } : { width: 0, height: 0 },
+        fetchWindowIcons: false,
+      }),
+    timeoutMs,
+  );
 }
 async function offer(
   lease: RemoteDesktopLease,
@@ -159,72 +155,74 @@ async function offer(
   cursorOverlay?: boolean,
   attemptId?: string,
 ): Promise<string> {
-  if (
-    !host ||
-    host.isDestroyed() ||
-    !isTrustedAppRendererWindow(BrowserWindow.fromWebContents(host))
-  )
-    throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
   if (pending || preparingOffer) throw new Error('DESKTOP_VIDEO_BUSY');
+  stopVideo();
   preparingOffer = true;
-  const generation = ++offerGeneration;
-  nativeCapture.stop();
-  nativeDisplay = null;
-  setVideoLease(null);
-  captureGrant = null;
-  const currentHost = host;
-  let source: DesktopCapturerSource | null = null;
-  let nativeAvailable = process.platform === 'darwin';
+  const generation = offerGeneration;
+  const current = () => generation === offerGeneration && remoteDesktop.hasLease(lease.lease);
   try {
-    nativeAvailable ||=
-      process.platform === 'win32' && (await readWindowsDesktopSupport()) === 'ready';
-    try {
-      const available = await sources(false, nativeAvailable ? 2000 : 5000);
-      source = desktopCaptureSource(available, lease.display.id, screen.getAllDisplays());
-    } catch (error) {
-      // A locked macOS session can reject Chromium's source enumeration even
-      // though the user has granted capture. Only the native adapter may recover.
-      if (
-        !nativeAvailable ||
-        (process.platform === 'darwin' &&
-          systemPreferences.getMediaAccessStatus('screen') !== 'granted')
-      )
-        throw error;
-    }
-  } finally {
-    preparingOffer = false;
-  }
-  if (!source && !nativeAvailable) throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
-  if (
-    generation !== offerGeneration ||
-    !remoteDesktop.hasLease(lease.lease) ||
-    host !== currentHost ||
-    currentHost.isDestroyed()
-  )
-    throw new Error('DESKTOP_LEASE_EXPIRED');
-  if (settings?.audio && !supportsSystemAudio) throw new Error('DESKTOP_AUDIO_UNAVAILABLE');
-  captureGrant = source ? { source, lease: lease.lease, audio: settings?.audio === true } : null;
-  nativeDisplay = nativeAvailable ? lease.display.id : null;
-  nativeOverlay = cursorOverlay === true && process.platform === 'darwin';
-  nativeSettings = settings;
-  setVideoLease(lease.lease);
-  videoAttempt = attemptId;
-  const result = await requestHost(
+    const ready = captureWindow.start();
+    host = captureWindow.contents;
+    const currentHost = host;
+    await ready;
+    if (!current() || host !== currentHost || !currentHost || currentHost.isDestroyed())
+      throw new Error('DESKTOP_LEASE_EXPIRED');
+    let source: DesktopCapturerSource | null = null;
+    let nativeAvailable = process.platform === 'darwin';
     {
-      id: randomUUID(),
-      op: 'offer',
-      sourceId: source?.id,
-      nativeCapture: nativeAvailable,
-      cursorOverlay: nativeOverlay,
-      lease: lease.lease,
-      sdp,
-      settings,
-      attemptId,
-    },
-    18_000,
-  );
-  if (typeof result !== 'string') throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
-  return result;
+      nativeAvailable ||=
+        process.platform === 'win32' && (await readWindowsDesktopSupport()) === 'ready';
+      try {
+        const available = await sources(false, nativeAvailable ? 2000 : 5000);
+        source = desktopCaptureSource(available, lease.display.id, screen.getAllDisplays());
+      } catch (error) {
+        // A locked macOS session can reject Chromium's source enumeration even
+        // though the user has granted capture. Only the native adapter may recover.
+        if (
+          !nativeAvailable ||
+          (process.platform === 'darwin' &&
+            systemPreferences.getMediaAccessStatus('screen') !== 'granted')
+        )
+          throw error;
+      }
+    }
+    if (!source && !nativeAvailable) throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+    if (
+      generation !== offerGeneration ||
+      !remoteDesktop.hasLease(lease.lease) ||
+      host !== currentHost ||
+      currentHost.isDestroyed()
+    )
+      throw new Error('DESKTOP_LEASE_EXPIRED');
+    if (settings?.audio && !supportsSystemAudio) throw new Error('DESKTOP_AUDIO_UNAVAILABLE');
+    captureGrant = source ? { source, lease: lease.lease, audio: settings?.audio === true } : null;
+    nativeDisplay = nativeAvailable ? lease.display.id : null;
+    nativeOverlay = cursorOverlay === true && process.platform === 'darwin';
+    nativeSettings = settings;
+    setVideoLease(lease.lease);
+    videoAttempt = attemptId;
+    const result = await requestHost(
+      {
+        id: randomUUID(),
+        op: 'offer',
+        sourceId: source?.id,
+        nativeCapture: nativeAvailable,
+        cursorOverlay: nativeOverlay,
+        lease: lease.lease,
+        sdp,
+        settings,
+        attemptId,
+      },
+      18_000,
+    );
+    if (typeof result !== 'string') throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
+    return result;
+  } catch (error) {
+    if (generation === offerGeneration) stopVideo();
+    throw error;
+  } finally {
+    if (generation === offerGeneration) preparingOffer = false;
+  }
 }
 
 /** One bounded command to the existing capture owner; never reset the shared device link. */
@@ -318,7 +316,11 @@ export const remoteDesktop = new RemoteDesktopController({
     // Compatibility viewers must also wake/capture without waiting for
     // Chromium's thumbnail enumeration, which may hang on a sleeping display.
     if (process.platform === 'darwin' || windowsAvailable) {
-      const frame = await nativeCapture.frame(displayId, cursorOverlay === true && process.platform === 'darwin', nativeSettings);
+      const frame = await nativeCapture.frame(
+        displayId,
+        cursorOverlay === true && process.platform === 'darwin',
+        nativeSettings,
+      );
       return encodeNativeRelayFrame(frame, (jpeg) => nativeImage.createFromBuffer(jpeg));
     }
     const source = desktopCaptureSource(await sources(true), displayId, screen.getAllDisplays());
@@ -348,9 +350,8 @@ export const remoteDesktop = new RemoteDesktopController({
   },
 });
 
-export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void): void {
-  onVideoActivityChanged = refreshBackgroundThrottling;
-  onVideoActivityChanged();
+export function registerRemoteDesktopIpc(): void {
+  denyAppDesktopCapture(session.defaultSession);
   const timer = setInterval(() => remoteDesktop.tick(), 1000);
   timer.unref();
   app.on('before-quit', () => {
@@ -391,7 +392,7 @@ export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void
   powerMonitor.on('lock-screen', sessionChanged);
   powerMonitor.on('unlock-screen', sessionChanged);
   ipcMain.handle(DESKTOP_LOCAL.NATIVE_FRAME, async (event, lease: unknown) => {
-    assertTrustedAppRendererEvent(event);
+    captureWindow.assertSender(event);
     if (
       event.sender !== host ||
       typeof lease !== 'string' ||
@@ -401,12 +402,14 @@ export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void
     )
       throwIpcError('PERMISSION_DENIED', 'Invalid desktop capture lease');
     const generation = offerGeneration;
-    const jpeg = await nativeCapture.frame(nativeDisplay, nativeOverlay, nativeSettings).catch(() => null);
+    const jpeg = await nativeCapture
+      .frame(nativeDisplay, nativeOverlay, nativeSettings)
+      .catch(() => null);
     if (generation !== offerGeneration || !remoteDesktop.hasLease(lease)) return null;
     return jpeg;
   });
   ipcMain.handle(DESKTOP_LOCAL.VIEW_HEARTBEAT, (event, lease: unknown) => {
-    assertTrustedAppRendererEvent(event);
+    captureWindow.assertSender(event);
     if (event.sender !== host || typeof lease !== 'string' || lease !== videoLease)
       throwIpcError('PERMISSION_DENIED', 'Invalid desktop viewer heartbeat');
     remoteDesktop.viewHeartbeat(lease);
@@ -472,46 +475,35 @@ export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void
     remoteDesktop.stopByUser();
   });
   ipcMain.handle(DESKTOP_LOCAL.REGISTER, (event) => {
-    assertTrustedAppRendererEvent(event);
-    if (getDeepLinkMainWindow()?.webContents !== event.sender)
-      throwIpcError('PERMISSION_DENIED', 'Only the main window can host desktop capture');
-    if (host && !host.isDestroyed() && host !== event.sender)
-      throwIpcError('PERMISSION_DENIED', 'Desktop host already registered');
-    if (host === event.sender) return;
-    host = event.sender;
-    const owner = host;
+    captureWindow.registered(event);
+    const owner = event.sender;
     owner.session.setDisplayMediaRequestHandler((request, callback) => {
       const grant = captureGrant;
       if (
         !grant ||
         host !== owner ||
         request.frame !== owner.mainFrame ||
-        !isTrustedAppRendererWindow(BrowserWindow.fromWebContents(owner)) ||
         !remoteDesktop.hasLease(grant.lease) ||
         !pending ||
+        pending.op !== 'offer' ||
         !request.videoRequested
       ) {
         callback({});
         return;
       }
-      captureGrant = null; // single-use and bound to the exact active offer
+      captureGrant = null;
       callback({
         video: grant.source,
         ...(grant.audio && request.audioRequested ? { audio: 'loopback' as const } : {}),
       });
     });
-    const stop = () => {
-      if (host === owner) {
-        remoteDesktop.stop();
-        host = null;
-      }
-    };
-    owner.once('destroyed', stop);
-    owner.on('render-process-gone', stop);
-    owner.on('will-navigate', stop);
+  });
+  ipcMain.handle(DESKTOP_LOCAL.CAPTURE_STOP, (event) => {
+    captureWindow.assertSender(event);
+    remoteDesktop.stop();
   });
   ipcMain.handle(DESKTOP_LOCAL.REPLY, (event, id: unknown, sdp: unknown) => {
-    assertTrustedAppRendererEvent(event);
+    captureWindow.assertSender(event);
     if (event.sender !== host || !pending || id !== pending.id)
       throwIpcError('PERMISSION_DENIED', 'Invalid desktop host reply');
     const request = pending;
@@ -545,7 +537,7 @@ export function registerRemoteDesktopIpc(refreshBackgroundThrottling: () => void
   ipcMain.handle(
     DESKTOP_LOCAL.INPUT,
     (event, lease: unknown, sequence: unknown, events: unknown) => {
-      assertTrustedAppRendererEvent(event);
+      captureWindow.assertSender(event);
       if (
         event.sender !== host ||
         lease !== videoLease ||

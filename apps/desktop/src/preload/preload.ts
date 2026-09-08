@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import { DESKTOP_LOCAL, type RemoteDesktopApi, type DesktopHostCommand } from '../shared/remoteDesktop';
+import { DESKTOP_LOCAL, type RemoteDesktopApi } from '../shared/remoteDesktop';
 import { DEVICE_LINK_PUSH } from '../shared/deviceLinkIpc';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
@@ -1150,8 +1150,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 意识仓库 (shared/ghost.ts)。listSync 走 sendSync:意识面板要与内置
   // 面板同帧注册进布局引擎(规则 7 无跳变);目录扫描极小,同步读不卡启动。
   ghosts: {
-    recommendationsSync: (): import('../shared/homePluginRecommendations').HomePluginRecommendationsSnapshot =>
-      ipcRenderer.sendSync('ghosts:recommendations'),
+    recommendationsSync:
+      (): import('../shared/homePluginRecommendations').HomePluginRecommendationsSnapshot =>
+        ipcRenderer.sendSync('ghosts:recommendations'),
     listSync: (): { ghosts: unknown[] } => ipcRenderer.sendSync('ghosts:list'),
     recentUsageSync: (): { ids: string[] } => {
       try {
@@ -4187,16 +4188,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     enable: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.ENABLE, enabled),
     windowsSupport: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.WINDOWS_SUPPORT, enabled),
     stop: () => ipcRenderer.invoke(DESKTOP_LOCAL.STOP),
-    registerHost: () => ipcRenderer.invoke(DESKTOP_LOCAL.REGISTER),
-    onCommand: (listener) => {
-      const wrapped = (_event: Electron.IpcRendererEvent, command: DesktopHostCommand) => listener(command);
-      ipcRenderer.on(DESKTOP_LOCAL.COMMAND, wrapped);
-      return () => { ipcRenderer.removeListener(DESKTOP_LOCAL.COMMAND, wrapped); };
-    },
-    reply: (id, sdp) => ipcRenderer.invoke(DESKTOP_LOCAL.REPLY, id, sdp),
-    input: (lease, sequence, events) => ipcRenderer.invoke(DESKTOP_LOCAL.INPUT, lease, sequence, events),
-    viewHeartbeat: (lease) => ipcRenderer.invoke(DESKTOP_LOCAL.VIEW_HEARTBEAT, lease),
-    nativeFrame: (lease) => ipcRenderer.invoke(DESKTOP_LOCAL.NATIVE_FRAME, lease),
   } satisfies RemoteDesktopApi,
   deviceLink: {
     getState: (): Promise<{

@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { RemoteDesktopHost } from '../RemoteDesktopHost';
+import { startDesktopCaptureHost } from '../captureHost';
+const disposers: Array<() => void> = [];
 import { nativeCaptureStream } from '../nativeCaptureStream';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/components/ui/confirm-dialog', () => ({ ConfirmDialog: () => null }));
-vi.mock('@/components/settings/RemoteDesktopPermissions', () => ({ RemoteDesktopPermissions: () => null }));
+vi.mock('@/components/settings/RemoteDesktopPermissions', () => ({
+  RemoteDesktopPermissions: () => null,
+}));
 vi.mock('../nativeCaptureStream', () => ({ nativeCaptureStream: vi.fn() }));
 afterEach(() => {
+  disposers.splice(0).forEach((dispose) => dispose());
   cleanup();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -50,7 +54,7 @@ it.each(['rejected', 'missing'] as const)(
         },
       },
     });
-    render(<RemoteDesktopHost />);
+    disposers.push(startDesktopCaptureHost(window.electronAPI.remoteDesktop as any));
     await act(async () => {
       command({
         op: 'offer',
@@ -100,7 +104,7 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
   const track = { stop: vi.fn() },
     stream = { getTracks: () => [track], getVideoTracks: () => [track] };
   const capture = vi.fn().mockResolvedValue(stream);
-  vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: capture } });
+  vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: capture } });
   let command!: (value: any) => void;
   const reply = vi.fn().mockResolvedValue(undefined);
   Object.assign(window, {
@@ -117,7 +121,7 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
       },
     },
   });
-  render(<RemoteDesktopHost />);
+  disposers.push(startDesktopCaptureHost(window.electronAPI.remoteDesktop as any));
   const offer = {
     op: 'offer',
     id: 'offer',

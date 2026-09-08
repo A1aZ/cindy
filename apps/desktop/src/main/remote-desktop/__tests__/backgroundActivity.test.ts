@@ -15,73 +15,17 @@ function compile(text: string, deps: Record<string, unknown>) {
   return new Function(...Object.keys(deps), js)(...Object.values(deps));
 }
 
-describe('remote video shares the existing main-window throttle policy', () => {
-  function harness() {
-    const setBackgroundThrottling = vi.fn();
-    const window = {
-      isDestroyed: () => false,
-      webContents: { isDestroyed: () => false, setBackgroundThrottling },
-    };
-    // Execute the production policy and lease setter, without booting Electron.
-    const runtime = compile(
-      `
-      let mainWindowRef = window;
-      let mainWindowBackgroundThrottlingAllowed = true;
-      ${between(source, 'let videoLease:', 'let offerGeneration').replace('export ', '')}
-      ${between(bootstrap, 'function applyMainWindowBackgroundThrottling', 'function focusMainWindow')}
-      onVideoActivityChanged = applyMainWindowBackgroundThrottling;
-      return { turn: setMainWindowBackgroundThrottlingForActiveTurn, video: setVideoLease,
-        apply: applyMainWindowBackgroundThrottling, replace: (win) => { mainWindowRef = win; applyMainWindowBackgroundThrottling(); } };
-    `,
-      { window },
-    );
-    return { ...runtime, window, setBackgroundThrottling };
-  }
-
-  it.each(['turn', 'video'])(
-    'keeps the other workload unthrottled when %s finishes first',
-    (first) => {
-      const h = harness();
-      h.apply();
-      expect(h.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
-      h.turn(true);
-      h.video('lease');
-      expect(h.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
-      if (first === 'turn') h.turn(false);
-      else h.video(null);
-      expect(h.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
-      if (first === 'turn') h.video(null);
-      else h.turn(false);
-      expect(h.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
-    },
-  );
-
-  it('reapplies active video to a replacement window and ignores destroyed windows', () => {
-    const h = harness();
-    h.video('lease');
-    h.replace(null);
-    h.turn(true);
-    h.turn(false);
-    const apply = vi.fn();
-    h.replace({
-      ...h.window,
-      webContents: { ...h.window.webContents, setBackgroundThrottling: apply },
-    });
-    expect(apply).toHaveBeenLastCalledWith(false);
-    h.replace({ ...h.window, isDestroyed: () => true });
-    h.video(null);
-    expect(apply).toHaveBeenCalledTimes(1);
-  });
-
-  it('notifies through every lease change instead of independently setting Electron throttling', () => {
-    expect(source.match(/videoLease = /g)).toHaveLength(1);
-    expect(source).not.toContain('.setBackgroundThrottling(');
-    expect(between(source, 'function stopVideo()', 'async function sources')).toContain(
-      'setVideoLease(null);',
-    );
-    expect(between(source, 'async function offer(', 'export const remoteDesktop')).toContain(
-      'setVideoLease(lease.lease);',
-    );
+describe('capture background activity is isolated from the chat window', () => {
+  it('keeps capture unthrottled without changing the main-window workload policy', () => {
+    const capture = readFileSync(new URL('../captureWindow.ts', import.meta.url), 'utf8');
+    expect(capture).toContain('backgroundThrottling: false');
+    expect(
+      between(
+        bootstrap,
+        'function applyMainWindowBackgroundThrottling',
+        'function focusMainWindow',
+      ),
+    ).not.toContain('isRemoteDesktopVideoActive');
   });
 });
 

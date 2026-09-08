@@ -21,7 +21,7 @@ function harness(sourceText = source) {
     parseDesktopIceReply,
     setTimeout,
     clearTimeout,
-    assertTrustedAppRendererEvent() {},
+    captureWindow: { assertSender() {} },
     throwIpcError: () => {
       throw new Error('PERMISSION_DENIED');
     },

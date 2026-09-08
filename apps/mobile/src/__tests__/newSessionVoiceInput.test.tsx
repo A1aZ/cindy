@@ -76,7 +76,8 @@ function composerExpression(name: string) {
 }
 const expressions = propNames.map((name) => `${name}: ${composerExpression(name)}`);
 const compiled = ts.transpileModule(`function pageProps(bindings) {
-  const { Platform, voiceIsListening, draft, finishVoiceRecording, composerPlaceholder, firstMessageSelection } = bindings;
+  const { Platform, voiceIsListening, draft, finishVoiceRecording, composerPlaceholder, firstMessageSelection,
+    voiceStopGestureSelectionGuardRef } = bindings;
   const styles = { inputVoiceHidden: ${hiddenStyle.initializer.getText(source)} };
   return { ${expressions.join(',\n')} };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -95,14 +96,16 @@ if (!stopCallback.initializer || !ts.isCallExpression(stopCallback.initializer))
 type Selection = { start: number; end: number };
 const compiledVoice = ts.transpileModule(`function voiceCallbacks(bindings) {
   const { voiceSelectionUserOwnedRef, voiceRecordingActiveRef, voiceStopInFlightRef,
+    voiceStopGestureSelectionGuardRef,
     firstMessageRef, firstMessageSelectionRef, setFirstMessageSelection, setFirstMessageDraft,
     voiceControllerSessionRef, voiceStartupSeqRef, voiceStartupInFlightRef, voiceState,
     setVoiceState, setVoiceError, setAudioModeAsync, requestAnimationFrame,
-    firstMessageInputRef, formatRemoteError } = bindings;
+    firstMessageInputRef, formatRemoteError, voiceIsListening, finishVoiceRecording } = bindings;
   return {
     publish: ${draftCallback.initializer.getText(source)},
     select: ${composerExpression('onSelectionChange')},
     type: ${composerExpression('onChangeText')},
+    press: ${composerExpression('onPressIn')},
     stop: ${stopCallback.initializer.arguments[0].getText(source)},
   };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -111,6 +114,7 @@ const voiceCallbacks = new Function(`${compiledVoice}; return voiceCallbacks;`)(
     publish: (text: string, selection?: Selection, replacement?: Selection & { text: string }) => void;
     select: (event: { nativeEvent: { selection: Selection } }) => void;
     type: (text: string) => void;
+    press: () => void;
     stop: () => Promise<string | null>;
   };
 
@@ -119,11 +123,14 @@ function pendingVoiceStop(initialDraft = '前后') {
   const firstMessageSelectionRef = { current: { start: 1, end: 1 } };
   let controlledSelection = firstMessageSelectionRef.current;
   let completeStop!: (draft: string) => void;
+  let finishVoiceRecording!: () => Promise<string | null>;
+  let activeStop: Promise<string | null> | undefined;
   const stopGate = new Promise<string>((resolve) => { completeStop = resolve; });
   const setNativeProps = vi.fn();
   const callbacks = voiceCallbacks({
     firstMessageRef, firstMessageSelectionRef,
     voiceSelectionUserOwnedRef: { current: false },
+    voiceStopGestureSelectionGuardRef: { current: false },
     voiceRecordingActiveRef: { current: true }, voiceStopInFlightRef: { current: false },
     voiceStartupSeqRef: { current: 1 }, voiceStartupInFlightRef: { current: false },
     voiceControllerSessionRef: { current: { stop: () => stopGate } },
@@ -133,12 +140,17 @@ function pendingVoiceStop(initialDraft = '前后') {
     setAudioModeAsync: async () => undefined,
     requestAnimationFrame: (callback: () => void) => callback(),
     firstMessageInputRef: { current: { setNativeProps } }, formatRemoteError: String,
+    voiceIsListening: true, finishVoiceRecording: () => {
+      activeStop = callbacks.stop();
+      return activeStop;
+    },
   });
   return {
     ...callbacks,
     selection: () => controlledSelection,
     move: (start: number, end = start) => callbacks.select({ nativeEvent: { selection: { start, end } } }),
     complete: () => completeStop(firstMessageRef.current), setNativeProps,
+    press: () => { callbacks.press(); return activeStop; },
     insert: (text: string) => firstMessageRef.current.slice(0, controlledSelection.start)
       + text + firstMessageRef.current.slice(controlledSelection.end),
   };
@@ -180,6 +192,20 @@ describe('new-session selection during dictation stop', () => {
     await stop;
     expect(voice.selection()).toEqual({ start: 4, end: 4 });
     expect(voice.insert('?')).toBe('前词后!?');
+  });
+
+  it('ignores the selection event caused by the stop gesture, then accepts a later user move', async () => {
+    const voice = pendingVoiceStop();
+    voice.publish('前识别后', { start: 3, end: 3 });
+    const stop = voice.press();
+    voice.move(5); // native selection change caused by the same stop press
+    voice.publish('前原始转写后', { start: 5, end: 5 });
+    expect(voice.selection()).toEqual({ start: 5, end: 5 });
+    voice.move(0); // a real user move during stop owns the selection
+    voice.publish('前润色后', { start: 3, end: 3 });
+    voice.complete();
+    expect(await stop).toBe('前润色后');
+    expect(voice.selection()).toEqual({ start: 0, end: 0 });
   });
 
   it.each([false, true])('follows final ASR and refinement without a user move (partial=%s)', async (partial) => {
@@ -255,7 +281,8 @@ function mountInput() {
       value: draft, onChangeText: vi.fn(), onPasteImages: vi.fn(),
       ...pageProps({ Platform: { OS: native.platform }, voiceIsListening: listening,
         draft: { firstMessage: draft }, firstMessageSelection: selection,
-        finishVoiceRecording, composerPlaceholder: 'Draft' }),
+        finishVoiceRecording, composerPlaceholder: 'Draft',
+        voiceStopGestureSelectionGuardRef: { current: false } }),
       inputOverlay: listening ? createElement('span', { 'data-testid': 'preview' }, draft) : null,
     })));
   }

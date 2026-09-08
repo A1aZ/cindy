@@ -715,6 +715,9 @@ export default function NewRemoteSessionScreen() {
   const voiceStartupInFlightRef = useRef(false);
   const voiceStopInFlightRef = useRef(false);
   const voiceSelectionUserOwnedRef = useRef(false);
+  // The press that stops dictation can emit one native selection event of its
+  // own. Consume that event before allowing a real user move to claim control.
+  const voiceStopGestureSelectionGuardRef = useRef(false);
   const voiceStartupSeqRef = useRef(0);
   const voiceControllerSessionRef = useRef<MobileVoiceControllerSession | null>(null);
   const voiceDictionaryLearningTrackerRef = useRef<MobileVoiceDictionaryLearningTracker | null>(null);
@@ -3210,6 +3213,7 @@ export default function NewRemoteSessionScreen() {
       }
       const selectionBefore = takeRefinementContextTail(currentDraft.slice(0, initialSelection.start));
       const selectionAfter = currentDraft.slice(initialSelection.end, initialSelection.end + 1200);
+      voiceStopGestureSelectionGuardRef.current = false;
       voiceSelectionUserOwnedRef.current = false;
       const controller = createMobileVoiceControllerSession({
         credential,
@@ -5912,6 +5916,10 @@ export default function NewRemoteSessionScreen() {
                     // ASR/refinement teardown, so native cursor edits remain user-owned.
                     if (!voiceRecordingActiveRef.current) {
                       const selection = event.nativeEvent.selection;
+                      if (voiceStopGestureSelectionGuardRef.current) {
+                        voiceStopGestureSelectionGuardRef.current = false;
+                        return;
+                      }
                       const previous = firstMessageSelectionRef.current;
                       // A matching native echo of a controlled selection is not a user move.
                       if (voiceStopInFlightRef.current
@@ -5928,7 +5936,13 @@ export default function NewRemoteSessionScreen() {
                   onPasteImagesLoading={beginPastePlaceholders}
                   onPasteImagesLoadFailed={failPastePlaceholders}
                   onPressIn={() => {
-                    if (voiceIsListening) void finishVoiceRecording();
+                    if (voiceIsListening) {
+                      voiceStopGestureSelectionGuardRef.current = true;
+                      setTimeout(() => {
+                        voiceStopGestureSelectionGuardRef.current = false;
+                      }, 0);
+                      void finishVoiceRecording();
+                    }
                   }}
                   placeholder={voiceIsListening ? '' : composerPlaceholder}
                   placeholderTextColor={colors.textTertiary}

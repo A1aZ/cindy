@@ -102,7 +102,7 @@ export function extractSimTakeoverArgs(args) {
 }
 
 /** Decide whether a listener has enough Cindy-specific identity for an explicit handoff. */
-export function classifySimMetroListener({ cwd, source, targetWorktree }) {
+export function classifySimMetroListener({ cwd, source, targetWorktree, platform = process.platform }) {
   if (!cwd) return { confirmed: false, worktree: null };
 
   const normalizedCwd = normalize(cwd).replaceAll('\\', '/').replace(/\/+$/, '');
@@ -113,10 +113,13 @@ export function classifySimMetroListener({ cwd, source, targetWorktree }) {
   }
 
   const worktree = normalizedCwd.slice(0, -suffix.length);
+  const isTarget = platform === 'win32'
+    ? worktree.toLowerCase() === normalizedTarget.toLowerCase()
+    : worktree === normalizedTarget;
   return {
     confirmed: true,
     worktree,
-    isTarget: worktree === normalizedTarget,
+    isTarget,
   };
 }
 

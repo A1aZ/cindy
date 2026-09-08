@@ -9,6 +9,7 @@ import { resolveSafe as resolveXdtImage } from '../imageCacheStore.js';
 import { createBlobImageStorage, createBlobVideoStorage } from '../cindy-media/generatedMedia.js';
 import { VideoProviderRegistry } from '../cindy-proxy-media/video/registry.js';
 import { createLogger } from '../logger.js';
+import { mediaErrorForLog } from '../cindy-media/mediaRequestLog.js';
 import { getProviderSecretStore } from '../secrets/providerSecretStore.js';
 import { effectiveXdGatewayBaseUrl } from '../model-access/effectiveEndpoint.js';
 import { getAppCapabilities } from '../appCapabilities.js';
@@ -110,9 +111,11 @@ export function getCindyVideoProviderRegistry(): VideoProviderRegistry {
     if (baseUrl.trim()) {
       try {
         for (const provider of createGatewayVideoProviders(baseUrl)) next.register(provider);
-      } catch {
+      } catch (error) {
         // A broken optional Gateway must not prevent independent providers from registering.
-        log.warn('Gateway video providers unavailable during registry initialization');
+        log.warn('Gateway video providers unavailable during registry initialization', {
+          error: mediaErrorForLog(error),
+        });
       }
     }
     videoRegistry = next;

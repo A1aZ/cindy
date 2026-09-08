@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../logger.js';
+import { mediaErrorForLog } from '../cindy-media/mediaRequestLog.js';
 
 import {
   buildRegistry,
@@ -176,11 +177,12 @@ export function createProviderService(deps: ProviderServiceDeps): ProviderServic
     let media: readonly { providerId: string; id: string }[] | undefined;
     try {
       media = deps.getAvailableMediaModels?.();
-    } catch {
+    } catch (error) {
       // Media is optional enrichment; configuration and chat providers remain usable.
       media = [];
       log.warn(
         'Media readiness unavailable; returning provider configuration without media readiness',
+        { error: mediaErrorForLog(error) },
       );
     }
     return buildRegistry(catalog, connected, discoveryFailures, deps.getModelAccess?.()).map(

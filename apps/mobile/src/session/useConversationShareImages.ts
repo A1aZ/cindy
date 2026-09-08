@@ -22,7 +22,10 @@ import {
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
-async function readShareImageSize(uri: string, signal: AbortSignal) {
+async function readWithShareImageCancellation<T>(
+  read: () => Promise<T>,
+  signal: AbortSignal,
+) {
   if (signal.aborted) throw new Error("conversation share image cancelled");
   let onAbort!: () => void;
   const cancelled = new Promise<never>((_, reject) => {
@@ -30,9 +33,8 @@ async function readShareImageSize(uri: string, signal: AbortSignal) {
     signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    // Android's encoded-image size reader accepts file:// but rejects data:.
-    // Racing cancellation also releases temporary files if native IO stalls.
-    return await Promise.race([Image.getSize(uri), cancelled]);
+    // Native IO may outlive this export; let its owner clean up on cancellation.
+    return await Promise.race([read(), cancelled]);
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
@@ -49,38 +51,59 @@ async function readShareImageFile(
   const file = new File(uri);
   if (!file.exists || file.size <= 0 || file.size > MAX_IMAGE_BYTES)
     return null;
-  const size = await readShareImageSize(uri, signal);
+  // Android's encoded-image size reader accepts file:// but rejects data:.
+  const size = await readWithShareImageCancellation(() => Image.getSize(uri), signal);
   if (!canRead()) return null;
   const dataUri = embeddedUri ?? `data:${mimeType};base64,${await file.base64()}`;
   return canRead() ? { uri: dataUri, ...size } : null;
 }
 
-/** Inline sources need a file only for sizing; exports keep their embedded bytes. */
+/** Stage Base64 only for sizing; retain other inline formats supported natively. */
 async function readShareImageDataUri(
   uri: string,
   canRead: () => boolean,
   signal: AbortSignal,
 ): Promise<ConversationShareImage | null> {
-  const header = /^data:(image\/[^;,]+);base64,/.exec(uri);
-  if (!header || uri.length === header[0].length || !canRead()) return null;
+  if (!canRead()) return null;
+  const header = /^data:(image\/[^;,]+)(?:;[^,]*)?;base64,/i.exec(uri);
+  if (!header) {
+    // iOS can size other data-image encodings. Preserve that existing support;
+    // an unsupported native format still follows the usual placeholder path.
+    const size = await readWithShareImageCancellation(() => Image.getSize(uri), signal);
+    return canRead() ? { uri, ...size } : null;
+  }
+  if (uri.length === header[0].length) return null;
+  const mimeType = header[1]!.toLowerCase();
+  const base64 = decodeURIComponent(uri.slice(header[0].length));
   const directory = new Directory(Paths.cache, "conversation-share-images");
   let file: File | null = null;
-  try {
-    directory.create({ intermediates: true, idempotent: true });
-    const unique = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    file = new File(directory, `image-${unique}.${extOfMime(header[1]!)}`);
-    const FileSystem = await import("expo-file-system/legacy");
-    if (!canRead()) return null;
-    await FileSystem.writeAsStringAsync(file.uri, uri.slice(header[0].length), {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    return await readShareImageFile(file.uri, header[1]!, canRead, signal, uri);
-  } finally {
+  const cleanup = () => {
     try {
       file?.delete();
     } catch {
       // Best-effort cleanup within the OS cache, including partial writes.
     }
+  };
+  try {
+    directory.create({ intermediates: true, idempotent: true });
+    const unique = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    file = new File(directory, `image-${unique}.${extOfMime(mimeType)}`);
+    const FileSystem = await import("expo-file-system/legacy");
+    if (!canRead()) return null;
+    const targetUri = file.uri;
+    await readWithShareImageCancellation(() => {
+      const write = FileSystem.writeAsStringAsync(targetUri, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      // Cancellation cannot stop this native write. Clean up again if a late
+      // completion recreates the file after the immediate finally cleanup.
+      const cleanupLateWrite = () => { if (signal.aborted) cleanup(); };
+      void write.then(cleanupLateWrite, cleanupLateWrite);
+      return write;
+    }, signal);
+    return await readShareImageFile(file.uri, mimeType, canRead, signal, uri);
+  } finally {
+    cleanup();
   }
 }
 

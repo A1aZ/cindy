@@ -293,7 +293,9 @@ export function startDesktopCaptureHost(api: DesktopCaptureApi): () => void {
           let pending = 0;
           let challenge = '';
           heartbeat = setInterval(() => {
-            if (channel.readyState !== 'open' || current !== generation) return;
+            // Keep one outstanding challenge until its reply arrives. The host
+            // lease bounds silence; replacing it here rejects valid slow pongs.
+            if (channel.readyState !== 'open' || current !== generation || challenge) return;
             challenge = crypto.randomUUID();
             channel.send(JSON.stringify({ type: 'viewPing', challenge }));
           }, 2000);

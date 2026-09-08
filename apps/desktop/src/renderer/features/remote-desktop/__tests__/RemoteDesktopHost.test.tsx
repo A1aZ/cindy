@@ -107,6 +107,7 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
   vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: capture } });
   let command!: (value: any) => void;
   const reply = vi.fn().mockResolvedValue(undefined);
+  const viewHeartbeat = vi.fn().mockResolvedValue(undefined);
   Object.assign(window, {
     electronAPI: {
       remoteDesktop: {
@@ -115,6 +116,7 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
           return () => {};
         },
         reply,
+        viewHeartbeat,
         registerHost: vi.fn().mockResolvedValue(undefined),
         state: vi.fn().mockResolvedValue(null),
         stop: vi.fn().mockResolvedValue(undefined),
@@ -132,6 +134,16 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
   };
   await act(async () => command(offer));
   expect(reply).toHaveBeenCalledWith('offer', 'answer'); // No gather delay for new endpoints.
+  const channel = { label: 'input-v1', readyState: 'open', send: vi.fn(), onmessage: (_event: any) => {} };
+  peers[0].ondatachannel({ channel });
+  await act(() => vi.advanceTimersByTimeAsync(8000));
+  expect(channel.send).toHaveBeenCalledTimes(1);
+  const firstChallenge = JSON.parse(channel.send.mock.calls[0][0]).challenge;
+  channel.onmessage({ data: firstChallenge });
+  expect(viewHeartbeat).toHaveBeenCalledWith('lease');
+  await act(() => vi.advanceTimersByTimeAsync(2000));
+  expect(channel.send).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(channel.send.mock.calls[1][0]).challenge).not.toBe(firstChallenge);
   const candidate = {
     candidate: 'candidate:1 1 UDP 100 192.0.2.1 5000 typ host',
     sdpMid: '0',
@@ -166,6 +178,8 @@ it('exchanges replayable candidates without recapturing, tolerates transient dis
   await act(() => vi.advanceTimersByTimeAsync(2));
   expect(peers[0].close).not.toHaveBeenCalled();
   await act(async () => command({ ...offer, id: 'new', attemptId: 'b' }));
+  channel.onmessage({ data: JSON.parse(channel.send.mock.calls[1][0]).challenge });
+  expect(viewHeartbeat).toHaveBeenCalledTimes(1);
   await act(async () => command({ ...ice, id: 'old' }));
   expect(reply).toHaveBeenCalledWith('old', { error: 'DESKTOP_VIDEO_STOPPED' });
   expect(peers[1].addIceCandidate).not.toHaveBeenCalled();

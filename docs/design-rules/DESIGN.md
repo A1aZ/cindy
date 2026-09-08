@@ -303,6 +303,21 @@ Reference implementation: `apps/desktop/src/renderer/components/ui/confirm-dialo
 - Active: Light Gray bg (`--surface-chip`); Inactive: transparent
 - All pill-shaped (9999px)
 
+### Settings segmented controls
+
+- Use `components/settings/SettingsSegmentedControl.tsx` for a compact, mutually exclusive setting on a settings card. This is a radio group, not navigation between tab panels.
+- Use the original browser automation target treatment (user preference, 2026-09-07): a borderless pill track with `--surface-chip`, 32px height, 3px padding and 2px gap. Options: 28px height, 12px text with line-height 1, 12px horizontal padding and a reserved 1px border.
+- Selected: `--surface-elevated`, `--settings-section-title`, weight 500, and a 1px `--border-default` outline. The outline and raised fill distinguish selection from the track; `--surface-chip` is only the track, never the selected fill.
+- Unselected: transparent fill/border, `--text-secondary`, weight 400; enabled hover uses `--text-primary`. Disabled options retain the selected mark at 50% opacity and cannot change value or gain hover feedback. Keyboard focus uses `--focus-ring`.
+- Use `radiogroup` / `radio` / `aria-checked`. Tab enters at the selected option (or first option when no preset matches); arrows move focus and selection, wrap at the ends, and respect RTL. Home/End select the first/last option. Space/Enter activate the focused option.
+
+### Usage data graphics
+
+- `UsageHeatmap` and `UsageTokenBars` encode dates and quantities, including when clicking a mark filters by date. **Clickable data marks keep their data geometry; they are not ordinary pill buttons.** Their corner treatment is the registered data-mark members `usage-heatmap-day` and `usage-token-bar` (§5); it is limited to these usage charts and their date hit targets.
+- Heatmap: 12×12px square cells, 2px radius and 3px gaps in both read-only and clickable views. Reserve a 3px outer gutter so edge cells retain their focus/selected outlines. Preserve month alignment, the complete requested history window and the existing four-level neutral intensity scale.
+- Token bars: 30 equal-width slim columns fitted to the plot, 3px gaps, 2px outer radius, shared baseline and proportional stacked segments. Do not enforce a 24px minimum column width or clip the latest days behind horizontal scrolling. A low/zero bar may have a taller transparent hit target without inflating its data height.
+- Preserve semantic gray palettes, native date/value tooltips, accessible date/value labels, keyboard activation and visible focus/selected outlines. This is a geometry exception, not permission to introduce category colors or apply chart radii to other buttons.
+
 ## 5. Layout Principles
 
 ### Spacing System
@@ -356,7 +371,7 @@ Reference implementation: `apps/desktop/src/renderer/components/ui/confirm-dialo
 
 *A member ID identifies an approved visual role, not a filename or an entire component subtree. Reuse within its stated scope and semantics-preserving refactors do not require a new radius ruling; keep implementation references current. A new role, wider scope or changed geometry requires adjudication. Component entries reference the member ID and record other dimensions and interaction details instead of maintaining a second radius value.*
 
-*The last two members absorb the narrow "status micro-cells (2px)" exception registered 2026-07-28. Their value and their components are unchanged; what changes is the basis — they are classified by the role their shape plays, not by being ≤8px and non-interactive. See the decision log for the two scope changes this entails.*
+*The last two members absorb the narrow "status micro-cells (2px)" exception registered 2026-07-28. Their value and their components are unchanged; what changes is the basis — they are classified by the role their shape plays, not by being ≤8px and non-interactive. See the decision log for the two scope changes this entails. The first two members likewise carry the usage-chart geometry that #4064 phrased as a separate "usage data marks (2px)" exception; that parallel wording was folded into these registrations when this section merged, and §4 Usage data graphics is the component entry that records their dimensions.*
 
 **Evidence required to register a new data mark** — what an adjudication request must establish. **Not** a self-service test that admits a layer automatically:
 
@@ -403,6 +418,7 @@ Making something clickable never moves a layer between Step 1 and Step 2.
 *New tiers and new registered shapes both enter only through adjudication — neither is added by a reviewer's reading of this section.*
 
 *Governed corner-radius values are **0px and 2px** for registered data marks, **4px** for keycaps, **8px** for inner controls, **12px** for containers, and **9999px** for pill frames. No 3px / 6px / 10px, and no arbitrary values. A layer with no frame to round needs no assignment; "no assignment" is not an additional radius value. **Intrinsic content and mark geometry remain outside this corner-radius inventory** — a scatter dot's circle, a pie sector's arc, a map outline are shapes of the mark itself. Existing non-keycap `rounded-[4px]` usages remain registered debt; bare `rounded` and `rounded-sm` substitute for nothing.*
+
 
 ## 6. Depth & Elevation
 

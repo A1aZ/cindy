@@ -208,6 +208,27 @@ export async function del(sessionId: string): Promise<void> {
   await mutateRegistry((map) => { delete map[sessionId]; });
 }
 
+/** Atomically replace a pooled registration under the registry lock. */
+export async function replace(
+  previousSessionId: string,
+  sessionId: string,
+  meta: WorktreeMeta,
+): Promise<void> {
+  if (!sessionId) throw new Error('worktreeStore.replace: sessionId is required');
+  await mutateRegistry((map) => {
+    if (previousSessionId && previousSessionId !== sessionId) delete map[previousSessionId];
+    map[sessionId] = meta;
+  });
+  try {
+    await setWorktreePathInDb(sessionId, meta.path);
+  } catch (err) {
+    log.warn(
+      `[worktreeStore] DB sync failed for session ${sessionId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 async function mutateRegistry(mutate: (map: Record<string, WorktreeMeta>) => void): Promise<void> {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
   await withCrossProcessLock(path.join(os.tmpdir(), `cindy-worktree-registry-${uid}.lock`),

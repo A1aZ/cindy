@@ -45,6 +45,10 @@ vi.mock('../worktree/worktreeStore', () => ({
   getAll: () => [...storeMap.values()],
   getAllPaths: () => [...storeMap.values()].map((m) => m.path),
   set: async (id: string, meta: WorktreeMeta) => { storeMap.set(id, meta); },
+  replace: async (previousId: string, id: string, meta: WorktreeMeta) => {
+    if (previousId !== id) storeMap.delete(previousId);
+    storeMap.set(id, meta);
+  },
   del: (sessionId: string) => storeMap.delete(sessionId),
 }));
 

@@ -106,8 +106,7 @@ export async function acquireWorktree(
             createdAt: new Date().toISOString(),
             generation: randomUUID(),
           };
-          await store.set(req.sessionId, meta);
-          if (entry.meta.sessionId !== req.sessionId) await store.del(entry.meta.sessionId);
+          await store.replace(entry.meta.sessionId, req.sessionId, meta);
 
           log.info(
             `[WorktreePool] reusing pooled worktree at ${meta.path} for session ${req.sessionId}`,

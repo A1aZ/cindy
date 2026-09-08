@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Tip } from '@/components/ui/tooltip';
-import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { extractIpcError } from '@/utils/ipcError';
 import { toast } from '@/lib/toast';
@@ -17,7 +16,6 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
   onUninstalled?: () => void;
 }) {
   const { t } = useTranslation();
-  const { confirm } = useConfirmDialog();
   const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [pendingEnabled, setPendingEnabled] = useState<boolean | null>(null);
@@ -48,21 +46,9 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
     busyRef.current = true;
     setBusy(true);
     try {
-      const accepted = await confirm({
-        title: t('skillhub.detail.uninstallDialog.title', { name: skill.name }),
-        description: [
-          t(skill.uninstallLinkOnly ? 'skillhub.management.unlinkDescription' : 'skillhub.management.trashDescription'),
-          t(skill.scope === 'project' ? 'skillhub.management.projectScope' : 'skillhub.management.globalScope', {
-            project: skill.projectRoot ?? '',
-          }),
-          t('skillhub.management.sharedImpact'),
-        ].join('\n\n'),
-        confirmText: t('skillhub.detail.uninstallDialog.confirm'),
-        cancelText: t('skillhub.detail.uninstallDialog.cancel'),
-      });
-      if (!accepted) return;
       const result = await window.electronAPI.skillhub.uninstall(skill.absolutePath, skill.id);
       if (!result.success) {
+        if (result.errorCode === 'CANCELLED') return;
         toast.error(t('skillhub.management.uninstallFailed'));
         return;
       }

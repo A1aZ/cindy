@@ -41,7 +41,7 @@ import {
   type SendOptions,
   type TurnPermissionPolicy,
 } from '../base-agent.js';
-import { skillEntryPath, snapshotDisabledSkillPaths } from '../shared/skill-activation.js';
+import { skillEntryPath, snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths } from '../shared/skill-activation.js';
 import type { AgentCredentialMode } from '../../interfaces/auth-adapter.js';
 import type {
   Capabilities,
@@ -4824,7 +4824,8 @@ export class CodexAgent extends BaseAgent {
     );
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
-    const disabledSkillSnapshot = snapshotDisabledSkillPaths(disabledSkillPaths);
+    const disabledSkillLaunch = snapshotDisabledSkillLaunch(disabledSkillPaths);
+    const disabledSkillSnapshot = disabledSkillLaunch.identities;
     if (disabledSkillPaths.length > 0) {
       try {
         const response = await host.request<{ config?: Record<string, unknown> }>(
@@ -4838,7 +4839,7 @@ export class CodexAgent extends BaseAgent {
             Array.isArray(nativeSkills) ? { 'skills.config': nativeSkills } : {},
             capabilityRoutingConfig,
           ),
-          { 'skills.config': disabledSkillPaths.map((source) => ({ path: skillEntryPath(source), enabled: false })) },
+          { 'skills.config': currentDisabledSkillLaunchPaths(disabledSkillLaunch).map((source) => ({ path: skillEntryPath(source), enabled: false })) },
         );
       } catch (error) {
         releaseHostBindingLeaseIfNeeded();

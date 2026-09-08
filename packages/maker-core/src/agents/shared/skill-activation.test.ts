@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { canonicalSkillPath, claudeDisabledSkillOverrides, isSkillDisabled, skillEntryPath } from './skill-activation.js';
-import { filterPiDisabledProjectSkills } from '../pi/skill-activation.js';
+import { canonicalSkillPath, claudeDisabledSkillOverrides, isSkillDisabled, skillEntryPath, snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths } from './skill-activation.js';
+import { filterPiDisabledProjectSkills, applyPiDisabledSkillSettings, piDisabledDiscoveryPaths } from '../pi/skill-activation.js';
 import type { AgentCustomization } from '../../types/customizations.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-skill-activation-'));
@@ -23,6 +23,36 @@ describe('Cindy-only Skill activation', () => {
     expect(isSkillDisabled(skillEntryPath(global.absolutePath), [global.absolutePath])).toBe(true);
     expect(isSkillDisabled(project.absolutePath, [global.absolutePath])).toBe(false);
     expect(canonicalSkillPath(skillEntryPath(global.absolutePath))).toBe(canonicalSkillPath(global.absolutePath));
+  });
+
+  it.each(['alias', 'physical'])('keeps native exclusions aligned when a %s path is retargeted across startup await', async (retarget) => {
+    const a = skill(`launch-a-${retarget}`);
+    const b = skill(`launch-b-${retarget}`);
+    const alias = path.join(root, `launch-alias-${retarget}`);
+    fs.symlinkSync(a.absolutePath, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const aKey = canonicalSkillPath(a.absolutePath);
+    const snapshot = snapshotDisabledSkillLaunch([alias]);
+    await Promise.resolve().then(() => {
+      if (retarget === 'alias') {
+        fs.unlinkSync(alias);
+        fs.symlinkSync(b.absolutePath, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      } else {
+        fs.renameSync(a.absolutePath, `${a.absolutePath}-moved`);
+        fs.symlinkSync(b.absolutePath, a.absolutePath, process.platform === 'win32' ? 'junction' : 'dir');
+      }
+    });
+    const paths = currentDisabledSkillLaunchPaths(snapshot);
+    expect(paths).not.toContain(alias);
+    expect(paths.some((source) => canonicalSkillPath(source) === canonicalSkillPath(b.absolutePath))).toBe(false);
+    expect(snapshot.identities).toEqual([aKey]);
+    const claude = claudeDisabledSkillOverrides([a, b], paths);
+    expect(claude[b.name]).toBeUndefined();
+    expect(claude[a.name]).toBe(retarget === 'alias' ? 'off' : undefined);
+    const codex = paths.map((source) => ({ path: skillEntryPath(source), enabled: false }));
+    expect(codex.every((item) => canonicalSkillPath(item.path) === aKey)).toBe(true);
+    const pi = applyPiDisabledSkillSettings({}, piDisabledDiscoveryPaths(paths, [alias]));
+    expect(pi.skills ?? []).not.toContain(`-${alias}`);
+    expect(pi.skills ?? []).not.toContain(`-${b.absolutePath}`);
   });
 
   it('uses the winning Claude source, leaving a same-name project Skill enabled', () => {

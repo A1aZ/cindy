@@ -15,6 +15,24 @@ export function snapshotDisabledSkillPaths(paths: readonly string[]): readonly s
   return Object.freeze([...new Set(paths.map(canonicalSkillPath))]);
 }
 
+export interface DisabledSkillLaunchSnapshot {
+  readonly identities: readonly string[];
+  readonly paths: readonly { readonly path: string; readonly identity: string }[];
+}
+
+/** Keep lexical exclusions bound to the identities chosen before startup awaits. */
+export function snapshotDisabledSkillLaunch(paths: readonly string[]): DisabledSkillLaunchSnapshot {
+  const identities = snapshotDisabledSkillPaths(paths);
+  return Object.freeze({ identities, paths: Object.freeze([...new Set([...paths, ...identities])]
+    .map((source) => Object.freeze({ path: source, identity: canonicalSkillPath(source) }))) });
+}
+
+/** Drop stale/retargeted lexical paths immediately before native configuration. */
+export function currentDisabledSkillLaunchPaths(snapshot: DisabledSkillLaunchSnapshot): string[] {
+  return snapshot.paths.filter((entry) => canonicalSkillPath(entry.path) === entry.identity)
+    .map((entry) => entry.path);
+}
+
 export function isSkillDisabled(source: string, disabledPaths: readonly string[]): boolean {
   const key = canonicalSkillPath(source);
   return disabledPaths.some((candidate) => canonicalSkillPath(candidate) === key);

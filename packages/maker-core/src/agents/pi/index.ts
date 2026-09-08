@@ -1,4 +1,4 @@
-import { snapshotDisabledSkillPaths } from '../shared/skill-activation.js';
+import { snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths } from '../shared/skill-activation.js';
 /**
  * PiAgent —— pi coding agent(earendil-works/pi)接入。
  *
@@ -3048,7 +3048,8 @@ export class PiAgent extends BaseAgent {
     // approval from permission mode, MCP/plugin state, or caller vendor options.
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
-    const disabledSkillSnapshot = snapshotDisabledSkillPaths(disabledSkillPaths);
+    const disabledSkillLaunch = snapshotDisabledSkillLaunch(disabledSkillPaths);
+    const disabledSkillSnapshot = disabledSkillLaunch.identities;
     let projectResourceAssembly = unavailablePiProjectResourceAssembly(
       reviewMode ? 'review-mode-project-resources-disabled' : 'approval-resolver-unavailable',
     );
@@ -3060,7 +3061,7 @@ export class PiAgent extends BaseAgent {
           ...(opts.remoteHostId ? { remoteHostId: opts.remoteHostId } : {}),
         });
         projectResourceAssembly = await assembleApprovedPiProjectResources(trustInput, opts.workingDir);
-        projectResourceAssembly = filterPiDisabledProjectSkills(projectResourceAssembly, disabledSkillPaths);
+        projectResourceAssembly = filterPiDisabledProjectSkills(projectResourceAssembly, currentDisabledSkillLaunchPaths(disabledSkillLaunch));
         projectResourceAssembly = await stageApprovedPiProjectResources(projectResourceAssembly, configHome);
       } catch {
         projectResourceAssembly = unavailablePiProjectResourceAssembly('approval-resolver-failed');
@@ -3142,7 +3143,7 @@ export class PiAgent extends BaseAgent {
     if (disabledSkillPaths.length > 0) {
       const settingsPath = path.join(configHome, 'settings.json');
       const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
-      await fs.writeFile(settingsPath, JSON.stringify(applyPiDisabledSkillSettings(settings, piDisabledDiscoveryPaths(disabledSkillPaths, [
+      await fs.writeFile(settingsPath, JSON.stringify(applyPiDisabledSkillSettings(settings, piDisabledDiscoveryPaths(currentDisabledSkillLaunchPaths(disabledSkillLaunch), [
         path.join(configHome, 'skills'), path.join(os.homedir(), '.agents', 'skills'),
         ...managedPackageResources.skills.map((skill) => skill.path),
       ])), null, 2) + '\n', { mode: 0o600 });

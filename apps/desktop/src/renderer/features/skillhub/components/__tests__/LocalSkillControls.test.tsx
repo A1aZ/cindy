@@ -74,22 +74,24 @@ describe('Local Skill management', () => {
     expect(mocks.refresh).toHaveBeenCalledOnce();
   });
 
-  it('does not uninstall when confirmation is cancelled', async () => {
-    mocks.confirm.mockResolvedValueOnce(false);
-    render(<LocalSkillControls skill={skill} />);
+  it('treats Main confirmation cancellation as a no-op', async () => {
+    mocks.uninstall.mockResolvedValueOnce({ success: false, errorCode: 'CANCELLED', message: '' });
+    const onUninstalled = vi.fn();
+    render(<LocalSkillControls skill={skill} onUninstalled={onUninstalled} />);
     await chooseUninstall();
-    await waitFor(() => expect(mocks.confirm).toHaveBeenCalledOnce());
-    expect(mocks.uninstall).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.uninstall).toHaveBeenCalledOnce());
+    expect(onUninstalled).not.toHaveBeenCalled();
+    expect(mocks.error).not.toHaveBeenCalled();
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.confirm).not.toHaveBeenCalled();
   });
 
-  it('explains external link and project scope before uninstalling', async () => {
+  it('delegates confirmation to Main with the selected skill identity', async () => {
     const onUninstalled = vi.fn();
     render(<LocalSkillControls skill={{ ...skill, scope: 'project', projectRoot: '/project', uninstallLinkOnly: true }} onUninstalled={onUninstalled} />);
     await chooseUninstall();
     await waitFor(() => expect(onUninstalled).toHaveBeenCalledOnce());
-    expect(mocks.confirm.mock.calls[0][0].description).toBe([
-      'skillhub.management.unlinkDescription', 'skillhub.management.projectScope', 'skillhub.management.sharedImpact',
-    ].join('\n\n'));
+    expect(mocks.confirm).not.toHaveBeenCalled();
     expect(mocks.uninstall).toHaveBeenCalledWith(skill.absolutePath, skill.id);
   });
 

@@ -173,7 +173,7 @@ import type {
   MemoryResetResult,
 } from '../../types/memory.js';
 import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
-import { claudeDisabledSkillOverrides, snapshotDisabledSkillPaths } from '../shared/skill-activation.js';
+import { claudeDisabledSkillOverrides, snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths } from '../shared/skill-activation.js';
 import { scanClaudeCustomizations, scanClaudeRuntimeSkills } from './customization-scanner.js';
 import {
   REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
@@ -2369,9 +2369,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     // 时快照。装配逻辑(含 apiKeyHelper 恒置空的鉴权防线)在 flag-settings.ts。
     const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
-    const disabledSkillSnapshot = snapshotDisabledSkillPaths(disabledSkillPaths);
+    const disabledSkillLaunch = snapshotDisabledSkillLaunch(disabledSkillPaths);
+    const disabledSkillSnapshot = disabledSkillLaunch.identities;
     const disabledSkillOverrides = disabledSkillPaths.length > 0
-      ? claudeDisabledSkillOverrides((await scanClaudeRuntimeSkills(opts.workingDir)).items, disabledSkillPaths)
+      ? claudeDisabledSkillOverrides((await scanClaudeRuntimeSkills(opts.workingDir)).items, currentDisabledSkillLaunchPaths(disabledSkillLaunch))
       : {};
     const buildSettings = (): Settings => {
       const settings = buildClaudeFlagSettings({

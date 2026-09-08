@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { t } from '../i18n.js';
 import { throwIpcError } from '../utils/ipcValidate';
 import { setCindySkillEnabled } from './activationPreferences';
 import { inspectLocalSkillTarget, isLocalSkillTargetCurrent, isPluginManagedSkillPath, type LocalSkillTarget } from './localSkillTarget';
@@ -115,6 +116,7 @@ async function validateRequestedProjects(
 export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   const marketService = options.marketService ?? new SkillhubMarketService();
   const localImportGrants = new Map<string, LocalImportGrant>();
+  const uninstallConfirmations = new Set<number>();
   const cleanupGrants = new Map<string, { ownerId: string | null; senderId: number }>();
   const scannedSkillRootsBySender = new Map<number, ScannedSkillGrant>();
   const localSkillsBySender = new Map<number, Array<{
@@ -1008,14 +1010,47 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   ipcMain.handle(
     'skillhub:uninstall',
     async (event, { absolutePath, skillId }: { absolutePath: string; skillId?: string }) => {
-      const { target } = await requireLocalSkill(event, absolutePath, skillId);
+      const { target, skill } = await requireLocalSkill(event, absolutePath, skillId);
       if (!target || !isLocalSkillTargetCurrent(target) || isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots())) {
         throwIpcError('PRECONDITION_FAILED', 'Skill cannot be uninstalled; refresh and retry');
       }
       const ownerId = getCurrentDataOwnerId();
       const cleanupGeneration = cleanupGenerationBySender.get(event.sender) ?? 0;
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      if (!parent || parent.isDestroyed() || uninstallConfirmations.has(event.sender.id)) {
+        throwIpcError('PRECONDITION_FAILED', 'Skill confirmation is unavailable');
+      }
+      // Renderer confirmation is not authorization. Only this native decision
+      // approves the Main-scanned entity, and navigation/owner changes revoke it.
+      uninstallConfirmations.add(event.sender.id);
+      let response: number;
+      try {
+        ({ response } = await dialog.showMessageBox(parent, {
+          type: 'warning',
+          title: t('skillhub.detail.uninstallDialog.title').replace('{{name}}', () => skill.name),
+          message: t('skillhub.detail.uninstallDialog.title').replace('{{name}}', () => skill.name),
+          detail: [
+            t(target.linkOnly ? 'skillhub.management.unlinkDescription' : 'skillhub.management.trashDescription'),
+            t(skill.scope === 'project' ? 'skillhub.management.projectScope' : 'skillhub.management.globalScope')
+              .replace('{{project}}', () => skill.projectRoot ?? ''),
+            t('skillhub.management.sharedImpact'), target.operationPath,
+          ].join('\n\n'),
+          buttons: [t('skillhub.detail.uninstallDialog.confirm'), t('skillhub.detail.uninstallDialog.cancel')],
+          defaultId: 1, cancelId: 1, noLink: true,
+        }));
+      } catch { throwIpcError('INTERNAL', 'Could not confirm Skill uninstall; retry'); }
+      finally { uninstallConfirmations.delete(event.sender.id); }
+      if (response !== 0) return { success: false, errorCode: 'CANCELLED', message: '' };
+      const current = await requireLocalSkill(event, absolutePath, skillId);
+      const approvalCurrent = () => !parent.isDestroyed()
+        && cleanupGeneration === (cleanupGenerationBySender.get(event.sender) ?? 0)
+        && ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending();
+      if (!approvalCurrent() || current.target?.identity !== target.identity
+        || JSON.stringify(current.target.aliases) !== JSON.stringify(target.aliases)) {
+        throwIpcError('PRECONDITION_FAILED', 'Skill confirmation expired; refresh and retry');
+      }
       const result = await installService.uninstall(absolutePath, target,
-        () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending()
+        () => approvalCurrent()
           && !isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots()));
       if (!result.success) throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
       await refreshCodexProjectSkillCache(result.projectWorkingDir);

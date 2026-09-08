@@ -10,6 +10,8 @@ vi.mock('../activationPreferences', () => ({ setCindySkillEnabled }));
 
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
 const showOpenDialog = vi.fn();
+const showMessageBox = vi.fn();
+vi.mock('../../i18n.js', () => ({ t: (key: string) => key }));
 const assertTrustedAppRendererEvent = vi.fn();
 const importLocalSkillMocks = vi.hoisted(() => ({
   inspectLocalSkill: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock('electron', () => ({
   },
   dialog: {
     showOpenDialog,
+    showMessageBox,
   },
   ipcMain: {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -137,6 +140,8 @@ describe('registerSkillhubIpc usage handlers', () => {
     });
     ensureReady.mockResolvedValue({ ready: true });
     requestLocalSkillUsageAnalyticsRefresh.mockReturnValue(null);
+    showMessageBox.mockReset();
+    showMessageBox.mockResolvedValue({ response: 0 });
     showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
     getAllowedProjectRoots.mockResolvedValue(['/repo', '/old', '/new']);
     resolveExistingSkillPathForGrant.mockImplementation((candidate: string) => (
@@ -351,6 +356,8 @@ describe('registerSkillhubIpc usage handlers', () => {
   });
 
   it('issues a sender-bound grant for the file selected and inspected in main', async () => {
+    showMessageBox.mockReset();
+    showMessageBox.mockResolvedValue({ response: 0 });
     showOpenDialog.mockResolvedValueOnce({
       canceled: false,
       filePaths: ['/selected/demo-skill.zip'],
@@ -381,6 +388,8 @@ describe('registerSkillhubIpc usage handlers', () => {
   });
 
   it('imports only the selected path for the grant owner and consumes a successful grant', async () => {
+    showMessageBox.mockReset();
+    showMessageBox.mockResolvedValue({ response: 0 });
     showOpenDialog.mockResolvedValueOnce({
       canceled: false,
       filePaths: ['/selected/demo-skill.zip'],
@@ -432,6 +441,8 @@ describe('registerSkillhubIpc usage handlers', () => {
     );
     expect(missing).toMatchObject({ success: false, errorCode: 'PERMISSION_DENIED' });
 
+    showMessageBox.mockReset();
+    showMessageBox.mockResolvedValue({ response: 0 });
     showOpenDialog.mockResolvedValueOnce({
       canceled: false,
       filePaths: ['/selected/demo-skill.zip'],
@@ -689,6 +700,50 @@ describe('registerSkillhubIpc usage handlers', () => {
     await handlers.get('skillhub:uninstall')!(event, { absolutePath, skillId: 'entry-1' });
     expect(installServiceMocks.uninstall).toHaveBeenCalledWith(absolutePath,
       expect.objectContaining({ operationPath: absolutePath, aliases: expect.arrayContaining(aliases), linkOnly: false }), expect.any(Function));
+  });
+
+  it('requires native confirmation for direct uninstall and never mutates on cancellation', async () => {
+    const { event, absolutePath } = await scanLocalFixture();
+    showMessageBox.mockResolvedValueOnce({ response: 1 });
+    expect(await handlers.get('skillhub:uninstall')!(event, { absolutePath }))
+      .toEqual({ success: false, errorCode: 'CANCELLED', message: '' });
+    expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
+    expect(showMessageBox).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      defaultId: 1, cancelId: 1, detail: expect.stringContaining(absolutePath),
+    }));
+  });
+
+  it.each(['owner', 'reload', 'source', 'project'])('revokes confirmation when %s changes while native dialog is open', async (change) => {
+    const { event, absolutePath } = await scanLocalFixture();
+    let approve!: (value: { response: number }) => void;
+    showMessageBox.mockImplementationOnce(() => new Promise((resolve) => { approve = resolve; }));
+    const pending = handlers.get('skillhub:uninstall')!(event, { absolutePath });
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledOnce());
+    expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
+    if (change === 'owner') getCurrentDataOwnerId.mockReturnValue('another-owner');
+    if (change === 'project') getAllowedProjectRoots.mockResolvedValue([]);
+    if (change === 'reload') event.sender.on.mock.calls.find(([name]) => name === 'did-start-navigation')![1]({}, '', false, true);
+    if (change === 'source') {
+      fs.renameSync(absolutePath, `${absolutePath}-old`);
+      fs.mkdirSync(absolutePath);
+      fs.writeFileSync(path.join(absolutePath, 'SKILL.md'), 'replacement');
+    }
+    approve({ response: 0 });
+    await rejected;
+    expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
+  });
+
+  it('does not queue repeated native uninstall dialogs from one renderer', async () => {
+    const { event, absolutePath } = await scanLocalFixture();
+    let cancel!: (value: { response: number }) => void;
+    showMessageBox.mockImplementationOnce(() => new Promise((resolve) => { cancel = resolve; }));
+    const pending = handlers.get('skillhub:uninstall')!(event, { absolutePath });
+    await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledOnce());
+    await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath })).rejects.toThrow('PRECONDITION_FAILED');
+    expect(showMessageBox).toHaveBeenCalledOnce();
+    cancel({ response: 1 });
+    await pending;
   });
 
   it('refreshes the Codex cwd cache after uninstalling a granted project skill', async () => {

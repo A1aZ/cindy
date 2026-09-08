@@ -136,11 +136,14 @@ if (portArgs.port === DEFAULT_PORT) {
       process.exit(1);
     }
 
-    if (!pid || !isMetroPid(pid)) {
+    const confirmedMetro = process.platform === 'win32'
+      ? Boolean(ownership?.cwd && ownership?.source)
+      : Boolean(pid && isMetroPid(pid));
+    if (!pid || !confirmedMetro) {
       console.error(`✗ ${DEFAULT_PORT} 上的进程不是可确认的 Metro,拒绝接管。`);
       process.exit(1);
     }
-    const stopped = await terminateMetro(pid, { worktreeRoot: listener.worktree });
+    const stopped = await terminateMetro(ownership?.launcherPid ?? pid, { worktreeRoot: listener.worktree });
     if (!stopped) {
       console.error(`✗ 无法在限定时间内停止旧 Metro(pid=${pid}),拒绝继续。`);
       process.exit(1);

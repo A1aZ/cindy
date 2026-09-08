@@ -1758,6 +1758,8 @@ describe('new session composer surface', () => {
     expect(newSource).toContain('const voiceStartupInFlightRef = useRef(false);');
     expect(newSource).toContain('const voicePermissionRequestInFlightRef = useRef(false);');
     expect(newSource).toContain('const voiceStopInFlightRef = useRef(false);');
+    expect(newSource).toContain('if (!voiceRecordingActiveRef.current) {');
+    expect(newSource).not.toContain('if (!voiceRecordingActiveRef.current && !voiceStopInFlightRef.current) {');
     expect(newSource).toContain('const voiceStartupSeqRef = useRef(0);');
     expect(newSource).toContain('|| voiceStopInFlightRef.current');
     expect(newSource).toContain('resolveMobileVoiceRecordingPermission({');

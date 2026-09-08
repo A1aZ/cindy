@@ -70,7 +70,7 @@ import {
   formatMobileLocalConfigStatus,
 } from './lib/mobile-local-config.mjs';
 import { podInstallBounded } from './sim-pod-install.mjs';
-import { ensureWindowsAndroidEmulator } from './lib/android-simulator.mjs';
+import { ensureWindowsAndroidEmulator, resolveAndroidSdkTools } from './lib/android-simulator.mjs';
 import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';
 import {
   cwdOfPid,
@@ -196,11 +196,18 @@ function ensureMetroOwnershipBeforeLaunch(packageName) {
 }
 
 async function rebuildAndroidSimulator() {
+  const androidTools = process.platform === 'win32'
+    ? resolveAndroidSdkTools({ env: devProcessEnv, platform: process.platform })
+    : null;
   const emulator = buildOnly
-    ? { serial: null, adb: null }
+    ? { serial: null, adb: null, sdkRoot: androidTools?.sdkRoot }
     : await ensureWindowsAndroidEmulator({ port: 8081 });
+  const sdkRoot = emulator.sdkRoot ?? androidTools?.sdkRoot;
   const androidDir = join(mobileDir, 'android');
-  const javaEnv = resolveJavaRuntimeEnv(devProcessEnv);
+  const javaEnv = resolveJavaRuntimeEnv({
+    ...devProcessEnv,
+    ...(sdkRoot ? { ANDROID_SDK_ROOT: sdkRoot, ANDROID_HOME: sdkRoot } : {}),
+  });
   console.log('› Android expo prebuild (debug development client)');
   runPnpm(['exec', 'expo', 'prebuild', '--platform', 'android', '--no-install']);
 

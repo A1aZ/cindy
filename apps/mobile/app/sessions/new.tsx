@@ -5888,7 +5888,9 @@ export default function NewRemoteSessionScreen() {
                   }}
                   onChangeText={setFirstMessageDraft}
                   onSelectionChange={(event) => {
-                    if (!voiceRecordingActiveRef.current && !voiceStopInFlightRef.current) {
+                    // finishVoiceRecording marks recording inactive before awaiting
+                    // ASR/refinement teardown, so native cursor edits remain user-owned.
+                    if (!voiceRecordingActiveRef.current) {
                       const selection = event.nativeEvent.selection;
                       firstMessageSelectionRef.current = selection;
                       setFirstMessageSelection(selection);

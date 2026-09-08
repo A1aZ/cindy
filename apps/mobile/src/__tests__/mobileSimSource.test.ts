@@ -88,6 +88,7 @@ describe('mobile simulator Metro takeover', () => {
     const run = vi.fn();
     let alive = true;
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: run,
       groupId: '456',
       currentGroupId: '789',
@@ -105,9 +106,30 @@ describe('mobile simulator Metro takeover', () => {
     expect(run).toHaveBeenCalledWith('kill', ['-TERM', '-456']);
   });
 
+  it('uses taskkill tree termination for a confirmed Windows launcher', async () => {
+    const run = vi.fn();
+    let alive = true;
+    const stopped = await terminateMetro(123, {
+      platform: 'win32',
+      execFile: run,
+      isAlive: () => alive,
+      wait: async () => { alive = false; },
+      timeoutMs: 100,
+      pollMs: 10,
+    });
+
+    expect(stopped).toBe(true);
+    expect(run).toHaveBeenCalledWith(
+      'taskkill',
+      ['/PID', '123', '/T', '/F'],
+      { stdio: 'ignore', windowsHide: true },
+    );
+  });
+
   it('falls back to the listener PID when the group is unavailable', async () => {
     const run = vi.fn();
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: run,
       groupId: null,
       currentGroupId: '789',
@@ -121,6 +143,7 @@ describe('mobile simulator Metro takeover', () => {
   it('falls back to the listener PID when the current process group is unknown', async () => {
     const run = vi.fn();
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: run,
       groupId: '456',
       currentGroupId: null,
@@ -135,6 +158,7 @@ describe('mobile simulator Metro takeover', () => {
   it('falls back to the listener PID for a process group with unrelated members', async () => {
     const run = vi.fn();
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: run,
       groupId: '456',
       currentGroupId: '789',
@@ -149,6 +173,7 @@ describe('mobile simulator Metro takeover', () => {
   it('returns success when the listener exits before kill', async () => {
     const run = vi.fn(() => { throw new Error('ESRCH'); });
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: run,
       groupId: null,
       isAlive: () => false,
@@ -163,6 +188,7 @@ describe('mobile simulator Metro takeover', () => {
 
   it('times out instead of claiming a process was stopped', async () => {
     const stopped = await terminateMetro(123, {
+      platform: 'darwin',
       execFile: vi.fn(),
       groupId: null,
       isAlive: () => true,

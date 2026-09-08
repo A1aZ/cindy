@@ -103,7 +103,12 @@ export function probeMetroOwnership(port) {
   if (!owner || !Number.isInteger(owner.pid) || !ownerProcessAlive) {
     return { pid, cwd: null, source: null };
   }
-  return { pid, cwd: owner.worktreeRoot ?? null, source: owner.source ?? null };
+  return {
+    pid,
+    launcherPid: Number.isInteger(owner.launcherPid) ? owner.launcherPid : owner.pid,
+    cwd: owner.worktreeRoot ?? null,
+    source: owner.source ?? null,
+  };
 }
 
 // 进程工作目录(用 cwd 判 worktree,而非解析命令行 —— 命令行常是 `pnpm exec expo`、取不到
@@ -182,11 +187,28 @@ export function isDedicatedMetroProcessGroup(entries, expectedWorktree) {
 export async function terminateMetro(pid, options = {}) {
   const run = options.execFile ?? execFileSync;
   const wait = options.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const isAlive = options.isAlive ?? (() => Boolean(commandOfPid(pid)));
+  const platform = options.platform ?? process.platform;
+  const isAlive = options.isAlive ?? (() => (
+    platform === 'win32' ? processAlive(pid) : Boolean(commandOfPid(pid))
+  ));
   const signal = options.signal ?? 'TERM';
   const timeoutMs = options.timeoutMs ?? 5000;
   const pollMs = options.pollMs ?? 100;
   if (!Number.isFinite(pollMs) || pollMs <= 0) throw new Error('Metro 终止轮询间隔必须大于 0');
+
+  if (platform === 'win32') {
+    try {
+      run('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } catch {
+      if (!isAlive()) return true;
+      return false;
+    }
+    for (let waitedMs = 0; waitedMs < timeoutMs; waitedMs += pollMs) {
+      if (!isAlive()) return true;
+      await wait(pollMs);
+    }
+    return !isAlive();
+  }
 
   const groupId = options.groupId !== undefined ? options.groupId : processGroupOfPid(pid);
   const currentGroupId = options.currentGroupId !== undefined

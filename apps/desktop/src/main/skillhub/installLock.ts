@@ -22,7 +22,8 @@ export type SkillInstallLockOwner =
   | 'market-install'
   | 'market-uninstall'
   | 'learn-apply'
-  | 'local-import';
+  | 'local-import'
+  | 'local-rename';
 
 interface LockHolder {
   owner: SkillInstallLockOwner;

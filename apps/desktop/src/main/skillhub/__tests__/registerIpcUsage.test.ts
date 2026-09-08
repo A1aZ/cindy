@@ -199,7 +199,8 @@ describe('registerSkillhubIpc usage handlers', () => {
     ] as const;
     for (const [channel, params, delegated] of calls) {
       await handlers.get(channel)?.({ sender }, params);
-      expect(delegated).toHaveBeenCalledWith(params);
+      if (channel === 'skillhub:rename-local') expect(delegated).toHaveBeenCalledWith(params, expect.any(Function));
+      else expect(delegated).toHaveBeenCalledWith(params);
     }
 
     const wrongSender = await handlers.get('skillhub:read-raw')?.(

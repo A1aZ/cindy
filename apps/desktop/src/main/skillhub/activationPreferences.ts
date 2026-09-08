@@ -48,3 +48,19 @@ export async function setCindySkillEnabled(source: string, enabled: boolean, can
     };
   });
 }
+
+/** Run the filesystem rename and preference migration under the same settings lock. */
+export async function renameSkillWithActivation(
+  source: string,
+  destination: string,
+  renameFiles: () => void,
+): Promise<void> {
+  await store.updateAtomic(({ value }) => {
+    const oldKey = skillActivationKey(source);
+    renameFiles();
+    const newKey = skillActivationKey(destination);
+    const disabledPaths = value.disabledPaths.filter((key) => key !== oldKey && key !== newKey);
+    if (value.disabledPaths.includes(oldKey)) disabledPaths.push(newKey);
+    return { disabledPaths: [...new Set(disabledPaths)].sort() };
+  });
+}

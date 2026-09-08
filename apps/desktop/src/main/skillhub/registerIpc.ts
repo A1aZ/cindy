@@ -473,7 +473,10 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     'skillhub:rename-local',
     async (event, params: { absolutePath: string; newName: string }) => {
       if (!await hasScannedSkillGrant(event, params.absolutePath)) return scanGrantDenied();
-      return renameLocalSkill(params);
+      const ownerId = getCurrentDataOwnerId();
+      const result = await renameLocalSkill(params, () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending());
+      if (result.success) broadcastLocalChange();
+      return result;
     },
   );
 

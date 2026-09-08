@@ -80,6 +80,18 @@ describe('SlashCommandPalette project Skill rows', () => {
     expect(onSelect).toHaveBeenCalledWith(command);
   });
 
+  it.each(['repo', 'project', 'global', 'user'] as const)('offers only resolvable %s details in a new-task draft', (scope) => {
+    const command: UnifiedCommand = { ...discoveredProjectSkill, scope, path: '/draft/demo/SKILL.md', runtimeStatus: 'approved' };
+    const onSelect = vi.fn();
+    render(<SlashCommandPalette query="" commands={[command]} focusedIndex={0} allowProjectSkillDetails={false}
+      onFocusedIndexChange={vi.fn()} onSelect={onSelect} onClose={vi.fn()} onOpenSkillDetails={vi.fn()} />);
+    const details = screen.queryByRole('button', { name: 'commandPalette.viewSkillDetails' });
+    if (scope === 'global' || scope === 'user') expect(details).not.toBeNull();
+    else expect(details).toBeNull();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'demo' }));
+    expect(onSelect).toHaveBeenCalledWith(command);
+  });
+
   it('keeps a discovered Skill disabled and non-actionable', () => {
     const onSelect = vi.fn();
 

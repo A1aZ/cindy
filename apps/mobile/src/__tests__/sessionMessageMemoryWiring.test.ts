@@ -22,7 +22,7 @@ describe('任务消息内存治理页面接线', () => {
     expect(screen).toContain('handledMessageReloadRevisionRef.current = messageReloadRevision;');
     expect(screen).toContain('const releasePendingRouteFocusLookup = () => {');
     expect(screen).toContain('releasePendingRouteFocusLookup();');
-    expect(screen).toContain('[deviceId, maker, messageReloadRevision, renderItems, routeFocusClientId, routeFocusKey, sessionId]');
+    expect(screen).toContain('[deviceId, maker, messageReloadRevision, renderItems, requestSync, routeFocusClientId, routeFocusKey, sessionId]');
   });
 
   it('首次进入详情在取得 authority 后触发同步，不依赖更早的 mount load', () => {

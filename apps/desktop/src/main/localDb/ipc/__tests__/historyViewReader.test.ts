@@ -116,3 +116,23 @@ describe('host history view', () => {
   });
 
 });
+
+describe('history scan budget', () => {
+  it('stops a boundary-free history before a twenty-first query without returning partial groups', async () => {
+    const { api, list } = reader(Array.from({ length: 2500 }, (_, i) => row(i)));
+    await expect(api.page('s')).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+    expect(list).toHaveBeenCalledTimes(20);
+  });
+  it('stops retained bytes before projecting a large result batch', async () => {
+    const { api, list } = reader(Array.from({ length: 150 }, (_, i) => ({ ...row(i), content: 'x'.repeat(100000) })));
+    await expect(api.page('s')).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+  it('applies the same budget to in-flight content', async () => {
+    const base = reader([row(0, 'user')]);
+    const api = createHistoryViewReader({ list: base.list, running: () => true,
+      live: () => [{ ...row(1), content: 'x'.repeat(8 * 1024 * 1024) }], anchor: async () => row(0, 'user') });
+    await expect(api.page('s')).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+    expect(base.list).toHaveBeenCalledTimes(1);
+  });
+});

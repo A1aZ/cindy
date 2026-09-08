@@ -23,7 +23,7 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
-import { historyViewLeaves } from '@cindy/maker-shared/message-window';
+import { historyViewLeaves, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 
 import { getDbClient } from '../client/current';
 import type { ContextRebuildArgs } from '../client/tx/types';
@@ -380,7 +380,10 @@ export function registerMessageIpc(
     if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
     const sid = requireString(sessionId, 'sessionId');
     const before = (opts as { before?: unknown } | null)?.before;
-    const page = await historyView.page(sid, before == null ? undefined : requireString(before, 'before'));
+    const page = await historyView.page(sid, before == null ? undefined : requireString(before, 'before')).catch((error) => {
+      if (isHistoryViewUnavailable(error)) getDeviceLinkInvokeContext()?.historyView?.disable();
+      throw error;
+    });
     if (before == null) {
       const liveKeys = historyViewLeaves(page.items)
         .filter((item) => item.type === 'work' && item.summary.isStreaming).map((item) => item.key);

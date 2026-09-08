@@ -66,6 +66,9 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   refresh(older = false): Promise<void> {
+    // Keep the existing raw fallback until an explicit reset; a later latest
+    // page must not re-enable projection after an oversized older-page read.
+    if (/UNSUPPORTED_CAPABILITY/.test(String(this.state.error))) return Promise.resolve();
     if (this.pagePromise) {
       // A caller after reset/reactivation must await its own generation's read,
       // even when the invalidated request happened to have the same direction.

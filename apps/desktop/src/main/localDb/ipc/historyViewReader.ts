@@ -5,6 +5,9 @@ import {
   type HistoryViewPage, type HistoryDetailPage, type HistoryWorkReference,
 } from '@cindy/maker-shared/message-window';
 
+const MAX_HISTORY_SCAN_ROWS = 2000;
+const MAX_HISTORY_SCAN_BYTES = 8 * 1024 * 1024;
+
 interface ReadOptions { limit: number; before?: string; after?: string }
 export interface HistoryViewReaderDependencies<T extends HistoryMessageSource> {
   list(sessionId: string, opts: ReadOptions, skipImport: boolean): Promise<T[]>;
@@ -31,10 +34,33 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
       let raw: T[] = [];
       let exhausted = false;
       let items: HistoryViewItem<T>[] = [];
+      let scannedRows = 0;
+      let scannedBytes = 0;
+      const unavailable = () => throwIpcError('UNSUPPORTED_CAPABILITY', 'History view scan budget exceeded');
+      const liveRows = (stored: readonly T[]) => {
+        const ids = new Set(stored.map((row) => row.clientId));
+        const live: T[] = [];
+        let bytes = scannedBytes;
+        for (const row of !before ? (deps.live?.(sessionId) ?? []) : []) {
+          if (ids.has(row.clientId)) continue;
+          bytes += Buffer.byteLength(JSON.stringify(row), 'utf8');
+          if (scannedRows + live.length + 1 > MAX_HISTORY_SCAN_ROWS || bytes > MAX_HISTORY_SCAN_BYTES) unavailable();
+          live.push(row);
+        }
+        return live;
+      };
       // Scan locally until the *visible* page fills. The oldest open group is
       // withheld until a boundary is known, so a long run is not split per DB batch.
       for (let scan = 0; ; scan++) {
+        // Never split a work group to satisfy this budget. Oversized history
+        // uses the existing raw window path; one DB batch may transiently exceed it.
+        if (scannedRows >= MAX_HISTORY_SCAN_ROWS) unavailable();
         const rows = await deps.list(sessionId, { limit: 100, ...(cursor ? { before: cursor } : {}) }, scan > 0);
+        for (const row of rows) {
+          scannedRows++;
+          scannedBytes += Buffer.byteLength(JSON.stringify(row), 'utf8');
+          if (scannedRows > MAX_HISTORY_SCAN_ROWS || scannedBytes > MAX_HISTORY_SCAN_BYTES) unavailable();
+        }
         if (rows.length === 0) { exhausted = true; break; }
         const next = rows[rows.length - 1].id;
         if (next === cursor) throwIpcError('INTERNAL', 'History cursor did not advance');
@@ -43,13 +69,13 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
         exhausted = rows.length < 100;
         if (!exhausted && !rows.some((row) => row.role === 'user' || row.role === 'system')) continue;
         raw = chunks.slice().reverse().flat();
-        const live = !before ? (deps.live?.(sessionId) ?? []).filter((row) => !raw.some((stored) => stored.clientId === row.clientId)) : [];
+        const live = liveRows(raw);
         const boundary = exhausted ? 0 : raw.findIndex((row) => row.role === 'user' || row.role === 'system');
         items = boundary < 0 ? [] : projectHistoryView([...raw.slice(boundary), ...live], !before && deps.running(sessionId));
         if (exhausted || items.length > HISTORY_VIEW_PAGE_ITEMS) break;
       }
       raw = chunks.slice().reverse().flat();
-      const live = !before ? (deps.live?.(sessionId) ?? []).filter((row) => !raw.some((stored) => stored.clientId === row.clientId)) : [];
+      const live = liveRows(raw);
       const boundary = exhausted ? 0 : raw.findIndex((row) => row.role === 'user' || row.role === 'system');
       items = boundary < 0 ? [] : projectHistoryView([...raw.slice(boundary), ...live], !before && deps.running(sessionId));
       const selected: HistoryViewItem<T>[] = [];

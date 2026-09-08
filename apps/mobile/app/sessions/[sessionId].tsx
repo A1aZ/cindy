@@ -3470,6 +3470,12 @@ export default function SessionScreen() {
     (run) => syncSession(run),
     remoteSyncContextKey,
   );
+  // A growing turn may exceed the projection budget during an automatic refresh.
+  // Refill the raw mirror through the same coordinator used by initial/recovery reads.
+  useEffect(() => {
+    if (!historyView.view.isActive() || !/UNSUPPORTED_CAPABILITY/.test(String(historyView.snapshot.error))) return;
+    void requestSync({ reason: 'manual', replaceMessages: true });
+  }, [historyView.snapshot.error, historyView.view, requestSync]);
   // A snapshot fetched before the subscription ACK can miss the gap between
   // the two. Reuse the existing coordinator to reconcile after this exact ACK.
   useEffect(() => {
@@ -4325,10 +4331,15 @@ export default function SessionScreen() {
         appliedRouteFocusKeyRef.current = routeFocusKey;
         setRouteFocusedClientId(routeFocusClientId);
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (cancelled) return;
         if (!remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority)) {
           releasePendingRouteFocusLookup();
+          return;
+        }
+        if (isHistoryViewUnavailable(err)) {
+          releasePendingRouteFocusLookup();
+          await requestSync({ reason: 'manual', replaceMessages: true });
           return;
         }
         setError(formatRemoteError(err));
@@ -4338,7 +4349,7 @@ export default function SessionScreen() {
       cancelled = true;
       releasePendingRouteFocusLookup();
     };
-  }, [deviceId, maker, messageReloadRevision, renderItems, routeFocusClientId, routeFocusKey, sessionId]);
+  }, [deviceId, maker, messageReloadRevision, renderItems, requestSync, routeFocusClientId, routeFocusKey, sessionId]);
 
   useEffect(() => {
     if (!routeFocusedItemKey || !routeFocusKey) return;
@@ -4488,6 +4499,11 @@ export default function SessionScreen() {
       await historyView.view.refresh(true);
       if (!historyView.view.isActive() || findRemoteHistoryView(deviceId, sessionId) !== historyView.view) return;
       const error = historyView.view.getSnapshot().error;
+      if (isHistoryViewUnavailable(error)) {
+        setHistoryError(null);
+        await requestSync({ reason: 'manual', replaceMessages: true });
+        return;
+      }
       setHistoryError(error ? formatRemoteError(error) : null);
       return;
     }
@@ -4533,7 +4549,7 @@ export default function SessionScreen() {
         setLoadingEarlier(false);
       }
     }
-  }, [historyView.snapshot.ready, historyView.view, abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
+  }, [historyView.snapshot.ready, historyView.view, requestSync, abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
 
   const loadToolInput = useCallback(async (
     ref: MobileToolInputProjection,

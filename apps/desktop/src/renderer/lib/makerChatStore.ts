@@ -10723,7 +10723,12 @@ function createRemoteHistoryView(sessionId: string) {
   view.subscribe(() => {
     if (!isCurrent() || !sessions.has(sessionId)) return;
     const snapshot = view.getSnapshot();
-    if (!snapshot.ready) return;
+    if (!snapshot.ready) {
+      if (view.isActive() && isHistoryViewUnavailable(snapshot.error)) {
+        void reconcileRemoteMessages(sessionId, { force: true }).catch(() => undefined);
+      }
+      return;
+    }
     const available = historyViewLeaves(snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
     for (const detail of snapshot.details.values()) available.push(...detail.messages);
     setState(sessionId, (state) => ({ ...state, historyLoaded: true,
@@ -12458,7 +12463,14 @@ async function loadAroundMessage(
   const rows = await aroundMessagesFor(sessionId, messageId, view?.getSnapshot().ready ? { radius: 0 } : opts);
   if (view?.getSnapshot().ready) {
     const target = rows.find((row) => row.id === messageId);
-    return target ? view.locate(target.clientId, target.createdAt) : null;
+    try {
+      return target ? await view.locate(target.clientId, target.createdAt) : null;
+    } catch (error) {
+      if (!isHistoryViewUnavailable(error)) throw error;
+      if (getRemoteHistoryView(sessionId) !== view || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
+      releaseRemoteHistoryView(sessionId, view);
+      return loadAroundMessage(sessionId, messageId, opts);
+    }
   }
   if (rows.length === 0) return null;
 
@@ -12528,7 +12540,14 @@ async function loadAroundMessageClientId(
   const rows = await aroundMessagesByClientIdFor(sessionId, clientId, view?.getSnapshot().ready ? { radius: 0 } : opts);
   if (view?.getSnapshot().ready) {
     const target = rows.find((row) => row.clientId === clientId);
-    return target ? view.locate(clientId, target.createdAt) : null;
+    try {
+      return target ? await view.locate(clientId, target.createdAt) : null;
+    } catch (error) {
+      if (!isHistoryViewUnavailable(error)) throw error;
+      if (getRemoteHistoryView(sessionId) !== view || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
+      releaseRemoteHistoryView(sessionId, view);
+      return loadAroundMessageClientId(sessionId, clientId, opts);
+    }
   }
   if (rows.length === 0) return null;
 

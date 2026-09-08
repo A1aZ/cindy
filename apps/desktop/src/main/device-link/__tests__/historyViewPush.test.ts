@@ -82,3 +82,20 @@ describe('per-controller deferred history', () => {
     expect(JSON.stringify(start).length).toBeGreaterThan(100000);
   });
 });
+
+it('restores raw pushes only for the disabled view and rejects its late reads/intents', () => {
+  for (const peer of ['a', 'b']) {
+    subscriptions.subscribe(peer, ['session:s']);
+    subscriptions.prepareHistoryView(peer, 's')!.update(['work']);
+  }
+  const old = subscriptions.prepareHistoryView('a', 's')!;
+  old.disable();
+  old.update(['work']);
+  old.setExpanded(['work']);
+  expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+  expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(false);
+  expect(subscriptions.projectsHistoryDetails('b', 's')).toBe(true);
+  subscriptions.prepareHistoryView('a', 's')!.update(['new']);
+  old.disable();
+  expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(true);
+});

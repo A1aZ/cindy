@@ -5,7 +5,7 @@ export const HISTORY_VIEW_PAGE_BYTES = 256 * 1024;
 export const HISTORY_DETAIL_PAGE_BYTES = 256 * 1024;
 
 export function isHistoryViewUnavailable(error: unknown): boolean {
-  return /CHANNEL_NOT_ALLOWED|not registered|No handler/i.test(String(error));
+  return /CHANNEL_NOT_ALLOWED|UNSUPPORTED_CAPABILITY|not registered|No handler/i.test(String(error));
 }
 
 export interface HistoryMessageSource {

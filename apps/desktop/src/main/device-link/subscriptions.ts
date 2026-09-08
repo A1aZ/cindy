@@ -59,6 +59,9 @@ export function prepareHistoryView(deviceId: string, sessionId: string) {
   historyViewsByController.set(deviceId, views);
   const isCurrent = () => historyViewsByController.get(deviceId)?.get(sessionId) === view;
   return {
+    disable(): void {
+      if (isCurrent()) views.delete(sessionId);
+    },
     update(liveKeys: readonly string[]): void {
       if (!isCurrent()) return;
       view.liveKeys = [...liveKeys];

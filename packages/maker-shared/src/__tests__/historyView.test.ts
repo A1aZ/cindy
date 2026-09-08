@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { projectHistoryView } from '../historyViewProjection.js';
-import { readHistoryWorkDetails, type HistoryMessageSource } from '../historyView.js';
+import { isHistoryViewUnavailable, readHistoryWorkDetails, type HistoryMessageSource } from '../historyView.js';
 
 function row(id: number, role: string, content: unknown): HistoryMessageSource {
   return { id: String(id), clientId: `c${id}`, role, content,
@@ -415,4 +415,28 @@ describe('locating folded history preserves display expansion', () => {
     view.setActive(false);
   });
 
+});
+
+it.each(['initial', 'older', 'refresh'])('uses existing raw fallback after a budget failure on %s', async (stage) => {
+  let fail = stage === 'initial';
+  const page = vi.fn(async () => {
+    if (fail) throw new Error('[UNSUPPORTED_CAPABILITY] History view scan budget exceeded');
+    return { version: 1 as const, items: projectHistoryView([row(1, 'user', 'hello')], false), hasMore: true, nextCursor: '1' };
+  });
+  const view = new HistoryViewController<HistoryMessageSource>({ page,
+    details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
+  await view.refresh();
+  if (!fail) { fail = true; await view.refresh(stage === 'older'); }
+  expect(view.getSnapshot().ready).toBe(false);
+  expect(isHistoryViewUnavailable(view.getSnapshot().error)).toBe(true);
+  expect(view.getSnapshot().items).toEqual([]);
+  const calls = page.mock.calls.length;
+  fail = false;
+  await view.refresh();
+  view.setActive(false); view.setActive(true);
+  await view.refresh(true);
+  expect(page).toHaveBeenCalledTimes(calls);
+  view.reset(); await view.refresh();
+  expect(view.getSnapshot().ready).toBe(true);
+  view.setActive(false);
 });

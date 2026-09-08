@@ -42,7 +42,7 @@ function harness() {
     },
     execute: vi.fn(async () => ({ ok: true as const, waitingExternal: true })),
   };
-  const resume = vi.fn(async (_card: BotAuthorizationCard) => {});
+  const resume = vi.fn(async (_card: BotAuthorizationCard, _assertCurrent: () => void) => {});
   const deps = {
     adapter: vi.fn(async () => adapter),
     save: vi.fn(async (card: BotAuthorizationCard) => {
@@ -603,4 +603,46 @@ describe('authorization input CAS', () => {
     expect(h.adapter.execute).not.toHaveBeenCalled();
     await h.service.dispose();
   });
+});
+
+it('cancellation vetoes a continuation waiting to enqueue', async () => {
+  const h = harness();
+  let release!: () => void;
+  const enqueue = vi.fn();
+  h.deps.resume.mockImplementationOnce(async (_card, assertCurrent) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    await commitBotAuthorizationInput({ validate: async () => {}, assertCurrent }, enqueue);
+  });
+  await h.service.request('s', { kind: 'plugin', id: 'p' });
+  h.complete();
+  await flush();
+  expect(release).toBeTypeOf('function');
+  await h.service.resolve(h.card().snapshot.requestId, {
+    kind: 'plugin_setup', action: 'cancel', expectedRevision: h.card().snapshot.revision,
+  });
+  release();
+  await flush();
+  expect(enqueue).not.toHaveBeenCalled();
+  expect(h.card().snapshot.steps[0].phase).toBe('cancelled');
+  await h.service.dispose();
+});
+
+it.each(['result', 'throw'] as const)('removes the expired OAuth reopen action after failure via %s', async (failure) => {
+  const h = harness();
+  h.adapter.execute = vi.fn(async (_a, _s, _v, onUrl) => {
+    onUrl?.('https://example.invalid/authorize?state=expired');
+    if (failure === 'throw') throw new Error('OAuth timed out');
+    return { ok: false as const, errorCode: 'TIMEOUT' as const };
+  });
+  await h.service.request('s', { kind: 'host', id: 'grok' });
+  await h.click();
+  await flush();
+  expect(h.card().snapshot.steps[0].phase).toBe('failed');
+  expect(h.card().snapshot.reopenActionId).toBeUndefined();
+  await h.service.resolve(h.card().snapshot.requestId, {
+    kind: 'plugin_setup', action: 'run_action', actionId: 'reopen-authorization',
+    expectedRevision: h.card().snapshot.revision,
+  });
+  expect(h.deps.openExternal).not.toHaveBeenCalled();
+  await h.service.dispose();
 });

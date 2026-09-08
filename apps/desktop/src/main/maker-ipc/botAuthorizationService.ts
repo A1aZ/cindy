@@ -65,7 +65,7 @@ export interface BotAuthorizationDeps {
     sessionId: string,
     target: BotAuthorizationTarget,
   ): Promise<BotAuthorizationCard | null>;
-  resume(card: BotAuthorizationCard): Promise<void>;
+  resume(card: BotAuthorizationCard, assertCurrent: () => void): Promise<void>;
   warn(error: unknown): void;
   openExternal(url: string): Promise<void>;
   onDisposing?(): void;
@@ -446,6 +446,10 @@ export class BotAuthorizationService {
     errorCode?: 'TIMEOUT' | 'ACTION_FAILED' | import('../../shared/ghost.js').GhostSetupErrorCode,
   ) {
     if (entry.closed || entry.cancelled) return;
+    if (phase === 'failed') {
+      entry.authorizationUrl = undefined;
+      delete entry.card.snapshot.reopenActionId;
+    }
     entry.card.snapshot = {
       ...entry.card.snapshot,
       revision: entry.card.snapshot.revision + 1,
@@ -517,7 +521,9 @@ export class BotAuthorizationService {
           return;
         }
         if (entry.closed || entry.cancelled) return;
-        await this.deps.resume(entry.card);
+        await this.deps.resume(entry.card, () => {
+          if (entry.closed || entry.cancelled) throw new Error('Authorization was cancelled');
+        });
         if (entry.closed || entry.cancelled) return;
         entry.card.snapshot = completedSnapshot;
         delete entry.card.completionPending;

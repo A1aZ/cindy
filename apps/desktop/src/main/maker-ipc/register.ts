@@ -8973,12 +8973,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return sendToSessionInternal(params);
   };
 
-  initializeBotAuthorizationHost(async (card, validate) => {
+  initializeBotAuthorizationHost(async (card, validate, assertAuthorizationCurrent) => {
     await inputCoordinator.ensureQueueRestored(card.sessionId);
     const generation = inputCoordinator.getGeneration(card.sessionId);
     const authorizationGuard: BotAuthorizationInputGuard = {
       validate,
       assertCurrent: () => {
+        assertAuthorizationCurrent();
         assertRemoteInputClearNotInFlight(card.sessionId, true);
         if (rewindInputSessions.has(card.sessionId) || !inputCoordinator.isGenerationCurrent(card.sessionId, generation)) {
           throw new Error('Authorization input boundary changed');

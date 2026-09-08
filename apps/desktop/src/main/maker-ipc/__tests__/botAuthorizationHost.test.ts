@@ -134,7 +134,7 @@ describe('authorization Host frozen plugin policy', () => {
       await expect(state.deps.adapter('session', cardTarget)).rejects.toThrow('teammate is unavailable');
       await expect(adapter.assess()).rejects.toThrow('teammate is unavailable');
       await expect(adapter.execute({ id: 'connect', kind: 'oauth_connect' }, undefined)).rejects.toThrow('teammate is unavailable');
-      await expect(state.deps.resume({ sessionId: 'session', target: cardTarget } as BotAuthorizationCard)).rejects.toThrow('teammate is unavailable');
+      await expect(state.deps.resume({ sessionId: 'session', target: cardTarget } as BotAuthorizationCard, () => {})).rejects.toThrow('teammate is unavailable');
     }
     expect(state.execute).not.toHaveBeenCalled();
     expect(state.login).not.toHaveBeenCalled();
@@ -153,7 +153,7 @@ describe('authorization Host frozen plugin policy', () => {
     state.policy = JSON.stringify({ toolsets: [] });
     await expect(adapter.assess()).rejects.toThrow('disabled in teammate profile');
     await expect(adapter.execute({ id: 'connect', kind: 'oauth_connect' }, undefined)).rejects.toThrow('disabled in teammate profile');
-    await expect(state.deps.resume({ sessionId: 'session', target } as BotAuthorizationCard)).rejects.toThrow('disabled in teammate profile');
+    await expect(state.deps.resume({ sessionId: 'session', target } as BotAuthorizationCard, () => {})).rejects.toThrow('disabled in teammate profile');
     expect(state.execute).not.toHaveBeenCalled();
   });
 

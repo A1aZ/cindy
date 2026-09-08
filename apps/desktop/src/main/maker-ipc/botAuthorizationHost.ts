@@ -63,7 +63,7 @@ export async function isBotAuthorizationSession(sessionId: string): Promise<bool
 
 /** Adapts existing Host credentials and plugin configuration into the same card lifecycle. */
 export function initializeBotAuthorizationHost(
-  resume: (card: BotAuthorizationCard, validate: () => Promise<void>) => Promise<void>,
+  resume: (card: BotAuthorizationCard, validate: () => Promise<void>, assertCurrent: () => void) => Promise<void>,
 ) {
   const ownerScopes = new Map<string, ReturnType<typeof captureDataOwnerBroadcastScope>>();
   const assertPluginPolicy = async (sessionId: string, pluginId: string) => {
@@ -350,7 +350,7 @@ export function initializeBotAuthorizationHost(
       }
       return null;
     },
-    async resume(card) {
+    async resume(card, assertCurrent) {
       await resume(card, async () => {
         await assertSession(card.sessionId);
         if (card.target.kind === 'plugin')
@@ -370,7 +370,7 @@ export function initializeBotAuthorizationHost(
           .limit(1);
         if (!row) throw new Error('Authorization card is no longer visible');
         await assertSession(card.sessionId);
-      });
+      }, assertCurrent);
     },
     onDisposing: () => cancelGrokOAuthLogin(),
     onDispose: () => ownerScopes.clear(),

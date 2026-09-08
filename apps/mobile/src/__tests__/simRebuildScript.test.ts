@@ -65,6 +65,7 @@ describe('sim-rebuild script invariants', () => {
     expect(source).toContain('const ownership = probeMetroOwnership(8081);');
     expect(source).toContain("import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';");
     expect(source).toContain('const androidTools = process.platform === \'win32\'');
+    expect(source).toContain('requireTools: !buildOnly');
     expect(source).toContain('ANDROID_SDK_ROOT: sdkRoot, ANDROID_HOME: sdkRoot');
     expect(source).toContain("if (process.platform === 'win32') {");
     expect(source).toContain('await rebuildAndroidSimulator();');

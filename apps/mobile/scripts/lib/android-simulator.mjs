@@ -48,6 +48,7 @@ export function resolveAndroidSdkTools({
   env = process.env,
   platform = process.platform,
   exists = existsSync,
+  requireTools = true,
 } = {}) {
   if (platform !== 'win32') return null;
 
@@ -60,7 +61,7 @@ export function resolveAndroidSdkTools({
   for (const sdkRoot of [...new Set(candidates)]) {
     const adb = win32Path.join(sdkRoot, 'platform-tools', 'adb.exe');
     const emulator = win32Path.join(sdkRoot, 'emulator', 'emulator.exe');
-    if (exists(adb) && exists(emulator)) return { sdkRoot, adb, emulator };
+    if (!requireTools || (exists(adb) && exists(emulator))) return { sdkRoot, adb, emulator };
   }
 
   throw new Error(

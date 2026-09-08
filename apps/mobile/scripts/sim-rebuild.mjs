@@ -197,7 +197,11 @@ function ensureMetroOwnershipBeforeLaunch(packageName) {
 
 async function rebuildAndroidSimulator() {
   const androidTools = process.platform === 'win32'
-    ? resolveAndroidSdkTools({ env: devProcessEnv, platform: process.platform })
+    ? resolveAndroidSdkTools({
+      env: devProcessEnv,
+      platform: process.platform,
+      requireTools: !buildOnly,
+    })
     : null;
   const emulator = buildOnly
     ? { serial: null, adb: null, sdkRoot: androidTools?.sdkRoot }

@@ -3227,7 +3227,10 @@ export default function NewRemoteSessionScreen() {
         localVoiceInputHistory,
         readCurrentDraft: () => firstMessageRef.current,
         onDraftChanged: (text, selection) => {
-          if (selection) {
+          // Once stopping starts, the user owns the native selection. The
+          // final ASR/refinement callback must not move it back to the
+          // dictation insertion point after the user has edited the draft.
+          if (selection && !voiceStopInFlightRef.current) {
             firstMessageSelectionRef.current = selection;
             setFirstMessageSelection(selection);
           }

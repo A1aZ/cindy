@@ -1821,6 +1821,7 @@ describe('new session composer surface', () => {
     expect(newSource).not.toContain('voiceDraftListeningText: {\n    color: colors.statusReady,');
     expect(newSource).toContain('const voiceDraftShowsListeningPrompt = voiceIsListening && draft.firstMessage.length === 0;');
     expect(newSource).toContain('firstMessageInputRef.current?.setNativeProps({ selection: firstMessageSelectionRef.current });');
+    expect(newSource).toContain('if (selection && !voiceStopInFlightRef.current) {');
     expect(newSource).toContain('voiceDraftScrollRef.current?.scrollTo({ y: voiceDraftCaretFrame.top, animated: false });');
     expect(newSource).toContain('draft.firstMessage.slice(0, firstMessageSelectionRef.current.end)');
     expect(newSource).toContain('draft.firstMessage.slice(firstMessageSelectionRef.current.end)');

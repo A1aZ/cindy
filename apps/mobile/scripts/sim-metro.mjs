@@ -106,7 +106,7 @@ export function probeMetroOwnership(port) {
   return {
     pid,
     launcherPid: Number.isInteger(owner.launcherPid) ? owner.launcherPid : owner.pid,
-    cwd: owner.worktreeRoot ?? null,
+    cwd: owner.worktreeRoot ? join(owner.worktreeRoot, 'apps/mobile') : null,
     source: owner.source ?? null,
   };
 }

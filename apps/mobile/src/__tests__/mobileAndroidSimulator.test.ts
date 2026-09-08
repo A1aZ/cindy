@@ -67,6 +67,15 @@ describe('Android SDK 与 adb 输出解析', () => {
     });
   });
 
+  it('build-only 可在缺少 emulator 时仍解析 SDK 根目录', () => {
+    expect(resolveAndroidSdkTools({
+      platform: 'win32',
+      requireTools: false,
+      env: { ANDROID_SDK_ROOT: 'D:\\Android\\Sdk' },
+      exists: () => false,
+    })).toMatchObject({ sdkRoot: 'D:\\Android\\Sdk' });
+  });
+
   it('只接受在线 emulator，并去掉 avd name 的 OK 尾行', () => {
     expect(parseAdbEmulatorSerials([
       'List of devices attached',

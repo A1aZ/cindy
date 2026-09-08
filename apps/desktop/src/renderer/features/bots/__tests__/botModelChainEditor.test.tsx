@@ -3,9 +3,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { modelSelectorProps } = vi.hoisted(() => ({
+const { modelSelectorProps, roster } = vi.hoisted(() => ({
   modelSelectorProps: vi.fn(),
+  roster: { availableVendors: new Set(['cc', 'codex', 'pi']), loaded: true },
 }));
+
+vi.mock('@/hooks/useAvailableAgents', () => ({ useAvailableAgents: () => roster }));
 
 vi.mock('@/components/new-chat/ModelSelector', () => ({
   ModelSelector: (props: {
@@ -80,6 +83,8 @@ import { BotModelChainEditor } from '../BotModelChainEditor';
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  roster.availableVendors = new Set(['cc', 'codex', 'pi']);
+  roster.loaded = true;
 });
 
 describe('BotModelChainEditor', () => {
@@ -117,6 +122,57 @@ describe('BotModelChainEditor', () => {
     render(<BotModelChainEditor value={[]} onChange={onChange} />);
     fireEvent.click(screen.getByText('choose-official-codex-model'));
     expect(onChange).toHaveBeenCalledWith([{ harness: 'codex', providerId: 'openai', model: 'gpt-5.6-sol', effort: 'medium', fastMode: true }]);
+  });
+
+  it('filters both first-route selection and added fallbacks with the local runtime roster', () => {
+    roster.availableVendors = new Set(['codex']);
+    const onChange = vi.fn();
+    const view = render(<BotModelChainEditor value={[]} onChange={onChange} />);
+    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['codex']);
+    // A callback from a now-hidden row must not create an unavailable override.
+    fireEvent.click(screen.getByText('choose-official-claude-model'));
+    expect(onChange).not.toHaveBeenCalled();
+    const details = view.container.querySelector('details')!;
+    details.open = true;
+    fireEvent(details, new Event('toggle'));
+    fireEvent.click(screen.getByText('bots.modelChain.add'));
+    expect(onChange).toHaveBeenCalledWith([expect.objectContaining({ harness: 'codex' })]);
+  });
+
+  it('does not fabricate a Pi fallback when no runtime is installed', () => {
+    roster.availableVendors = new Set();
+    const onChange = vi.fn();
+    const view = render(<BotModelChainEditor value={[]} onChange={onChange} />);
+    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual([]);
+    const details = view.container.querySelector('details')!;
+    details.open = true;
+    fireEvent(details, new Event('toggle'));
+    const add = screen.getByText('bots.modelChain.add') as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    fireEvent.click(add);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('refreshes runtime filtering after installation without rewriting an existing route', () => {
+    roster.availableVendors = new Set(['codex']);
+    const onChange = vi.fn();
+    const route = { harness: 'pi' as const, model: 'saved-pi', providerId: 'custom', effort: '', fastMode: false };
+    const view = render(<BotModelChainEditor value={[route]} onChange={onChange} />);
+    expect(modelSelectorProps.mock.lastCall?.[0]).toMatchObject({ modelId: 'saved-pi', unifiedAgents: ['codex'] });
+    roster.availableVendors = new Set(['pi', 'codex']);
+    view.rerender(<BotModelChainEditor value={[route]} onChange={onChange} />);
+    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['pi', 'codex']);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps the existing loading behavior and the remote callers runtime filter', () => {
+    roster.availableVendors = new Set();
+    roster.loaded = false;
+    const view = render(<BotModelChainEditor value={[]} onChange={vi.fn()} />);
+    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['pi', 'codex', 'claude-code']);
+    roster.loaded = true;
+    view.rerender(<BotModelChainEditor value={[]} onChange={vi.fn()} remote hiddenVendors={['codex']} />);
+    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['pi', 'claude-code']);
   });
 
   it('writes depth and fast mode to the selected route without changing its model', () => {

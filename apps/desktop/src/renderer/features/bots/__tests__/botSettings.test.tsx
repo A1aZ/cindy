@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   initialSearch: '' as string,
   profiles: [] as BotProfile[],
   params: {} as { botId?: string },
+  availableVendors: new Set(['cc', 'codex', 'pi']),
   updateBotProfile: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({
     id: 'bot-1',
     currentVersion: 1,
@@ -68,10 +69,15 @@ vi.mock('../BotLifecycleSettings', () => ({
   BotLifecycleSettings: () => <div data-testid="bot-lifecycle-settings" />,
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: ({ onUnifiedSelect }: { onUnifiedSelect: (selection: unknown) => void }) => <button data-testid="model-selector" onClick={() => onUnifiedSelect({ engine: 'pi', providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>select-model</button>,
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect }: {
+    unifiedAgents: string[];
+    onUnifiedSelect: (selection: unknown) => void;
+  }) => <>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+    <button key={engine} data-testid={engine === 'pi' ? 'model-selector' : 'codex-model-selector'} onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>select-{engine}-model</button>
+  ))}</>,
 }));
 vi.mock('@/hooks/useAvailableAgents', () => ({
-  useAvailableAgents: () => ({ availableVendors: new Set(['cc', 'codex', 'pi']), loaded: true }),
+  useAvailableAgents: () => ({ availableVendors: mocks.availableVendors, loaded: true }),
 }));
 vi.mock('@/state/newMakerDraft', () => ({
   getDraft: () => ({
@@ -165,6 +171,7 @@ beforeEach(() => {
   mocks.initialSearch = '';
   mocks.profiles = [];
   mocks.params = {};
+  mocks.availableVendors = new Set(['cc', 'codex', 'pi']);
   (window as unknown as { electronAPI: unknown }).electronAPI = { openPath: mocks.openPath };
 });
 
@@ -186,6 +193,22 @@ describe('Bot settings profile consolidation', () => {
     fireEvent.click(screen.getByTestId('model-selector'));
     await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenCalledWith(emptyBot.id, expect.objectContaining({
       capabilities: expect.objectContaining({ modelChainOverride: [expect.objectContaining({ model: 'custom-model', providerId: 'custom' })] }),
+    })));
+  });
+
+  it('filters unavailable runtimes when recovering an existing empty-chain bot', async () => {
+    mocks.availableVendors = new Set(['codex']);
+    const emptyBot = bot({ capabilities: capabilities({ modelChain: [], model: '' }), sessions: [], canonicalSessionId: undefined });
+    mocks.profiles = [emptyBot];
+    mocks.params = { botId: emptyBot.id };
+    const createCanonicalSession = vi.fn();
+    Object.assign(window.electronAPI, { localDb: { bots: { createCanonicalSession } } });
+    render(<BotsHomeView />);
+    expect(createCanonicalSession).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('model-selector')).toBeNull();
+    fireEvent.click(screen.getByTestId('codex-model-selector'));
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenCalledWith(emptyBot.id, expect.objectContaining({
+      capabilities: expect.objectContaining({ modelChainOverride: [expect.objectContaining({ harness: 'codex', model: 'custom-model' })] }),
     })));
   });
 

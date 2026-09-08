@@ -12,9 +12,11 @@ const mocks = vi.hoisted(() => ({
   addBotProfileAndWait: vi.fn(),
   navigate: vi.fn(),
   onboarding: false,
+  availableVendors: new Set(['cc', 'codex', 'pi']),
   profiles: [] as Array<{ id: string; name: string; invitation: { stage: string } }>,
 }));
 vi.mock('@/hooks/useProviderOnboarding', () => ({ useProviderOnboarding: () => ({ visible: mocks.onboarding }) }));
+vi.mock('@/hooks/useAvailableAgents', () => ({ useAvailableAgents: () => ({ availableVendors: mocks.availableVendors, loaded: true }) }));
 vi.mock('@/components/onboarding/ConnectProviderCard', () => ({ ConnectProviderCard: () => <div>Shared provider setup</div> }));
 vi.mock('../botStore', () => ({
   BotModelSelectionRequiredError: mocks.BotModelSelectionRequiredError,
@@ -22,10 +24,18 @@ vi.mock('../botStore', () => ({
   useBotProfiles: () => mocks.profiles,
   refreshBotProfiles: vi.fn(),
   retryBotInvitation: vi.fn(),
+  getEffectiveBotModelSettings: () => ({ model: 'custom-model', providerId: 'custom', effort: 'high', fastMode: false }),
 }));
-vi.mock('../BotModelChainEditor', () => ({
-  BotModelChainEditor: ({ onChange }: { onChange: (routes: unknown[]) => void }) => (
-    <button type="button" onClick={() => onChange([{ harness: 'pi', providerId: 'custom', model: 'custom-model', effort: 'high', fastMode: false }])}>choose-custom-model</button>
+vi.mock('@/components/new-chat/ModelSelector', () => ({
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect }: {
+    unifiedAgents: string[];
+    onUnifiedSelect: (selection: unknown) => void;
+  }) => (
+    <>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+      <button key={engine} type="button" onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>
+        {engine === 'pi' ? 'choose-custom-model' : 'choose-custom-codex-model'}
+      </button>
+    ))}</>
   ),
 }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => mocks.navigate }));
@@ -38,6 +48,7 @@ beforeEach(() => {
   mocks.navigate.mockReset();
   mocks.profiles = [];
   mocks.onboarding = false;
+  mocks.availableVendors = new Set(['cc', 'codex', 'pi']);
 });
 
 afterEach(() => cleanup());
@@ -54,6 +65,20 @@ describe('BotRosterView — 唯一的伙伴创建界面', () => {
     fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
     await waitFor(() => expect(mocks.addBotProfileAndWait).toHaveBeenCalledTimes(2));
     expect(mocks.addBotProfileAndWait.mock.calls[1][0].capabilities.modelChainOverride[0]).toMatchObject({ model: 'custom-model', providerId: 'custom' });
+  });
+
+  it('offers only installed runtimes when recovering creation with an empty chain', async () => {
+    mocks.availableVendors = new Set(['codex']);
+    mocks.addBotProfileAndWait.mockRejectedValueOnce(new mocks.BotModelSelectionRequiredError());
+    render(<BotRosterView />);
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    await screen.findByText('choose-custom-codex-model');
+    expect(screen.queryByText('choose-custom-model')).toBeNull();
+    fireEvent.click(screen.getByText('choose-custom-codex-model'));
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    await waitFor(() => expect(mocks.addBotProfileAndWait).toHaveBeenCalledTimes(2));
+    expect(mocks.addBotProfileAndWait.mock.calls[1][0].capabilities.modelChainOverride[0])
+      .toMatchObject({ harness: 'codex', model: 'custom-model', providerId: 'custom' });
   });
 
   it('uses the shared connection guide before creating an unconfigured teammate', () => {

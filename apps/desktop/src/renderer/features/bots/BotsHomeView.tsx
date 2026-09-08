@@ -7,8 +7,6 @@ import { useBotTranslation } from './botPronounContext';
 
 import { Spinner } from '@/components/ui/spinner';
 import * as sessionService from '@/lib/sessionService';
-import { useAvailableAgents } from '@/hooks/useAvailableAgents';
-import type { MakerVendor } from '@/lib/ccAgent.types';
 import type { ConversationSearchJump } from '../../../shared/conversationSearchJump';
 import { useRegisterContentHeader } from '../feature-context';
 import {
@@ -82,11 +80,6 @@ export function BotSettings({
   const [folderError, setFolderError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
-  const { availableVendors, loaded: availableAgentsLoaded } = useAvailableAgents();
-  const hiddenVendors = useMemo<MakerVendor[]>(() => {
-    if (!availableAgentsLoaded) return [];
-    return (['cc', 'codex', 'pi'] as const).filter((item) => !availableVendors.has(item));
-  }, [availableAgentsLoaded, availableVendors]);
   // 只在切到另一个 Bot 时重灌表单。自动保存下 `bot` 每次落库(以及失败回滚)都会
   // 换一个新对象,若仍按对象身份重灌,用户在提交在途期间敲的字会被服务端快照盖掉,
   // 失败回滚时更会把刚改的内容整批还原 —— 那是比「忘记点保存」更严重的丢字。
@@ -297,7 +290,6 @@ export function BotSettings({
                 autosave.onEdit('instant');
               }}
               value={capabilities.modelChain}
-              hiddenVendors={hiddenVendors}
               onChange={(modelChain) => {
                 const primary = modelChain[0];
                 if (!primary) return;

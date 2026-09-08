@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react';
 
 import { ModelSelector } from '@/components/new-chat/ModelSelector';
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
+import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import type { MakerVendor } from '@/lib/ccAgent.types';
 import { cn } from '@/lib/utils';
 import {
@@ -45,11 +46,15 @@ export function BotModelChainEditor({
   onRestoreDefault?: () => void;
 }) {
   const { t } = useBotTranslation();
+  const { availableVendors, loaded } = useAvailableAgents();
   const [expanded, setExpanded] = useState(false);
   const routes = value.slice(0, BOT_MODEL_CHAIN_MAX);
-  const unifiedAgents = (['pi', 'codex', 'cc'] as const)
+  // All local entry points, including empty-chain recovery, use the runtime
+  // roster. Remote callers supply their own device's hiddenVendors instead.
+  const visibleVendors = (['pi', 'codex', 'cc'] as const)
     .filter((vendor) => !hiddenVendors.includes(vendor))
-    .map(agentKindFor);
+    .filter((vendor) => remote || !loaded || availableVendors.has(vendor));
+  const unifiedAgents = visibleVendors.map(agentKindFor);
 
   const replace = (index: number, patch: Partial<BotModelRoute>) => {
     const editable = routes.length ? routes : [{ harness: 'pi' as const, model: '', providerId: null, effort: '', fastMode: false }];
@@ -64,13 +69,11 @@ export function BotModelChainEditor({
   };
   const add = () => {
     if (routes.length >= BOT_MODEL_CHAIN_MAX) return;
-    const visible = (['pi', 'codex', 'cc'] as const).filter(
-      (vendor) => !hiddenVendors.includes(vendor),
-    );
-    const unused = visible.find(
+    const unused = visibleVendors.find(
       (vendor) => !routes.some((route) => vendorFor(route.harness) === vendor),
     );
-    const vendor = unused ?? visible[0] ?? 'pi';
+    const vendor = unused ?? visibleVendors[0];
+    if (!vendor) return;
     const route = defaultRoute(vendor);
     if (route.model) onChange([...routes, route]);
   };
@@ -94,15 +97,16 @@ export function BotModelChainEditor({
         configurationEnabled
         unifiedPanel
         unifiedAgents={unifiedAgents}
-        onUnifiedSelect={(selection) =>
+        onUnifiedSelect={(selection) => {
+          if (!visibleVendors.includes(selection.engine)) return;
           replace(index, {
             harness: harnessFor(selection.engine),
             providerId: selection.providerId,
             model: selection.modelId,
             effort: selection.effort ?? '',
             fastMode: selection.fast,
-          })
-        }
+          });
+        }}
         unknownModelLabel={(model) => t('bots.modelUnavailable', { model })}
       />
     </div>
@@ -162,7 +166,7 @@ export function BotModelChainEditor({
             ))}
             <button
               type="button"
-              disabled={routes.length >= BOT_MODEL_CHAIN_MAX}
+              disabled={routes.length >= BOT_MODEL_CHAIN_MAX || visibleVendors.length === 0}
               onClick={add}
               className={cn(
                 'inline-flex h-8 items-center gap-2 rounded-full px-3 text-12',

@@ -133,6 +133,12 @@ vi.mock('../../logger.js', () => ({
 // Claude 走建线闭包 ctx；Codex / Pi 用此 mock 模拟 HTTP bridge 的 ALS 恢复。
 vi.mock('@cindy/mcps', () => ({ getLiziMcpSessionContext: () => alsSessionContextMock() }));
 
+vi.mock('../../maker-ipc/botAuthorizationHost.js', () => ({ isBotAuthorizationSession: async () => false }));
+const authorizationRequestMock = vi.fn(async () => ({ ok: true as const }));
+vi.mock('../../maker-ipc/botAuthorizationService.js', () => ({
+  getBotAuthorizationService: () => ({ request: authorizationRequestMock }),
+}));
+
 const WORKDIR = '/proj/alpha';
 const listMock = vi.fn<() => unknown[]>(() => []);
 const activeSessionAvailableMock = vi.fn((_ghostId: string) => true);
@@ -299,6 +305,7 @@ function clearAllPrefs(): void {
 }
 
 beforeEach(() => {
+  authorizationRequestMock.mockClear();
   fs.mkdirSync(outsideDir, { recursive: true });
   listMock.mockReset();
   listMock.mockReturnValue([chipGhost('art'), chipGhost('other')]);
@@ -737,6 +744,28 @@ describe('写路径 roundtrip(真实存储,tmp userData)', () => {
     expect(isGhostDisabledForWorkdir('art', 'E:\\REPO\\')).toBe(true);
     setGhostDisabledForWorkdir('E:\\REPO\\', 'art', false);
     expect(isGhostDisabledForWorkdir('art', 'E:/Repo')).toBe(false);
+  });
+});
+
+describe('connect_account frozen plugin policy', () => {
+  it.each([
+    { __cindyAllowedBuiltinPluginIds: ['other'] },
+    { __cindyDisabledBuiltinPluginIds: ['art'] },
+  ])('rejects a disabled plugin before creating a card: %j', async (policy) => {
+    const deps = makeDeps('claude-code', 'bot-session', 'bot-instance', policy);
+    await expect(deps.connectAccount!({ kind: 'plugin', id: 'art' })).resolves.toMatchObject({
+      ok: false, errorCode: 'GHOST_DISABLED_IN_WORKDIR',
+    });
+    expect(authorizationRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('allows an enabled plugin and keeps Host login independent of plugin policy', async () => {
+    const deps = makeDeps('claude-code', 'bot-session', 'bot-instance', {
+      __cindyAllowedBuiltinPluginIds: ['art'],
+    });
+    await deps.connectAccount!({ kind: 'plugin', id: 'art' });
+    await deps.connectAccount!({ kind: 'host', id: 'grok' });
+    expect(authorizationRequestMock).toHaveBeenCalledTimes(2);
   });
 });
 

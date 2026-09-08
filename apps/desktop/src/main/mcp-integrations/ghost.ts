@@ -1359,6 +1359,8 @@ export function getCindyGhostsMcpDeps(
   });
   return {
     connectAccount: async (target) => {
+      if (target.kind === 'plugin' && !isGhostAllowedByFrozenProfile(target.id))
+        return frozenProfileDenied();
       const context = resolveSessionContext();
       const sessionId = ghostSetupInteractionSessionId(context);
       if (!sessionId) return { ok: false, errorCode: 'NO_SESSION_CONTEXT' };

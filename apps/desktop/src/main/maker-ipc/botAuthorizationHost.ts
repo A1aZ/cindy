@@ -1,8 +1,8 @@
 import { shell } from 'electron';
 import { t } from '../i18n.js';
-import { and, eq, isNull, ne, or, gt, like, desc } from 'drizzle-orm';
+import { and, eq, isNull, ne, or, gt, like, desc, inArray } from 'drizzle-orm';
 import { getDbClient } from '../localDb/client/current.js';
-import { botSessionLinks, botProfiles, sessions, messages } from '../localDb/schema.js';
+import { botSessionLinks, botProfiles, botRuntimeSnapshots, sessions, messages } from '../localDb/schema.js';
 import {
   createMessage,
   patchMessageAgentMeta,
@@ -65,6 +65,30 @@ export function initializeBotAuthorizationHost(
   resume: (card: BotAuthorizationCard, validate: () => Promise<void>) => Promise<void>,
 ) {
   const ownerScopes = new Map<string, ReturnType<typeof captureDataOwnerBroadcastScope>>();
+  const assertPluginPolicy = async (sessionId: string, pluginId: string) => {
+    // The applied snapshot survives Host restarts; never infer teammate grants
+    // from global plugin visibility or from the card's display metadata.
+    const [snapshot] = await getDbClient()
+      .drizzle
+      .select({ resolvedJson: botRuntimeSnapshots.resolvedJson })
+      .from(botRuntimeSnapshots)
+      .where(
+        and(
+          eq(botRuntimeSnapshots.sessionId, sessionId),
+          inArray(botRuntimeSnapshots.status, ['applied', 'degraded']),
+        ),
+      )
+      .orderBy(desc(botRuntimeSnapshots.preparedAt))
+      .limit(1);
+    let resolved: { toolsets?: unknown } | null = null;
+    try {
+      resolved = JSON.parse(snapshot?.resolvedJson ?? 'null');
+    } catch {
+      /* deny malformed policy */
+    }
+    if (!Array.isArray(resolved?.toolsets) || !resolved.toolsets.includes(pluginId))
+      throw new Error('Plugin is disabled in teammate profile');
+  };
   const assertSession = async (sessionId: string) => {
     const scope = ownerScopes.get(sessionId);
     if (
@@ -152,6 +176,8 @@ export function initializeBotAuthorizationHost(
         .where(eq(sessions.id, sessionId))
         .limit(1);
       const validate = async () => {
+        await assertSession(sessionId);
+        await assertPluginPolicy(sessionId, target.id);
         await assertSession(sessionId);
         const result = classifyGhostVisibility(target.id, session?.workingDir ?? null, {
           listGhosts: () => getGhostManager().list(),
@@ -312,6 +338,8 @@ export function initializeBotAuthorizationHost(
     async resume(card) {
       await resume(card, async () => {
         await assertSession(card.sessionId);
+        if (card.target.kind === 'plugin')
+          await assertPluginPolicy(card.sessionId, card.target.id);
         const [row] = await getDbClient()
           .drizzle.select({ id: messages.id })
           .from(messages)

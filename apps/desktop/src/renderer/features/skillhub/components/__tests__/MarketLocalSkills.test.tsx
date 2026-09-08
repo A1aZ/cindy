@@ -88,7 +88,7 @@ describe('market Skill details', () => {
 
 describe('market installed location matching', () => {
   it.each(['market', 'team'] as const)('manages a case-variant local directory in the %s catalog', async (catalogScope) => {
-    const copy = { ...local, name: 'Gws-Calendar', absolutePath: '/fixture/.agents/skills/Gws-Calendar',
+    const copy = { ...local, name: 'Gws-Calendar', registrySkillName: market.name, absolutePath: '/fixture/.agents/skills/Gws-Calendar',
       registryEntry: { ...local.registryEntry!, catalogScope } };
     mocks.skills = [copy];
     render(<MarketLocalSkills skill={{ ...market, catalogScope }} />);
@@ -142,17 +142,29 @@ describe('market installed location matching', () => {
 
   it('does not manage same-name copies from another catalog or unregistered third-party copies', () => {
     mocks.skills = [
-      { ...local, name: 'Gws-Calendar', registryEntry: { ...local.registryEntry!, catalogScope: 'team' } },
+      { ...local, name: 'Gws-Calendar', registrySkillName: market.name, registryEntry: { ...local.registryEntry!, catalogScope: 'team' } },
       { ...local, name: 'Gws-Calendar', absolutePath: '/untracked', registryEntry: null },
-      { ...local, name: 'Gws-Calendar', absolutePath: '/native', registryEntry: { ...local.registryEntry!, catalogScope: undefined } },
+      { ...local, name: 'Gws-Calendar', registrySkillName: market.name, absolutePath: '/native', registryEntry: { ...local.registryEntry!, catalogScope: undefined } },
     ];
     render(<MarketLocalSkills skill={market} />);
     expect(screen.queryByRole('switch')).toBeNull();
   });
 
   it('includes an owned unregistered copy and keeps package-owned copies toggleable', () => {
-    mocks.skills = [{ ...local, name: 'Gws-Calendar', registryEntry: null, canUninstall: false }];
+    mocks.skills = [{ ...local, registryEntry: null, canUninstall: false }];
     render(<MarketLocalSkills skill={{ ...market, isMine: true }} />);
     expect(screen.getByRole('switch')).toBeTruthy();
+  });
+
+  it('keeps unrelated case-sensitive copies separate even on an owned market page', () => {
+    mocks.skills = [
+      { ...local, name: 'Gws-Calendar', registryEntry: null },
+      { ...local, name: 'Gws-Calendar', registrySkillName: 'other-market-skill' },
+      { ...local, name: market.name, registrySkillName: 'other-market-skill' },
+      { ...local, name: 'Gws-Calendar' }, // Old scan without registry slug: exact match only.
+    ];
+    render(<MarketLocalSkills skill={{ ...market, isMine: true }} />);
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'skillhub.management.moreLabel' })).toBeNull();
   });
 });

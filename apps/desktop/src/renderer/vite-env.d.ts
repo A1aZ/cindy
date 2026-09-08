@@ -6684,6 +6684,8 @@ interface SkillhubSkill {
    * Only set for kind=skill; command/agent always null.
    */
   registryEntry: StoredInstall | null;
+  /** Original market slug from the registry joined by physical path. */
+  registrySkillName?: string;
 }
 
 type SkillhubSourceStatus =

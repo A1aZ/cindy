@@ -109,6 +109,8 @@ export interface Skill {
    * 仅 kind=skill 才会填；command/agent 始终 null。
    */
   registryEntry: StoredInstall | null;
+  /** Original market slug from the registry joined by physical path. */
+  registrySkillName?: string;
 }
 
 export type SourceStatus =
@@ -356,15 +358,15 @@ export async function scanAllSkills(
     log.warn('registry list failed, fallback to empty:', err);
     registryEntries = [];
   }
-  const registryByPath = new Map<string, StoredInstall>();
+  const registryByPath = new Map<string, (typeof registryEntries)[number]>();
   const registryLiveKeys = new Map<string, string>();
   for (const r of registryEntries) {
     const installPathKey = path.normalize(r.installPath);
-    registryByPath.set(installPathKey, r.entry);
+    registryByPath.set(installPathKey, r);
     registryLiveKeys.set(installPathKey, installPathKey);
     try {
       const realInstallPathKey = path.normalize(fs.realpathSync(r.installPath));
-      registryByPath.set(realInstallPathKey, r.entry);
+      registryByPath.set(realInstallPathKey, r);
       registryLiveKeys.set(installPathKey, realInstallPathKey);
     } catch {
       // If the path no longer exists, keep the original key so orphan cleanup
@@ -383,7 +385,9 @@ export async function scanAllSkills(
     const normPath = path.normalize(resolved);
     // path 是物理唯一标识；允许 registry skillName 和 scanner directory name 不一致
     // （历史数据或 frontmatter name 与目录名不同步时会出现）
-    s.registryEntry = registryByPath.get(normPath) ?? null;
+    const registered = registryByPath.get(normPath);
+    s.registryEntry = registered?.entry ?? null;
+    s.registrySkillName = registered?.skillName;
     liveRealPaths.add(normPath);
   }
 

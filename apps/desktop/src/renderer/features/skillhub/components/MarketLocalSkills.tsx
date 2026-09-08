@@ -15,14 +15,14 @@ export function MarketLocalSkills({ skill }: {
   const { t } = useTranslation();
   const { skills } = useSkillhub();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // The directory keeps its native casing even when its registry slug does not.
-  const marketName = skill.name.toLowerCase();
   const copies = skills.filter((local) => {
-    const localName = local.name.toLowerCase();
-    if (local.kind !== 'skill' || localName !== marketName) return false;
+    // Use the physically joined registry identity; casing alone cannot prove
+    // ownership on case-sensitive volumes. Old scans keep exact-name matching.
+    const localName = local.registryEntry ? local.registrySkillName ?? local.name : local.name;
+    if (local.kind !== 'skill' || localName !== skill.name) return false;
     return local.registryEntry
       ? skillhubCatalogKey(localName, local.registryEntry.catalogScope)
-        === skillhubCatalogKey(marketName, skill.catalogScope)
+        === skillhubCatalogKey(skill.name, skill.catalogScope)
       : skill.isMine;
   });
   if (copies.length === 0) return null;

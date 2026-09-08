@@ -22,6 +22,7 @@ import {
   writeSkillFile,
 } from '../scanner';
 import type { Maker } from '@cindy/maker-core';
+import { registryService, type StoredInstall } from '../registry';
 
 const tempRoots: string[] = [];
 
@@ -80,6 +81,34 @@ function createSymlinkedSkill() {
 }
 
 describe('scanAllSkills', () => {
+  it('projects the registry slug joined by physical path without replacing native directory names', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillhub-registry-slug-'));
+    tempRoots.push(root);
+    const paths = [path.join(root, '.agents', 'skills', 'Foo'), path.join(root, '.claude', 'skills', 'foo')];
+    for (const skillPath of paths) {
+      fs.mkdirSync(skillPath, { recursive: true });
+      fs.writeFileSync(path.join(skillPath, 'SKILL.md'), '---\nname: fixture\n---\nFixture');
+    }
+    const entry = { catalogScope: 'market', version: '1.0.0' } as StoredInstall;
+    vi.mocked(registryService.listAllInstalls).mockResolvedValueOnce([
+      { skillName: 'foo', installPath: paths[0], entry },
+      { skillName: 'different-skill', installPath: paths[1], entry },
+    ]);
+    const maker = { listCustomizations: vi.fn(async () => ({ errors: [], items: paths.map((absolutePath) => ({
+      engine: 'claude-code', kind: 'skill', scope: 'user', name: 'fixture', absolutePath,
+      mdPath: path.join(absolutePath, 'SKILL.md'), files: [],
+    })) })) } as unknown as Maker;
+    const result = await scanAllSkills({}, maker);
+    expect(result.skills).toHaveLength(2);
+    for (const [index, skillPath] of paths.entries()) {
+      const physical = fs.realpathSync(skillPath);
+      expect(result.skills.find((skill) => skill.absolutePath === physical)).toMatchObject({
+        name: path.basename(physical), registryEntry: entry,
+        registrySkillName: index === 0 ? 'foo' : 'different-skill',
+      });
+    }
+  });
+
   it('projects plugin ownership and prevents standalone uninstall for snapshot links', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillhub-plugin-source-'));
     tempRoots.push(root);

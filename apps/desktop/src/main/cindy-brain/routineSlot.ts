@@ -1,8 +1,27 @@
 import type { InstalledGhost } from '../../shared/ghost.js';
-import type { RoutineEngine } from '@cindy/maker-scheduler';
+import { parseRoutineEvent, type RoutineEngine } from '@cindy/maker-scheduler';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('routines:plugin');
+
+// Host-wide, across engine startup/replacement: status and publish share these slots.
+// Engine-local rate and persistence quotas remain independent of this outer concurrency bound.
+const pendingByPlugin = new Map<string, number>();
+let totalPending = 0;
+
+function reserveRequest(pluginId: string): () => void {
+  const pending = pendingByPlugin.get(pluginId) ?? 0;
+  if (pending >= 8 || totalPending >= 32)
+    throw new Error('Routine request intake is busy; retry later');
+  pendingByPlugin.set(pluginId, pending + 1);
+  totalPending += 1;
+  return () => {
+    const remaining = pendingByPlugin.get(pluginId)! - 1;
+    if (remaining) pendingByPlugin.set(pluginId, remaining);
+    else pendingByPlugin.delete(pluginId);
+    totalPending -= 1;
+  };
+}
 
 // Exact host-authored rejections only. Never echo arbitrary storage errors across the plugin boundary.
 const PUBLIC_REJECTIONS = [
@@ -38,13 +57,19 @@ export async function handleRoutineRequest(
   if (!payload || typeof payload !== 'object' || Array.isArray(payload))
     return { ok: false, message: 'Invalid routine request' };
   const request = payload as Record<string, unknown>;
+  let release: (() => void) | undefined;
   try {
+    release = reserveRequest(ghost.manifest.id);
+    if (request.action !== 'status' && request.action !== 'publish')
+      return { ok: false, message: 'Unknown routine operation' };
+    if (request.action === 'status' && !['listening', 'disconnected', 'error'].includes(String(request.status)))
+      return { ok: false, message: 'Invalid source status' };
+    // Reject malformed/oversized events before any startup wait, using the engine's validator.
+    const event = request.action === 'publish' ? parseRoutineEvent(request.event) : undefined;
     const engine = await getEngine();
     if (!isCurrent()) return { ok: false, message: 'Plugin owner or installation changed' };
     const sourceId = `plugin:${ghost.manifest.id}`;
     if (request.action === 'status') {
-      if (!['listening', 'disconnected', 'error'].includes(String(request.status)))
-        return { ok: false, message: 'Invalid source status' };
       engine.registerSource({
         id: sourceId,
         name: ghost.manifest.name,
@@ -53,8 +78,7 @@ export async function handleRoutineRequest(
       });
       return { ok: true };
     }
-    if (request.action !== 'publish') return { ok: false, message: 'Unknown routine operation' };
-    return { ok: true, ...(await engine.publish(sourceId, request.event, isCurrent)) };
+    return { ok: true, ...(await engine.publish(sourceId, event, isCurrent)) };
   } catch (error) {
     const publicMessage = error instanceof Error
       ? PUBLIC_REJECTIONS.find((message) => message === error.message)
@@ -68,5 +92,7 @@ export async function handleRoutineRequest(
       ok: false,
       message: 'Routine request failed; please retry later',
     };
+  } finally {
+    release?.();
   }
 }

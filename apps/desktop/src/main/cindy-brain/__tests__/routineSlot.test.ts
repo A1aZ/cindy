@@ -195,3 +195,129 @@ it('keeps fixed validation and retry guidance without logging repeated expected 
   expect(warn).not.toHaveBeenCalled();
   await f.engine.stop();
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const listening = { action: 'status', status: 'listening' };
+const publish = { action: 'publish', event: { id: 'startup-event', type: 'new', occurredAt: 1, data: {} } };
+const busy = { ok: false, message: 'Routine request intake is busy; retry later' };
+
+it('bounds mixed status/publish requests before startup and cannot bypass a plugin quota by self-reporting identity', async () => {
+  const f = await statusFixture();
+  const ready = deferred<RoutineEngine>();
+  const getEngine = vi.fn(() => ready.promise);
+  const request = (payload: unknown, plugin = ghost) => handleRoutineRequest(plugin, payload, getEngine, () => true);
+  const pending = Array.from({ length: 8 }, (_, i) => request(i % 2 ? publish : listening));
+  try {
+    for (let i = 0; i < 20; i++) {
+      expect(await request({ ...listening, sourceId: `forged-${i}` })).toEqual(busy);
+      expect(await request({ ...publish, botId: `forged-${i}` })).toEqual(busy);
+    }
+    expect(getEngine).toHaveBeenCalledTimes(8);
+    const other = { ...ghost, manifest: { ...ghost.manifest, id: 'other' } };
+    pending.push(request(listening, other));
+    expect(getEngine).toHaveBeenCalledTimes(9);
+  } finally {
+    ready.resolve(f.engine);
+    expect((await Promise.all(pending)).every((reply) => reply.ok)).toBe(true);
+    await f.engine.stop();
+  }
+});
+
+it('caps all plugin startup requests at 32 and returns every slot after success', async () => {
+  const f = await statusFixture();
+  const ready = deferred<RoutineEngine>();
+  const getEngine = vi.fn(() => ready.promise);
+  const plugin = (i: number) => ({ ...ghost, manifest: { ...ghost.manifest, id: `startup-${i}` } });
+  const pending = Array.from({ length: 32 }, (_, i) =>
+    handleRoutineRequest(plugin(Math.floor(i / 8)), listening, getEngine, () => true));
+  try {
+    expect(await handleRoutineRequest(plugin(4), publish, getEngine, () => true)).toEqual(busy);
+    expect(getEngine).toHaveBeenCalledTimes(32);
+    ready.resolve(f.engine);
+    expect((await Promise.all(pending)).every((reply) => reply.ok)).toBe(true);
+    // Refill all slots, not just one, to catch counter leaks after settled requests.
+    const retry = Array.from({ length: 32 }, (_, i) =>
+      handleRoutineRequest(plugin(Math.floor(i / 8)), listening, getEngine, () => true));
+    expect((await Promise.all(retry)).every((reply) => reply.ok)).toBe(true);
+  } finally {
+    ready.resolve(f.engine);
+    await Promise.all(pending);
+    await f.engine.stop();
+  }
+});
+
+it.each(['startup failure', 'owner changed', 'publisher failure'])('releases all reserved slots after %s', async (failure) => {
+  const f = await statusFixture();
+  const ready = deferred<RoutineEngine>();
+  let current = true;
+  const pending = Array.from({ length: 8 }, () => handleRoutineRequest(
+    ghost, failure === 'publisher failure' ? publish : listening, () => ready.promise, () => current,
+  ));
+  try {
+    if (failure === 'startup failure') ready.reject(new Error('startup failed'));
+    else {
+      if (failure === 'owner changed') current = false;
+      // Publish fails because this engine has no listening source.
+      ready.resolve(f.engine);
+    }
+    expect((await Promise.all(pending)).every((reply) => !reply.ok)).toBe(true);
+    const retry = Array.from({ length: 8 }, () => f.request(listening));
+    expect((await Promise.all(retry)).every((reply) => reply.ok)).toBe(true);
+  } finally {
+    ready.resolve(f.engine);
+    await Promise.all(pending);
+    await f.engine.stop();
+  }
+});
+
+it('rejects invalid operations and oversized events without waiting for startup or leaking slots', async () => {
+  const getEngine = vi.fn();
+  const invalid = [
+    { action: 'unknown' },
+    { action: 'status', status: 'unknown' },
+    { action: 'publish', event: { ...publish.event, data: { oversized: 'x'.repeat(8001) } } },
+    { action: 'publish', event: { ...publish.event, data: Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`field${i}`, 'x'.repeat(8000)])) } },
+  ];
+  for (let i = 0; i < 12; i++) {
+    for (const payload of invalid) {
+      const reply = await handleRoutineRequest(ghost, payload, getEngine, () => true);
+      expect(reply.ok).toBe(false);
+      expect(reply).not.toEqual(busy);
+    }
+  }
+  expect(getEngine).not.toHaveBeenCalled();
+});
+
+it('keeps slots reserved until publish finishes, not only until the engine is ready', async () => {
+  const saved = deferred<void>();
+  const save = vi.fn(async () => {});
+  const engine = new RoutineEngine({
+    load: async () => null, save, execute: vi.fn(async () => ({})),
+    id: () => 'id', now: () => 1, changed: vi.fn(), onError: vi.fn(),
+  });
+  await engine.start();
+  const getEngine = vi.fn(async () => engine);
+  const request = (payload: unknown) => handleRoutineRequest(ghost, payload, getEngine, () => true);
+  await request(listening);
+  save.mockClear();
+  save.mockImplementationOnce(() => saved.promise);
+  const pending = Array.from({ length: 8 }, (_, i) => request({ ...publish, event: { ...publish.event, id: `slow-${i}` } }));
+  try {
+    await vi.waitFor(() => expect(save).toHaveBeenCalled());
+    expect(await request(listening)).toEqual(busy);
+    expect(getEngine).toHaveBeenCalledTimes(9);
+    saved.resolve();
+    expect((await Promise.all(pending)).every((reply) => reply.ok)).toBe(true);
+    expect(await request(listening)).toEqual({ ok: true });
+  } finally {
+    saved.resolve();
+    await Promise.all(pending);
+    await engine.stop();
+  }
+});

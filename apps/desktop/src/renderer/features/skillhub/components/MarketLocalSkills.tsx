@@ -15,11 +15,14 @@ export function MarketLocalSkills({ skill }: {
   const { t } = useTranslation();
   const { skills } = useSkillhub();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The directory keeps its native casing even when its registry slug does not.
+  const marketName = skill.name.toLowerCase();
   const copies = skills.filter((local) => {
-    if (local.kind !== 'skill' || local.name !== skill.name) return false;
+    const localName = local.name.toLowerCase();
+    if (local.kind !== 'skill' || localName !== marketName) return false;
     return local.registryEntry
-      ? skillhubCatalogKey(local.name, local.registryEntry.catalogScope)
-        === skillhubCatalogKey(skill.name, skill.catalogScope)
+      ? skillhubCatalogKey(localName, local.registryEntry.catalogScope)
+        === skillhubCatalogKey(marketName, skill.catalogScope)
       : skill.isMine;
   });
   if (copies.length === 0) return null;

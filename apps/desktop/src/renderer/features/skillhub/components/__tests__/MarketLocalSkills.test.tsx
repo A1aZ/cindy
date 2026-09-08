@@ -87,6 +87,20 @@ describe('market Skill details', () => {
 });
 
 describe('market installed location matching', () => {
+  it.each(['market', 'team'] as const)('manages a case-variant local directory in the %s catalog', async (catalogScope) => {
+    const copy = { ...local, name: 'Gws-Calendar', absolutePath: '/fixture/.agents/skills/Gws-Calendar',
+      registryEntry: { ...local.registryEntry!, catalogScope } };
+    mocks.skills = [copy];
+    render(<MarketLocalSkills skill={{ ...market, catalogScope }} />);
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() => expect(mocks.setEnabled).toHaveBeenCalledWith({
+      absolutePath: copy.absolutePath, skillId: copy.id, enabled: false,
+    }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.management.moreLabel' }), { key: 'Enter' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'skillhub.detail.uninstall' }));
+    await waitFor(() => expect(mocks.uninstall).toHaveBeenCalledWith(copy.absolutePath, copy.id));
+  });
+
   it('selects a local copy in the toolbar and falls back after that copy is removed', async () => {
     const project = { ...local, id: 'project-calendar', scope: 'project', projectRoot: '/project',
       absolutePath: '/project/.agents/skills/gws-calendar', cindyEnabled: false } as SkillhubSkill;
@@ -128,16 +142,16 @@ describe('market installed location matching', () => {
 
   it('does not manage same-name copies from another catalog or unregistered third-party copies', () => {
     mocks.skills = [
-      { ...local, registryEntry: { ...local.registryEntry!, catalogScope: 'team' } },
-      { ...local, absolutePath: '/untracked', registryEntry: null },
-      { ...local, absolutePath: '/native', registryEntry: { ...local.registryEntry!, catalogScope: undefined } },
+      { ...local, name: 'Gws-Calendar', registryEntry: { ...local.registryEntry!, catalogScope: 'team' } },
+      { ...local, name: 'Gws-Calendar', absolutePath: '/untracked', registryEntry: null },
+      { ...local, name: 'Gws-Calendar', absolutePath: '/native', registryEntry: { ...local.registryEntry!, catalogScope: undefined } },
     ];
     render(<MarketLocalSkills skill={market} />);
     expect(screen.queryByRole('switch')).toBeNull();
   });
 
   it('includes an owned unregistered copy and keeps package-owned copies toggleable', () => {
-    mocks.skills = [{ ...local, registryEntry: null, canUninstall: false }];
+    mocks.skills = [{ ...local, name: 'Gws-Calendar', registryEntry: null, canUninstall: false }];
     render(<MarketLocalSkills skill={{ ...market, isMine: true }} />);
     expect(screen.getByRole('switch')).toBeTruthy();
   });

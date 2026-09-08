@@ -1185,7 +1185,16 @@ describe('Cindy durable PI Subagent runner', () => {
         { mode: 0o600 },
       );
     };
-    // Approval first by every ordering key the runner sorts on.
+    // Approval first by every ordering key the runner sorts on. The stop
+    // still lands on disk first, mirroring the sibling case below: a control
+    // poll that lands between the two writes must never see the approval
+    // alone — that forwards it, the child completes the run, and the wait
+    // for `stopped` times out (seen once on a slow Windows runner). Writing
+    // the stop first turns that window into a stop-only scan, which still
+    // stops the run and satisfies the assertions; the both-in-one-scan
+    // batch this case is about stays the dominant interleaving, since the
+    // write gap is a fraction of the runner's CONTROL_POLL_MS.
+    await write({ seq: 2, requestedAt: 2, action: 'stop' });
     await write({
       seq: 1,
       requestedAt: 1,
@@ -1194,7 +1203,6 @@ describe('Cindy durable PI Subagent runner', () => {
       approvalId: 'approval-1',
       confirmed: true,
     });
-    await write({ seq: 2, requestedAt: 2, action: 'stop' });
 
     const stopped = await waitFor(async () => {
       const [run] = await listPiSubagentRuns(fixture.root);

@@ -27,6 +27,40 @@ const modelDaily = [
 ];
 
 describe('UsageTokenBars registered geometry and interaction', () => {
+  it('highlights seven calendar dates without selecting them and clears emphasis for an older day', () => {
+    const props = {
+      modelDaily: [],
+      colorOrder: [],
+      todayKey: '2026-09-03',
+      onDayClick: vi.fn(),
+    };
+    const view = render(<UsageTokenBars {...props} />);
+    const highlightedDays = () =>
+      [...view.container.querySelectorAll<HTMLButtonElement>('[data-highlighted="true"]')].map(
+        (button) => button.title.slice(0, 10),
+      );
+    expect(highlightedDays()).toEqual([]);
+    view.rerender(<UsageTokenBars {...props} highlightRecentWeek />);
+    expect(highlightedDays()).toEqual([
+      '2026-08-28',
+      '2026-08-29',
+      '2026-08-30',
+      '2026-08-31',
+      '2026-09-01',
+      '2026-09-02',
+      '2026-09-03',
+    ]);
+    expect(view.container.querySelectorAll('[aria-pressed="true"]')).toHaveLength(0);
+    // An exact date takes priority, including one outside the fixed chart window.
+    view.rerender(<UsageTokenBars {...props} highlightRecentWeek selectedDay="2026-07-18" />);
+    expect(highlightedDays()).toEqual([]);
+    expect(view.container.querySelectorAll('[aria-pressed="true"]')).toHaveLength(0);
+    view.rerender(<UsageTokenBars {...props} highlightRecentWeek selectedDay="2026-09-01" />);
+    expect(highlightedDays()).toEqual(['2026-09-01']);
+    expect(view.container.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('[data-usage-mark="usage-token-bar"]')).toHaveLength(30);
+  });
+
   it('preserves data encoding when clicking is enabled or disabled', () => {
     const view = render(
       <UsageTokenBars modelDaily={modelDaily} colorOrder={[]} todayKey="2026-09-08" />,

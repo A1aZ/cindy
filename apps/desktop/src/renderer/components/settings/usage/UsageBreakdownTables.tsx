@@ -28,9 +28,9 @@ const AGENT_RANK: Record<UsageAgentKind, number> = {
 };
 
 const TH_CLASS =
-  'whitespace-nowrap border-b border-[var(--border-default)] pb-2 pl-3 text-right text-11 font-medium text-[var(--text-tertiary)]';
+  'whitespace-nowrap border-b border-[var(--border-default)] pb-2 pl-3 text-right text-12 font-medium text-[var(--text-secondary)]';
 const TD_CLASS =
-  'whitespace-nowrap border-b border-[var(--border-default)] py-2 pl-3 text-right text-12 tabular-nums';
+  'whitespace-nowrap border-b border-[var(--border-default)] py-2 pl-3 text-right text-13 tabular-nums';
 
 /**
  * 首列 (agent / model) 是唯一可收缩的列, 实现与 UsageTaskTable 的任务列相同:
@@ -133,7 +133,7 @@ export function UsageAgentTable({
                 <td className={cn(TD_CLASS, FIRST_COL_CLASS, 'text-left')}>
                   <span className="flex min-w-0 items-center gap-2">
                     <Swatch rank={rank} />
-                    <span className="truncate" title={row.agentKind}>
+                    <span className="truncate font-medium" title={row.agentKind}>
                       {row.agentKind}
                     </span>
                   </span>
@@ -196,11 +196,11 @@ export function UsageModelTable({
               <td className={cn(TD_CLASS, FIRST_COL_CLASS, 'text-left')}>
                 <span className="flex min-w-0 items-center gap-2">
                   <Swatch rank={rank} color={color} />
-                  <span className="truncate" title={row.model}>
+                  <span className="truncate font-medium" title={row.model}>
                     {formatModelShort(row.model)}
                   </span>
                   {/* 同一模型 id 可能跨 agent 撞名, 标签让两行区分得开 */}
-                  <span className="shrink-0 rounded border border-[var(--border-default)] px-1 py-px text-10 leading-none text-[var(--text-tertiary)]">
+                  <span className="shrink-0 rounded border border-[var(--border-default)] px-1 py-px text-11 leading-[1.4] text-[var(--text-tertiary)]">
                     {row.agentKind}
                   </span>
                 </span>

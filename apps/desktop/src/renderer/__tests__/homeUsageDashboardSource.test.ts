@@ -94,7 +94,10 @@ describe('HomeUsageDashboard source contract', () => {
     expect(chartStyles).toContain('transition: none');
   });
 
-  it('keeps registered chart geometry dense with a same-page equivalent date control', () => {
+  // The owner removed the added date form. This verifies the retained chart
+  // entry points and geometry, not WCAG target-size conformance; the unresolved
+  // target-size requirement remains documented in usage-history-charts.md.
+  it('keeps dense chart geometry and the two retained date-selection entry points', () => {
     expect(heatmapSource).not.toContain('INTERACTIVE_CELL_PX');
     expect(heatmapSource).toContain('const cellSize = CELL_PX;');
     expect(heatmapSource).toContain('data-usage-mark="usage-heatmap-day"');
@@ -103,7 +106,8 @@ describe('HomeUsageDashboard source contract', () => {
     expect(tokenBarsSource).not.toContain('minWidth: bars.list.length * 24');
     expect(tokenBarsSource).not.toContain('minWidth: 24');
     expect(tokenBarsSource).not.toContain('overflow-x-auto');
-    expect(usageHistorySectionSource).toContain('onSelectDay={handleDayClick}');
+    expect(usageHistorySectionSource.match(/onDayClick=\{handleDayClick\}/g)).toHaveLength(2);
+    expect(usageHistorySectionSource).not.toContain('UsageDateFilter');
   });
 
   it('keeps the home heatmap non-interactive when no day callback is supplied', () => {

@@ -68,6 +68,7 @@ export function UsageTokenBars({
   colorOrder,
   todayKey,
   selectedDay,
+  highlightRecentWeek = false,
   onDayClick,
 }: {
   modelDaily: UsageHistoryModelDay[];
@@ -75,6 +76,8 @@ export function UsageTokenBars({
   colorOrder: string[];
   todayKey: string;
   selectedDay?: string | null;
+  /** Visual emphasis only; a multi-day range does not select individual buttons. */
+  highlightRecentWeek?: boolean;
   onDayClick?: (day: string) => void;
 }): React.JSX.Element {
   const { t, i18n } = useTranslation();
@@ -127,16 +130,17 @@ export function UsageTokenBars({
   }, [modelDaily, colorOrder, todayKey, t]);
 
   const ticks = niceTicks(bars.max);
+  const recentWeekStart = shiftDayKeyLocal(todayKey, -6);
 
   return (
     <div className="flex gap-1.5" style={{ height: CHART_HEIGHT_PX }}>
       {/* Y 轴 token 刻度 (有数据才显示; 宽度固定避免数字位数变化引起布局抖动) */}
       {ticks.length > 0 && (
-        <div className="relative w-[30px] shrink-0">
+        <div className="relative w-[4.5ch] shrink-0 text-11 tabular-nums">
           {ticks.map((v) => (
             <span
               key={v}
-              className="absolute right-0 translate-y-1/2 text-10 leading-none tabular-nums text-[var(--text-tertiary)]"
+              className="absolute right-0 translate-y-1/2 text-11 leading-none tabular-nums text-[var(--text-tertiary)]"
               style={{ bottom: (v / bars.max) * CHART_HEIGHT_PX }}
             >
               {formatCompactTokens(v)}
@@ -180,10 +184,15 @@ export function UsageTokenBars({
                   title={titleLines.join('\n')}
                   aria-label={`${dateFormatter.format(parseDayKeyLocal(b.day))} · ${usageSummary}`}
                   aria-pressed={selectedDay === b.day}
+                  data-highlighted={
+                    selectedDay
+                      ? selectedDay === b.day
+                      : highlightRecentWeek && b.day >= recentWeekStart
+                  }
                   onClick={() => onDayClick?.(b.day)}
                   disabled={!onDayClick}
                   // Hit height remains generous without forcing the visible bar width.
-                  // The same-page date control supplies the §5 Equivalent route.
+                  // Target sizing remains pending after cancellation of the added date entry.
                   className="usage-chart-target group relative flex min-w-0 flex-1 cursor-pointer items-end justify-center rounded-none border-0 bg-transparent p-0 outline-none"
                   style={{ height: hitHeight }}
                 >

@@ -259,11 +259,14 @@ export function UsageHeatmap({
       {/* Reserve the outside indicator stroke inside the scrolling viewport. */}
       <div className="flex min-w-max flex-col gap-1.5 p-[3px]">
         {/* 月份标签行。nowrap 防止最右侧月份被挤成上下两行。 */}
-        <div className="relative h-[14px]" style={{ width: columns.length * colPitch - GAP_PX }}>
+        <div
+          className="usage-heatmap-months relative h-[14px]"
+          style={{ width: columns.length * colPitch - GAP_PX }}
+        >
           {monthLabels.map((m) => (
             <span
               key={`${m.col}-${m.text}`}
-              className="absolute top-0 whitespace-nowrap text-10 leading-[1.4] text-[var(--text-tertiary)]"
+              className="usage-heatmap-month-label absolute top-0 whitespace-nowrap text-10 leading-[1.4] text-[var(--text-tertiary)]"
               style={{ left: m.col * colPitch }}
             >
               {m.text}
@@ -320,7 +323,7 @@ export function UsageHeatmap({
                     title={title}
                     aria-pressed={selectedDay === cell.day}
                     onClick={() => onDayClick(cell.day)}
-                    className="usage-chart-target group relative flex cursor-pointer items-center justify-center rounded-none border-0 bg-transparent p-0 outline-none"
+                    className="usage-chart-target usage-heatmap-target group relative flex cursor-pointer items-center justify-center rounded-none border-0 bg-transparent p-0 outline-none"
                     style={{ width: cellSize, height: cellSize }}
                   >
                     {visual}

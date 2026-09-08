@@ -81,8 +81,8 @@ function history(): UsageHistoryPayload {
   };
 }
 
-describe('usage history date entry equivalence', () => {
-  it('heatmap, token bar and date form apply identical filters without changing plotted data', () => {
+describe('Usage history selection behavior', () => {
+  it('keeps both chart filters equivalent and preserves default, repeated and outside clicks', () => {
     state.history = history();
     const view = render(<UsageHistorySection />);
     const marks = () =>
@@ -90,31 +90,27 @@ describe('usage history date entry equivalence', () => {
     const initialMarks = marks();
     const snapshot = () =>
       ['summary', 'agents', 'models'].map((id) => view.getByTestId(id).textContent);
-    const date = view.getByLabelText('usageHistory.date.label') as HTMLInputElement;
+    expect(state.taskRange).toBe('30d');
+    expect(view.container.querySelector('[aria-pressed="true"]')).toBeNull();
+    expect(view.container.querySelector('input[type="date"]')).toBeNull();
     const dayTargets = () => view.getAllByRole('button', { name: /Aug 21, 2026/ });
     expect(dayTargets()).toHaveLength(2);
     fireEvent.click(dayTargets()[0]);
     expect(state.taskRange).toBe('day:2026-08-21');
-    expect(date.value).toBe('2026-08-21');
     const heatmapResult = snapshot();
     fireEvent.click(view.getAllByRole('button', { name: /Aug 20, 2026/ })[0]);
     fireEvent.click(dayTargets()[1]);
     expect(snapshot()).toEqual(heatmapResult);
-    fireEvent.click(view.getAllByRole('button', { name: /Aug 20, 2026/ })[0]);
-    fireEvent.change(date, { target: { value: '2026-08-21' } });
-    expect(state.taskRange).toBe('day:2026-08-20');
-    fireEvent.submit(date.closest('form')!);
+    fireEvent.click(dayTargets()[1]);
+    fireEvent.click(view.getByRole('heading'));
     expect(state.taskRange).toBe('day:2026-08-21');
     expect(snapshot()).toEqual(heatmapResult);
     expect(marks()).toEqual(initialMarks);
     // Zero-usage and padded history dates retain the same exact-day route.
     const oldestTarget = view.container.querySelector<HTMLButtonElement>('[aria-pressed]')!;
     fireEvent.click(oldestTarget);
-    const oldestDay = state.taskRange.slice(4);
-    fireEvent.click(dayTargets()[0]);
-    fireEvent.change(date, { target: { value: oldestDay } });
-    fireEvent.submit(date.closest('form')!);
-    expect(state.taskRange).toBe(`day:${oldestDay}`);
+    expect(state.taskRange).toMatch(/^day:/);
+    expect(oldestTarget.getAttribute('aria-pressed')).toBe('true');
     expect(marks()).toEqual(initialMarks);
   });
 });

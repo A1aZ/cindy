@@ -16,7 +16,7 @@ const renderer = source.statements.find((node): node is ts.FunctionDeclaration =
 ));
 const callbackNames = [
   'markProgrammaticScroll', 'clearProgrammaticScroll', 'markMobileMvcpSettle',
-  'isUserControllingScroll', 'getTailFollower', 'scrollToEndProgrammatically', 'runStickToLatestVerify',
+  'isUserControllingScroll', 'revealPositionedHistory', 'getTailFollower', 'scrollToEndProgrammatically', 'runStickToLatestVerify',
   'scrollToOffsetProgrammatically', 'scrollToIndexProgrammatically',
   'scrollToBottom', 'handleScroll', 'handleHistoryTouchStart', 'maybeTriggerHistoryTouch',
   'handleHistoryTouchMove', 'handleHistoryTouchEnd', 'handleHistoryTouchCancel',
@@ -52,6 +52,8 @@ function harness() {
     programmaticScrollInFlightRef: ref(false), programmaticAnimatedScrollInFlightRef: ref(false),
     programmaticScrollSettleAtRef: ref(0), mvcpSettleAtRef: ref(0),
     tailFollowerRef: ref(null),
+    initialAnchorDoneRef: ref(true),
+    initialRevealAnimationRef: ref<{ stop: () => void } | null>({ stop: vi.fn() }),
     historyPrependTransactionRef: ref(null), nativeScrollEventSequenceRef: ref(0),
     shareSelectionActiveRef: ref(false),
     scrollMetricsRef: ref({ contentHeight: 2000, offsetY: 1200, viewportHeight: 800 }),
@@ -62,6 +64,7 @@ function harness() {
   });
   const environment = {
     ...scrollModel, ...state, createMobileTailFollower, mobileDebugEnabled, mobileDebugLog,
+    initialRevealProgress: { setValue: vi.fn() }, setListRevealed: vi.fn(),
     listRef: ref({
       scrollToEnd: tailScroll,
       scrollToIndex: vi.fn(),
@@ -87,6 +90,8 @@ function harness() {
   } });
   return {
     ...callbacks, state, tailScroll, scrollEvent,
+    initialRevealProgress: environment.initialRevealProgress,
+    setListRevealed: environment.setListRevealed,
     handleScrollEndDrag: (event = scrollEvent(state.scrollMetricsRef.current.offsetY)) => (
       callbacks.handleScrollEndDrag(event)
     ),
@@ -117,6 +122,27 @@ describe('streaming follow yields to the reader', () => {
     expect(sink.mock.calls.length > 0).toBe(recording !== 'off');
   });
 
+  it('reveals positioned history immediately once, cancelling the fallback before opacity changes', () => {
+    const h = harness();
+    const stop = h.state.initialRevealAnimationRef.current!.stop;
+    h.scrollToEndProgrammatically(false);
+    vi.advanceTimersByTime(64);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(h.initialRevealProgress.setValue).toHaveBeenCalledExactlyOnceWith(1);
+    expect(h.setListRevealed).toHaveBeenCalledExactlyOnceWith(true);
+    expect(vi.mocked(stop).mock.invocationCallOrder[0]).toBeLessThan(h.initialRevealProgress.setValue.mock.invocationCallOrder[0]);
+    h.handleContentSize(400, 2500);
+    vi.advanceTimersByTime(300);
+    expect(h.setListRevealed).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reveal a not-yet-started initial history from unrelated layout callbacks', () => {
+    const h = harness();
+    h.state.initialAnchorDoneRef.current = false;
+    h.runStickToLatestVerify();
+    vi.advanceTimersByTime(300);
+    expect(h.initialRevealProgress.setValue).not.toHaveBeenCalled();
+  });
   it.each([1196, 1180].flatMap((offset) => ['missing', 'before-verify', 'after-verify'].map((end) => ({ offset, end }))))(
     'releases a cancelled drag at $offset with end event $end', ({ offset, end }) => {
       const h = harness();

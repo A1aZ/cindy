@@ -391,11 +391,7 @@ const STICKY_SHARE_CHECK_THROTTLE_MS = 150;
 const SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD = 10;
 // LegendList 变高 item 的初始估高(仅影响首帧布局定位,LegendList 挂载后按实测尺寸修正)。
 /** Bound the hidden initial correction so live measurement churn cannot blank the list for seconds. */
-const MOBILE_INITIAL_ANCHOR_SETTLE_MS = 300;
-/** Fade in on the UI thread after the hidden correction window; JS may be busy mounting cells. */
-const MOBILE_INITIAL_REVEAL_FADE_MS = 100;
-const MOBILE_INITIAL_REVEAL_MAX_MS = MOBILE_INITIAL_ANCHOR_SETTLE_MS
-  + MOBILE_INITIAL_REVEAL_FADE_MS;
+const MOBILE_INITIAL_REVEAL_MAX_MS = 300;
 /** Maximum time a native imperative scroll may be reported as in-flight. */
 const MOBILE_PROGRAMMATIC_SCROLL_SETTLE_MS = 1000;
 /** Animated jump-to-latest commands get a little more time to settle. */
@@ -822,8 +818,8 @@ export function MessageRenderer({
     viewportHeight: 0,
   });
   const tailFollowerRef = useRef<MobileTailFollower | null>(null);
-  // 完整历史从挂载起就在列表中；首次揭示交给 UI 线程，首批复杂消息占满 JS 时也不会
-  // 把 300ms 窗口拖成长达数秒的白屏。位置校验由 tail follower 独立管理。
+  // 实际定位完成就直接显示；UI 线程只负责 300ms 兜底，不让繁忙 JS 无限延长隐藏。
+  // 揭示沿用唯一 tail follower 的位置校验，不再额外等待或对旧消息做淡入。
   const initialAnchorDoneRef = useRef(false);
   const initialRevealGenerationRef = useRef(0);
   const initialRevealAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
@@ -831,14 +827,7 @@ export function MessageRenderer({
     () => new Animated.Value(0),
     [scrollResetKey],
   );
-  const initialRevealOpacity = useMemo(() => initialRevealProgress.interpolate({
-    inputRange: [
-      0,
-      MOBILE_INITIAL_ANCHOR_SETTLE_MS / MOBILE_INITIAL_REVEAL_MAX_MS,
-      1,
-    ],
-    outputRange: [0, 0, 1],
-  }), [initialRevealProgress]);
+  const initialRevealOpacity = initialRevealProgress;
   const [listRevealed, setListRevealed] = useState(false);
   // Re-evaluate the near-start predicate after a prepend request releases its ref-only lock.
   // Without a render tick, a user who remains at the top can stall after one page because the
@@ -899,6 +888,7 @@ export function MessageRenderer({
     nativeScrollEventSequenceRef.current = 0;
     scrollMetricsRef.current = { contentHeight: 0, offsetY: 0, viewportHeight: 0 };
     tailFollowerRef.current?.reset();
+    tailFollowerRef.current = null;
     initialAnchorDoneRef.current = false;
     initialRevealGenerationRef.current += 1;
     initialRevealAnimationRef.current?.stop();
@@ -989,6 +979,17 @@ export function MessageRenderer({
     || isMomentumScrollingRef.current
   ), []);
 
+  const revealPositionedHistory = useCallback(() => {
+    // The fallback handle also gates repeated settle notifications. Stop before
+    // setting opacity so the native fallback cannot write a later hidden frame.
+    const animation = initialRevealAnimationRef.current;
+    if (!initialAnchorDoneRef.current || !animation) return;
+    initialRevealAnimationRef.current = null;
+    animation.stop();
+    initialRevealProgress.setValue(1);
+    setListRevealed(true);
+  }, [initialRevealProgress]);
+
   const getTailFollower = useCallback(() => {
     if (!tailFollowerRef.current) {
       tailFollowerRef.current = createMobileTailFollower({
@@ -1012,10 +1013,11 @@ export function MessageRenderer({
         onMeasurementOscillation: () => console.warn(
           '[message-list] contentSize follow-pin circuit tripped: oscillating item measurements suspected',
         ),
+        onSettled: revealPositionedHistory,
       });
     }
     return tailFollowerRef.current;
-  }, [isUserControllingScroll, markProgrammaticScroll]);
+  }, [isUserControllingScroll, markProgrammaticScroll, revealPositionedHistory]);
 
   const scrollToEndProgrammatically = useCallback((
     animated: boolean,
@@ -2270,9 +2272,8 @@ export function MessageRenderer({
     scheduleHistoryAnchorRestore,
   ]);
 
-  // 首次落底：完整历史已经在列表里。短暂遮住命令式落底与首轮测量校正，随后由 native
-  // Animated 在 UI 线程按真实时间揭开；运行中消息持续 resize 或复杂 cell 占满 JS 时，
-  // 都不能把数据已在本地的消息区继续隐藏数秒。
+  // 首次落底：完整历史已经在列表里。校验到位即显示，native Animated 只作上限兜底。
+  // 没有淡入阶段；持续 resize 或复杂 cell 占满 JS 也不能无限延长隐藏。
   useLayoutEffect(() => {
     if (initialAnchorDoneRef.current) return;
     if (listData.length === 0) {
@@ -2293,7 +2294,7 @@ export function MessageRenderer({
 
     const revealAnimation = Animated.timing(initialRevealProgress, {
       duration: MOBILE_INITIAL_REVEAL_MAX_MS,
-      easing: Easing.linear,
+      easing: Easing.step1,
       toValue: 1,
       useNativeDriver: true,
     });

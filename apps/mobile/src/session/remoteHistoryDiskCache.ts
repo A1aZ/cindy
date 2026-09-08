@@ -1,4 +1,4 @@
-import type { HistoryViewSnapshot } from '@cindy/maker-shared/message-window';
+import type { HistoryViewItem, HistoryViewSnapshot, HistoryWorkSummary } from '@cindy/maker-shared/message-window';
 import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
 import { getActiveMobileSessionRealm } from '@/config/env';
 import { HistoryDiskStore, HISTORY_DISK_ITEM_BYTES, historyValueBytes } from './historyDiskStore';
@@ -68,10 +68,23 @@ export async function writeHistoryDisk(authority: Authority, snapshot: HistoryVi
   if (!authority.current() || !snapshot.ready || snapshot.loading || snapshot.error) return;
   if (historyValueBytes([snapshot.items, snapshot.details, snapshot.expanded, snapshot.nextCursor], HISTORY_DISK_ITEM_BYTES - 1024) > HISTORY_DISK_ITEM_BYTES - 1024) return;
   try {
-    const text = JSON.stringify({ version: 1, items: snapshot.items,
-      details: [...snapshot.details].filter(([, detail]) => detail.complete && !detail.loading && !detail.error),
+    const messages = (rows: readonly RemoteMessage[]) => rows.map(row =>
+      row.agentMeta?.isStreaming === true || row.agentMeta?.streaming === true
+        ? { ...row, agentMeta: { ...row.agentMeta,
+          ...(row.agentMeta.isStreaming === true ? { isStreaming: false } : {}),
+          ...(row.agentMeta.streaming === true ? { streaming: false } : {}),
+        } } : row);
+    const summary = (value: HistoryWorkSummary): HistoryWorkSummary => ({ ...value, isStreaming: false,
+      ...(value.preview ? { preview: summary(value.preview) } : {}),
+    });
+    const items = (values: readonly HistoryViewItem<RemoteMessage>[]): HistoryViewItem<RemoteMessage>[] => values.map(item =>
+      item.type === 'messages' ? { ...item, messages: messages(item.messages) }
+        : { ...item, summary: summary(item.summary), ...(item.children ? { children: items(item.children) } : {}) });
+    const text = JSON.stringify({ version: 1, items: items(snapshot.items),
+      details: [...snapshot.details].filter(([, detail]) => detail.complete && !detail.loading && !detail.error)
+        .map(([key, detail]) => [key, { ...detail, messages: messages(detail.messages) }]),
       expanded: [...snapshot.expanded], nextCursor: snapshot.nextCursor, hasMore: snapshot.hasMore,
-    }, (key, value) => key === 'isStreaming' ? false : value);
+    });
     await (await disk()).write(authority.key, text, authority.current);
   } catch { /* Cache failure must not affect reading or synchronizing. */ }
 }

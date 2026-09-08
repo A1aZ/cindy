@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HistoryViewController, projectHistoryView, type HistoryViewSnapshot } from '@cindy/maker-shared/message-window';
+import { HistoryViewController, projectHistoryView, type HistoryViewSnapshot, type HistoryWorkSummary } from '@cindy/maker-shared/message-window';
 import { setMobileAuthOwner } from '@/auth/authOwnerGeneration';
 import { clearHistoryDisk, historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from '@/session/remoteHistoryDiskCache';
 import type { RemoteMessage } from '@/session/types';
@@ -64,6 +64,38 @@ describe('persistent history integration', () => {
     if (value.items[0].type === 'messages') value.items[0].messages[0].agentMeta = { isStreaming: true };
     await writeHistoryDisk(auth, value);
     expect(JSON.stringify(await readHistoryDisk(auth))).not.toContain('"isStreaming":true');
+  });
+  it('clears only view streaming metadata while preserving nested message and card content', async () => {
+    setMobileAuthOwner('a');
+    const auth = historyDiskAuthority('d', 's');
+    const value = snapshot('saved');
+    const row: RemoteMessage = { id: 'a', clientId: 'a', sessionId: 's', role: 'tool_use', toolUseId: 'tool',
+      createdAt: '2026-09-08T00:00:00Z', agentMeta: { isStreaming: true, streaming: true, custom: { isStreaming: 'business', streaming: true } },
+      content: { isStreaming: true, input: { isStreaming: 'literal', nested: [{ isStreaming: true }] } },
+      systemCardData: { isStreaming: true },
+    };
+    const summary: HistoryWorkSummary = { key: 'w', firstMessageId: 'a', lastMessageId: 'a', revision: 'r',
+      startedAtMs: 1, endedAtMs: 2, messageCount: 1, toolCount: 1, isStreaming: true };
+    value.items = [{ type: 'work', key: 'outer', summary: { ...summary, preview: summary }, children: [
+      { type: 'messages', key: 'narration', messages: [row] },
+      { type: 'work', key: 'inner', summary, children: [{ type: 'messages', key: 'nested', messages: [row] }] },
+    ] }];
+    value.details = new Map([['w', { messages: [row], revision: 'r', lastMessageId: 'a',
+      complete: true, loading: false, error: null }]]);
+    const original = JSON.stringify(value.items);
+    await writeHistoryDisk(auth, value);
+    const restored = (await readHistoryDisk(auth))!;
+    const cachedRow = { ...row, agentMeta: { ...row.agentMeta, isStreaming: false, streaming: false } };
+    expect(restored.items).toEqual([{ type: 'work', key: 'outer',
+      summary: { ...summary, isStreaming: false, preview: { ...summary, isStreaming: false } }, children: [
+        { type: 'messages', key: 'narration', messages: [cachedRow] },
+        { type: 'work', key: 'inner', summary: { ...summary, isStreaming: false }, children: [
+          { type: 'messages', key: 'nested', messages: [cachedRow] },
+        ] },
+      ] }]);
+    expect(restored.details.get('w')!.messages).toEqual([cachedRow]);
+    expect(JSON.stringify(value.items)).toBe(original);
+    expect(row.agentMeta!.isStreaming).toBe(true);
   });
   function controller() {
     return new HistoryViewController<RemoteMessage>({

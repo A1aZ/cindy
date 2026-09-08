@@ -1,5 +1,5 @@
-/** Disk-only LRU. The index contains metadata, never message bodies. */
-export const HISTORY_DISK_BUDGET_BYTES = 1024 * 1024 * 1024;
+/** Disk retention has no total quota; explicit lifecycle cleanup still applies. */
+export const HISTORY_DISK_BUDGET_BYTES = Infinity;
 export const HISTORY_DISK_ITEM_BYTES = 8 * 1024 * 1024;
 
 /** Conservative JSON/UTF-8 bound with early exit; never copies message bodies. */
@@ -90,8 +90,10 @@ export class HistoryDiskStore {
       const old = this.entries![key];
       this.entries![key] = { file, bytes, accessed: Date.now() };
       const discarded = old ? [old.file] : [];
-      let total = Object.values(this.entries!).reduce((sum, entry) => sum + entry.bytes, 0);
-      for (const [candidate, entry] of Object.entries(this.entries!).sort((a, b) => a[1].accessed - b[1].accessed)) {
+      let total = Number.isFinite(this.budget)
+        ? Object.values(this.entries!).reduce((sum, entry) => sum + entry.bytes, 0) : 0;
+      for (const [candidate, entry] of Number.isFinite(this.budget)
+        ? Object.entries(this.entries!).sort((a, b) => a[1].accessed - b[1].accessed) : []) {
         if (total <= this.budget) break;
         if (candidate === key) continue;
         delete this.entries![candidate]; total -= entry.bytes; discarded.push(entry.file);

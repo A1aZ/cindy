@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { HistoryDiskStore, HISTORY_DISK_BUDGET_BYTES, HISTORY_DISK_ITEM_BYTES, historyValueBytes, type HistoryDiskIO } from '../session/historyDiskStore';
 
-function fixture(budget = 100) {
+function fixture(budget = HISTORY_DISK_BUDGET_BYTES) {
   const files = new Map<string, string>();
   const io: HistoryDiskIO = {
     read: vi.fn(async name => files.get(name) ?? null),
@@ -30,8 +30,8 @@ describe('history disk cache', () => {
     expect(await new HistoryDiskStore(h.io).read('old', current)).toBeNull();
     expect(h.io.read).not.toHaveBeenCalledWith('view-old.json');
   });
-  it('uses a GiB budget and survives a new store without reading every body', async () => {
-    expect(HISTORY_DISK_BUDGET_BYTES).toBe(1073741824);
+  it('has no total quota and survives a new store without reading every body', async () => {
+    expect(HISTORY_DISK_BUDGET_BYTES).toBe(Infinity);
     const h = fixture();
     await h.cache.write('first', 'hello', current);
     await h.cache.write('second', 'world', current);
@@ -39,6 +39,19 @@ describe('history disk cache', () => {
     const restarted = new HistoryDiskStore(h.io);
     expect(await restarted.read('first', current)).toBe('hello');
     expect(h.io.read).toHaveBeenCalledTimes(2); // index and requested body only
+  });
+  it('retains existing history above the old GiB quota when adding another view', async () => {
+    const h = fixture();
+    const index: Record<string, unknown> = {};
+    for (let i = 0; i < 140; i++) {
+      const file = `view-${i}.json`;
+      h.files.set(file, 'existing');
+      index[String(i)] = { file, bytes: HISTORY_DISK_ITEM_BYTES, accessed: i };
+    }
+    h.files.set('index.json', JSON.stringify(index));
+    await h.cache.write('new', 'new body', current);
+    expect(await h.cache.read('0', current)).toBe('existing');
+    expect(h.io.remove).not.toHaveBeenCalled();
   });
   it('retains more than eight views and evicts by actual UTF-8 bytes', async () => {
     const h = fixture(30);

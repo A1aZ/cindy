@@ -602,6 +602,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
    * - 每个 session 保留最近一次失败/中断，即使已读也能查看历史失败提示。
    * - 未读旧 run 先返回以累计 session 红点，最新映射最后返回以裁决 Automation 归属。
    * - 非最新 running 不携带 sessionId，只参与运行标记对账。
+   * - 内部例行任务在 SQL 内排除，避免未读历史随运行次数累积到公共侧栏内存中。
    */
   async listSidebarIndexRuns(): Promise<ScheduleSidebarIndexRun[]> {
     const db = this.getDb();
@@ -625,17 +626,17 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
         .from(scheduleSessionLatestRuns)
         .innerJoin(scheduleRuns, eq(scheduleSessionLatestRuns.runId, scheduleRuns.id))
         .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
-        .where(isNotNull(scheduleRuns.sessionId)),
+        .where(and(isNotNull(scheduleRuns.sessionId), publicScheduleRunWhere())),
       db
         .select(projection)
         .from(scheduleRuns)
         .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
-        .where(unreadTerminalRunWhere()),
+        .where(and(unreadTerminalRunWhere(), publicScheduleRunWhere())),
       db
         .select(projection)
         .from(scheduleRuns)
         .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
-        .where(eq(scheduleRuns.status, 'running')),
+        .where(and(eq(scheduleRuns.status, 'running'), publicScheduleRunWhere())),
       db
         .select(projection)
         .from(scheduleSessionLatestRuns)
@@ -651,7 +652,8 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
           )`,
           ),
         )
-        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id)),
+        .innerJoin(schedules, eq(scheduleRuns.scheduleId, schedules.id))
+        .where(publicScheduleRunWhere()),
     ]);
     const latestRunIds = new Set(latestSessionRows.map((row) => row.runId));
     const unreadRunIds = new Set(unreadRows.map((row) => row.runId));

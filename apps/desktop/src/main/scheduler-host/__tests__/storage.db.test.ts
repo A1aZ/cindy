@@ -256,14 +256,18 @@ const SCHEDULER_DDL = [
   `,
 ];
 
-function createStorageHarness() {
+function createStorageHarness(queries?: { query: string; params: unknown[] }[]) {
   const sqlite = new Database(':memory:');
   sqlite.pragma('foreign_keys = ON');
   for (const statement of SCHEDULER_DDL) sqlite.exec(statement);
 
-  const db = drizzle(sqlite, { schema }) as SchedulerDrizzleDb;
+  const db = drizzle(sqlite, {
+    schema,
+    logger: queries ? { logQuery: (query, params) => queries.push({ query, params }) } : undefined,
+  }) as SchedulerDrizzleDb;
   return {
     close: () => sqlite.close(),
+    sqlite,
     db,
     storage: new DrizzleScheduleStorage(() => db),
   };
@@ -1577,6 +1581,40 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
       harness.close();
     }
   });
+});
+
+it('excludes internal routine rows in SQLite before materializing the public sidebar index', async () => {
+  const queries: { query: string; params: unknown[] }[] = [];
+  const harness = createStorageHarness(queries);
+  try {
+    for (const id of ['public', 'legacy', 'routine-owned']) {
+      await harness.storage.insert(baseSchedule({ id, source: id === 'routine-owned' ? 'bot' : 'user' }));
+      harness.db.run(sql`INSERT INTO sessions (id, title) VALUES (${id}, ${id})`);
+      await harness.storage.insertRun({ id: `${id}-failed`, scheduleId: id, sessionId: id, firedAt: 1, status: 'failed', readAt: 2 });
+      await harness.storage.insertRun({ id: `${id}-running`, scheduleId: id, sessionId: id, firedAt: 2, status: 'running' });
+      await harness.storage.insertRun({ id: `${id}-latest`, scheduleId: id, sessionId: id, firedAt: 3, status: 'success', readAt: 4 });
+    }
+    harness.db.run(sql`UPDATE schedules SET source = NULL WHERE id = 'legacy'`);
+    for (let i = 0; i < 128; i++) {
+      await harness.storage.insertRun({ id: `routine-unread-${i}`, scheduleId: 'routine-owned', sessionId: 'routine-owned', firedAt: i + 4, status: 'success' });
+    }
+    queries.length = 0;
+    const runs = await harness.storage.listSidebarIndexRuns();
+    expect(new Set(runs.map((run) => run.scheduleId))).toEqual(new Set(['public', 'legacy']));
+
+    // Execute the captured SQL directly: a final JS filter alone cannot pass this assertion.
+    const indexQueries = queries.filter(({ query }) =>
+      query.startsWith('select "schedule_runs"."id", "schedules"."id",'),
+    );
+    expect(indexQueries).toHaveLength(4);
+    for (const { query, params } of indexQueries) {
+      const rows = harness.sqlite.prepare(query).all(...params) as { source: string | null }[];
+      expect(rows.every((row) => row.source !== 'bot')).toBe(true);
+    }
+    expect(await harness.storage.listRuns('routine-owned', 131)).toHaveLength(131);
+  } finally {
+    harness.close();
+  }
 });
 
 it('excludes internal routine history from public indexes, unread counts and deletion', async () => {

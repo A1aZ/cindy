@@ -9,11 +9,13 @@ export function buildMobileHistoryRenderItems(options: {
   messages: readonly RemoteMessage[];
   streaming: boolean;
   sessionId: string;
+  pendingHandoff?: ReadonlySet<string>;
   taskUpdates?: ReadonlyMap<string, AgentTaskUpdate>;
 }): MobileMessageRenderItem[] {
   return renderHistoryView<RemoteMessage, MobileMessageRenderItem>({
     view: options.view, snapshot: options.snapshot, liveMessages: options.messages,
-    isLive: (row) => row.agentMeta?.isStreaming === true,
+    isLive: (row) => row.agentMeta?.isStreaming === true || options.pendingHandoff?.has(row.clientId) === true,
+    isPendingHandoff: (row) => options.pendingHandoff?.has(row.clientId) === true,
     streaming: options.streaming,
     build: (rows, streaming) => buildMobileMessageRenderItems(rows, { isSessionStreaming: streaming, sessionId: options.sessionId }, options.taskUpdates),
     structure: {

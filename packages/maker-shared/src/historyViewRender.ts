@@ -9,6 +9,8 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   build(messages: readonly T[], streaming: boolean): TItem[];
   streaming: boolean;
   isLive?(message: T): boolean;
+  /** Already displayed assistant identities awaiting history, not arbitrary cached rows. */
+  isPendingHandoff?(message: T): boolean;
   isLocalUser?(message: T): boolean;
   structure: {
     placeholder(summary: HistoryWorkSummary): T;
@@ -61,7 +63,8 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   }
   for (const row of options.liveMessages) {
     if (options.isLive?.(row) && !seen.has(row.clientId) && (row.role === 'assistant' || row.role === 'user')
-      && Date.parse(row.createdAt) >= endMs) rows.push(row);
+      && (Date.parse(row.createdAt) >= endMs
+        || (row.role === 'assistant' && options.isPendingHandoff?.(row)))) rows.push(row);
   }
   // Local pending/blocked user bubbles belong to the current UI store, not
   // persisted history. Keep their store order without trusting device clocks.

@@ -147,7 +147,7 @@ describe('shared history view lifecycle', () => {
 
   it.each([false, true])('preserves an opposite-direction request during a pending page (older=%s)', async (older) => {
     let resolve!: (page: HistoryViewPage<HistoryMessageSource>) => void;
-    const page = { version: 1 as const, items: projectHistoryView([row(2, 'user', 'current')], false), hasMore: true, nextCursor: '2' };
+    const page: HistoryViewPage<HistoryMessageSource> = { version: 1, items: projectHistoryView([row(2, 'user', 'current')], false), hasMore: true, nextCursor: '2' };
     const read = vi.fn(async (_before?: string) => page);
     const view = new HistoryViewController({ page: read,
       details: async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null }), expanded: async () => undefined });
@@ -178,7 +178,7 @@ describe('shared history view lifecycle', () => {
     const read = vi.fn(async () => ({ version: 1 as const, items: projectHistoryView([row(1, 'thinking', 'old')], true), hasMore: false, nextCursor: null }));
     let resolve!: (page: { version: 1; messages: HistoryMessageSource[]; hasMore: false; nextCursor: null }) => void;
     const view = new HistoryViewController({ page: read,
-      details: () => new Promise((done) => { resolve = done; }), expanded: async () => undefined });
+      details: () => new Promise<Parameters<typeof resolve>[0]>((done) => { resolve = done; }), expanded: async () => undefined });
     await view.refresh();
     view.setExpanded(view.getSnapshot().items[0].key, true);
     read.mockRejectedValueOnce(new Error('timeout'));
@@ -289,7 +289,7 @@ describe('shared history view lifecycle', () => {
     await view.refresh();
     const blocked = { ...row(2, 'user', 'blocked'), blockedByGhost: true };
     const pending = { ...row(3, 'user', 'pending'), isPendingPersist: true };
-    const render = (liveMessages: Message[]) => renderHistoryView({
+    const render = (liveMessages: Message[]) => renderHistoryView<Message, unknown>({
       view, snapshot: view.getSnapshot(), liveMessages, streaming: false,
       isLive: () => false,
       isLocalUser: (message) => message.isPendingPersist === true || !!message.blockedByGhost,

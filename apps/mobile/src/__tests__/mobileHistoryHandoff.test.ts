@@ -1,0 +1,87 @@
+import { describe, expect, it } from 'vitest';
+import { HistoryViewController, projectHistoryView } from '@cindy/maker-shared/message-window';
+import { MobileHistoryHandoff } from '../session/mobileHistoryHandoff';
+import { buildMobileHistoryRenderItems } from '../session/mobileHistoryRender';
+import type { RemoteMessage } from '../session/types';
+
+const row = (id: string, streaming = false): RemoteMessage => ({
+  id, clientId: id, sessionId: 's', role: id === 'user' ? 'user' : 'assistant',
+  content: id === 'user' ? 'question' : 'visible answer', toolUseId: null,
+  createdAt: id === 'user' ? '2026-09-08T00:00:00Z' : '2026-09-08T00:00:01Z',
+  agentMeta: streaming ? { isStreaming: true } : null,
+});
+
+describe('mobile history handoff', () => {
+  it('retains text finalized before the first history page arrives, including an older provisional time anchor', async () => {
+    const view = new HistoryViewController<RemoteMessage>({
+      page: async () => ({ version: 1, items: projectHistoryView([row('user')], false), hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    const handoff = new MobileHistoryHandoff();
+    const live = { ...row('answer', true), createdAt: '2026-09-07T23:59:59Z' };
+    handoff.reconcile(view.getSnapshot(), [live]);
+    const final = { ...live, agentMeta: null };
+    handoff.reconcile(view.getSnapshot(), [final]);
+    await view.refresh();
+    const state = handoff.reconcile(view.getSnapshot(), [final]);
+    const output = buildMobileHistoryRenderItems({ view, snapshot: view.getSnapshot(), messages: state.messages,
+      pendingHandoff: state.pending, streaming: false, sessionId: 's' });
+    expect(JSON.stringify(output)).toContain('visible answer');
+    expect(state.pending.has('answer')).toBe(true);
+    view.setActive(false);
+  });
+
+  it('keeps a displayed answer through finalization, persistence and a stale page until history takes over once', async () => {
+    let source = [row('user')];
+    const view = new HistoryViewController<RemoteMessage>({
+      page: async () => ({ version: 1, items: projectHistoryView(source, false), hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    const handoff = new MobileHistoryHandoff();
+    const render = (raw: RemoteMessage[]) => {
+      const state = handoff.reconcile(view.getSnapshot(), raw);
+      const output = buildMobileHistoryRenderItems({ view, snapshot: view.getSnapshot(),
+        messages: state.messages, pendingHandoff: state.pending, streaming: false, sessionId: 's' });
+      return { state, output: JSON.stringify(output) };
+    };
+    expect(render([row('answer', true)]).output).toContain('visible answer');
+    // done/tool boundary clears streaming, but persistence/history have not arrived.
+    expect(render([row('answer')]).output).toContain('visible answer');
+    // A durable push replaces the raw object before the separate history page.
+    expect(render([{ ...row('answer'), id: 'db-id', rowid: 42 }]).output).toContain('visible answer');
+    await view.refresh();
+    expect(render([row('answer')]).output).toContain('visible answer');
+    source = [row('user'), { ...row('answer'), content: 'authoritative answer' }];
+    await view.refresh();
+    const final = render([row('answer')]);
+    expect(final.state.pending.size).toBe(0);
+    expect(final.state.messages.filter(x => x.clientId === 'answer')).toHaveLength(1);
+    expect(final.output).toContain('authoritative answer');
+    expect(final.output).not.toContain('visible answer');
+    view.setActive(false);
+  });
+
+  it('never promotes old durable cache rows and cancels a handoff removed by delete or rewind', async () => {
+    const view = new HistoryViewController<RemoteMessage>({
+      page: async () => ({ version: 1, items: projectHistoryView([row('user')], false), hasMore: false, nextCursor: null }),
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined,
+    });
+    await view.refresh();
+    const handoff = new MobileHistoryHandoff();
+    expect(handoff.reconcile(view.getSnapshot(), [row('old')]).messages.map(x => x.clientId)).toEqual(['user']);
+    handoff.reconcile(view.getSnapshot(), [row('answer', true)]);
+    expect(handoff.reconcile(view.getSnapshot(), []).pending.size).toBe(0);
+    expect(handoff.reconcile(view.getSnapshot(), [row('answer')]).messages.map(x => x.clientId)).toEqual(['user']);
+    handoff.reconcile(view.getSnapshot(), [row('answer', true)]);
+    view.reset();
+    handoff.reconcile(view.getSnapshot(), []);
+    await view.refresh();
+    expect(handoff.reconcile(view.getSnapshot(), [row('answer')]).pending.size).toBe(0);
+    expect(new MobileHistoryHandoff().reconcile(view.getSnapshot(), [row('answer')]).pending.size).toBe(0);
+    view.setActive(false);
+  });
+});

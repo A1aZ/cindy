@@ -110,8 +110,9 @@ import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
-import { isHistoryViewUnavailable, historyViewLeaves } from '@cindy/maker-shared/message-window';
+import { isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { buildMobileHistoryRenderItems } from '@/session/mobileHistoryRender';
+import { MobileHistoryHandoff } from '@/session/mobileHistoryHandoff';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
@@ -1022,16 +1023,10 @@ export default function SessionScreen() {
     if (messageReloadRevision > 0) historyView.view.reset();
   }, [messageReloadRevision, historyView.view]);
   const rawMessages = useSessionMessages(sessionId, deviceId);
-  const messages = useMemo(() => {
-    if (!historyView.snapshot.ready) return rawMessages;
-    const available = historyViewLeaves(historyView.snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
-    for (const detail of historyView.snapshot.details.values()) available.push(...detail.messages);
-    const byId = new Map(available.map((row) => [row.clientId, row]));
-    for (const row of rawMessages) {
-      if (row.agentMeta?.isStreaming === true) byId.set(row.clientId, row);
-    }
-    return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.rowid ?? 0) - (b.rowid ?? 0));
-  }, [rawMessages, historyView.snapshot]);
+  const historyHandoff = useMemo(() => new MobileHistoryHandoff(), [historyView.view]);
+  const handoff = useMemo(() => historyHandoff.reconcile(historyView.snapshot, rawMessages),
+    [historyHandoff, rawMessages, historyView.snapshot]);
+  const messages = handoff.messages;
   const messageStructureToken = remoteSessionStore.getSessionMessageStructureToken(sessionId);
   const messageStructureChangedIndexes = remoteSessionStore
     .getSessionMessageStructureChangedIndexes(sessionId);
@@ -4184,6 +4179,7 @@ export default function SessionScreen() {
       const historyItems = historyView.snapshot.ready ? buildMobileHistoryRenderItems({
         view: historyView.view, snapshot: historyView.snapshot, messages: projectedMessages,
         streaming: isMessageListStreaming, sessionId, taskUpdates,
+        pendingHandoff: handoff.pending,
       }) : builtWindow.items;
       let items = insertMobileForkOriginItem(
         // 孤儿 agent_task 兜底用 maker status 驱动的权威 turn 边界 gate,与 store 的
@@ -4225,7 +4221,7 @@ export default function SessionScreen() {
         stablePrefixItemCount,
       };
     },
-    [historyView.snapshot, historyView.view, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
+    [historyView.snapshot, historyView.view, handoff.pending, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
   );
   const renderItems = renderWindow.items;
   const renderItemsStructureKey = useMemo(

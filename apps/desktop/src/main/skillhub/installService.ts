@@ -951,9 +951,16 @@ export async function uninstall(
 
   // 共享安装锁:同名 install / learn apply 的 final-switch 进行中时拒绝删除,
   // 避免 rm 掉对方刚切入的目录、registry 写入交错。
-  const releaseLock = tryAcquireSkillInstallLock(skillName, 'market-uninstall');
-  if (!releaseLock) {
-    return { success: false, errorCode: 'INTERNAL', message: skillLockBusyMessage(skillName) };
+  const releaseLocks: Array<() => void> = [];
+  // An imported discovery link can have a different name from its source. Install
+  // replaces that entry under its discovery name, so hold both locks through trash.
+  for (const lockName of new Set([skillName, path.basename(target?.operationPath ?? absolutePath)])) {
+    const release = tryAcquireSkillInstallLock(lockName, 'market-uninstall');
+    if (!release) {
+      for (const unlock of releaseLocks) unlock();
+      return { success: false, errorCode: 'INTERNAL', message: skillLockBusyMessage(lockName) };
+    }
+    releaseLocks.push(release);
   }
   try {
     // Keep the exact registry identity for metadata cleanup after trash succeeds.
@@ -976,7 +983,7 @@ export async function uninstall(
       canMutate,
     );
   } finally {
-    releaseLock();
+    for (const unlock of releaseLocks) unlock();
   }
 }
 

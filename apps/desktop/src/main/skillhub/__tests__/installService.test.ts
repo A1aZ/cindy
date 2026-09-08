@@ -2079,6 +2079,48 @@ describe('skillhub/installService', () => {
     expect(vi.mocked(registryService.addInstall)).not.toHaveBeenCalled();
   });
 
+  it.each(['install-first', 'uninstall-first'])('locks differently named import entries against install (%s)', async (order) => {
+    const source = path.join(TEST_ROOT, 'checkout', 'source');
+    const alias = path.join(TEST_ROOT, '.agents', 'skills', 'alias');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'external content');
+    makeDirectoryLink(alias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { tryAcquireSkillInstallLock, getSkillInstallLockOwner } = await import('../installLock');
+    const { uninstall, install } = await import('../installService');
+    const { getCurrentUserId } = await import('../../authManager');
+    const { shell } = await import('electron');
+    vi.mocked(getCurrentUserId).mockReturnValue('user-1');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue(null);
+    vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    const target = inspectLocalSkillTarget(source, [alias])!;
+    if (order === 'install-first') {
+      const releaseInstall = tryAcquireSkillInstallLock('alias', 'market-install')!;
+      try {
+        expect((await uninstall(source, target)).success).toBe(false);
+        expect(shell.trashItem).not.toHaveBeenCalled();
+        expect(getSkillInstallLockOwner('source')).toBeNull();
+      } finally { releaseInstall(); }
+    } else {
+      let finishTrash: (() => void) | undefined;
+      vi.mocked(shell.trashItem).mockImplementationOnce(async (entry) => {
+        await new Promise<void>((resolve) => { finishTrash = resolve; });
+        await fs.promises.rename(entry, path.join(TEST_ROOT, 'trashed-alias'));
+      });
+      const removing = uninstall(source, target);
+      await vi.waitFor(() => expect(finishTrash).toBeDefined());
+      try {
+        expect((await install({ name: 'alias', installPath: alias, version: '1' }, () => {})).success).toBe(false);
+        expect(getSkillInstallLockOwner('alias')).toBe('market-uninstall');
+      } finally { finishTrash!(); }
+      expect(await removing).toEqual({ success: true });
+    }
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
+    expect(getSkillInstallLockOwner('alias')).toBeNull();
+    expect(getSkillInstallLockOwner('source')).toBeNull();
+  });
+
   it('rejects uninstall while a learn apply holds the shared lock', async () => {
     const dir = path.join(TEST_ROOT, '.agents', 'skills', 'locked-skill');
     fs.mkdirSync(dir, { recursive: true });

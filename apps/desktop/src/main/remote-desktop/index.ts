@@ -327,7 +327,11 @@ export const remoteDesktop = new RemoteDesktopController({
       );
       return encodeNativeRelayFrame(frame, (jpeg) => nativeImage.createFromBuffer(jpeg));
     }
-    const source = desktopCaptureSource(await sources(true), displayId, screen.getAllDisplays());
+    const available = await sources(true).catch((error) => {
+      if (error instanceof Error && error.message === 'DESKTOP_VIDEO_TIMEOUT') return [];
+      throw error;
+    });
+    const source = desktopCaptureSource(available, displayId, screen.getAllDisplays());
     return source ? encodeDesktopFrame(source.thumbnail) : null;
   },
   clipboard: (action, text, isCurrent) =>
@@ -354,8 +358,8 @@ export const remoteDesktop = new RemoteDesktopController({
   },
 });
 
-export function registerRemoteDesktopIpc(): void {
-  denyAppDesktopCapture(session.defaultSession);
+export function registerRemoteDesktopIpc(isVoiceInputOwner?: Parameters<typeof denyAppDesktopCapture>[1]): void {
+  denyAppDesktopCapture(session.defaultSession, isVoiceInputOwner);
   const timer = setInterval(() => remoteDesktop.tick(), 1000);
   timer.unref();
   app.on('before-quit', () => {

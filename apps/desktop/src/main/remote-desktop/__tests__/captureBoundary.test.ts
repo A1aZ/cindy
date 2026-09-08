@@ -165,6 +165,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('drops enumeration timeouts for one relay frame and resumes without stopping the host', async () => {
+  vi.stubGlobal('process', { ...process, platform: 'linux' });
+  h.source = new Promise(() => {});
+  const pending = h.deps.frame('1', false);
+  await vi.advanceTimersByTimeAsync(5000);
+  await expect(pending).resolves.toBeNull();
+  expect(h.stop).not.toHaveBeenCalled();
+  h.source = Promise.resolve([]);
+  await expect(h.deps.frame('1', false)).resolves.toBeNull();
+  h.source = Promise.reject(new Error('DESKTOP_DISABLED'));
+  await expect(h.deps.frame('1', false)).rejects.toThrow('DESKTOP_DISABLED');
+});
+
 it.each(['success', 'timeout'])('keeps relay polls out of native preparation and resumes after %s', async (outcome) => {
   vi.stubGlobal('process', { ...process, platform: 'darwin' });
   let sourcesReady!: (sources: any[]) => void;

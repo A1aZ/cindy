@@ -24,6 +24,7 @@ vi.mock('electron', () => ({
     }),
   },
   BrowserWindow: class {
+    static fromWebContents(owner: any) { return owner; }
     destroyed = false;
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: '', parent: null },
@@ -45,6 +46,10 @@ vi.mock('electron', () => ({
       this.webContents.emit('destroyed');
     }
   },
+}));
+vi.mock('../../security/trustedAppRenderer', () => ({
+  isTrustedAppRendererWindow: (owner: any) => owner?.kind === 'app' && owner.mainFrame.url === 'file:///app/index.html',
+  isTrustedCindyRendererWindow: (owner: any) => owner?.mainFrame.url === 'file:///app/index.html',
 }));
 vi.mock('../../utils/ipcValidate', () => ({
   throwIpcError: () => {
@@ -160,20 +165,44 @@ it('denies app display/legacy capture while preserving physical microphone and c
     setPermissionCheckHandler: vi.fn(),
     setPermissionRequestHandler: vi.fn(),
   };
-  denyAppDesktopCapture(ses as any);
+  const owner = { kind: 'app', mainFrame: { url: 'file:///app/index.html' }, isDestroyed: () => false };
+  const voice = { ...owner, kind: 'voice' };
+  const details = { isMainFrame: true, requestingUrl: owner.mainFrame.url };
+  denyAppDesktopCapture(ses as any, (candidate) => candidate === voice as any);
   const check = ses.setPermissionCheckHandler.mock.calls[0][0];
   const request = ses.setPermissionRequestHandler.mock.calls[0][0];
   for (const mediaType of ['unknown', undefined])
-    expect(check(null, 'media', '', { mediaType })).toBe(false);
+    expect(check(owner, 'media', '', { ...details, mediaType })).toBe(false);
   for (const mediaType of ['audio', 'video'])
-    expect(check(null, 'media', '', { mediaType })).toBe(true);
+    expect(check(owner, 'media', '', { ...details, mediaType })).toBe(true);
   for (const types of [[], undefined, ['unknown']]) {
     const reply = vi.fn();
-    request(null, 'media', reply, { mediaTypes: types });
+    request(owner, 'media', reply, { ...details, mediaTypes: types });
     expect(reply).toHaveBeenCalledWith(false);
   }
   const reply = vi.fn();
-  request(null, 'media', reply, { mediaTypes: ['audio'] });
+  request(owner, 'media', reply, { ...details, mediaTypes: ['audio'] });
+  expect(reply).toHaveBeenLastCalledWith(true);
+  request(voice, 'media', reply, { ...details, mediaTypes: ['audio'] });
+  expect(reply).toHaveBeenLastCalledWith(true);
+  for (const permission of ['notifications', 'geolocation', 'midi', 'hid', 'display-capture', 'unknown']) {
+    expect(check(owner, permission, '', details)).toBe(false);
+    request(owner, permission, reply, details);
+    expect(reply).toHaveBeenLastCalledWith(false);
+  }
+  for (const [candidate, requestDetails] of [
+    [null, details],
+    [{ ...owner, kind: 'foreign' }, details],
+    [owner, { ...details, isMainFrame: false }],
+    [owner, { ...details, requestingUrl: 'https://evil.example/' }],
+    [{ ...voice, mainFrame: { url: 'https://evil.example/' } }, details],
+  ]) {
+    expect(check(candidate, 'media', '', { ...requestDetails, mediaType: 'audio' })).toBe(false);
+    request(candidate, 'media', reply, { ...requestDetails, mediaTypes: ['audio'] });
+    expect(reply).toHaveBeenLastCalledWith(false);
+  }
+  expect(check(owner, 'clipboard-sanitized-write', '', details)).toBe(true);
+  request(owner, 'clipboard-sanitized-write', reply, details);
   expect(reply).toHaveBeenLastCalledWith(true);
   request(null, 'display-capture', reply, {});
   expect(reply).toHaveBeenLastCalledWith(false);

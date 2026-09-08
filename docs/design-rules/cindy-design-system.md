@@ -33,7 +33,7 @@
 
 ## 版本记录
 
-- **2026-09-07（圆角改按可见层与登记分配）**：`DESIGN.md §5` 重写为两步判定树——Step 1 已登记形状（keycap / data mark）优先，Step 2 普通控件三档；判定对象从 DOM 标签改为「可见层」，§5 成为半径唯一权威（§§1/4/7/9 与组件条目只引用不另立）。新增 data mark 类目（0px 或 2px、按成员钉死），首批四个成员四角 2px：`usage-heatmap-day`、`usage-token-bar`、`workflow-status-cell`、`system-category-square`；07-28「status micro-cells（2px）」窄例外被后两个成员吸收——数值与组件不变，依据从「≤8px 非交互」改为图元角色，解除 non-interactive 限定、尺寸不再作归类边界。`every button` /「唯一豁免」等绝对化措辞改为「未命中 Step 1 的普通控件框」。命中尺寸采用 Equivalent 路径：用量历史同页补足产生相同单日筛选的合规日期选择控件，与密集图表恢复同 PR 交付。`REVIEW.md` 审查入口与 `design-governance.md §13` 同步；`UsageHeatmap` / `UsageTokenBars` 的生产差异登记为待迁移项。裁决全文与两处范围变更见 [`design-decision-log.md`](./design-decision-log.md)「09-07」条。**本条取代 08-29 条的「按钮一律胶囊／裸文字按钮唯一豁免」绝对化表述与 07-28 条的微格尺寸判据（三档数值本身不变）。**
+- **2026-09-07（圆角改按可见层与登记分配）**：`DESIGN.md §5` 重写为两步判定树——Step 1 已登记形状（keycap / data mark）优先，Step 2 普通控件三档；判定对象从 DOM 标签改为「可见层」，§5 成为半径唯一权威（§§1/4/7/9 与组件条目只引用不另立）。新增 data mark 类目（0px 或 2px、按成员钉死），首批四个成员四角 2px：`usage-heatmap-day`、`usage-token-bar`、`workflow-status-cell`、`system-category-square`；07-28「status micro-cells（2px）」窄例外被后两个成员吸收——数值与组件不变，依据从「≤8px 非交互」改为图元角色，解除 non-interactive 限定、尺寸不再作归类边界。`every button` /「唯一豁免」等绝对化措辞改为「未命中 Step 1 的普通控件框」。命中尺寸采用 Equivalent 路径：用量历史同页补足产生相同单日筛选的合规日期选择控件；原定与密度恢复同 PR 交付的时序已被 #4064 先行恢复密度超越，控件单独交付，交付前密集目标为 §5 登记在案的过渡不合规。`REVIEW.md` 审查入口与 `design-governance.md §13` 同步；`UsageHeatmap` / `UsageTokenBars` 的生产差异登记为待迁移项。裁决全文与两处范围变更见 [`design-decision-log.md`](./design-decision-log.md)「09-07」条。**本条取代 08-29 条的「按钮一律胶囊／裸文字按钮唯一豁免」绝对化表述与 07-28 条的微格尺寸判据（三档数值本身不变）。**
 
 - **2026-09-07（设置分段选项与用量数据图形）**：`DESIGN.md §4` 补设置分段单选逐态与键盘合同，统一复用 `SettingsSegmentedControl`；§4/§5 明确用量热力方格、细柱与点击承载的 2px 数据图形例外，保留灰度色阶和日期筛选，避免普通按钮胶囊规则改变图表形状。
 

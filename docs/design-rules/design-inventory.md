@@ -139,7 +139,7 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.plugins.app-main` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.plugins.installed` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.settings` | unassigned（用量图表裁决与迁移跟进：kirozeng） | pilot | DESIGN.md §10 语义豁免色族消费者；外部主题导入保护 token（资源用量类别色在独立窗）；DESIGN.md §5 登记成员 `usage-heatmap-day` / `usage-token-bar` | DS-4 / DS-4b 的 Button / Input 与 SettingsTextInput 局部兼容壳已落地；DS-6 完整表单和第二消费者，DS-8 数值同源；用量图表另走普通命名的视觉修复 PR，见下方待迁移记录 | DS-6 补全状态、说明与公开附件；focus、ivory/elevated 见治理 §10。旧 alias 与 slot 按作用域生效，禁止仅因同值删除局部配色；DS-6/8/9/11 按实际消费者分批核对跨 surface alias，confirm-dialog 归 DS-6；用量图表按 2026-09-07 裁决跟进，不记为已合规 |
-| `desktop.shell.main-layout` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族（侧栏 vibrancy / 选中 pill）；外部主题导入保护 token | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
+| `desktop.shell.main-layout` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族（侧栏 vibrancy / 选中 pill）；外部主题导入保护 token；DESIGN.md §5 登记成员 `workflow-status-cell`（background-tasks 面板详情） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.skillhub.local` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.skillhub.market` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.computer-permission-guide` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
@@ -147,7 +147,7 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.window.resource-usage` | unassigned | legacy | 外部主题导入保护 token（进程类别色） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.review-artifact-confirm` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.session-drag-preview` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
-| `desktop.window.sidebar` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族 | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
+| `desktop.window.sidebar` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族；DESIGN.md §5 登记成员 `workflow-status-cell`（background-tasks 面板详情） | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.voice-dictionary-toast` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.voice-overlay` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 

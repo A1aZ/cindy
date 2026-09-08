@@ -7437,6 +7437,7 @@
       "stop": "생성 중지"
     },
     "pluginSetup": {
+      "reopen": "다시 열기",
       "title": "{{name}} 설정",
       "assessmentReadFailed": "플러그인 설정 상태를 읽을 수 없습니다.",
       "setupIncomplete": "플러그인 설정이 완료되지 않았습니다.",

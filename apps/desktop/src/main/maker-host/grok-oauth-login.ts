@@ -507,6 +507,8 @@ export interface GrokOAuthLoginResult {
 /** 跑一次 xAI 订阅 OAuth 浏览器登录。成功后把可刷新凭证写进 safeStorage('xai')。 */
 export async function runGrokOAuthLogin(opts?: {
   onProgress?: (msg: string) => void;
+  /** Host-only callback; URL must never be persisted in chat. */
+  onAuthorizationUrl?: (url: string) => void;
 }): Promise<GrokOAuthLoginResult> {
   cancelGrokOAuthLogin(); // 同一时刻只允许一个登录流
 
@@ -552,6 +554,7 @@ export async function runGrokOAuthLogin(opts?: {
     });
 
     opts?.onProgress?.('opening-browser');
+    opts?.onAuthorizationUrl?.(authUrl);
     log.info('opening browser for xai oauth', { port: REDIRECT_PORT });
     await shell.openExternal(authUrl);
 

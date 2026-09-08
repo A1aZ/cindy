@@ -871,6 +871,8 @@ export class GhostOauthAccountManager {
        * GhostOauthClientConfig.corsDeliveryHosts。
        */
       deliveryHosts?: readonly string[];
+      /** Main-only handoff for reopening the current authorization page. */
+      onAuthorizationUrl?: (url: string) => void;
     },
   ): Promise<GhostOauthConnectResult> {
     if (decl.tokenBroker !== undefined && !this.isTokenBrokerAuthorized(ghostId)) {
@@ -918,7 +920,7 @@ export class GhostOauthAccountManager {
 
     const flow = await startGhostOauthFlow({
       config,
-      openExternal: this.deps.openExternal,
+      openExternal: (url) => { opts?.onAuthorizationUrl?.(url); return this.deps.openExternal(url); },
       fetchImpl: this.deps.fetchImpl,
       broker: this.deps.broker,
       brandName: this.deps.brandName,

@@ -1,3 +1,4 @@
+import { AuthorizationMessageCard } from './AuthorizationMessageCard';
 import { CompanionMessageCard } from '@/session/CompanionMessageCard';
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -2613,7 +2614,9 @@ const RenderItemView = memo(function RenderItemView({
   let node: ReactNode;
   switch (item.type) {
     case 'message':
-      node = item.message.companion
+      node = item.message.authorization
+        ? <AuthorizationMessageCard message={item.message} />
+        : item.message.companion
         ? <CompanionMessageCard message={item.message} />
         : item.message.orcaCard
         ? <OrcaCollabCard card={item.message.orcaCard} screenWidth={actions.screenWidth} />

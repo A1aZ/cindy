@@ -1,3 +1,6 @@
+import { initializeBotAuthorizationHost } from './botAuthorizationHost.js';
+import { getBotAuthorizationService } from './botAuthorizationService.js';
+import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
  * registerMakerIpc — 把 Maker Core 的能力暴露为 maker:* IPC channel。
@@ -8941,6 +8944,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return sendToSessionInternal(params);
   };
 
+  initializeBotAuthorizationHost(async (card) => {
+    const prompt = `The ${JSON.stringify(card.snapshot.ghost.name)} connection finished authorizing. Tell the user it is connected, then continue the work paused for this connection. Do not assume any other account or model was changed.`;
+    const result = await dispatchBotSessionMessage({ targetSessionId: card.sessionId, message: prompt,
+      persistedContent: `${UI_ACTION_TRIGGER_PREFIX}${prompt}`, clientId: `bot-authorization-resume:${card.snapshot.requestId}` });
+    if (!result.ok) throw new Error('Authorization continuation not accepted');
+  });
+
   botDirectMessageServiceHolder = createBotDirectMessageService({
     hasQueuedDelivery: async (sessionId, clientId) => {
       await inputCoordinator.ensureQueueRestored(sessionId);
@@ -14707,7 +14717,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   ipcMain.handle(
     MAKER_INVOKE.RESOLVE_INTERACTION,
-    (event, requestId: unknown, decision: unknown) => {
+    async (event, requestId: unknown, decision: unknown) => {
       if (typeof requestId !== 'string') throwIpcError('INVALID_PARAMS', 'requestId required');
       if (
         isPluginSetupInteractionDecision(decision) &&
@@ -14751,6 +14761,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (ghostSetupInteractionBridge.resolve(requestId, decision, pluginSetupResponseTarget)) {
         return { accepted: true };
       }
+      if (await getBotAuthorizationService()?.resolve(requestId, decision, pluginSetupResponseTarget)) return { accepted: true };
       log.warn('resolve-interaction: no pending resolver (likely already dismissed/timed out)', {
         requestId,
       });
@@ -14758,12 +14769,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
-  ipcMain.handle(MAKER_INVOKE.PLUGIN_SETUP_SUBMIT_INLINE, (event, raw: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.PLUGIN_SETUP_SUBMIT_INLINE, async (event, raw: unknown) => {
     assertTrustedAppRendererEvent(event);
     const request = parseGhostSetupInlineSubmitRequest(raw);
     if (!request) throwIpcError('INVALID_PARAMS', 'invalid plugin setup submission');
     const { requestId, ...submit } = request;
-    if (!ghostSetupInteractionBridge.submitInline(requestId, submit)) {
+    if (!ghostSetupInteractionBridge.submitInline(requestId, submit) && !(await getBotAuthorizationService()?.submit(requestId, submit))) {
       throwIpcError('INVALID_PARAMS', 'plugin setup interaction is not pending');
     }
   });

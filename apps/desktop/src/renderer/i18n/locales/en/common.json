@@ -7439,6 +7439,7 @@
       "stop": "Stop generating"
     },
     "pluginSetup": {
+      "reopen": "Reopen",
       "title": "{{name}} Settings",
       "assessmentReadFailed": "Couldn't read the plugin setup status.",
       "setupIncomplete": "Plugin setup is not complete.",

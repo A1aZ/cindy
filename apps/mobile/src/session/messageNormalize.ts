@@ -80,6 +80,7 @@ export interface NormalizedRemoteMessage {
   /** user Composer 的结构化语义引用；用于 fork / rewind 恢复同款 chip。 */
   agentReferences?: AgentInputReference[];
   secondaryBody?: string;
+  authorization?: Record<string, unknown>;
   systemCardData?: Record<string, unknown>;
   systemCardType?: MobileSystemCardType;
   attachments?: NormalizedAttachment[];
@@ -199,6 +200,15 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
   for (const message of sorted) {
     if (message.role === 'tool_result') continue;
     if (message.role === 'assistant') {
+      const authorization = readRecord(message.agentMeta?.botAuthorization);
+      const snapshot = readRecord(authorization?.snapshot);
+      if (authorization?.v === 1 && authorization.sessionId === message.sessionId && snapshot?.kind === 'plugin_setup') {
+        result.push({ key: messageNormalizeKey(message), source: message, kind: 'system', role: message.role,
+          label: 'authorization', body: typeof message.content === 'string' ? message.content : '', align: 'agent',
+          createdAt: message.createdAt, authorization: snapshot });
+        continue;
+      }
+
       const task = readBotCollaborationMeta(message.agentMeta?.botCollaboration);
       const direct = readBotDirectMessageMeta(message.agentMeta?.botDirectMessage);
       if (task?.role === 'delegation-request' || task?.role === 'interjection' || direct) {

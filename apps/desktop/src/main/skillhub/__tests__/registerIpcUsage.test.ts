@@ -677,6 +677,12 @@ describe('registerSkillhubIpc usage handlers', () => {
       .rejects.toThrow('PERMISSION_DENIED');
   });
 
+  it('persists discovered aliases across scopes when disabling a physical Skill', async () => {
+    const { absolutePath, aliases, event } = await scanSharedAliases(false);
+    await handlers.get('skillhub:set-enabled')!(event, { absolutePath, skillId: 'entry-2', enabled: false });
+    expect(setCindySkillEnabled).toHaveBeenCalledWith(absolutePath, false, expect.any(Function), aliases);
+  });
+
   it('captures differently named discovery links across scopes for physical Skill removal', async () => {
     const { absolutePath, aliases, event } = await scanSharedAliases(true);
     installServiceMocks.uninstall.mockResolvedValueOnce({ success: true });
@@ -699,7 +705,7 @@ describe('registerSkillhubIpc usage handlers', () => {
     const { event, absolutePath } = await scanLocalFixture();
     const handler = handlers.get('skillhub:set-enabled')!;
     expect(await handler(event, { absolutePath, enabled: false })).toEqual({ cindyEnabled: false });
-    expect(setCindySkillEnabled).toHaveBeenCalledWith(absolutePath, false, expect.any(Function));
+    expect(setCindySkillEnabled).toHaveBeenCalledWith(absolutePath, false, expect.any(Function), expect.any(Array));
     await expect(handler({ sender: { id: 72 } }, { absolutePath, enabled: false }))
       .rejects.toThrow('PRECONDITION_FAILED');
     expect(setCindySkillEnabled).toHaveBeenCalledTimes(1);
@@ -747,6 +753,9 @@ describe('registerSkillhubIpc usage handlers', () => {
     await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath: source }))
       .rejects.toThrow('PRECONDITION_FAILED');
     expect(installServiceMocks.uninstall).not.toHaveBeenCalled();
+    await expect(handlers.get('skillhub:set-enabled')!(event, { absolutePath: source, enabled: false }))
+      .rejects.toThrow('PRECONDITION_FAILED');
+    expect(setCindySkillEnabled).not.toHaveBeenCalled();
     expect(fs.existsSync(alias)).toBe(true);
     getManagedSkillRoots.mockReturnValue([]);
   });

@@ -27,6 +27,44 @@ describe('Skill activation preferences', () => {
     await reloaded.setCindySkillEnabled(b, true);
     expect(reloaded.readDisabledSkillPaths()).toEqual([]);
   });
+  it('persists lexical aliases across restart, bypasses wide Pi scans, and drops retargeted aliases', async () => {
+    const prefs = await import('../activationPreferences');
+    const source = path.join(root, 'external');
+    const other = path.join(root, 'other');
+    const discovery = path.join(root, '.agents', 'skills');
+    const alias = path.join(discovery, 'z-alias');
+    fs.mkdirSync(source);
+    fs.mkdirSync(other);
+    fs.mkdirSync(discovery, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'fixture');
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await prefs.setCindySkillEnabled(source, false, () => true, [alias]);
+    vi.resetModules();
+    const reloaded = await import('../activationPreferences');
+    const { piDisabledDiscoveryPaths, applyPiDisabledSkillSettings } = await import(
+      '../../../../../../packages/maker-core/src/agents/pi/skill-activation');
+    const close = vi.fn();
+    const scan = vi.spyOn(fs, 'opendirSync').mockReturnValue({
+      readSync: () => ({ name: '.irrelevant' }), closeSync: close,
+    } as unknown as fs.Dir);
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    try {
+      const disabled = piDisabledDiscoveryPaths(reloaded.readDisabledSkillPaths(), [discovery]);
+      const settings = applyPiDisabledSkillSettings({}, disabled);
+      expect(settings.skills).toContain(`-${alias}`);
+      expect(close).toHaveBeenCalled();
+    } finally { scan.mockRestore(); clock.mockRestore(); }
+    fs.unlinkSync(alias);
+    fs.symlinkSync(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(reloaded.readDisabledSkillPaths()).not.toContain(alias);
+    expect(reloaded.isCindySkillEnabled(other)).toBe(true);
+    fs.unlinkSync(alias);
+    fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await reloaded.setCindySkillEnabled(source, true);
+    expect(reloaded.readDisabledSkillPaths()).not.toContain(alias);
+    expect(reloaded.isCindySkillEnabled(source)).toBe(true);
+  });
+
   it.each(['success', 'enabled-source', 'content-failure', 'preference-failure', 'owner-changed'])('migrates disabled state with a local rename (%s)', async (scenario) => {
     const { renameLocalSkill } = await import('../scanner');
     const { setCindySkillEnabled, readDisabledSkillPaths, skillActivationKey } = await import('../activationPreferences');

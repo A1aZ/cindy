@@ -28,7 +28,7 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
     toast.error(t(`skillhub.management.${code === 'PRECONDITION_FAILED' || code === 'PERMISSION_DENIED' ? 'refreshRequired' : operation}`));
   };
   const toggle = async (value: boolean) => {
-    if (busyRef.current || disabled) return;
+    if (busyRef.current || disabled || skill.managedByPlugin) return;
     busyRef.current = true;
     setBusy(true);
     setPendingEnabled(value);
@@ -98,10 +98,10 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
 
   return (
     <div className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()}>
-      <Tip text={`${skill.absolutePath}\n${t('skillhub.management.activationHint')}`}>
+      <Tip text={`${skill.absolutePath}\n${t(skill.managedByPlugin ? 'skillhub.management.managedByPlugin' : 'skillhub.management.activationHint')}`}>
         {/* Keep Tooltip's open/closed data-state off the Switch's checked/unchecked root. */}
         <span className="inline-flex">
-          <Switch checked={enabled} disabled={busy || disabled}
+          <Switch checked={enabled} disabled={busy || disabled || skill.managedByPlugin}
             aria-label={t('skillhub.management.enabledLabel', { name: skill.name })}
             onCheckedChange={(value) => { void toggle(value); }} />
         </span>

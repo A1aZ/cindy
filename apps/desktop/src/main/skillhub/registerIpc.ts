@@ -979,9 +979,16 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     if (typeof params?.enabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'Invalid Skill state');
     const record = await requireLocalSkill(event, params.absolutePath, params.skillId);
     const { skill } = record;
+    if (skill.managedByPlugin || isPluginManagedSkillPath(skill.absolutePath, options.getManagedSkillRoots())) {
+      throwIpcError('PRECONDITION_FAILED', 'Manage this Skill in its plugin');
+    }
+    const discoveryPaths = (localSkillsBySender.get(event.sender.id) ?? [])
+      .filter((item) => item.physicalIdentity === record.physicalIdentity)
+      .flatMap((item) => item.skill.discoveryPaths ?? [item.skill.discoveredPath]);
     const ownerId = getCurrentDataOwnerId();
     const canMutate = () => {
-      if (ownerId !== getCurrentDataOwnerId() || isAppSessionBoundaryPending()) return false;
+      if (ownerId !== getCurrentDataOwnerId() || isAppSessionBoundaryPending()
+        || isPluginManagedSkillPath(skill.absolutePath, options.getManagedSkillRoots())) return false;
       try {
         return physicalIdentity(skill.absolutePath) === record.physicalIdentity
           && (skill.discoveryPaths ?? [skill.discoveredPath]).every((alias) => physicalIdentity(alias) === record.physicalIdentity);
@@ -990,7 +997,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     const release = tryAcquireSkillInstallLock(skill.name, 'market-uninstall');
     if (!release) throwIpcError('PRECONDITION_FAILED', 'Skill is being changed; retry shortly');
     try {
-      await setCindySkillEnabled(skill.absolutePath, params.enabled, canMutate);
+      await setCindySkillEnabled(skill.absolutePath, params.enabled, canMutate, discoveryPaths);
     } catch { throwIpcError('INTERNAL', 'Could not save Skill state; retry'); }
     finally { release(); }
     broadcastLocalChange();

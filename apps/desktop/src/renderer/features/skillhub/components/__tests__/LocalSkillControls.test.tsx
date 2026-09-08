@@ -116,6 +116,10 @@ describe('Local Skill management', () => {
 
   it('directs plugin-owned Skills to plugin management without allowing uninstall', async () => {
     render(<LocalSkillControls skill={{ ...skill, canUninstall: false, managedByPlugin: true }} />);
+    const control = screen.getByRole('switch') as HTMLButtonElement;
+    expect(control.disabled).toBe(true);
+    fireEvent.click(control);
+    expect(mocks.setEnabled).not.toHaveBeenCalled();
     fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.management.moreLabel' }), { key: 'Enter' });
     const item = await screen.findByRole('menuitem');
     expect(item.getAttribute('aria-disabled')).toBe('true');

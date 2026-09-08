@@ -110,9 +110,8 @@ import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
-import { isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
+import { HistoryViewHandoff, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { buildMobileHistoryRenderItems } from '@/session/mobileHistoryRender';
-import { MobileHistoryHandoff } from '@/session/mobileHistoryHandoff';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
@@ -1023,7 +1022,9 @@ export default function SessionScreen() {
     if (messageReloadRevision > 0) historyView.view.reset();
   }, [messageReloadRevision, historyView.view]);
   const rawMessages = useSessionMessages(sessionId, deviceId);
-  const historyHandoff = useMemo(() => new MobileHistoryHandoff(), [historyView.view]);
+  const historyHandoff = useMemo(() => new HistoryViewHandoff<RemoteMessage>(
+    (row) => row.agentMeta?.isStreaming === true,
+  ), [historyView.view]);
   const handoff = useMemo(() => historyHandoff.reconcile(historyView.snapshot, rawMessages),
     [historyHandoff, rawMessages, historyView.snapshot]);
   const messages = handoff.messages;

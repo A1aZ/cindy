@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HistoryViewController, projectHistoryView } from '@cindy/maker-shared/message-window';
-import { MobileHistoryHandoff } from '../session/mobileHistoryHandoff';
+import { HistoryViewController, HistoryViewHandoff, projectHistoryView } from '@cindy/maker-shared/message-window';
 import { buildMobileHistoryRenderItems } from '../session/mobileHistoryRender';
 import type { RemoteMessage } from '../session/types';
 
@@ -11,6 +10,8 @@ const row = (id: string, streaming = false): RemoteMessage => ({
   agentMeta: streaming ? { isStreaming: true } : null,
 });
 
+const createHandoff = () => new HistoryViewHandoff<RemoteMessage>((row) => row.agentMeta?.isStreaming === true);
+
 describe('mobile history handoff', () => {
   it('retains text finalized before the first history page arrives, including an older provisional time anchor', async () => {
     const view = new HistoryViewController<RemoteMessage>({
@@ -18,7 +19,7 @@ describe('mobile history handoff', () => {
       details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
       expanded: async () => undefined,
     });
-    const handoff = new MobileHistoryHandoff();
+    const handoff = createHandoff();
     const live = { ...row('answer', true), createdAt: '2026-09-07T23:59:59Z' };
     handoff.reconcile(view.getSnapshot(), [live]);
     const final = { ...live, agentMeta: null };
@@ -40,7 +41,7 @@ describe('mobile history handoff', () => {
       expanded: async () => undefined,
     });
     await view.refresh();
-    const handoff = new MobileHistoryHandoff();
+    const handoff = createHandoff();
     const render = (raw: RemoteMessage[]) => {
       const state = handoff.reconcile(view.getSnapshot(), raw);
       const output = buildMobileHistoryRenderItems({ view, snapshot: view.getSnapshot(),
@@ -71,7 +72,7 @@ describe('mobile history handoff', () => {
       expanded: async () => undefined,
     });
     await view.refresh();
-    const handoff = new MobileHistoryHandoff();
+    const handoff = createHandoff();
     expect(handoff.reconcile(view.getSnapshot(), [row('old')]).messages.map(x => x.clientId)).toEqual(['user']);
     handoff.reconcile(view.getSnapshot(), [row('answer', true)]);
     expect(handoff.reconcile(view.getSnapshot(), []).pending.size).toBe(0);
@@ -81,7 +82,7 @@ describe('mobile history handoff', () => {
     handoff.reconcile(view.getSnapshot(), []);
     await view.refresh();
     expect(handoff.reconcile(view.getSnapshot(), [row('answer')]).pending.size).toBe(0);
-    expect(new MobileHistoryHandoff().reconcile(view.getSnapshot(), [row('answer')]).pending.size).toBe(0);
+    expect(createHandoff().reconcile(view.getSnapshot(), [row('answer')]).pending.size).toBe(0);
     view.setActive(false);
   });
 });

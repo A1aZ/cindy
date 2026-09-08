@@ -14,8 +14,8 @@ export function buildMobileHistoryRenderItems(options: {
 }): MobileMessageRenderItem[] {
   return renderHistoryView<RemoteMessage, MobileMessageRenderItem>({
     view: options.view, snapshot: options.snapshot, liveMessages: options.messages,
-    isLive: (row) => row.agentMeta?.isStreaming === true || options.pendingHandoff?.has(row.clientId) === true,
-    isPendingHandoff: (row) => options.pendingHandoff?.has(row.clientId) === true,
+    isLive: (row) => row.agentMeta?.isStreaming === true,
+    pendingHandoff: options.pendingHandoff,
     streaming: options.streaming,
     build: (rows, streaming) => buildMobileMessageRenderItems(rows, { isSessionStreaming: streaming, sessionId: options.sessionId }, options.taskUpdates),
     structure: {

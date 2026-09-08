@@ -1,17 +1,17 @@
-import { historyViewLeaves, type HistoryViewSnapshot } from '@cindy/maker-shared/message-window';
-import type { RemoteMessage } from './types';
-
-const streaming = (row: RemoteMessage) => row.agentMeta?.isStreaming === true;
+import { historyViewLeaves, type HistoryMessageSource } from './historyView.js';
+import type { HistoryViewSnapshot } from './historyViewController.js';
 
 /** View-local identities only; message bodies remain in the existing raw store.
  * A finalized live row stays visible until history takes over. Removing it from
  * the raw store (delete/rewind/clear) cancels the handoff rather than reviving it.
  */
-export class MobileHistoryHandoff {
+export class HistoryViewHandoff<T extends HistoryMessageSource> {
   private readonly pending = new Set<string>();
   private ready = false;
 
-  reconcile(snapshot: HistoryViewSnapshot<RemoteMessage>, raw: readonly RemoteMessage[]) {
+  constructor(private readonly streaming: (row: T) => boolean) {}
+
+  reconcile(snapshot: HistoryViewSnapshot<T>, raw: readonly T[]) {
     if (this.ready && !snapshot.ready) this.pending.clear();
     this.ready = snapshot.ready;
     const available = historyViewLeaves(snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
@@ -21,8 +21,8 @@ export class MobileHistoryHandoff {
     for (const id of this.pending) if (!current.has(id)) this.pending.delete(id);
     for (const row of raw) {
       if (row.role !== 'assistant') continue;
-      if (streaming(row)) this.pending.add(row.clientId);
-      else if (history.has(row.clientId) && !streaming(history.get(row.clientId)!)) this.pending.delete(row.clientId);
+      if (this.streaming(row)) this.pending.add(row.clientId);
+      else if (history.has(row.clientId) && !this.streaming(history.get(row.clientId)!)) this.pending.delete(row.clientId);
     }
     const pending = new Set(this.pending);
     if (!snapshot.ready) return { messages: raw, pending };

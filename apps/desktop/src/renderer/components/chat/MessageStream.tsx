@@ -28,7 +28,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
-import { renderHistoryView } from '@cindy/maker-shared/message-window';
+import { HistoryViewHandoff, renderHistoryView } from '@cindy/maker-shared/message-window';
 import { getRemoteHistoryView, type HistoryChatMessage } from '@/lib/makerChatStore';
 import { createPortal } from 'react-dom';
 import { GitFork } from 'lucide-react';
@@ -2485,6 +2485,17 @@ export function MessageStream({
     historyView?.getSnapshot ?? (() => null),
     historyView?.getSnapshot ?? (() => null),
   );
+  const historyHandoff = useMemo(() => new HistoryViewHandoff<HistoryChatMessage>(
+    (row) => row.isStreaming === true,
+  ), [historyView]);
+  // Observe live rows before the first history page too: a stream can finish
+  // while that page is in flight. Local tasks retain their existing path.
+  const historyLiveMessages = useMemo(() => historyView ? messages.map((row) => ({
+    ...row, id: row.id ?? row.clientId, createdAt: row.createdAt ?? '',
+  })) : [], [historyView, messages]);
+  const handoff = useMemo(() => historySnapshot
+    ? historyHandoff.reconcile(historySnapshot, historyLiveMessages) : null,
+  [historyHandoff, historySnapshot, historyLiveMessages]);
   // 右上角 chip 栈插槽 —— PrevMessageJumpChip 通过 portal 挂到这里,
   // 与 DiffPanelToggle 在同一栈中各占一行。Provider 不存在时返回 null,
   // 渲染处会兜底跳过(典型场景:其他视图直接用 MessageStream 但不需要栈)。
@@ -2733,12 +2744,10 @@ export function MessageStream({
     });
     if (historyView && historySnapshot?.ready) {
       const results = new Map(built.singleResultMap);
-      const liveMessages: HistoryChatMessage[] = messages.map((row) => ({ ...row,
-        id: row.id ?? row.clientId, createdAt: row.createdAt ?? '',
-      }));
       const items = renderHistoryView<HistoryChatMessage, RenderItem>({
-        view: historyView, snapshot: historySnapshot, liveMessages, streaming: isSessionStreaming,
+        view: historyView, snapshot: historySnapshot, liveMessages: historyLiveMessages, streaming: isSessionStreaming,
         isLive: (row) => row.isStreaming === true,
+        pendingHandoff: handoff?.pending,
         isLocalUser: (row) => row.role === 'user' && (row.isPendingPersist === true || !!row.blockedByGhost),
         build: (rows) => {
           const chunk = buildRenderItems([...rows], taskUpdates, ghostCardSnapshot, {
@@ -2775,6 +2784,8 @@ export function MessageStream({
     messages,
     historyView,
     historySnapshot,
+    historyLiveMessages,
+    handoff,
     isSessionStreaming,
     taskUpdates,
     ghostCardSnapshot,

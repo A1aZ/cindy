@@ -10,7 +10,7 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   streaming: boolean;
   isLive?(message: T): boolean;
   /** Already displayed assistant identities awaiting history, not arbitrary cached rows. */
-  isPendingHandoff?(message: T): boolean;
+  pendingHandoff?: ReadonlySet<string>;
   isLocalUser?(message: T): boolean;
   structure: {
     placeholder(summary: HistoryWorkSummary): T;
@@ -24,7 +24,9 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
   const seen = new Set<string>();
   const placeholders = new Set<string>();
   const references = new Map<string, HistoryWorkSummary>();
-  const live = new Map(options.liveMessages.filter((row) => options.isLive?.(row)).map((row) => [row.clientId, row]));
+  const isPendingHandoff = (row: T) => row.role === 'assistant' && options.pendingHandoff?.has(row.clientId) === true;
+  const isLive = (row: T) => options.isLive?.(row) || isPendingHandoff(row);
+  const live = new Map(options.liveMessages.filter(isLive).map((row) => [row.clientId, row]));
   const leaves = historyViewLeaves(snapshot.items);
   const sourceIds = new Set(leaves.flatMap((item) => item.type === 'messages' ? item.messages.map((row) => row.clientId) : []));
   let endMs = 0;
@@ -62,9 +64,9 @@ export function renderHistoryView<T extends HistoryMessageSource, TItem>(options
     endMs = Math.max(endMs, summary.endedAtMs);
   }
   for (const row of options.liveMessages) {
-    if (options.isLive?.(row) && !seen.has(row.clientId) && (row.role === 'assistant' || row.role === 'user')
+    if (isLive(row) && !seen.has(row.clientId) && (row.role === 'assistant' || row.role === 'user')
       && (Date.parse(row.createdAt) >= endMs
-        || (row.role === 'assistant' && options.isPendingHandoff?.(row)))) rows.push(row);
+        || isPendingHandoff(row))) rows.push(row);
   }
   // Local pending/blocked user bubbles belong to the current UI store, not
   // persisted history. Keep their store order without trusting device clocks.

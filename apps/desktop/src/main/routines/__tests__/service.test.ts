@@ -254,3 +254,41 @@ it('waits for an in-flight backing write before deleting its schedule and rule',
   expect(mock.scheduler.runNow).not.toHaveBeenCalled();
   expect(await routineTools.list('bot')).toEqual([]);
 });
+
+it.each(['explicit', 'timer', 'replacement'] as const)('waits for execution and asynchronous pause before account replacement (%s stop)', async (mode) => {
+  vi.useFakeTimers();
+  let finishRun!: () => void;
+  let finishPause!: () => void;
+  mock.scheduler.runNow.mockImplementationOnce(() => new Promise((resolve) => {
+    finishRun = () => resolve({ runId: 'execution' });
+  }));
+  mock.scheduler.pause.mockImplementationOnce(() => new Promise((resolve) => {
+    finishPause = () => resolve({} as Schedule);
+  }));
+  const first = await getRoutineEngine();
+  const routine = await routineTools.save('bot', {
+    name: 'Review', prompt: 'Check the PR', enabled: true,
+    triggers: [{ id: 'tick', kind: 'interval', intervalMs: 60000 }],
+  });
+  await routineTools.runNow('bot', routine.id);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mock.scheduler.runNow).toHaveBeenCalledOnce();
+  mock.scope = 'owner-b';
+  const stop = mode === 'explicit' ? stopRoutines() : undefined;
+  if (mode === 'timer') await vi.advanceTimersByTimeAsync(1000);
+  let ready = false;
+  const replacement = getRoutineEngine().then((engine) => { ready = true; return engine; });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mock.scheduler.pause).toHaveBeenCalledOnce();
+  expect(mock.load).toHaveBeenCalledOnce();
+  expect(ready).toBe(false);
+  finishRun();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ready).toBe(false);
+  expect(mock.load).toHaveBeenCalledOnce();
+  finishPause();
+  await stop;
+  expect(await replacement).not.toBe(first);
+  expect(mock.load).toHaveBeenCalledTimes(2);
+  expect(mock.scheduler.runNow).toHaveBeenCalledOnce();
+});

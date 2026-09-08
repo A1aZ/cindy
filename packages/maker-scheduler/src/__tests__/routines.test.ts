@@ -122,12 +122,16 @@ describe("Routine event admission and execution", () => {
   });
 
   it("retains receipts across restart and does not replay an ambiguous interrupted run", async () => {
-    const first = await fixture(vi.fn(() => new Promise<never>(() => {})));
+    const first = await fixture(vi.fn(async (_routine, _run, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return {};
+    }));
     const routine = await first.engine.put("bot", input);
     await first.engine.publish("github", event());
     await vi.waitFor(() =>
       expect(first.engine.history(routine.id)[0].status).toBe("running"),
     );
+    await vi.waitFor(() => expect(first.execute).toHaveBeenCalledOnce());
     await first.engine.stop();
     const second = await fixture(
       vi.fn(async () => ({})),
@@ -461,4 +465,53 @@ it('keeps deletion retryable across restart if the final routine purge cannot be
   expect(restarted.snapshot()?.routines).toEqual([]);
   expect(restarted.snapshot()?.runs).toEqual([]);
   await restarted.engine.stop();
+});
+
+it('waits for every active execution to finish cancelling before stop resolves', async () => {
+  const release: Array<() => void> = [];
+  const aborted = vi.fn();
+  const execute = vi.fn<RoutineEngineDeps['execute']>(async (_routine, _run, signal) => {
+    signal.addEventListener('abort', aborted, { once: true });
+    await new Promise<void>((resolve) => release.push(resolve));
+    return {};
+  });
+  const f = await fixture(execute);
+  const a = await f.engine.put('bot-a', input);
+  const b = await f.engine.put('bot-b', input);
+  await f.engine.runNow('bot-a', a.id);
+  await f.engine.runNow('bot-b', b.id);
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+  await f.engine.runNow('bot-a', a.id);
+  let stopped = false;
+  const stop = f.engine.stop().then(() => { stopped = true; });
+  expect(aborted).toHaveBeenCalledTimes(2);
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  release[0]();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  expect(stopped).toBe(false);
+  release[1]();
+  await stop;
+  expect(stopped).toBe(true);
+  expect(execute).toHaveBeenCalledTimes(2);
+});
+
+it('does not start execution if stop arrives while its running claim is being saved', async () => {
+  let release!: () => void;
+  const f = await fixture(undefined, null, async (state) => {
+    if (state.runs.some((run) => run.status === 'running')) {
+      await new Promise<void>((resolve) => { release = resolve; });
+    }
+  });
+  const routine = await f.engine.put('bot', input);
+  await f.engine.runNow('bot', routine.id);
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+  let stopped = false;
+  const stop = f.engine.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  release();
+  await stop;
+  expect(f.execute).not.toHaveBeenCalled();
+  expect(f.snapshot()?.runs[0].status).toBe('running');
 });

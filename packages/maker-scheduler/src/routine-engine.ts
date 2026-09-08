@@ -115,6 +115,8 @@ export class RoutineEngine {
   async stop(): Promise<void> {
     this.stopped = true;
     for (const controller of this.active.values()) controller.abort();
+    // Admission persistence does not include asynchronous execution or cancellation.
+    await Promise.all([...this.activeTasks.values()]);
     await this.tail;
   }
 
@@ -501,7 +503,7 @@ export class RoutineEngine {
       run.revision = routine.revision;
       return { routine: structuredClone(routine), run: structuredClone(run) };
     });
-    if (!claimed) return;
+    if (!claimed || this.stopped) return;
     let result: {
       scheduleRunId?: string;
       error?: string;

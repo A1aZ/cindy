@@ -47,6 +47,7 @@ const log = createLogger('routines');
 let current:
   { scope: string; engine: RoutineEngine; timer: ReturnType<typeof setInterval> } | undefined;
 let starting: Promise<RoutineEngine> | undefined;
+let stopping: Promise<void> | undefined;
 let generation = 0;
 
 function assertScope(scope: string): void {
@@ -97,8 +98,9 @@ async function execute(scope: string, routine: Routine, run: RoutineRun, signal:
   else await storage.insert(schedule);
   assertScope(scope);
   if (signal.aborted) throw new Error('Routine cancelled');
+  let cancellation: Promise<unknown> | undefined;
   const abort = () => {
-    void scheduler
+    cancellation = scheduler
       .pause(id, { internalRoutine: true })
       .catch((error) => log.warn('routine cancellation failed', { error: String(error) }));
   };
@@ -120,6 +122,7 @@ async function execute(scope: string, routine: Routine, run: RoutineRun, signal:
     };
   } finally {
     signal.removeEventListener('abort', abort);
+    await cancellation;
   }
 }
 
@@ -128,13 +131,17 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
   if (!app.isPackaged && process.env.XDT_SCHEDULER_PASSIVE === '1') {
     throw new Error('Routines are disabled in a passive development instance');
   }
+  if (stopping) {
+    await stopping;
+    return getRoutineEngine();
+  }
   const scope = activeOwnerScopeKey();
   assertScope(scope);
-  if (current?.scope === scope) return current.engine;
   if (starting) {
     await starting;
     return getRoutineEngine();
   }
+  if (current?.scope === scope) return current.engine;
   const epoch = generation;
   starting = (async () => {
     if (current) {
@@ -200,8 +207,7 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
     const timer = setInterval(() => {
       if (scope !== activeOwnerScopeKey() || isAppSessionBoundaryPending()) {
         clearInterval(timer);
-        if (current?.engine === engine) current = undefined;
-        void engine.stop();
+        void stopRoutines().catch((error) => log.warn('routine stop failed', { error: String(error) }));
         return;
       }
       void engine
@@ -220,18 +226,28 @@ export async function getRoutineEngine(): Promise<RoutineEngine> {
 }
 
 export async function stopRoutines(): Promise<void> {
+  if (stopping) return stopping;
   generation += 1;
-  if (starting) {
-    try {
-      await starting;
-    } catch {
-      /* Startup is invalidated by this reset. */
+  const stop = (async () => {
+    if (starting) {
+      try {
+        await starting;
+      } catch {
+        /* Startup is invalidated by this reset. */
+      }
     }
-  }
-  if (current) {
-    clearInterval(current.timer);
-    await current.engine.stop();
-    current = undefined;
+    if (current) {
+      clearInterval(current.timer);
+      await current.engine.stop();
+      current = undefined;
+    }
+  })();
+  // Both explicit teardown and the account timer must block replacement startup.
+  stopping = stop;
+  try {
+    await stop;
+  } finally {
+    if (stopping === stop) stopping = undefined;
   }
 }
 

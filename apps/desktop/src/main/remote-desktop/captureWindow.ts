@@ -1,5 +1,6 @@
 import { BrowserWindow, session, type IpcMainInvokeEvent, type Session } from 'electron';
 import path from 'node:path';
+import { REMOTE_DESKTOP_OFFER_BUDGET } from '@cindy/device-link';
 import { readFile } from 'node:fs/promises';
 import { installContentSecurityPolicy, parseOrigin } from '../security/csp';
 import { throwIpcError } from '../utils/ipcValidate';
@@ -161,7 +162,7 @@ export class DesktopCaptureWindow {
     win.webContents.on('render-process-gone', failed);
     win.webContents.on('destroyed', failed);
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(failed, 10_000);
+      const timer = setTimeout(failed, REMOTE_DESKTOP_OFFER_BUDGET.captureReadyMs);
       this.ready = { resolve, reject, timer };
       void win.loadURL(this.url).catch(failed);
     });

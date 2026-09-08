@@ -15,6 +15,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   isDesktopPermission,
+  REMOTE_DESKTOP_OFFER_BUDGET,
   parseDesktopIceReply,
   type RemoteDesktopIceRequest,
   type RemoteDesktopIceReply,
@@ -132,7 +133,7 @@ function stopVideo(): void {
     pending = null;
   }
 }
-async function sources(thumbnail = false, timeoutMs = 5000) {
+async function sources(thumbnail = false, timeoutMs = REMOTE_DESKTOP_OFFER_BUDGET.sourcesMs) {
   if (
     process.platform === 'darwin' &&
     systemPreferences.getMediaAccessStatus('screen') !== 'granted'
@@ -173,7 +174,7 @@ async function offer(
       nativeAvailable ||=
         process.platform === 'win32' && (await readWindowsDesktopSupport()) === 'ready';
       try {
-        const available = await sources(false, nativeAvailable ? 2000 : 5000);
+        const available = await sources(false, nativeAvailable ? 2000 : REMOTE_DESKTOP_OFFER_BUDGET.sourcesMs);
         source = desktopCaptureSource(available, lease.display.id, screen.getAllDisplays());
       } catch (error) {
         // A locked macOS session can reject Chromium's source enumeration even
@@ -213,7 +214,7 @@ async function offer(
         settings,
         attemptId,
       },
-      18_000,
+      REMOTE_DESKTOP_OFFER_BUDGET.hostMs,
     );
     if (typeof result !== 'string') throw new Error('DESKTOP_VIDEO_UNAVAILABLE');
     return result;

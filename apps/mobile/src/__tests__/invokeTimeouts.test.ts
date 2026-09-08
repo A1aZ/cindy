@@ -9,7 +9,7 @@ import {
 describe("resolveMobileInvokeTimeoutMs", () => {
   it("allows remote desktop capture and ICE to finish without widening other device reads", () => {
     expect(resolveMobileInvokeTimeoutMs("device-link:remote-desktop:v1")).toBe(
-      30_000,
+      59_000,
     );
     expect(resolveMobileInvokeTimeoutMs("device-link:state")).toBeUndefined();
   });

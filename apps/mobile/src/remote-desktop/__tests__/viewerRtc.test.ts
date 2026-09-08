@@ -176,6 +176,18 @@ it("does not replenish retry budget from a brief connection", async () => {
   h.api.stop();
 });
 
+it("accepts a cold-host answer after readiness, Windows probe, sources and offer", async () => {
+  const h = viewer();
+  await h.api.start();
+  await vi.advanceTimersByTimeAsync(10_000 + 21_000 + 5_000 + 18_000);
+  expect(h.peers[0].close).not.toHaveBeenCalled();
+  await h.answer();
+  expect(h.peers[0].setRemoteDescription).toHaveBeenCalled();
+  expect(h.peers).toHaveLength(1);
+  h.api.stop();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it("separates answer wait from connection checks and drops the previous attempt answer", async () => {
   const h = viewer();
   await h.api.start();

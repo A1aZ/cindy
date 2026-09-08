@@ -23,13 +23,29 @@ export const REMOTE_DESKTOP_ICE_SERVERS = [
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
 ];
+// Sequential host stages, followed by transport and WebView delivery headroom.
+// Keep the outer waits derived from these limits so a valid cold start is not discarded.
+export const REMOTE_DESKTOP_OFFER_BUDGET = {
+  captureReadyMs: 10_000,
+  platformStatusMs: 8_000,
+  // Windows Node-API probe: pipe open 3s, write 5s, and ready read 5s.
+  platformHandshakeMs: 13_000,
+  sourcesMs: 5_000,
+  hostMs: 18_000,
+};
+export const REMOTE_DESKTOP_INVOKE_MS =
+  REMOTE_DESKTOP_OFFER_BUDGET.captureReadyMs +
+  REMOTE_DESKTOP_OFFER_BUDGET.platformStatusMs +
+  REMOTE_DESKTOP_OFFER_BUDGET.platformHandshakeMs +
+  REMOTE_DESKTOP_OFFER_BUDGET.sourcesMs +
+  REMOTE_DESKTOP_OFFER_BUDGET.hostMs + 5_000;
 export const REMOTE_DESKTOP_NETWORK = {
   maxCandidates: 128,
   batchSize: 16,
   pollMs: 250,
   exchangeMs: 30_000,
   disconnectedMs: 5_000,
-  answerMs: 25_000,
+  answerMs: REMOTE_DESKTOP_INVOKE_MS + 2_000,
   connectMs: 15_000,
   legacyGatherMs: 5_000,
   stableMs: 30_000,

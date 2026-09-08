@@ -1,4 +1,5 @@
 import { app } from 'electron';
+import { REMOTE_DESKTOP_OFFER_BUDGET } from '@cindy/device-link';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -18,7 +19,7 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
   if (!app.isPackaged) return 'installRequired';
   try {
     const { stdout } = await exec(binary(), ['--status'], {
-      timeout: 8000,
+      timeout: REMOTE_DESKTOP_OFFER_BUDGET.platformStatusMs,
       maxBuffer: 1024,
       windowsHide: true,
     });

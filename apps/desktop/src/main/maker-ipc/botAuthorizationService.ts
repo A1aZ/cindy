@@ -29,6 +29,22 @@ export function buildBotAuthorizationContinuation(card: BotAuthorizationCard) {
   };
 }
 
+export interface BotAuthorizationInputGuard {
+  validate(): Promise<void>;
+  assertCurrent(): void;
+}
+
+/** Called while the existing session send lock is held. No await may separate
+ * the synchronous clear-generation check from enqueue. */
+export async function commitBotAuthorizationInput(
+  guard: BotAuthorizationInputGuard,
+  enqueue: () => void,
+) {
+  await guard.validate();
+  guard.assertCurrent();
+  enqueue();
+}
+
 export interface BotAuthorizationAdapter {
   identity: { id: string; name: string; iconDataUrl?: string };
   assess(): Promise<GhostSetupAssessment>;
@@ -191,9 +207,15 @@ export class BotAuthorizationService {
   }
   private save(entry: Entry): Promise<void> {
     const card = structuredClone(entry.card);
-    const write = entry.writes.then(() => {
-      if (!entry.closed) return this.deps.save(card);
-    });
+    const write = entry.writes
+      .then(() => {
+        if (!entry.closed) return this.deps.save(card);
+      })
+      .catch((error: unknown) => {
+        if ((error as { code?: string } | null)?.code === 'REMOTE_OPTIMISTIC_INPUT_CLEARED')
+          this.close(entry);
+        throw error;
+      });
     entry.writes = write.catch(this.deps.warn);
     return write;
   }

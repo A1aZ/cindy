@@ -62,7 +62,7 @@ export async function isBotAuthorizationSession(sessionId: string): Promise<bool
 
 /** Adapts existing Host credentials and plugin configuration into the same card lifecycle. */
 export function initializeBotAuthorizationHost(
-  resume: (card: BotAuthorizationCard) => Promise<void>,
+  resume: (card: BotAuthorizationCard, validate: () => Promise<void>) => Promise<void>,
 ) {
   const ownerScopes = new Map<string, ReturnType<typeof captureDataOwnerBroadcastScope>>();
   const assertSession = async (sessionId: string) => {
@@ -250,7 +250,10 @@ export function initializeBotAuthorizationHost(
           agentMeta: { botAuthorization: card },
           createdAt: card.createdAt,
         },
-        { broadcastOwnerScope: ownerScopes.get(card.sessionId) },
+        {
+          broadcastOwnerScope: ownerScopes.get(card.sessionId),
+          expectedClearBoundaryMs: row.clearedAt,
+        },
       );
       await assertSession(card.sessionId);
       await updateMessageContent(card.sessionId, clientId, fallback);
@@ -307,23 +310,24 @@ export function initializeBotAuthorizationHost(
       return null;
     },
     async resume(card) {
-      await assertSession(card.sessionId);
-      const [row] = await getDbClient()
-        .drizzle.select({ id: messages.id })
-        .from(messages)
-        .innerJoin(sessions, eq(sessions.id, messages.sessionId))
-        .where(
-          and(
-            eq(messages.sessionId, card.sessionId),
-            eq(messages.clientId, `bot-authorization:${card.snapshot.requestId}`),
-            isNull(messages.rewindAt),
-            or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)),
-          ),
-        )
-        .limit(1);
-      if (!row) throw new Error('Authorization card is no longer visible');
-      await assertSession(card.sessionId);
-      await resume(card);
+      await resume(card, async () => {
+        await assertSession(card.sessionId);
+        const [row] = await getDbClient()
+          .drizzle.select({ id: messages.id })
+          .from(messages)
+          .innerJoin(sessions, eq(sessions.id, messages.sessionId))
+          .where(
+            and(
+              eq(messages.sessionId, card.sessionId),
+              eq(messages.clientId, `bot-authorization:${card.snapshot.requestId}`),
+              isNull(messages.rewindAt),
+              or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)),
+            ),
+          )
+          .limit(1);
+        if (!row) throw new Error('Authorization card is no longer visible');
+        await assertSession(card.sessionId);
+      });
     },
     onDisposing: () => cancelGrokOAuthLogin(),
     onDispose: () => ownerScopes.clear(),

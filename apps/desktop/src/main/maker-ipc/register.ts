@@ -1,5 +1,5 @@
 import { initializeBotAuthorizationHost } from './botAuthorizationHost.js';
-import { buildBotAuthorizationContinuation, getBotAuthorizationService } from './botAuthorizationService.js';
+import { buildBotAuthorizationContinuation, commitBotAuthorizationInput, type BotAuthorizationInputGuard, getBotAuthorizationService } from './botAuthorizationService.js';
 import { registerSessionSetModelHandler } from './sessionSetModelHandler.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
@@ -8184,6 +8184,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    authorizationGuard?: BotAuthorizationInputGuard;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -8551,6 +8552,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           onAcceptedRollback,
           onAcceptedCommit,
           origin: queuedOrigin,
+          authorizationGuard: params.authorizationGuard,
         });
         return {
           ok: true as const,
@@ -8880,6 +8882,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   const dispatchBotSessionMessage = async (params: {
     targetSessionId: string;
+    authorizationGuard?: BotAuthorizationInputGuard;
     message: string;
     persistedContent?: string;
     clientId?: string;
@@ -8950,9 +8953,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return sendToSessionInternal(params);
   };
 
-  initializeBotAuthorizationHost(async (card) => {
+  initializeBotAuthorizationHost(async (card, validate) => {
     await inputCoordinator.ensureQueueRestored(card.sessionId);
-    const result = await dispatchBotSessionMessage(buildBotAuthorizationContinuation(card));
+    const generation = inputCoordinator.getGeneration(card.sessionId);
+    const authorizationGuard: BotAuthorizationInputGuard = {
+      validate,
+      assertCurrent: () => {
+        assertRemoteInputClearNotInFlight(card.sessionId, true);
+        if (rewindInputSessions.has(card.sessionId) || !inputCoordinator.isGenerationCurrent(card.sessionId, generation)) {
+          throw new Error('Authorization input boundary changed');
+        }
+      },
+    };
+    authorizationGuard.assertCurrent();
+    const result = await dispatchBotSessionMessage({ ...buildBotAuthorizationContinuation(card), authorizationGuard });
     if (!result.ok) throw new Error('Authorization continuation not accepted');
     await awaitAgentInputQueueSnapshotPersistence(card.sessionId);
   });
@@ -9427,6 +9441,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    authorizationGuard?: BotAuthorizationInputGuard;
   }): Promise<void> {
     const queued = await buildSessionControlInputItem(params);
     if (params.onAccepted) {
@@ -9440,7 +9455,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 崩溃恢复排序:确保先读回持久化队列再追加本条(见 ensureQueueRestored)。
     // 失败时 enqueue 照常入队(shouldQueueNewTurn 已守住不会直发)。
     await inputCoordinator.ensureQueueRestored(params.targetSessionId).catch(() => undefined);
-    inputCoordinator.enqueue(params.targetSessionId, queued);
+    if (params.authorizationGuard) {
+      await commitBotAuthorizationInput(params.authorizationGuard, () => {
+        inputCoordinator.enqueue(params.targetSessionId, queued);
+      });
+    } else {
+      inputCoordinator.enqueue(params.targetSessionId, queued);
+    }
     log.info('send_to_session queued while target busy', {
       targetSessionId: params.targetSessionId,
       clientId: params.clientId,

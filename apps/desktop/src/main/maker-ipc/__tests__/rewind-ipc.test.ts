@@ -63,6 +63,7 @@ vi.mock('../../logger.js', () => ({
 
 import { MAKER_INVOKE } from '../channels.js';
 import { registerMakerRewindIpc } from '../rewind.js';
+import { acquireSendToSessionLock } from '../sendToSessionLock.js';
 
 function sessionRunningError(): Error & { code: 'SESSION_RUNNING' } {
   return Object.assign(new Error('session running'), { code: 'SESSION_RUNNING' as const });
@@ -82,6 +83,21 @@ describe('maker rewind IPC stop-then-rewind', () => {
     });
     mocks.listVisibleSubagentObservationIdentities.mockResolvedValue([]);
     registerMakerRewindIpc();
+  });
+
+  it('does not commit rewind while authorization owns the session send boundary', async () => {
+    const release = await acquireSendToSessionLock('session-1');
+    mocks.commitRewindAtMessage.mockResolvedValue({ id: 'session-1' });
+    const handler = mocks.handlers.get(MAKER_INVOKE.REWIND_COMMIT)!;
+    const rewinding = handler({}, 'session-1', 'message-1', { stopIfRunning: true });
+    try {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(mocks.commitRewindAtMessage).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    await rewinding;
+    expect(mocks.commitRewindAtMessage).toHaveBeenCalledOnce();
   });
 
   it('runs normal rewind inside the stopped input boundary when requested', async () => {

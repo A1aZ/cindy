@@ -1,3 +1,4 @@
+import { withSendToSessionLock } from './sendToSessionLock.js';
 /**
  * registerMakerRewindIpc — maker:rewind:preview / maker:rewind:commit
  *
@@ -66,7 +67,7 @@ async function commitAfterPersistBarrier(
   // withdrawn work visible again. Drain first, then let commitRewindAtMessage
   // reload its target and transaction boundary from the durable store.
   await drainPersistQueue();
-  return commitRewindAtMessage(sessionId, clientId, opts);
+  return withSendToSessionLock(sessionId, () => commitRewindAtMessage(sessionId, clientId, opts));
 }
 
 function wrapErr(err: unknown): never {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BotAuthorizationService,
   buildBotAuthorizationContinuation,
+  commitBotAuthorizationInput,
   type BotAuthorizationAdapter,
 } from '../botAuthorizationService';
 import type { BotAuthorizationCard } from '../../../shared/botAuthorization';
@@ -438,4 +439,59 @@ it('retires an OAuth waiter when the card is rewound during completion persisten
   await flush();
   expect(h.deps.resume).not.toHaveBeenCalled();
   await h.service.dispose();
+});
+
+describe('authorization input CAS', () => {
+  it('does not enqueue when clear wins during the visibility query', async () => {
+    let generation = 1;
+    const captured = generation;
+    let finish!: () => void;
+    const enqueue = vi.fn();
+    const committing = commitBotAuthorizationInput(
+      {
+        validate: () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+        assertCurrent: () => {
+          if (generation !== captured) throw new Error('cleared');
+        },
+      },
+      enqueue,
+    );
+    const rejected = expect(committing).rejects.toThrow('cleared');
+    generation++;
+    finish();
+    await rejected;
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+  it('checks the generation and enqueues in one synchronous boundary', async () => {
+    const events: string[] = [];
+    await commitBotAuthorizationInput(
+      {
+        validate: async () => {
+          events.push('visible');
+        },
+        assertCurrent: () => {
+          events.push('guard');
+          queueMicrotask(() => events.push('clear'));
+        },
+      },
+      () => {
+        events.push('enqueue');
+      },
+    );
+    expect(events).toEqual(['visible', 'guard', 'enqueue', 'clear']);
+  });
+  it('retires the card entry when creation loses the durable clear-boundary CAS', async () => {
+    const h = harness();
+    h.deps.save.mockRejectedValueOnce(
+      Object.assign(new Error('clear won'), { code: 'REMOTE_OPTIMISTIC_INPUT_CLEARED' }),
+    );
+    await expect(h.service.request('s', { kind: 'host', id: 'grok' })).rejects.toThrow('clear won');
+    expect(h.listeners.size).toBe(0);
+    expect(h.stored.size).toBe(0);
+    expect(h.adapter.execute).not.toHaveBeenCalled();
+    await h.service.dispose();
+  });
 });

@@ -46,6 +46,18 @@ afterEach(() => {
 });
 
 describe('opened worktree refresh', () => {
+  it('checks an active task again when it regains focus and hides an externally deleted worktree', async () => {
+    const { result } = renderHook(() => useTaskInfoWorktree(session, true, { observeTelemetry: true }));
+    await act(async () => {});
+    expect(result.current?.source).toBe('managed');
+
+    mocks.detect.mockResolvedValue({ isInsideWorktree: false });
+    await act(async () => switchFocus());
+
+    expect(mocks.detect).toHaveBeenCalledTimes(2);
+    expect(result.current).toBeNull();
+  });
+
   it('applies recycle and restore events immediately', async () => {
     const { result } = renderHook(() => useTaskInfoWorktree(session, true, { observeTelemetry: true }));
     await act(async () => {});

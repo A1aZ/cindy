@@ -97,6 +97,7 @@ async function run(version, dirs, scenario) {
     exports: {},
     path,
     gitExec,
+    createCwdProbeScheduler: (probe) => probe,
     GitExecError: Error,
     getManagedWorktreeBasePath: () => null,
     log: {
@@ -139,10 +140,12 @@ async function run(version, dirs, scenario) {
       },
     },
   });
-  vm.runInContext(functionsOnly(version.manager, ['detectCwd']), context);
-  const names = ['isLiveOfficialPath', 'WorktreeProvider'];
-  if (version.label === 'after')
-    names.push('FOREGROUND_REFRESH_INTERVAL_MS', 'VALIDATION_CONCURRENCY');
+  const managerNames = version.label === 'after' ? ['detectCwd', 'detectCwdOnce'] : ['detectCwd'];
+  vm.runInContext(functionsOnly(version.manager, managerNames), context);
+  context.detectCwd = context.exports.detectCwd;
+  const names = version.label === 'after'
+    ? ['WorktreeProvider']
+    : ['isLiveOfficialPath', 'WorktreeProvider', 'FOREGROUND_REFRESH_INTERVAL_MS', 'VALIDATION_CONCURRENCY'];
   vm.runInContext(functionsOnly(version.provider, names, true), context);
   const drain = async () => {
     const deadline = performance.now() + 120_000;
@@ -161,10 +164,10 @@ async function run(version, dirs, scenario) {
     statsReset();
     now = scenario === 'warm-focus' ? 1000 : 20_000;
     start = performance.now();
-    listeners.get('focus')();
+    listeners.get('focus')?.();
     // All ten focus events arrive while the first Git probe is still running.
     await tick();
-    for (let i = 1; i < 10; i++) listeners.get('focus')();
+    for (let i = 1; i < 10; i++) listeners.get('focus')?.();
     await drain();
   }
   const immediate = {

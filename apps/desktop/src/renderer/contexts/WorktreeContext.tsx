@@ -8,7 +8,7 @@
  *   - Scheduler / hook 等 main 侧后台创建完成后，复用 sessions:created 按
  *     sessionId 增量发现 worktree
  *   - 归档/删除的 worktree 回收跑完后，由 main 的 `worktree:changed` 推送按
- *     sessionId 增量更新；启动先显示快照，低频、有界校验兜底外部删除，不随聚焦扫描
+ *     sessionId 增量更新；启动只读取快照，外部删除由打开中的任务按需校验
  *
  * 与项目内 AuthContext / EnvCheckContext 同
  * Provider+hooks 范式，不引入新状态库。
@@ -29,21 +29,6 @@ import type { WorktreeMeta } from '@/lib/worktree.types';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('WorktreeContext');
-const BACKGROUND_CHECK_INTERVAL_MS = 5 * 60_000;
-const BACKGROUND_CHECK_CONCURRENCY = 4;
-
-/** store 仍可能留着已被 `git worktree remove` 的路径；探测失败不摘标，避免 IPC 抖动清空侧栏。 */
-async function isLiveOfficialPath(cwd: string): Promise<boolean> {
-  const detect = window.electronAPI?.worktreeDetectCwd;
-  if (!detect) return true;
-  try {
-    const result = await detect({ cwd });
-    return Boolean(result?.isInsideWorktree);
-  } catch {
-    return true;
-  }
-}
-
 interface WorktreeContextValue {
   /** sessionId → meta；非 null 即代表此 session 正绑定一个 worktree。 */
   metas: Record<string, WorktreeMeta>;
@@ -60,7 +45,7 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
   const fullRefreshGenerationRef = useRef(0);
   const eventGenerationRef = useRef(0);
   const sessionEventGenerationsRef = useRef(new Map<string, number>());
-  const refresh = useCallback(async (showSnapshot: boolean) => {
+  const refresh = useCallback(async () => {
     const myTurn = ++fullRefreshGenerationRef.current;
     const eventGenerationAtStart = eventGenerationRef.current;
     try {
@@ -80,27 +65,7 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
         }
         return merged;
       });
-      if (showSnapshot) {
-        mergeSnapshot(Object.fromEntries(entries.map((meta) => [meta.sessionId, meta])));
-      }
-      const next: Record<string, WorktreeMeta> = {};
-      let index = 0;
-      const checkNext = async () => {
-        while (myTurn === fullRefreshGenerationRef.current && index < entries.length) {
-          const meta = entries[index++];
-          // 已收到增量事件的条目由 refreshSession 负责；不再启动旧快照里的探测。
-          if ((sessionEventGenerationsRef.current.get(meta.sessionId) ?? 0) > eventGenerationAtStart) {
-            continue;
-          }
-          if (await isLiveOfficialPath(meta.path)) next[meta.sessionId] = meta;
-        }
-      };
-      await Promise.all(Array.from(
-        { length: Math.min(BACKGROUND_CHECK_CONCURRENCY, entries.length) },
-        checkNext,
-      ));
-      if (myTurn !== fullRefreshGenerationRef.current) return;
-      mergeSnapshot(next);
+      mergeSnapshot(Object.fromEntries(entries.map((meta) => [meta.sessionId, meta])));
     } catch (err) {
       log.warn('refresh failed:', err);
     }
@@ -119,9 +84,7 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
       const meta = await getForSession(sessionId);
       if (!isCurrent()) return;
       const next =
-        meta?.sessionId === sessionId && meta.path && (await isLiveOfficialPath(meta.path))
-          ? meta
-          : null;
+        meta?.sessionId === sessionId && meta.path ? meta : null;
       if (!isCurrent()) return;
       setMetas((current) => {
         if (next) return { ...current, [sessionId]: next };
@@ -136,17 +99,8 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const check = async (showSnapshot: boolean) => {
-      await refresh(showSnapshot);
-      // 从本轮完成后计时，慢扫描不会与下一轮重叠或积压。
-      if (!cancelled) timer = setTimeout(() => void check(false), BACKGROUND_CHECK_INTERVAL_MS);
-    };
-    void check(true);
+    void refresh();
     return () => {
-      cancelled = true;
-      clearTimeout(timer);
       fullRefreshGenerationRef.current++;
     };
   }, [refresh]);
@@ -154,7 +108,7 @@ export function WorktreeProvider({ children }: { children: ReactNode }) {
   // 权威时机在这条推送上：main 侧的 worktree 回收是 fire-and-forget 的异步链
   // （关子进程 → git worktree remove → 文件系统清理），store 条目被移除的时刻
   // 远晚于归档/删除的状态 IPC 返回。main 只为实际涉及 worktree 的 session 广播，
-  // 这里也只查询、校验并更新这一条，不再扫描其它 worktree。
+  // 这里也只查询并更新这一条，不再扫描其它 worktree；存活校验由打开中的任务负责。
   useEffect(() => {
     const subscribe = window.electronAPI?.onWorktreeChanged;
     if (!subscribe) return;

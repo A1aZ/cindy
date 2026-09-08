@@ -109,6 +109,7 @@
   "resolutionControlHint": "Take control to change the resolution.",
   "videoSettingsFailed": "Live video is unavailable. Compatibility viewing does not apply frame rate, quality or sound settings. Select a setting again to retry.",
   "settingFailed": "Could not apply the setting. Please retry.",
+  "audioUnavailable": "Sound is temporarily unavailable for this connection. Your preference is saved. Turn sound off and on to retry.",
   "pipUnavailable": "Picture in picture is unavailable. Keep Cindy open to view the desktop.",
   "clipboardUnsupported": "This clipboard content is not supported yet. Copy a single image, text, or link. Files and app-specific formats cannot be transferred yet.",
   "clipboardTransferring": "Transferring clipboard content…",

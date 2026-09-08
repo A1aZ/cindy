@@ -217,6 +217,7 @@ export default function RemoteDesktopScreen() {
   const [videoSettings, setVideoSettings, videoPreferencesLoaded] = useVideoSettingsPreference();
   const videoSettingsRef = useRef(videoSettings);
   videoSettingsRef.current = videoSettings;
+  const audioUnavailable = useRef(false);
   const [settingNotice, setSettingNotice] = useState<string | null>(null);
   const [settingBusy, setSettingBusy] = useState(false);
   const settingInFlight = useRef(false);
@@ -463,8 +464,17 @@ export default function RemoteDesktopScreen() {
         };
         setLease({ ...next });
         setStatus("compatibility");
+        audioUnavailable.current = false;
+        setSettingNotice(null);
         if (result.systemAudio && videoSettingsRef.current.audio) {
-          await remotePresentation?.playback(true);
+          try {
+            await remotePresentation?.playback(true);
+          } catch {
+            if (current !== generation.current) return;
+            audioUnavailable.current = true;
+            setSettingNotice(t("remoteDesktop.audioUnavailable"));
+            await remotePresentation?.playback(false).catch(() => {});
+          }
           if (current !== generation.current) return;
         }
         send({
@@ -474,7 +484,7 @@ export default function RemoteDesktopScreen() {
           width: display.width,
           height: display.height,
           fillHeight: landscape,
-          audio: result.systemAudio && videoSettingsRef.current.audio,
+          audio: result.systemAudio && videoSettingsRef.current.audio && !audioUnavailable.current,
         });
         send({ type: "mode", mode });
         // Entering remote desktop is the user's intent to control. The existing
@@ -498,7 +508,7 @@ export default function RemoteDesktopScreen() {
         if (current === generation.current) connecting.current = false;
       }
     },
-    [deviceId, fail, landscape, mode, request, send, stop, videoPreferencesLoaded],
+    [deviceId, fail, landscape, mode, request, send, stop, t, videoPreferencesLoaded],
   );
   const connectRef = useRef(connect);
   connectRef.current = connect;
@@ -764,7 +774,7 @@ export default function RemoteDesktopScreen() {
                   settings: {
                     ...videoSettingsRef.current,
                     audio: Boolean(
-                      caps.systemAudio && videoSettingsRef.current.audio,
+                      caps.systemAudio && videoSettingsRef.current.audio && !audioUnavailable.current,
                     ),
                   },
                 }
@@ -1028,6 +1038,7 @@ export default function RemoteDesktopScreen() {
       if (settings.audio) await remotePresentation?.playback(true);
       else if (!presentation.current) await remotePresentation?.playback(false);
       if (active.current !== current) return;
+      audioUnavailable.current = false;
       videoSettingsRef.current = settings;
       setVideoSettings(settings);
       streaming.current = false;
@@ -1376,7 +1387,7 @@ export default function RemoteDesktopScreen() {
                   settings: videoSettings,
                   busy: settingBusy,
                   modesSupported: Boolean(caps?.displayModes),
-                  notice: settingNotice,
+                  notice: audioUnavailable.current ? t("remoteDesktop.audioUnavailable") : settingNotice,
                   onChange: (settings) => {
                     void changeVideoSettings(settings);
                   },

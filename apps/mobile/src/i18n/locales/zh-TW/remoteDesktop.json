@@ -109,6 +109,7 @@
   "resolutionControlHint": "接管操作後可以變更解析度。",
   "videoSettingsFailed": "即時傳輸未建立，目前使用相容畫面。幀率、畫質與聲音尚未生效，可重新選擇設定重試。",
   "settingFailed": "設定未能套用，請重試。",
+  "audioUnavailable": "本次連線暫時無聲，聲音偏好已保留。關閉再開啟聲音可重試。",
   "pipUnavailable": "目前無法開啟系統子母畫面，請保持 Cindy 在前景觀看。",
   "clipboardUnsupported": "暫不支援這種剪貼簿內容，請單獨複製一張圖片、文字或連結。檔案及應用程式專有格式暫時無法傳輸。",
   "clipboardTransferring": "正在傳輸剪貼簿內容…",

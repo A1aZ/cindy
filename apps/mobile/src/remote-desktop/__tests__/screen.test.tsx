@@ -17,6 +17,8 @@ const fixture = vi.hoisted(() => ({
   message: null as null | ((e: unknown) => void),
   size: { width: 390, height: 844 },
   canControl: true,
+  systemAudio: false,
+  playback: vi.fn(async (_enabled: boolean) => {}),
   trickleIce: false,
   focused: true,
   status: "online",
@@ -91,6 +93,9 @@ vi.mock("react-i18next", () => {
   return { useTranslation: () => ({ t }) };
 });
 vi.mock("expo-modules-core", () => ({ requireOptionalNativeModule: () => null }));
+vi.mock("../../../modules/cindy-remote-presentation/src", () => ({
+  remotePresentation: { playback: fixture.playback, rotate: vi.fn(async () => {}) },
+}));
 vi.mock("expo-clipboard", () => ({ getStringAsync: vi.fn(), setStringAsync: vi.fn() }));
 vi.mock("@expo/ui/community/segmented-control", () => ({ default: () => null }));
 vi.mock("@/platform/chrome/NativePullDownMenu", () => ({
@@ -186,6 +191,8 @@ beforeEach(() => {
   fixture.trickleIce = false;
   fixture.size = { width: 390, height: 844 };
   fixture.openLink.mockResolvedValue({});
+  fixture.systemAudio = false;
+  fixture.playback.mockReset().mockResolvedValue(undefined);
   fixture.invoke.mockImplementation(async (_device, _channel, [request]) => {
     switch (request.op) {
       case "capabilities":
@@ -195,6 +202,8 @@ beforeEach(() => {
           automaticReconnect: true,
           enabled: true,
           canControl: fixture.canControl,
+          systemAudio: fixture.systemAudio,
+          videoSettings: fixture.systemAudio,
           platform: "darwin",
           displays: [display],
         };
@@ -231,6 +240,29 @@ const connect = async () => {
 };
 
 describe("remote desktop controls", () => {
+  it("keeps video and control when playback fails without changing the sound preference", async () => {
+    fixture.systemAudio = true;
+    fixture.playback.mockImplementation(async (enabled) => { if (enabled) throw new Error("audio interrupted"); });
+    await connect();
+    expect(sent().find((m) => m.type === "init")).toMatchObject({ audio: false });
+    expect(sent().find((m) => m.type === "control")).toMatchObject({ enabled: true });
+    expect(fixture.playback).toHaveBeenLastCalledWith(false);
+    await act(async () => {
+      fixture.message!({ nativeEvent: { data: JSON.stringify({ type: "offer", epoch: "lease", sdp: "sdp", attemptId: "attempt" }) } });
+    });
+    expect(requests().find((r) => r.op === "offer").settings.audio).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
+    act(() => button("operations").click());
+    expect(host.textContent).toContain("remoteDesktop.audioUnavailable");
+    expect(button("sound").getAttribute("aria-selected")).toBe("true");
+    fixture.playback.mockResolvedValue(undefined);
+    await act(async () => button("sound").click());
+    act(() => fixture.message!({ nativeEvent: { data: JSON.stringify({ type: "streaming", epoch: "lease" }) } }));
+    await act(async () => button("sound").click());
+    expect(sent().filter((m) => m.type === "videoSettings").at(-1)).toMatchObject({ audio: true });
+    expect(host.textContent).not.toContain("remoteDesktop.audioUnavailable");
+  });
   it("overlays landscape keyboards and includes their measured occlusion", async () => {
     fixture.size = { width: 844, height: 390 };
     act(() => root.render(<RemoteDesktopScreen />));

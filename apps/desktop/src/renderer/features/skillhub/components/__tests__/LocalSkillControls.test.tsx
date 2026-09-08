@@ -14,7 +14,7 @@ vi.mock('@/lib/toast', () => ({ toast: {
 } }));
 import { LocalSkillControls } from '../LocalSkillControls';
 
-const skill = { name: 'example', kind: 'skill', absolutePath: '/fixture/.agents/skills/example',
+const skill = { id: 'global-example', name: 'example', kind: 'skill', absolutePath: '/fixture/.agents/skills/example',
   scope: 'global', cindyEnabled: true, canUninstall: true } as SkillhubSkill;
 
 async function chooseUninstall() {
@@ -70,7 +70,7 @@ describe('Local Skill management', () => {
     render(<LocalSkillControls skill={{ ...skill, cindyEnabled: false }} />);
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() => expect(mocks.success).toHaveBeenCalledWith('skillhub.management.enabledToast'));
-    expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: skill.absolutePath, enabled: true });
+    expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: skill.absolutePath, skillId: skill.id, enabled: true });
     expect(mocks.refresh).toHaveBeenCalledOnce();
   });
 
@@ -90,7 +90,7 @@ describe('Local Skill management', () => {
     expect(mocks.confirm.mock.calls[0][0].description).toBe([
       'skillhub.management.unlinkDescription', 'skillhub.management.projectScope', 'skillhub.management.sharedImpact',
     ].join('\n\n'));
-    expect(mocks.uninstall).toHaveBeenCalledWith(skill.absolutePath);
+    expect(mocks.uninstall).toHaveBeenCalledWith(skill.absolutePath, skill.id);
   });
 
   it('keeps package-owned uninstall unavailable', async () => {

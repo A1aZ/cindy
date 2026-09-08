@@ -3162,7 +3162,7 @@ interface ElectronAPI {
 
   // ── SkillHub (xdt-maker-技能中心 v0.2) ──
   skillhub: {
-    setEnabled: (params: { absolutePath: string; enabled: boolean }) => Promise<{ cindyEnabled: boolean }>;
+    setEnabled: (params: { absolutePath: string; skillId?: string; enabled: boolean }) => Promise<{ cindyEnabled: boolean }>;
     onLocalStateChanged: (callback: () => void) => () => void;
     scan: (params: { projects?: SkillhubProjectInput[] }) => Promise<{
       success: boolean;
@@ -3501,6 +3501,7 @@ interface ElectronAPI {
     cancelInstall: (name: string) => Promise<{ success: boolean }>;
     uninstall: (
       absolutePath: string,
+      skillId?: string,
     ) => Promise<{ success: true; cleanupToken?: string } | { success: false; errorCode: string; message: string }>;
     retryUninstallCleanup: (token: string) => Promise<{ complete: boolean }>;
 

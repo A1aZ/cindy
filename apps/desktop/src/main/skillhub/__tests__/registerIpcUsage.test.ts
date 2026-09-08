@@ -634,6 +634,56 @@ describe('registerSkillhubIpc usage handlers', () => {
     return { event, absolutePath, project };
   }
 
+  async function scanSharedAliases(physicalProjectSkill: boolean) {
+    const root = fs.mkdtempSync(path.join(fixtureRoot, 'shared-aliases-'));
+    const projects = [path.join(root, 'project-a'), path.join(root, 'project-b')];
+    const source = physicalProjectSkill
+      ? path.join(projects[0]!, '.agents', 'skills', 'foo') : path.join(root, 'external', 'foo');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'fixture');
+    const absolutePath = fs.realpathSync.native(source);
+    const aliases = [path.join(root, 'home', '.agents', 'skills', 'global-alias'),
+      ...projects.map((project) => path.join(project, '.agents', 'skills', 'project-alias'))];
+    for (const alias of aliases) {
+      fs.mkdirSync(path.dirname(alias), { recursive: true });
+      fs.symlinkSync(source, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    const records = aliases.map((alias, index) => ({
+      id: `entry-${index}`, kind: 'skill', name: 'foo', absolutePath,
+      scope: index === 0 ? 'global' : 'project',
+      discoveredPath: alias, discoveryPaths: [alias],
+      ...(index > 0 ? { projectRoot: projects[index - 1] } : {}),
+    }));
+    getAllowedProjectRoots.mockResolvedValue(projects);
+    scanAllSkills.mockResolvedValue({ skills: records, sources: [] });
+    const event = { sender: { id: 71, on: vi.fn(), once: vi.fn() } };
+    await handlers.get('skillhub:scan')!(event, { projects: projects.map((projectRoot, index) => ({ projectRoot, hash: `p${index}` })) });
+    return { absolutePath, aliases, records, projects, event };
+  }
+
+  it('uses the selected scan ID for external aliases and retains the selected project boundary', async () => {
+    const { absolutePath, aliases, projects, event } = await scanSharedAliases(false);
+    installServiceMocks.uninstall.mockResolvedValueOnce({ success: true });
+    await handlers.get('skillhub:uninstall')!(event, { absolutePath, skillId: 'entry-2' });
+    expect(installServiceMocks.uninstall).toHaveBeenCalledWith(absolutePath,
+      expect.objectContaining({ operationPath: aliases[2], aliases: [aliases[2]], linkOnly: true }), expect.any(Function));
+    await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath, skillId: 'unknown' }))
+      .rejects.toThrow('PRECONDITION_FAILED');
+    getAllowedProjectRoots.mockResolvedValue([projects[0]]);
+    await expect(handlers.get('skillhub:uninstall')!(event, { absolutePath, skillId: 'entry-2' }))
+      .rejects.toThrow('PERMISSION_DENIED');
+    await expect(handlers.get('skillhub:set-enabled')!(event, { absolutePath, skillId: 'entry-2', enabled: false }))
+      .rejects.toThrow('PERMISSION_DENIED');
+  });
+
+  it('captures differently named discovery links across scopes for physical Skill removal', async () => {
+    const { absolutePath, aliases, event } = await scanSharedAliases(true);
+    installServiceMocks.uninstall.mockResolvedValueOnce({ success: true });
+    await handlers.get('skillhub:uninstall')!(event, { absolutePath, skillId: 'entry-1' });
+    expect(installServiceMocks.uninstall).toHaveBeenCalledWith(absolutePath,
+      expect.objectContaining({ operationPath: absolutePath, aliases: expect.arrayContaining(aliases), linkOnly: false }), expect.any(Function));
+  });
+
   it('refreshes the Codex cwd cache after uninstalling a granted project skill', async () => {
     const { event, absolutePath, project } = await scanLocalFixture();
     installServiceMocks.uninstall.mockResolvedValueOnce({ success: true, projectWorkingDir: project });

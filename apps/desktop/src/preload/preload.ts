@@ -2946,7 +2946,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ~/.claude/{skills,commands,agents}，project 来源由调用方传入的 projectRoot 决定。
   // 返回商店层 Skill[] 与兼容用 sources[]；scan 本身只读。
   skillhub: {
-    setEnabled: (params: { absolutePath: string; enabled: boolean }): Promise<{ cindyEnabled: boolean }> =>
+    setEnabled: (params: { absolutePath: string; skillId?: string; enabled: boolean }): Promise<{ cindyEnabled: boolean }> =>
       ipcRenderer.invoke('skillhub:set-enabled', params),
     onLocalStateChanged: fanOutSkillhubLocalStateChanged,
     scan: (params: {
@@ -3377,8 +3377,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Main 校验当前扫描实体后移入系统回收站。
     uninstall: (
       absolutePath: string,
+      skillId?: string,
     ): Promise<{ success: true; cleanupToken?: string } | { success: false; errorCode: string; message: string }> =>
-      ipcRenderer.invoke('skillhub:uninstall', { absolutePath }),
+      ipcRenderer.invoke('skillhub:uninstall', { absolutePath, skillId }),
 
     retryUninstallCleanup: (token: string): Promise<{ complete: boolean }> =>
       ipcRenderer.invoke('skillhub:retry-uninstall-cleanup', token),

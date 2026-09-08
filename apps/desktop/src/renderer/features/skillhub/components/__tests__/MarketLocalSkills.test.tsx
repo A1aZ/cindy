@@ -36,6 +36,7 @@ const market: MarketSkill = {
   latestPublishedFromDeviceId: null, cardState: 'installed-latest',
 };
 const local = {
+  id: 'global-calendar',
   name: market.name, kind: 'skill', absolutePath: '/fixture/.agents/skills/gws-calendar',
   scope: 'global', registryEntry: { catalogScope: 'market', version: '1.0.2' },
   cindyEnabled: true, canUninstall: true,
@@ -78,16 +79,16 @@ describe('market Skill details', () => {
     expect(screen.getByRole('switch').getAttribute('data-state')).toBe('checked');
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalledOnce());
-    expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: local.absolutePath, enabled: false });
+    expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: local.absolutePath, skillId: local.id, enabled: false });
     fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.management.moreLabel' }), { key: 'Enter' });
     fireEvent.click(await screen.findByRole('menuitem', { name: 'skillhub.detail.uninstall' }));
-    await waitFor(() => expect(mocks.uninstall).toHaveBeenCalledWith(local.absolutePath));
+    await waitFor(() => expect(mocks.uninstall).toHaveBeenCalledWith(local.absolutePath, local.id));
   });
 });
 
 describe('market installed location matching', () => {
   it('selects a local copy in the toolbar and falls back after that copy is removed', async () => {
-    const project = { ...local, scope: 'project', projectRoot: '/project',
+    const project = { ...local, id: 'project-calendar', scope: 'project', projectRoot: '/project',
       absolutePath: '/project/.agents/skills/gws-calendar', cindyEnabled: false } as SkillhubSkill;
     mocks.skills = [local, project];
     const { rerender } = render(<MarketLocalSkills skill={market} />);
@@ -97,7 +98,7 @@ describe('market installed location matching', () => {
     fireEvent.click(await screen.findByRole('menuitemradio', { name: new RegExp(project.absolutePath) }));
     expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('false');
     fireEvent.click(screen.getByRole('switch'));
-    await waitFor(() => expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: project.absolutePath, enabled: true }));
+    await waitFor(() => expect(mocks.setEnabled).toHaveBeenCalledWith({ absolutePath: project.absolutePath, skillId: project.id, enabled: true }));
     mocks.skills = [local];
     rerender(<MarketLocalSkills skill={market} />);
     expect(screen.getAllByRole('switch')).toHaveLength(1);
@@ -105,6 +106,24 @@ describe('market installed location matching', () => {
     mocks.skills = [];
     rerender(<MarketLocalSkills skill={market} />);
     expect(screen.queryByRole('switch')).toBeNull();
+  });
+
+  it.each(['global', 'project'] as const)('selects the second entry sharing a physical path with a %s entry', async (firstScope) => {
+    const first = { ...local, scope: firstScope, projectRoot: '/first-project' };
+    const second = { ...local, id: 'second-project-calendar', scope: 'project', projectRoot: '/second-project' } as SkillhubSkill;
+    mocks.skills = [first, second];
+    render(<MarketLocalSkills skill={market} />);
+    fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.sidebar.marketInstalledHeading' }), { key: 'Enter' });
+    const locations = await screen.findAllByRole('menuitemradio');
+    expect(locations[1]!.textContent).toContain('/second-project');
+    fireEvent.click(locations[1]!);
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() => expect(mocks.setEnabled).toHaveBeenCalledWith({
+      absolutePath: second.absolutePath, skillId: second.id, enabled: false,
+    }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'skillhub.management.moreLabel' }), { key: 'Enter' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'skillhub.detail.uninstall' }));
+    await waitFor(() => expect(mocks.uninstall).toHaveBeenCalledWith(second.absolutePath, second.id));
   });
 
   it('does not manage same-name copies from another catalog or unregistered third-party copies', () => {

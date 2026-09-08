@@ -33,7 +33,7 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
     setBusy(true);
     setPendingEnabled(value);
     try {
-      await window.electronAPI.skillhub.setEnabled({ absolutePath: skill.absolutePath, enabled: value });
+      await window.electronAPI.skillhub.setEnabled({ absolutePath: skill.absolutePath, skillId: skill.id, enabled: value });
       await refresh();
       toast.success(t(value ? 'skillhub.management.enabledToast' : 'skillhub.management.disabledToast', { name: skill.name }));
     } catch (error) { reportError(error, 'toggleFailed'); }
@@ -61,7 +61,7 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
         cancelText: t('skillhub.detail.uninstallDialog.cancel'),
       });
       if (!accepted) return;
-      const result = await window.electronAPI.skillhub.uninstall(skill.absolutePath);
+      const result = await window.electronAPI.skillhub.uninstall(skill.absolutePath, skill.id);
       if (!result.success) {
         toast.error(t('skillhub.management.uninstallFailed'));
         return;

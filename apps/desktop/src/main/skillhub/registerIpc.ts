@@ -133,12 +133,14 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       }
     }
   };
-  const requireLocalSkill = async (event: Electron.IpcMainInvokeEvent, source: string) => {
+  const requireLocalSkill = async (event: Electron.IpcMainInvokeEvent, source: string, skillId?: string) => {
     assertTrustedAppRendererEvent(event);
     if (typeof source !== 'string' || !path.isAbsolute(source)) throwIpcError('INVALID_PARAMS', 'Invalid Skill');
+    if (skillId !== undefined && (typeof skillId !== 'string' || !skillId)) throwIpcError('INVALID_PARAMS', 'Invalid Skill identity');
     const ownerId = getCurrentDataOwnerId();
     const grant = scannedSkillRootsBySender.get(event.sender.id);
-    const record = localSkillsBySender.get(event.sender.id)?.find(({ skill }) => skill.absolutePath === source);
+    const record = localSkillsBySender.get(event.sender.id)?.find(({ skill }) =>
+      skill.absolutePath === source && (skillId === undefined || skill.id === skillId));
     if (!record || !ownerId || grant?.ownerId !== ownerId || isAppSessionBoundaryPending()) {
       throwIpcError('PRECONDITION_FAILED', 'Refresh the Skill list and retry');
     }
@@ -216,13 +218,27 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       }
     }
     scannedSkillRootsBySender.set(event.sender.id, { ownerId, entries });
-    localSkillsBySender.set(event.sender.id, skills.flatMap((skill) => {
+    const records = skills.flatMap((skill) => {
       if (skill.kind !== 'skill') return [];
       try {
         return [{ skill, physicalIdentity: physicalIdentity(skill.absolutePath),
           target: inspectLocalSkillTarget(skill.absolutePath, skill.discoveryPaths ?? [skill.discoveredPath], options.getManagedSkillRoots()) }];
       } catch { return []; }
-    }));
+    });
+    const aliasesByIdentity = new Map<string, Set<string>>();
+    for (const record of records) {
+      const aliases = aliasesByIdentity.get(record.physicalIdentity) ?? new Set<string>();
+      for (const alias of record.target?.aliases ?? []) aliases.add(alias);
+      aliasesByIdentity.set(record.physicalIdentity, aliases);
+    }
+    for (const record of records) {
+      // Removing the physical entity must clean every scanned scope's links.
+      // Removing an external import keeps its scope-local operation/aliases.
+      if (record.target && !record.target.linkOnly) {
+        record.target.aliases = [...aliasesByIdentity.get(record.physicalIdentity)!];
+      }
+    }
+    localSkillsBySender.set(event.sender.id, records);
   };
 
   const hasScannedSkillGrant = (
@@ -959,9 +975,9 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     },
   );
 
-  ipcMain.handle('skillhub:set-enabled', async (event, params: { absolutePath: string; enabled: boolean }) => {
+  ipcMain.handle('skillhub:set-enabled', async (event, params: { absolutePath: string; skillId?: string; enabled: boolean }) => {
     if (typeof params?.enabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'Invalid Skill state');
-    const record = await requireLocalSkill(event, params.absolutePath);
+    const record = await requireLocalSkill(event, params.absolutePath, params.skillId);
     const { skill } = record;
     const ownerId = getCurrentDataOwnerId();
     const canMutate = () => {
@@ -984,8 +1000,8 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   // Main resolves the exact scanned entity; no arbitrary renderer path deletion.
   ipcMain.handle(
     'skillhub:uninstall',
-    async (event, { absolutePath }: { absolutePath: string }) => {
-      const { target } = await requireLocalSkill(event, absolutePath);
+    async (event, { absolutePath, skillId }: { absolutePath: string; skillId?: string }) => {
+      const { target } = await requireLocalSkill(event, absolutePath, skillId);
       if (!target || !isLocalSkillTargetCurrent(target) || isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots())) {
         throwIpcError('PRECONDITION_FAILED', 'Skill cannot be uninstalled; refresh and retry');
       }

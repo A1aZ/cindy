@@ -229,6 +229,28 @@ describe('skillhub/installService', () => {
     expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
   });
 
+  it('cleans cross-scope aliases after physical removal and preserves a retargeted link', async () => {
+    const { source } = await localFixture('foo');
+    const globalAlias = path.join(TEST_ROOT, 'home', '.agents', 'skills', 'global-alias');
+    const projectAlias = path.join(TEST_ROOT, 'project', '.agents', 'skills', 'project-alias');
+    const replacedAlias = path.join(TEST_ROOT, 'other', '.agents', 'skills', 'replaced-alias');
+    for (const alias of [globalAlias, projectAlias, replacedAlias]) makeDirectoryLink(alias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const target = inspectLocalSkillTarget(source, [source, globalAlias, projectAlias, replacedAlias])!;
+    const otherSource = path.join(TEST_ROOT, 'unrelated');
+    fs.mkdirSync(otherSource);
+    fs.unlinkSync(replacedAlias);
+    makeDirectoryLink(replacedAlias, otherSource);
+    const { uninstall } = await import('../installService');
+    expect(await uninstall(source, target)).toEqual({ success: true });
+    for (const alias of [globalAlias, projectAlias]) {
+      expect(fs.lstatSync(alias, { throwIfNoEntry: false })).toBeUndefined();
+      // A fresh directory can now occupy the old alias name.
+      fs.mkdirSync(alias);
+    }
+    expect(fs.realpathSync.native(replacedAlias)).toBe(fs.realpathSync.native(otherSource));
+  });
+
   it('rejects a source replaced while registry inspection is pending', async () => {
     const { source, target } = await localFixture('replaced');
     const { registryService } = await import('../registry');

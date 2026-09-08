@@ -74,6 +74,7 @@ vi.mock('../registry', () => ({
     addInstall: vi.fn(),
     getInstall: vi.fn(),
     readManifest: vi.fn(),
+    listAllInstalls: vi.fn(),
     removeInstall: vi.fn(),
   },
 }));
@@ -182,6 +183,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue(null);
     vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
     return { source, target: inspectLocalSkillTarget(source, [source])! };
   }
 
@@ -220,6 +222,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue(null);
     vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
     const { uninstall } = await import('../installService');
     const { shell } = await import('electron');
     const target = inspectLocalSkillTarget(source, [alias])!;
@@ -242,6 +245,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue(null);
     vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
     const { setCindySkillEnabled, isCindySkillEnabled } = await import('../activationPreferences');
     await setCindySkillEnabled(source, false);
     const { shell } = await import('electron');
@@ -1166,6 +1170,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue(null);
     vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
     vi.mocked(sharedSkills.projectWorkingDirFromSkillPath).mockImplementation((entry) => entry === alias ? projectRoot : null);
     const { uninstall } = await import('../installService');
     const result = await uninstall(target.sourcePath, target);
@@ -1239,6 +1244,31 @@ describe('skillhub/installService', () => {
     expect(result).toEqual({ success: true });
     expect(fs.existsSync(finalDir)).toBe(false);
     vi.mocked(getCurrentDataOwnerId).mockReturnValue('user-1');
+  });
+
+  it('uses the original registry name after a case-only source directory rename', async () => {
+    const physicalDir = path.join(TEST_ROOT, 'case-registry', '.agents', 'skills', 'Foo');
+    const logicalDir = path.join(TEST_ROOT, 'case-registry-alias', '.agents', 'skills', 'foo');
+    fs.mkdirSync(physicalDir, { recursive: true });
+    fs.writeFileSync(path.join(physicalDir, 'SKILL.md'), 'fixture');
+    makeDirectoryLink(logicalDir, physicalDir);
+    const entry = { version: '1.0.0', authorId: 'owner', folderHash: 'hash',
+      installedAt: 1, updatedAt: 1, origin: 'installed' as const };
+    const { registryService } = await import('../registry');
+    const { uninstall } = await import('../installService');
+    vi.mocked(registryService.getInstall).mockImplementation(async (name) => {
+      if (name === 'Foo') throw new Error('REGISTRY_CORRUPTED');
+      return name === 'foo' ? entry : null;
+    });
+    vi.mocked(registryService.readManifest).mockRejectedValue(new Error('REGISTRY_CORRUPTED'));
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([
+      { skillName: 'foo', installPath: path.join(TEST_ROOT, 'unrelated'), entry },
+      { skillName: 'foo', installPath: logicalDir, entry },
+    ]);
+    const result = await uninstall(physicalDir);
+    expect(result).toEqual({ success: true });
+    expect(fs.existsSync(physicalDir)).toBe(false);
+    expect(registryService.removeInstall).toHaveBeenCalledWith('foo', logicalDir);
   });
 
   it('uninstalls a linked install when the scanner passes its physical path', async () => {
@@ -2211,6 +2241,7 @@ describe('skillhub/installService', () => {
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue(null);
     vi.mocked(registryService.readManifest).mockResolvedValue(null);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
     const target = inspectLocalSkillTarget(source, [alias])!;
     if (order === 'install-first') {
       const releaseInstall = tryAcquireSkillInstallLock(aliasName, 'market-install')!;

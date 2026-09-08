@@ -974,7 +974,7 @@ export async function uninstall(
     return await uninstallLocked(
       absolutePath,
       resolved,
-      skillName,
+      registryMatch?.skillName ?? skillName,
       cloudUserId,
       registryMatch,
       target,
@@ -987,6 +987,7 @@ export async function uninstall(
 
 /** Registry entry plus the exact key that must be removed after uninstall. */
 interface RegistryInstallMatch {
+  skillName: string;
   installPath: string;
   entry: StoredInstall;
 }
@@ -1014,25 +1015,33 @@ async function findRegistryInstallForPath(
   ]);
   for (const installPath of candidatePaths) {
     const entry = await registryService.getInstall(skillName, installPath).catch(() => null);
-    if (entry) return { installPath, entry };
+    if (entry) return { skillName, installPath, entry };
   }
 
   const manifest = await registryService.readManifest(skillName).catch(() => null);
-  if (!manifest) return null;
-  for (const [installPath, entry] of Object.entries(manifest.installs)) {
+  for (const [installPath, entry] of Object.entries(manifest?.installs ?? {})) {
     let realInstallPath: string;
     try {
       realInstallPath = fs.realpathSync(installPath);
     } catch {
       // 目录已删时仍允许用规范化路径与候选路径直接比对
       if (candidatePaths.some((candidate) => pathTextEquals(path.normalize(installPath), candidate))) {
-        return { installPath, entry };
+        return { skillName, installPath, entry };
       }
       continue;
     }
     if (candidatePaths.some((candidate) => resolvedPathEquals(realInstallPath, candidate))) {
-      return { installPath, entry };
+      return { skillName, installPath, entry };
     }
+  }
+  // A case-only directory rename does not rename the registry manifest. Resolve
+  // its original key by physical identity; do not loosen manifest self-validation.
+  const installs = await registryService.listAllInstalls();
+  for (const record of installs) {
+    if (skillInstallLockKey(record.skillName) !== skillInstallLockKey(skillName)) continue;
+    try {
+      if (fs.realpathSync.native(record.installPath) === resolved) return record;
+    } catch { /* Missing records do not prove ownership of a live source. */ }
   }
   return null;
 }

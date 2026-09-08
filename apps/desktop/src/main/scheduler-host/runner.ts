@@ -1,5 +1,5 @@
 import { UI_ACTION_TRIGGER_PREFIX } from '../../shared/interruptedTurn.js';
-import { routinePermissionMode } from './routinePermission.js';
+import { routinePermissionSnapshot } from './routinePermission.js';
 /**
  * Phase 3: MakerScheduleRunner
  *
@@ -440,6 +440,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       | 'session-running'
       | 'already-queued'
       | 'queue-restore-pending'
+      | 'routine-permission-unavailable'
       | 'queue-wait-timeout',
   ): FireResult {
     this.deps.logger.info?.(
@@ -466,6 +467,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // RoutineEngine explicitly owns retries; no nextFireAt is armed in this mode.
     if (ctx.deferToCaller) return true;
     return schedule.recurring === true && schedule.status === 'active' && schedule.manual !== true;
+  }
+
+  private async readRoutinePermissions(sessionId: string, live?: Session) {
+    const stored = await getSessionFsSnapshot(sessionId);
+    return routinePermissionSnapshot(live ?? this.deps.maker.getSession(sessionId), stored);
   }
 
   private async failOrDeferSessionRunning(
@@ -871,10 +877,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const materializedDefaultProviderId = shouldMaterializeFreshClaudeProvider
       ? (dynamicDefaultRoute?.providerId ?? null)
       : null;
-    const routineSnapshot = schedule.source === 'bot' && isHeartbeat ? await getSessionFsSnapshot(sessionId) : null;
-    const permissionMode = schedule.source === 'bot' && isHeartbeat
-      ? routinePermissionMode(this.deps.maker.getSession(sessionId)?.permissionModeState.mode, routineSnapshot?.permissionMode)
-      : defaultPermissionModeForSchedule();
+    let routinePermissions = schedule.source === 'bot' ? await this.readRoutinePermissions(sessionId) : null;
+    if (schedule.source === 'bot' && !routinePermissions)
+      return this.deferFire(schedule, sessionId, 'routine-permission-unavailable');
     // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
     let fastMode =
@@ -1080,6 +1085,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // The worktree path can also await filesystem work, so cancellation may
     // have arrived after the preceding guard.  Never create a late session.
     throwIfFireAborted(ctx.signal, 'session creation');
+    if (schedule.source === 'bot') {
+      routinePermissions = await this.readRoutinePermissions(sessionId);
+      if (!routinePermissions) return this.deferFire(schedule, sessionId, 'routine-permission-unavailable');
+      throwIfFireAborted(ctx.signal, 'session creation');
+    }
     let session: Awaited<ReturnType<Maker['createSession']>>;
     try {
       session = await this.deps.maker.createSession({
@@ -1089,8 +1099,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
         model,
         effort: reconciledEffort,
         fastMode,
-        permissionMode,
-        ...(schedule.source === 'bot' ? { planMode: !!routineSnapshot?.planModeEnabled } : {}),
+        permissionMode: routinePermissions?.permissionMode ?? defaultPermissionModeForSchedule(),
+        ...(routinePermissions ? { planMode: routinePermissions.planMode } : {}),
         title: isHeartbeat ? undefined : `[Schedule] ${schedule.name}`,
         resumeSessionId,
         // Pi distinguishes an explicit null (Cindy default route) from undefined
@@ -1265,6 +1275,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       this.deps.getDb(),
       session.id,
       {
+        // The routine owns no permission choice; never overwrite the teammate (including a concurrent edit).
+        ...(schedule.source === 'bot' ? { permissionMode: null } : {}),
         // 复用路径 setEffort 失败时跳过落库 —— 保留旧 meta.effort, 下次 fire
         // heartbeatEffortChanged 仍为 true 会重试同步（4.4.1 注释的固化问题）。
         // 落 runtimeReconciledEffort（按实际运行模型 clamp 后的值),session 行 effort 反映真跑的档,
@@ -1471,9 +1483,18 @@ export class MakerScheduleRunner implements ScheduleRunner {
           setSessionProvider(session.id, verdict.providerId);
         }
       }
+      if (schedule.source === 'bot') {
+        routinePermissions = await this.readRoutinePermissions(session.id, session);
+        if (!routinePermissions) {
+          waiter.stopListening();
+          ctx.signal.removeEventListener('abort', onAbort);
+          return this.deferFire(schedule, session.id, 'routine-permission-unavailable');
+        }
+        throwIfFireAborted(ctx.signal, 'agent turn dispatch');
+      }
       const sendResult = await session.send(outgoingMessage as never, {
         origin,
-        planMode: schedule.source === 'bot' ? !!routineSnapshot?.planModeEnabled : false,
+        planMode: routinePermissions?.planMode ?? false,
         onAccepted: async () => {
           // createSession 之后到真正 dispatch 之间仍会 await 模型切换、baseline
           // 等准备工作。复用 desktop session 时不能在这些准备阶段把用户正在跑的

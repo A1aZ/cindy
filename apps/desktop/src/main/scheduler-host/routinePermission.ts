@@ -1,8 +1,6 @@
-import type { PermissionMode } from '@cindy/maker-core';
+import type { PermissionMode, Session } from '@cindy/maker-core';
 
-/** Background triggers inherit the teammate's permission choice, never grant Full Access. */
-export function routinePermissionMode(live: unknown, stored: unknown): PermissionMode {
-  const mode = live ?? stored;
+function permissionMode(mode: unknown): PermissionMode | null {
   if (
     mode === 'ask' ||
     mode === 'default' ||
@@ -12,5 +10,21 @@ export function routinePermissionMode(live: unknown, stored: unknown): Permissio
     mode === 'bypassPermissions'
   )
     return mode;
-  throw new Error('The teammate permission setting is unavailable');
+  return null;
+}
+
+/** Never fall back from an unstable live session or a missing/incomplete durable snapshot. */
+export function routinePermissionSnapshot(
+  live: Pick<Session, 'stablePermissionModeState'> | undefined,
+  stored: { permissionMode: unknown; planModeEnabled: unknown } | null,
+): { permissionMode: PermissionMode; planMode: boolean } | null {
+  if (!stored || typeof stored.planModeEnabled !== 'boolean') return null;
+  const mode = permissionMode(stored.permissionMode);
+  if (!mode) return null;
+  if (live) {
+    const stable = live.stablePermissionModeState;
+    // A persistence/runtime mismatch may be a partially applied user change; wait for it to settle.
+    if (!stable || stable.mode !== mode) return null;
+  }
+  return { permissionMode: mode, planMode: stored.planModeEnabled };
 }

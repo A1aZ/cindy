@@ -207,6 +207,38 @@ const listening = { action: 'status', status: 'listening' };
 const publish = { action: 'publish', event: { id: 'startup-event', type: 'new', occurredAt: 1, data: {} } };
 const busy = { ok: false, message: 'Routine request intake is busy; retry later' };
 
+it('bounds the entire request including ignored fields before waiting, with UTF-8 accounting', async () => {
+  const getEngine = vi.fn();
+  const invalid: unknown[] = [
+    { ...listening, extra: 'x'.repeat(128 * 1024) },
+    { ...publish, event: { ...publish.event, extra: 'x'.repeat(128 * 1024) } },
+    { ...listening, extra: { nested: '字'.repeat(45_000) } },
+    { ...listening, extra: { ['x'.repeat(128 * 1024)]: true } },
+    { ...listening, extra: new Uint8Array(128 * 1024) },
+    { ...listening, extra: Array(5000).fill(null) },
+    { ...listening, extra: Object.assign([], { hiddenFromJson: 'x'.repeat(128 * 1024) }) },
+  ];
+  const cycle: Record<string, unknown> = { ...listening };
+  cycle.extra = cycle;
+  invalid.push(cycle);
+  for (const payload of invalid) {
+    expect(await handleRoutineRequest(ghost, payload, getEngine, () => true))
+      .toEqual({ ok: false, message: 'Routine request is too large or invalid' });
+  }
+  expect(getEngine).not.toHaveBeenCalled();
+  expect(warn).not.toHaveBeenCalled();
+  const f = await statusFixture();
+  try {
+    // Small ignored fields remain compatible, and rejected payloads did not consume slots.
+    const pending = Array.from({ length: 8 }, () => f.request({ ...listening, extra: { label: '字'.repeat(10_000) } }));
+    expect((await Promise.all(pending)).every((reply) => reply.ok)).toBe(true);
+    const data = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`field${i}`, '字'.repeat(7900)]));
+    expect(await f.request({ ...publish, event: { ...publish.event, data } })).toMatchObject({ ok: true });
+  } finally {
+    await f.engine.stop();
+  }
+});
+
 it('bounds mixed status/publish requests before startup and cannot bypass a plugin quota by self-reporting identity', async () => {
   const f = await statusFixture();
   const ready = deferred<RoutineEngine>();

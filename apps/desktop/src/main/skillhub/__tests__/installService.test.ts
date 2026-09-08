@@ -158,7 +158,7 @@ async function setupInstallDownload(skillName: string, zipBuf: Uint8Array) {
 describe('skillhub/installService', () => {
   beforeEach(async () => {
     vi.resetModules();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     removeTestRoot();
     fs.mkdirSync(TEST_ROOT, { recursive: true });
     const { projectWorkingDirFromSkillPath } = await import('../../maker-host/shared-global-skills.js');
@@ -1271,6 +1271,7 @@ describe('skillhub/installService', () => {
       schemaVersion: 1,
       ignoredSkills: [],
       autoSyncCandidates: [],
+      pendingOfflineUninstalls: [],
     });
   });
 
@@ -1436,6 +1437,44 @@ describe('skillhub/installService', () => {
     );
   });
 
+  it.each([true, undefined])('persists offline auto-sync opt-out across restart (autoSynced=%s)', async (autoSynced) => {
+    const { source, target } = await localFixture('offline-auto');
+    const { getCurrentUserId } = await import('../../authManager');
+    const { registryService } = await import('../registry');
+    const { recordAutoSyncCandidateSkills } = await import('../autoSyncPreferences');
+    await recordAutoSyncCandidateSkills('original-user', ['offline-auto']);
+    vi.mocked(getCurrentUserId).mockReturnValue(null);
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'installed', autoSynced, version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    const { uninstall } = await import('../installService');
+    expect(await uninstall(source, target)).toEqual({ success: true });
+    vi.resetModules();
+    const { listIgnoredAutoSyncSkills, clearIgnoredAutoSyncSkill } = await import('../autoSyncPreferences');
+    expect(await listIgnoredAutoSyncSkills('original-user')).toContain('offline-auto');
+    expect(await listIgnoredAutoSyncSkills('another-user')).toContain('offline-auto');
+    // Manual installation is the existing explicit reset of this device-level opt-out.
+    await clearIgnoredAutoSyncSkill('offline-auto', 'original-user');
+    expect(await listIgnoredAutoSyncSkills('original-user')).not.toContain('offline-auto');
+  });
+
+  it('rolls back an offline opt-out when trash fails', async () => {
+    const { source, target } = await localFixture('offline-trash-failure');
+    const { getCurrentUserId } = await import('../../authManager');
+    const { registryService } = await import('../registry');
+    const { shell } = await import('electron');
+    vi.mocked(getCurrentUserId).mockReturnValue(null);
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'installed', autoSynced: true, version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    vi.mocked(shell.trashItem).mockRejectedValueOnce(new Error('trash unavailable'));
+    const { uninstall } = await import('../installService');
+    const { listIgnoredAutoSyncSkills } = await import('../autoSyncPreferences');
+    expect((await uninstall(source, target)).success).toBe(false);
+    expect(await listIgnoredAutoSyncSkills('original-user')).not.toContain('offline-trash-failure');
+    expect(fs.existsSync(source)).toBe(true);
+  });
+
   it('records an auto-sync ignore marker when uninstalling an auto-synced skill', async () => {
     const finalDir = path.join(TEST_ROOT, '.agents', 'skills', 'auto-skill');
     fs.mkdirSync(finalDir, { recursive: true });
@@ -1551,6 +1590,7 @@ describe('skillhub/installService', () => {
       schemaVersion: 1,
       ignoredSkills: [],
       autoSyncCandidates: [],
+      pendingOfflineUninstalls: [],
     });
   });
 

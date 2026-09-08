@@ -34,6 +34,7 @@ Skills are reusable agent capabilities you package as a folder and load into you
 - The switch is local to this device and Cindy profile. It does not edit external CLI settings, sync to other devices, or override a native engine's own disabled state. Enable it again to let the engine discover it normally.
 - In the skill's details, use **… → Uninstall skill**. Confirm the location and shared-file impact. Standalone skills, including locally written skills without a market installation record, move to the system trash. Recovery is through the operating system's trash.
 - External source imports remove only their discovery links and keep the external source files. Package-owned or built-in skills must be removed through their owning package; their uninstall action is unavailable here. Skills provided by Cindy plugins are managed on the owning plugin's page, including when discovered through shared skill links.
+- Offline removal of an automatically synced skill is remembered on this device, including after restart or sign-in. Automatic sync skips it until you explicitly install it again.
 - Uninstalling a shared copy affects external CLIs that use it. It does not unpublish a skill or delete other users' copies. If file removal fails, Cindy keeps the installation. If only metadata/link cleanup fails, the notice offers **Retry cleanup** until the current window is closed or reloaded. Retry before then; closing or reloading ends the retry receipt without restoring the removed files.
 
 **Publishing your own skill:**

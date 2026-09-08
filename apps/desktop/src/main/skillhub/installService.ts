@@ -935,7 +935,8 @@ export async function uninstall(
   // 防御：resolve 后验证路径是精确的 skill 根目录（只允许一层 slug，防 traversal）
   let resolved: string;
   try {
-    resolved = fs.realpathSync(absolutePath);
+    // Match the scan snapshot's native canonical path, including Windows 8.3 aliases.
+    resolved = fs.realpathSync.native(absolutePath);
   } catch {
     resolved = path.resolve(absolutePath);
   }
@@ -1044,11 +1045,11 @@ async function uninstallLocked(
   const registryEntry = registryMatch?.entry;
 
   if (!canMutate()) return { success: false, errorCode: 'CANCELLED', message: 'Skill mutation context changed' };
-  const recordIgnore = !!(cloudUserId && registryEntry && await shouldRecordAutoSyncIgnore(skillName, registryEntry, cloudUserId));
-  const wasIgnored = recordIgnore && (await listIgnoredAutoSyncSkills(cloudUserId!)).has(skillName);
+  const recordIgnore = !!(registryEntry && await shouldRecordAutoSyncIgnore(skillName, registryEntry, cloudUserId ?? undefined));
+  const wasIgnored = recordIgnore && (await listIgnoredAutoSyncSkills(cloudUserId ?? undefined)).has(skillName);
   // Persist the user's opt-out before touching files, so auto-sync cannot recreate the Skill.
   if (recordIgnore && !wasIgnored) {
-    try { await ignoreAutoSyncSkill(skillName, cloudUserId!); }
+    try { await ignoreAutoSyncSkill(skillName, cloudUserId ?? undefined); }
     catch { return { success: false, errorCode: 'WRITE_FAILED', message: 'Could not save uninstall preference' }; }
   }
   const candidates = [...new Set([
@@ -1070,7 +1071,7 @@ async function uninstallLocked(
     if (exists) await shell.trashItem(target?.operationPath ?? resolved);
   } catch (err) {
     if (recordIgnore && !wasIgnored) {
-      await clearIgnoredAutoSyncSkill(skillName, cloudUserId!).catch((error) => log.warn('[skillInstall] restore auto-sync preference failed:', error));
+      await clearIgnoredAutoSyncSkill(skillName, cloudUserId ?? undefined).catch((error) => log.warn('[skillInstall] restore auto-sync preference failed:', error));
     }
     return { success: false, errorCode: 'WRITE_FAILED', message: err instanceof Error ? err.message : String(err) };
   }
@@ -1158,7 +1159,7 @@ export async function retryUninstallCleanup(token: string, canMutate: () => bool
   } finally { release(); }
 }
 
-async function shouldRecordAutoSyncIgnore(skillName: string, registryEntry: StoredInstall, userId: string): Promise<boolean> {
+async function shouldRecordAutoSyncIgnore(skillName: string, registryEntry: StoredInstall, userId?: string): Promise<boolean> {
   if (registryEntry.autoSynced === true) return true;
   if (registryEntry.origin !== 'installed' || registryEntry.autoSynced !== undefined) return false;
   // 兼容 auto-sync 首版：当时 registry 没有 autoSynced 字段，候选集合来自最近一次 auto-sync 配置。

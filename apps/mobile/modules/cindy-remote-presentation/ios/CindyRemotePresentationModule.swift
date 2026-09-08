@@ -38,11 +38,14 @@ public class CindyRemotePresentationModule: Module {
         try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
         try session.setActive(true)
       } else if let previous = self.previousAudio {
-        self.previousAudio = nil
         // Do not overwrite a newer voice/audio owner's category.
-        if session.category == .playback && session.mode == .moviePlayback {
+        if session.category == .playback && session.mode == .moviePlayback
+          && session.categoryOptions == [.mixWithOthers] {
+          // Release playback before restoring a potentially non-mixing category.
+          try session.setActive(false, options: .notifyOthersOnDeactivation)
           try session.setCategory(previous.0, mode: previous.1, options: previous.2)
         }
+        self.previousAudio = nil
       }
     }.runOnQueue(.main)
   }

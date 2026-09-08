@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { join, relative, resolve } from 'node:path';
+import path, { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // 连接探测:连得上 = 有进程在监听。比 listen(127.0.0.1) 可靠 —— Metro 监听 *:port(可能带
@@ -292,7 +292,7 @@ export function gitSourceIdentity(worktreeRoot, options = {}) {
 }
 
 // 真正的路径边界判断:避免 /workspace/XDMaker 与 /workspace/XDMaker-old 这种字符串前缀误判。
-export function isInside(root, child) {
-  const rel = relative(root, child);
-  return rel === '' || !rel.startsWith('..');
+export function isInside(root, child, paths = path) {
+  const rel = paths.relative(root, child);
+  return !paths.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${paths.sep}`);
 }

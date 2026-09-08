@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import {
   gitSourceIdentity,
   isDedicatedMetroProcessGroup,
+  isInside,
   parseWindowsNetstatListener,
   terminateMetro,
 } from '../../scripts/sim-metro.mjs';
@@ -49,6 +50,32 @@ describe('mobile simulator source identity', () => {
 });
 
 describe('mobile simulator Metro takeover', () => {
+  it.each([
+    ['C:\\repo', 'C:\\repo', true],
+    ['C:\\repo', 'c:\\repo\\apps\\mobile', true],
+    ['C:\\repo', 'C:\\repo\\..notes', true],
+    ['C:\\repo', 'D:\\repo\\apps\\mobile', false],
+    ['C:\\repo', 'C:\\repo-other\\apps\\mobile', false],
+    ['C:\\repo', 'C:\\repo\\..\\other\\apps\\mobile', false],
+    ['C:\\repo', 'C:\\', false],
+    ['\\\\server\\repo', '\\\\server\\other\\apps\\mobile', false],
+    ['\\\\server\\repo', '\\\\other\\repo\\apps\\mobile', false],
+    ['\\\\server\\repo', '\\\\server\\repo\\apps\\mobile', true],
+  ])('checks Windows Metro worktree boundaries: %s -> %s', (root, cwd, expected) => {
+    expect(isInside(root, cwd, win32)).toBe(expected);
+  });
+
+  it.each([
+    ['/repo', '/repo', true],
+    ['/repo', '/repo/apps/mobile', true],
+    ['/repo', '/repo/..notes', true],
+    ['/repo', '/repo-other/apps/mobile', false],
+    ['/repo', '/repo/../other/apps/mobile', false],
+    ['/repo', '/', false],
+  ])('checks POSIX Metro worktree boundaries: %s -> %s', (root, cwd, expected) => {
+    expect(isInside(root, cwd, posix)).toBe(expected);
+  });
+
   it('parses a Windows netstat listener without accepting another port', () => {
     const output = [
       '  TCP    0.0.0.0:8081    0.0.0.0:0    LISTENING    4242',

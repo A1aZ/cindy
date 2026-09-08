@@ -6,7 +6,17 @@ const MIN_JAVA_MAJOR = 17;
 
 export function resolveJavaRuntimeEnv(baseEnv = process.env) {
   const current = javaMajor(versionForJavaCommand('java', baseEnv));
-  if (current >= MIN_JAVA_MAJOR) return { ...baseEnv };
+  if (current >= MIN_JAVA_MAJOR) {
+    const env = { ...baseEnv };
+    if (baseEnv.JAVA_HOME) {
+      const javaBin = join(baseEnv.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+      const homeMajor = javaMajor(versionForJavaCommand(javaBin, baseEnv));
+      // Gradle prefers JAVA_HOME over PATH. Drop an unusable override so it uses
+      // the supported PATH Java we just checked, without changing the parent env.
+      if (!(homeMajor >= MIN_JAVA_MAJOR)) delete env.JAVA_HOME;
+    }
+    return env;
+  }
 
   for (const javaHome of javaHomeCandidates(baseEnv)) {
     if (!javaHome) continue;

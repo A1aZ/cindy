@@ -214,6 +214,14 @@ async function requestWorktreeRecycle(sessionId: string, resources: readonly str
   await recycle(sessionId, resources);
 }
 
+/** Persist a terminal cleanup intent using references from the same DB snapshot. */
+export async function requestSessionWorktreeRecycle(
+  db: DbClient['drizzle'],
+  sessionId: string,
+): Promise<void> {
+  await requestWorktreeRecycle(sessionId, await readSessionWorktreeResources(db, sessionId));
+}
+
 /** Read from the same captured database that will receive the status/path update. */
 async function readSessionWorktreeResources(db: DbClient['drizzle'], sessionId: string): Promise<string[]> {
   try {

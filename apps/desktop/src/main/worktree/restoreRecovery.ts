@@ -14,6 +14,17 @@ import * as store from './worktreeStore';
 import { withLegacyWorktreeRuntimeGuard } from './legacyRuntimeGuard';
 import { readWorktreeHeadRef } from './contentSnapshot';
 
+function restoreCheckoutPathIsSafe(value: string): boolean {
+  if (!path.isAbsolute(value)) return false;
+  const root = path.resolve(os.tmpdir());
+  const relative = path.relative(root, value);
+  const parts = relative.split(path.sep);
+  return parts.length === 2
+    && parts[0].startsWith('cindy-worktree-restore-')
+    && /^[0-9a-f-]{36}$/i.test(parts[0].slice('cindy-worktree-restore-'.length))
+    && parts[1] === 'checkout';
+}
+
 async function indexIsRestorable(worktreePath: string, indexTree: string): Promise<boolean> {
   const { stdout } = await gitExec(['rev-parse', '--path-format=absolute', '--git-path', 'index'], worktreePath);
   try { await fs.lstat(stdout.trim()); } catch (error) {
@@ -109,23 +120,53 @@ export async function restoreRecordedWorktree(sessionId: string, worktreePath: s
     record.restoredGeneration ??= randomUUID();
     await writeRecycleRecord(record);
     const gitLink = path.join(worktreePath, '.git');
+    let gitLinkExists = true;
     try {
       await fs.lstat(gitLink);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      gitLinkExists = false;
+    }
+    if (!gitLinkExists || record.restoreCheckoutPath) {
       // Repair a partially deleted worktree without deleting any remaining user file.
-      const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-worktree-restore-'));
-      const checkout = path.join(temp, 'checkout');
-      try {
-        await gitExec(['worktree', 'prune'], record.meta.baseRepo);
-        // Git checks branch occupancy itself; no --force/-B may bypass another checkout.
-        const target = headRef ? headRef.slice('refs/heads/'.length) : record.snapshot.head;
-        await gitExec(['worktree', 'add', '--no-checkout', ...(headRef ? [] : ['--detach']), checkout, target], record.meta.baseRepo);
-        await fs.copyFile(path.join(checkout, '.git'), gitLink, constants.COPYFILE_EXCL);
-        await gitExec(['worktree', 'repair', worktreePath], record.meta.baseRepo);
-      } finally {
-        await fs.rm(temp, { recursive: true, force: true });
+      // Persist the temporary checkout before creating it so a crash after `worktree add`
+      // can resume the same checkout instead of leaving its branch permanently occupied.
+      const checkout = record.restoreCheckoutPath ?? path.join(
+        os.tmpdir(), `cindy-worktree-restore-${randomUUID()}`, 'checkout',
+      );
+      if (!restoreCheckoutPathIsSafe(checkout)) return false;
+      if (record.restoreCheckoutPath !== checkout) {
+        record.restoreCheckoutPath = checkout;
+        await writeRecycleRecord(record);
       }
+      const checkoutRoot = path.dirname(checkout);
+      let checkoutEntries: string[] | null = null;
+      try {
+        const stat = await fs.lstat(checkout);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+        checkoutEntries = await fs.readdir(checkout);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      await gitExec(['worktree', 'prune'], record.meta.baseRepo);
+      // Git checks branch occupancy itself; no --force/-B may bypass another checkout.
+      const target = headRef ? headRef.slice('refs/heads/'.length) : record.snapshot.head;
+      if (checkoutEntries === null || checkoutEntries.length === 0) {
+        await fs.mkdir(checkoutRoot, { recursive: true });
+        await gitExec(['worktree', 'add', '--no-checkout', ...(headRef ? [] : ['--detach']), checkout, target], record.meta.baseRepo);
+      } else if (!checkoutEntries.includes('.git')) {
+        // Never delete or adopt an unexpected non-empty temporary directory.
+        return false;
+      }
+      try {
+        await fs.copyFile(path.join(checkout, '.git'), gitLink, constants.COPYFILE_EXCL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      await gitExec(['worktree', 'repair', worktreePath], record.meta.baseRepo);
+      await fs.rm(checkoutRoot, { recursive: true, force: true });
+      record.restoreCheckoutPath = undefined;
+      await writeRecycleRecord(record);
     }
     await assertManagedResourcePath(record.meta, [worktreePath]);
     await assertWorktreeGitIdentity(record.meta);

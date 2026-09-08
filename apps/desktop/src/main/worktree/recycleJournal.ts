@@ -27,6 +27,8 @@ export interface WorktreeRecycleRecord {
   directoryIdentity?: string | null;
   snapshot?: { head: string; headRef?: string | null; tree: string; indexTree: string; commit: string; ref: string; indexHash: string };
   restoredGeneration?: string;
+  /** Temporary checkout used to repair a partially removed worktree. */
+  restoreCheckoutPath?: string;
   archive?: WorktreeRecoveryArchive;
 }
 
@@ -45,6 +47,8 @@ function parseRecord(raw: string, id: string): WorktreeRecycleRecord {
     || typeof record.meta.sessionId !== 'string' || !record.meta.sessionId
     || typeof record.meta.path !== 'string' || !path.isAbsolute(record.meta.path)
     || typeof record.meta.baseRepo !== 'string' || !path.isAbsolute(record.meta.baseRepo)
+    || (record.restoreCheckoutPath !== undefined
+      && (typeof record.restoreCheckoutPath !== 'string' || !path.isAbsolute(record.restoreCheckoutPath)))
     || typeof record.requestedAt !== 'string' || !Number.isFinite(Date.parse(record.requestedAt))
     || !Number.isInteger(record.attempts) || record.attempts < 0
     || !Number.isFinite(record.nextAttemptAt)

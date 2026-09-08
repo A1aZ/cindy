@@ -77,12 +77,13 @@ vi.mock('../BotLifecycleSettings', () => ({
   BotLifecycleSettings: () => <div data-testid="bot-lifecycle-settings" />,
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: ({ unifiedAgents, onUnifiedSelect, modelId, onEffortChange }: {
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect, modelId, onEffortChange, onNavigateToProviders }: {
+    onNavigateToProviders?: () => void;
     modelId: string;
     onEffortChange: (effort: string) => void;
     unifiedAgents: string[];
     onUnifiedSelect: (selection: unknown) => void;
-  }) => <><button data-testid="current-model" onClick={() => onEffortChange('high')}>{modelId}</button>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+  }) => <>{onNavigateToProviders && <button type="button" onClick={onNavigateToProviders}>connect-source</button>}<button data-testid="current-model" onClick={() => onEffortChange('high')}>{modelId}</button>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
     <button key={engine} data-testid={engine === 'pi' ? 'model-selector' : 'codex-model-selector'} onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>select-{engine}-model</button>
   ))}</>,
 }));
@@ -216,6 +217,16 @@ describe('Bot settings profile consolidation', () => {
     await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenCalledWith(emptyBot.id, expect.objectContaining({
       capabilities: expect.objectContaining({ modelChainOverride: [expect.objectContaining({ model: 'custom-model', providerId: 'custom' })] }),
     })));
+  });
+
+  it('can connect a source from existing empty-chain recovery when onboarding is hidden', () => {
+    const emptyBot = bot({ capabilities: capabilities({ modelChain: [], model: '' }), sessions: [], canonicalSessionId: undefined });
+    mocks.profiles = [emptyBot];
+    mocks.params = { botId: emptyBot.id };
+    render(<BotsHomeView />);
+    fireEvent.click(screen.getByText('connect-source'));
+    expect(mocks.navigate).toHaveBeenCalledWith('/settings?tab=providers');
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
   });
 
   it('filters unavailable runtimes when recovering an existing empty-chain bot', async () => {

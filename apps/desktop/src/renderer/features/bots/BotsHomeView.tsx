@@ -629,6 +629,7 @@ export function BotsHomeView() {
         <BotModelChainEditor
           label={t('bots.settingsTabs.model')}
           value={[]}
+          onNavigateToProviders={() => navigate('/settings?tab=providers')}
           onChange={(modelChain) => {
             if (!modelChain[0]?.model) return;
             setCreateSessionError(null);

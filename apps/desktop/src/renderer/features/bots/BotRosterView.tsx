@@ -265,7 +265,7 @@ export function BotRosterView({ onCreated, onClose, restoreFocus }: BotRosterVie
                 />
               </fieldset>
               {modelChain !== null ? (
-                <BotModelChainEditor label={t('bots.settingsTabs.model')} value={modelChain} onChange={setModelChain} disabled={creating || avatarBusy} />
+                <BotModelChainEditor label={t('bots.settingsTabs.model')} value={modelChain} onChange={setModelChain} onNavigateToProviders={() => navigate('/settings?tab=providers')} disabled={creating || avatarBusy} />
               ) : null}
               {avatarError ? (
                 <p className="mt-3 text-12 text-[var(--text-danger)]" role="alert">

@@ -27,13 +27,14 @@ vi.mock('../botStore', () => ({
   getEffectiveBotModelSettings: () => ({ model: 'custom-model', providerId: 'custom', effort: 'high', fastMode: false }),
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: ({ unifiedAgents, onUnifiedSelect, disabled, vendorKey }: {
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect, disabled, vendorKey, onNavigateToProviders }: {
+    onNavigateToProviders?: () => void;
     disabled: boolean;
     vendorKey: string;
     unifiedAgents: string[];
     onUnifiedSelect: (selection: unknown) => void;
   }) => (
-    <><span data-testid="selected-engine">{vendorKey}</span>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+    <>{onNavigateToProviders && <button type="button" onClick={onNavigateToProviders}>connect-source</button>}<span data-testid="selected-engine">{vendorKey}</span>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
       <button key={engine} disabled={disabled} type="button" onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>
         {engine === 'pi' ? 'choose-custom-model' : 'choose-custom-codex-model'}
       </button>
@@ -67,6 +68,15 @@ describe('BotRosterView — 唯一的伙伴创建界面', () => {
     fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
     await waitFor(() => expect(mocks.addBotProfileAndWait).toHaveBeenCalledTimes(2));
     expect(mocks.addBotProfileAndWait.mock.calls[1][0].capabilities.modelChainOverride[0]).toMatchObject({ model: 'custom-model', providerId: 'custom' });
+  });
+
+  it('can connect a source from creation recovery when normal onboarding is hidden', async () => {
+    mocks.addBotProfileAndWait.mockRejectedValueOnce(new mocks.BotModelSelectionRequiredError());
+    render(<BotRosterView />);
+    fireEvent.click(screen.getByRole('button', { name: 'bots.roster.create' }));
+    fireEvent.click(await screen.findByText('connect-source'));
+    expect(mocks.navigate).toHaveBeenCalledWith('/settings?tab=providers');
+    expect(mocks.addBotProfileAndWait).toHaveBeenCalledOnce();
   });
 
   it('locks the recovery picker while creation is pending and unlocks after failure', async () => {

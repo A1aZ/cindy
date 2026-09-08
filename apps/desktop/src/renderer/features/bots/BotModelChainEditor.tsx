@@ -38,6 +38,7 @@ export function BotModelChainEditor({
   remote = false,
   label,
   onRestoreDefault,
+  onNavigateToProviders,
 }: {
   value: BotModelRoute[];
   onChange: (next: BotModelRoute[]) => void;
@@ -46,6 +47,7 @@ export function BotModelChainEditor({
   remote?: boolean;
   label?: string;
   onRestoreDefault?: () => void;
+  onNavigateToProviders?: () => void;
 }) {
   const { t } = useBotTranslation();
   const { availableVendors, loaded } = useAvailableAgents();
@@ -102,6 +104,7 @@ export function BotModelChainEditor({
         onModelChange={(model) => replace(index, { model })}
         onEffortChange={(effort) => replace(index, { effort })}
         onFastModeChange={(fastMode) => replace(index, { fastMode })}
+        onNavigateToProviders={remote ? undefined : onNavigateToProviders}
         configurationEnabled
         unifiedPanel
         unifiedAgents={unifiedAgents}

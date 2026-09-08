@@ -5,6 +5,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SsrFBlockedError } from '@cindy/browser-control-runtime/ssrf-runtime';
 import { guardedOutboundFetch } from '../maker-host/outbound-fetch.js';
+import { mediaRequestUrlForLog } from './mediaRequestLog.js';
 
 export type MediaDownloadReason = 'source' | 'http' | 'port' | 'credentials' | 'network';
 
@@ -15,7 +16,7 @@ export interface MediaDownloadContext {
   approvals?: Set<string>;
   dispose?(): void;
   assertActive(): void;
-  confirm(input: { origin: string; reasons: MediaDownloadReason[] }): Promise<boolean>;
+  confirm(input: { source: string; reasons: MediaDownloadReason[] }): Promise<boolean>;
 }
 
 export class MediaDownloadError extends Error {
@@ -66,7 +67,10 @@ export async function downloadMediaResult(input: {
     if (!input.context) {
       throw new MediaDownloadError('MEDIA_DOWNLOAD_CONFIRMATION_REQUIRED', '本次下载需要用户确认，当前任务的审批通道不可用');
     }
-    const allowed = await input.context.confirm({ origin: url.origin, reasons });
+    // Private-network approval is bound to an exact target, so show its path
+    // and non-secret query values using the existing URL redaction policy.
+    const source = reasons.includes('network') ? mediaRequestUrlForLog(url.href) : url.origin;
+    const allowed = await input.context.confirm({ source, reasons });
     assertActive();
     if (!allowed) {
       throw new MediaDownloadError('MEDIA_DOWNLOAD_DENIED', '用户未允许本次下载，已停止；不要自动重试或再次请求审批');

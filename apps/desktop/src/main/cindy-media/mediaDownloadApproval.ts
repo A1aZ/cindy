@@ -26,7 +26,7 @@ export function createMediaDownloadContext(
     signal: controller.signal,
     dispose: unsubscribe,
     assertActive,
-    confirm: async ({ origin, reasons }) => {
+    confirm: async ({ source, reasons }) => {
       assertActive();
       // Bound only the human decision; generation has its own request timeout.
       const approvalSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(8 * 60_000)]);
@@ -37,7 +37,7 @@ export function createMediaDownloadContext(
         toolName: 'cindy.media.download',
         title: t('newChat.mediaDownload.title'),
         description: `${t('newChat.mediaDownload.description')}\n${details}\n${t('newChat.mediaDownload.scope')}`,
-        input: { source: origin },
+        input: { source },
         metadata: { hostOwnedConfirmation: 'media_download' },
       };
       const decision = await session.runHostInteraction(request, () =>

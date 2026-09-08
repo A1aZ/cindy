@@ -1149,8 +1149,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 意识仓库 (shared/ghost.ts)。listSync 走 sendSync:意识面板要与内置
   // 面板同帧注册进布局引擎(规则 7 无跳变);目录扫描极小,同步读不卡启动。
   ghosts: {
-    recommendationsSync: (): import('../shared/homePluginRecommendations').HomePluginRecommendationsSnapshot =>
-      ipcRenderer.sendSync('ghosts:recommendations'),
+    recommendationsSync:
+      (): import('../shared/homePluginRecommendations').HomePluginRecommendationsSnapshot =>
+        ipcRenderer.sendSync('ghosts:recommendations'),
     listSync: (): { ghosts: unknown[] } => ipcRenderer.sendSync('ghosts:list'),
     recentUsageSync: (): { ids: string[] } => {
       try {
@@ -3197,6 +3198,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Market 分类列表
     listCategories: (params?: {
       scope?: import('../shared/skillhubCatalog').SkillhubCatalogScope;
+      /** Defaults to true for publish/edit pickers; browse filters pass false. */
+      includeEmpty?: boolean;
     }): Promise<{
       success: boolean;
       categories?: import('../shared/skillhubCategory').MarketCategory[];
@@ -3765,6 +3768,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Open <userData>/logs in the OS file manager (Settings → About).
   openLogsDir: (): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('app:open-logs-dir'),
+
+  // Open <userData>/cindy-make/tools in the OS file manager (Settings → Cindy Make).
+  openCindyMakeToolsDir: (): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('app:open-cindy-make-tools-dir'),
 
   // ── 客户端日志上报(Settings → About)──
   // 真相在 main:是否配置了上报目标、是否已同意隐私政策、开关的 override 状态都由 main
@@ -5110,6 +5117,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         modelChain: import('../shared/botModelChain').BotModelRoute[];
         isCustomized: boolean;
       }> => ipcRenderer.invoke('local-db:bots:model-chain-settings-get'),
+      resetModelChainSettings: (): Promise<{
+        modelChain: import('../shared/botModelChain').BotModelRoute[];
+        isCustomized: boolean;
+      }> => ipcRenderer.invoke('local-db:bots:model-chain-settings-reset'),
       setModelChainSettings: (body: {
         modelChain: import('../shared/botModelChain').BotModelRoute[];
       }): Promise<{
@@ -5595,7 +5606,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       savedProviderId?: string;
     }): Promise<{
       ok: boolean;
-      models?: { id: string; name: string; contextWindow?: number }[];
+      models?: import('@cindy/model-providers').DiscoveredModel[];
       code?: import('../shared/providerErrors').ProviderErrorCode;
       status?: number;
       detail?: string;
@@ -5856,9 +5867,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     executeDesktopCommand: (
       name: string,
       // deviceId:device-link 远程会话的归属设备(main 侧 /goal /learn /cmd 据此隧道路由)。
-      ctx: { sessionId?: string; workingDir?: string; args?: string; deviceId?: string },
-    ): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke('maker:execute-desktop-command', name, ctx),
+      ctx: {
+        sessionId?: string;
+        workingDir?: string;
+        args?: string;
+        deviceId?: string;
+      } & import('../shared/cindyMakeDoctor').MakeDoctorCommandContext,
+    ): Promise<{
+      success: boolean;
+      error?: string;
+      doctorReport?: import('../shared/cindyMakeDoctor').MakeDoctorReport;
+    }> => ipcRenderer.invoke('maker:execute-desktop-command', name, ctx),
 
     startReview: (input: {
       sourceSessionId: string;
@@ -5930,6 +5949,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onDesktopCommandTriggered: (
       handler: (payload: {
         command: string;
+        doctorReport?: import('../shared/cindyMakeDoctor').MakeDoctorReport;
         sessionId?: string;
         workingDir?: string;
         args?: string;

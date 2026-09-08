@@ -237,6 +237,27 @@ let globalModelChainCache: {
   /** null means an explicit override; derived results are leased to their inputs. */
   defaultInputs: ReturnType<typeof getDefaultModelInputs> | null;
 } | null = null;
+// Unknown until Main answers; a failed read must not hide the recovery action.
+let globalModelChainCustomized: boolean | null = null;
+// Serialize writes and legacy migration with settings reads. A late read must not
+// reapply an old override, and a migration must finish before a requested reset.
+let modelSettingsQueue: Promise<unknown> = Promise.resolve();
+
+function queueModelSettings<T>(operation: () => Promise<T>): Promise<T> {
+  ensureProfileOwner();
+  const owner = getDataOwnerGeneration();
+  const result = modelSettingsQueue.then(async () => {
+    assertCurrentOwner(owner);
+    return operation();
+  });
+  modelSettingsQueue = result.catch(() => undefined);
+  return result;
+}
+
+export function isBotGlobalModelChainCustomized(): boolean | null {
+  ensureProfileOwner();
+  return globalModelChainCustomized;
+}
 
 function readGlobalModelOverrides(): Partial<Record<BotModelVendor, BotModelOverride>> {
   if (typeof window === 'undefined') return {};
@@ -328,22 +349,23 @@ export function getEffectiveBotModelChain(
     availableAgentsLoaded: availableAgents !== null });
 }
 
-export async function setBotGlobalModelChain(chain: BotModelRoute[]): Promise<void> {
-  ensureProfileOwner();
-  const owner = getDataOwnerGeneration();
-  const api = botsApi();
-  if (!api || typeof api.setModelChainSettings !== 'function') {
-    throw new Error('Bot model settings are not ready');
-  }
-  const normalized = normalizeBotModelChain(chain);
-  if (normalized.length === 0) throw new Error('Choose at least one Bot model route');
-  const state = await api.setModelChainSettings({ modelChain: normalized });
-  assertCurrentOwner(owner);
+function applyGlobalModelChain(
+  state: { modelChain: BotModelRoute[]; isCustomized: boolean },
+  defaultInputs: ReturnType<typeof getDefaultModelInputs>,
+): void {
   const persisted = normalizeBotModelChain(state.modelChain);
-  if (persisted.length === 0) throw new Error('Bot model settings were not saved');
-  globalModelChainCache = { modelChain: persisted, defaultInputs: null };
+  globalModelChainCache = { modelChain: persisted, defaultInputs: state.isCustomized ? null : defaultInputs };
+  globalModelChainCustomized = state.isCustomized;
   window.localStorage.removeItem(BOT_GLOBAL_MODEL_CHAIN_KEY);
-  const primary = persisted[0]!;
+  projectGlobalModelChain();
+  for (const listener of botModelListeners) listener();
+  emit();
+}
+
+function projectGlobalModelChain(): void {
+  if (!globalModelChainCache) return;
+  const chain = getEffectiveBotModelChain();
+  const primary = chain[0] ?? { model: '', providerId: null, effort: '', fastMode: false };
   profiles = profiles.map((bot) =>
     bot.capabilities.modelChainOverride === null
       ? {
@@ -352,14 +374,47 @@ export async function setBotGlobalModelChain(chain: BotModelRoute[]): Promise<vo
             ...bot.capabilities,
             ...primary,
             modelOverride: null,
-            modelChain: persisted,
+            modelChain: chain,
             modelChainOverride: null,
           },
         }
       : bot,
   );
-  for (const listener of botModelListeners) listener();
-  emit();
+}
+
+export async function setBotGlobalModelChain(chain: BotModelRoute[]): Promise<void> {
+  const normalized = normalizeBotModelChain(chain);
+  if (normalized.length === 0) throw new Error('Choose at least one Bot model route');
+  return queueModelSettings(async () => {
+    const owner = getDataOwnerGeneration();
+    const api = botsApi();
+    if (!api || typeof api.setModelChainSettings !== 'function') {
+      throw new Error('Bot model settings are not ready');
+    }
+    const defaultInputs = getDefaultModelInputs();
+    const state = await api.setModelChainSettings({ modelChain: normalized });
+    assertCurrentOwner(owner);
+    if (normalizeBotModelChain(state.modelChain).length === 0) {
+      throw new Error('Bot model settings were not saved');
+    }
+    applyGlobalModelChain(state, defaultInputs);
+  });
+}
+
+export function resetBotGlobalModelChain(): Promise<void> {
+  return queueModelSettings(async () => {
+    const owner = getDataOwnerGeneration();
+    const api = botsApi();
+    if (!api || typeof api.resetModelChainSettings !== 'function') {
+      throw new Error('Bot model settings are not ready');
+    }
+    const defaultInputs = getDefaultModelInputs();
+    const state = await api.resetModelChainSettings();
+    assertCurrentOwner(owner);
+    // A default resolver may return no available models. Do not turn that into
+    // a failed reset or save the derived chain as a new override.
+    applyGlobalModelChain(state, defaultInputs);
+  });
 }
 
 function defaultCapabilities(
@@ -440,6 +495,8 @@ function ensureProfileOwner(): void {
   profiles = [];
   unreadCounts = {};
   globalModelChainCache = null;
+  globalModelChainCustomized = null;
+  modelSettingsQueue = Promise.resolve();
   profileWriteGenerations.clear();
   hydrationPromises.clear();
   hydrationGeneration += 1;
@@ -659,23 +716,18 @@ async function hydrateFromDatabase(): Promise<void> {
   try {
     if (typeof api.getModelChainSettings === 'function') {
       try {
-        // Capture before the IPC read: a late response must not renew a default
-        // computed before a provider/roster change with the newer inputs.
-        const defaultInputs = getDefaultModelInputs();
-        let state = await api.getModelChainSettings();
-        if (!isCurrent()) return;
-        const legacy = readLegacyBotGlobalModelChain();
-        if (!state.isCustomized && legacy && typeof api.setModelChainSettings === 'function') {
-          state = await api.setModelChainSettings({ modelChain: legacy });
+        await queueModelSettings(async () => {
           if (!isCurrent()) return;
-        }
-        const persisted = normalizeBotModelChain(state.modelChain);
-        globalModelChainCache = {
-          modelChain: persisted,
-          defaultInputs: state.isCustomized ? null : defaultInputs,
-        };
-        window.localStorage.removeItem(BOT_GLOBAL_MODEL_CHAIN_KEY);
-        for (const listener of botModelListeners) listener();
+          const defaultInputs = getDefaultModelInputs();
+          let state = await api.getModelChainSettings();
+          if (!isCurrent()) return;
+          const legacy = readLegacyBotGlobalModelChain();
+          if (!state.isCustomized && legacy && typeof api.setModelChainSettings === 'function') {
+            state = await api.setModelChainSettings({ modelChain: legacy });
+            if (!isCurrent()) return;
+          }
+          applyGlobalModelChain(state, defaultInputs);
+        });
       } catch {
         // Profile hydration remains usable if the settings file is temporarily
         // unavailable. A later explicit refresh retries the Main-owned source.
@@ -686,6 +738,7 @@ async function hydrateFromDatabase(): Promise<void> {
     if (!isCurrent()) return;
     const dbProfiles = rows.map(normalizeDbProfile).filter((item): item is BotProfile => !!item);
     profiles = dbProfiles;
+    projectGlobalModelChain();
     applyUnreadCounts(rows);
     // A Bot we have never tracked starts read: shipping unread badges must not
     // retroactively mark every existing conversation as unread. Pruning keeps
@@ -833,13 +886,12 @@ export async function addBotProfileAndWait(input: CreateBotProfileInput): Promis
   }
   const settingsApi = botsApi();
   if (settingsApi?.getModelChainSettings) {
-    const defaultInputs = getDefaultModelInputs();
-    const state = await settingsApi.getModelChainSettings();
-    assertCurrentOwner(owner);
-    globalModelChainCache = {
-      modelChain: normalizeBotModelChain(state.modelChain),
-      defaultInputs: state.isCustomized ? null : defaultInputs,
-    };
+    await queueModelSettings(async () => {
+      const defaultInputs = getDefaultModelInputs();
+      const state = await settingsApi.getModelChainSettings();
+      assertCurrentOwner(owner);
+      applyGlobalModelChain(state, defaultInputs);
+    });
   }
   assertCurrentOwner(owner);
   const requested = input.capabilities;

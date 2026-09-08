@@ -73,13 +73,14 @@ async function setup(options: { customized?: boolean; empty?: boolean; pending?:
   const setModelChainSettings = vi.fn(async ({ modelChain }: { modelChain: BotModelRoute[] }) => ({
     modelChain, isCustomized: true,
   }));
+  const resetModelChainSettings = vi.fn(async () => ({ modelChain: [gateway], isCustomized: false }));
   const list = vi.fn(async () => []);
   const create = vi.fn(async (input: Record<string, unknown>) => ({
     ...input, enabled: true, createdAt: 1, sessions: [],
   }));
   const listAvailableAgents = vi.fn(async (): Promise<('pi' | 'codex')[]> => ['pi', 'codex']);
   Object.defineProperty(window, 'electronAPI', { configurable: true, value: {
-    localDb: { bots: { getModelChainSettings, setModelChainSettings, list, create } },
+    localDb: { bots: { getModelChainSettings, setModelChainSettings, resetModelChainSettings, list, create } },
     maker: {
       listAvailableAgents,
       onAgentsChanged: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
@@ -101,7 +102,7 @@ async function setup(options: { customized?: boolean; empty?: boolean; pending?:
   const agents = await import('@/hooks/useAvailableAgents');
   await waitFor(() => expect(agents.getCachedAvailableVendors()).toEqual(new Set(['pi', 'codex'])));
   return {
-    store, publish, getModelChainSettings, setModelChainSettings, resolveSettings,
+    store, publish, getModelChainSettings, setModelChainSettings, resetModelChainSettings, resolveSettings,
     changeAgents: async (next: ('pi' | 'codex')[]) => {
       listAvailableAgents.mockResolvedValue(next);
       await act(async () => { for (const listener of listeners) listener(); });
@@ -165,6 +166,25 @@ describe('live derived Bot defaults', () => {
     await act(async () => api.resolveSettings({ modelChain: [gateway], isCustomized: false }));
     expect(shownChain()).toEqual([openai]);
     expect(api.store.getEffectiveBotModelChain()).toEqual([openai]);
+  });
+
+  it('keeps restored defaults live when sources change while reset is pending', async () => {
+    const api = await setup({ customized: true });
+    let finishReset!: (state: { modelChain: BotModelRoute[]; isCustomized: boolean }) => void;
+    api.resetModelChainSettings.mockImplementationOnce(() => new Promise((resolve) => { finishReset = resolve; }));
+    let reset!: Promise<void>;
+    await act(async () => { reset = api.store.resetBotGlobalModelChain(); });
+    expect(api.resetModelChainSettings).toHaveBeenCalledOnce();
+    api.publish(providers(false, true));
+    await act(async () => {
+      finishReset({ modelChain: [gateway], isCustomized: false });
+      await reset;
+    });
+    expect(shownChain()).toEqual([openai]);
+    expect(api.store.isBotGlobalModelChainCustomized()).toBe(false);
+    api.publish(providers(false, false));
+    expect(shownChain()).toEqual([]);
+    expect(api.setModelChainSettings).not.toHaveBeenCalled();
   });
 
   it('also expires the derived settings cached by profile creation', async () => {

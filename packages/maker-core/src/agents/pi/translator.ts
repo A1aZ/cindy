@@ -15,6 +15,8 @@
  * message_end 时把该消息全部 text block 拼接发一次 isFinal:true 校准。
  */
 
+import { randomUUID } from 'node:crypto';
+import { parseMessageToolUse } from '@cindy/maker-shared/message-normalize';
 import type { Logger } from '../../interfaces/logger.js';
 import { PI_SUBAGENT_TOOL_NAME, subagentSpawnResultIndicatesRunning } from '@cindy/maker-shared/agent-task';
 import {
@@ -121,6 +123,8 @@ export interface PiTranslateContext {
   /** 当前 turn 内尚未被终态消费的 Host 主动停止请求。 */
   hostAbortRequestGeneration: number | null;
   hostAbortRequestTokens: Set<symbol>;
+  /** Runtime-local namespace: persisted thinking IDs must not collide after context recreation. */
+  thinkingIdPrefix: string;
   /** thinking 块序号(blockId 生成)。 */
   thinkingSeq: number;
   /** contentIndex → 当前消息内的 thinking block 状态。 */
@@ -209,6 +213,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     pendingHostTurnStartToken: null,
     hostAbortRequestGeneration: null,
     hostAbortRequestTokens: new Set(),
+    thinkingIdPrefix: `pi-think-${randomUUID()}`,
     thinkingSeq: 0,
     thinkingBlocks: new Map(),
     streamStopTokenByIndex: new Map(),
@@ -769,8 +774,11 @@ export function translatePiEvent(
         type: 'tool_use',
         data: {
           toolUseId,
-          toolName,
-          input: toolArgs,
+          ...parseMessageToolUse({
+            role: 'tool_use',
+            content: { toolName, input: toolArgs },
+            toolUseId,
+          }),
         },
         source: 'pi',
       });
@@ -1253,7 +1261,7 @@ function ensureThinkingBlock(
   const existing = ctx.thinkingBlocks.get(contentIndex);
   if (existing) return existing;
   const block = {
-    blockId: `pi-think-${++ctx.thinkingSeq}`,
+    blockId: `${ctx.thinkingIdPrefix}-${++ctx.thinkingSeq}`,
     startedAt: Date.now(),
     redacted,
   };

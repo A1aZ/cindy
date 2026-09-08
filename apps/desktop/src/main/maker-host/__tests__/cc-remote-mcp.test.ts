@@ -60,6 +60,24 @@ describe('buildCcRemoteHttpMcpServers', () => {
     vi.clearAllMocks();
   });
 
+  it.each([true, false])('injects the helper only for an identified Bot (bot=%s)', async (botSession) => {
+    const { bridge, registered } = fakeBridge();
+    const { servers, cleanup } = await buildCcRemoteHttpMcpServers({
+      host: HOST, sessionId: 'bot-session', sessionInstanceId: 'bot-instance', workingDir: '/remote/bot', botSession,
+      vendorOptions: { [CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY]: ['xdt_helper'] },
+    }, {
+      ensureBridgeStarted: async () => ({ port: 38080, serverNames: ['cindy_helper', 'cindy_orca'], bridge }),
+      ensureForward: async () => 47921, getBridgeToken: () => 'remote-test-token', isCollabEnabled: () => false,
+    });
+    expect(Object.keys(servers)).toEqual(botSession ? ['cindy_helper'] : []);
+    if (botSession) {
+      expect(servers.cindy_helper).toEqual({ type: 'http', url: 'http://127.0.0.1:47921/mcp/cindy_helper?session=bot-session&instance=bot-instance', headers: { Authorization: 'Bearer remote-test-token' } });
+      expect(registered.get('bot-session')).toMatchObject({ sessionInstanceId: 'bot-instance', remoteHostId: 'host-1' });
+    }
+    cleanup();
+    expect(registered.size).toBe(0);
+  });
+
   it('returns empty when the bridge is unavailable', async () => {
     const { servers, cleanup } = await buildCcRemoteHttpMcpServers(
       { host: HOST, sessionId: 's1', workingDir: '/remote/repo' },

@@ -108,6 +108,8 @@ export async function buildCcRemoteHttpMcpServers(
     /** 当前 Maker Session 实例代号；作为 opaque bridge route identity 下发。 */
     sessionInstanceId?: string;
     workingDir: string;
+    /** Host-owned Bot classification; helper also rechecks the live surface. */
+    botSession?: boolean;
     /** session 自己的 vendorOptions (maker-core startSession 透传); 优先于 DB 合成。 */
     vendorOptions?: Record<string, unknown>;
     /**
@@ -184,6 +186,8 @@ export async function buildCcRemoteHttpMcpServers(
     collabEnabled:
       (deps.isCollabEnabled?.() ?? true) && isFrozenBuiltinPluginAllowed(vendorOptions, 'collab'),
     memoryEnabled: args.makerMemoryEnabled === true,
+    botHelperEnabled: args.botSession === true && !!args.sessionInstanceId
+      && isFrozenBuiltinPluginAllowed(vendorOptions, 'xdt_helper'),
   });
   if (names.length === 0) {
     // 无注入也是一代 (collab 禁用 / 白名单空):指纹常量 'disabled',

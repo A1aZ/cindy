@@ -8,6 +8,7 @@
  * 这样可以确保 localDb.ensureReady(userId) 已经完成才能用 SessionStorage。
  */
 
+import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
 import { readCodexContextWindowInfo } from './codex-context-window.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
@@ -246,6 +247,7 @@ import { setRemoteMcpBridgeTokenRotatedHook } from '../mcp-integrations/remoteMc
 import { isBotToolsetAvailableOnTarget } from '../../shared/botRemoteCapabilities.js';
 import {
   ensureRemoteMcpForward,
+  buildRemoteCodexSessionMcpConfig,
   setRemoteMcpForwardRearmedHook,
   stripRemoteCodexMcpConfig,
 } from '../remote-ssh/codex-remote-mcp.js';
@@ -833,6 +835,11 @@ export function getMaker(): Maker {
     };
 
     const makerMemoryProviderDeps = {
+      createMediaDownloadContext: (sessionId: string, sessionInstanceId: string) => {
+        const session = _maker?.getSession(sessionId);
+        if (!session || session.instanceId !== sessionInstanceId) return undefined;
+        return createMediaDownloadContext(session, () => _maker?.getSession(sessionId) === session);
+      },
       getAppVersion: () => app.getVersion(),
       getMakerMemoryManager: () => makerMemoryManager,
       lspPool: getLspPool(),
@@ -1101,6 +1108,7 @@ export function getMaker(): Maker {
         onOAuthRefresh,
         makerMemoryEnabled,
         makerMemoryScopeKey,
+        botSession,
       }) => {
         const host = getRemoteSshPool().get(remoteHostId);
         if (host?.getStatus() !== 'ready') {
@@ -1135,6 +1143,7 @@ export function getMaker(): Maker {
               vendorOptions,
               // per-session Maker Memory 开关 (maker-core 归一后透传)。
               makerMemoryEnabled,
+              botSession,
               // 同源的 scope key: Bot 会话恒为 `bot:<botId>`, 缺失时远端工具
               // 会回落 workdir 键, 与本地 prompt 注入的伙伴记忆分家。
               ...(makerMemoryScopeKey ? { makerMemoryScopeKey } : {}),
@@ -1402,7 +1411,7 @@ export function getMaker(): Maker {
         );
       },
       onCodexLocalModelsListed: (models) => {
-        setDiscoveredCodexModels(mapCodexAppServerModelsToCatalog(models));
+        setDiscoveredCodexModels(mapCodexAppServerModelsToCatalog(models), { source: 'list' });
       },
       // 「后端不可达」终局升级时读一次本次请求的出站路径判定,把通用猜测换成实测事实。
       // 快照的 proxy 字段在 resolver 侧已脱敏,可直接进用户可见的错误消息。
@@ -1445,6 +1454,8 @@ export function getMaker(): Maker {
             extraEnv: {},
             codexProxyActive: false,
             codexBrowserUseAvailable: true,
+            buildSessionMcpConfig: (instance: string) =>
+              buildRemoteCodexSessionMcpConfig(ctx.remoteHostId!, instance),
           };
         }
         const isControlPlane = ctx.hostPurpose === 'control-plane';

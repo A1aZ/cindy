@@ -107,7 +107,8 @@ async function startBotSession(input: {
   const deps = createDeps();
   let remoteOptions: unknown;
   if (input.remote) {
-    deps.remoteCcQueryFactory = async ({ startParams }) => {
+    deps.remoteCcQueryFactory = async ({ startParams, botSession }) => {
+      expect(botSession).toBe(!input.reviewMode && !input.ordinary);
       remoteOptions = startParams.extraOptions;
       return createFakeQuery() as never;
     };

@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { getLiziMcpSessionContext } from '@cindy/mcps';
+import { createXdtHelperMcpServer, getLiziMcpSessionContext } from '@cindy/mcps';
 
 import type { Logger } from '@cindy/maker-core';
 import {
@@ -204,6 +204,84 @@ describe('codexHttpBridge', () => {
     const execution = await request('tools/call', { name: 'current_session', arguments: {}, _meta: { threadId: 'real-thread' } });
     expect(execution.status).toBe(200);
     expect(await readRpcResponse(execution)).toMatchObject({ result: { content: [{ text: 'bot-parent' }] } });
+  });
+
+  it.each(['codex', 'claude-code'] as const)('serves only live Bot tasks over the %s remote helper route', async (agentKind) => {
+    let surface: 'bot' | 'default' = 'bot';
+    const start = vi.fn(async () => ({ ok: true as const, delegationId: 'remote-task', childSessionId: 'child-session', status: 'running', deadlineAt: 1000 }));
+    const unavailable = vi.fn(async () => ({ ok: false as const, errorCode: 'UNEXPECTED', message: 'unused' }));
+    bridge = await startCodexHttpBridge({
+      serverFactories: { cindy_helper: () => createXdtHelperMcpServer({
+        resolveSurface: async () => surface,
+        sessionTasks: { startSessionTask: start, getSessionTask: unavailable, messageSessionTask: unavailable, stopSessionTask: unavailable },
+      }, { agentKind, workingDir: '', getSessionContext: getLiziMcpSessionContext }) },
+      pluginIdByServerName: { cindy_helper: 'xdt_helper' },
+      additionalBearerTokens: () => ['remote-test-token'],
+      logger: noopLogger(),
+    });
+    const current = bridge;
+    const ctx = { agentKind, sessionId: 'remote-bot', sessionInstanceId: 'remote-instance', remoteHostId: 'ssh-host', workingDir: '/bot' };
+    if (agentKind === 'claude-code') current.registerSessionCtx(ctx.sessionId, ctx);
+    const url = withMcpRouteIdentity(current.url('cindy_helper'), {
+      sessionInstanceId: ctx.sessionInstanceId,
+      ...(agentKind === 'claude-code' ? { sessionId: ctx.sessionId } : {}),
+    });
+    const headers: Record<string, string> = {
+      authorization: 'Bearer remote-test-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json',
+    };
+    const init = await fetch(url, { method: 'POST', headers, body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'remote-bot-test', version: '1' },
+      },
+    }) });
+    expect(init.status).toBe(200);
+    headers['mcp-session-id'] = init.headers.get('mcp-session-id')!;
+    await init.text();
+    let id = 2;
+    const request = (method: string, params: unknown = {}, target = url) => fetch(target, {
+      method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: id++, method, params }),
+    });
+    const list = async () => readRpcResponse(await request('tools/list')) as Promise<{ result: { tools: Array<{ name: string }> } }>;
+    await current.withDiscoveryContext(ctx, async () => {
+      expect((await list()).result.tools.map(t => t.name)).toEqual(expect.arrayContaining([
+        'start_session_task', 'check_session_task', 'message_session_task', 'stop_session_task',
+      ]));
+      if (agentKind === 'codex') {
+        const denied = await request('tools/call', { name: 'start_session_task', arguments: { instruction: 'too early' } });
+        expect(denied.status).toBe(401);
+        await denied.text();
+      }
+    });
+    if (agentKind === 'codex') current.registerThreadContext('remote-thread', ctx);
+    const firstList = await list();
+    expect((await list()).result).toEqual(firstList.result);
+    const result = await readRpcResponse(await request('tools/call', {
+      name: 'start_session_task', arguments: { instruction: 'Build the report' },
+      ...(agentKind === 'codex' ? { _meta: { threadId: 'remote-thread' } } : {}),
+    }));
+    expect(result).toMatchObject({ result: { content: [{ type: 'text', text: expect.stringContaining('remote-task') }] } });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ callerSessionId: 'remote-bot', objective: 'Build the report' }));
+    // The bridge is shared: a live surface change must not reveal ordinary helper controls.
+    surface = 'default';
+    expect((await list()).result.tools.map(t => t.name).sort()).toEqual(['call_tool', 'list_tools']);
+    const categories = await readRpcResponse(await request('tools/call', { name: 'list_tools', arguments: {} }));
+    expect(categories).toMatchObject({ result: { content: [{ text: expect.stringContaining('"categories":[]') }] } });
+    await request('tools/call', { name: 'start_session_task', arguments: { instruction: 'denied' } }).then(readRpcResponse);
+    expect(start).toHaveBeenCalledTimes(1);
+    if (agentKind === 'codex') {
+      // A remote token cannot borrow a local or Pi context to get the broad helper surface.
+      for (const invalid of [{ ...ctx, remoteHostId: undefined }, { ...ctx, agentKind: 'pi' as const }]) {
+        current.registerThreadContext('remote-thread', invalid);
+        const denied = await request('tools/list');
+        expect(denied.status).toBe(401);
+        await denied.text();
+      }
+    }
+    if (agentKind === 'codex') current.unregisterThreadContext('remote-thread', ctx.sessionInstanceId);
+    else current.unregisterSessionCtx(ctx.sessionId, ctx);
+    const stale = await request('tools/list');
+    expect(stale.status).toBe(401);
+    await stale.text();
   });
 
   it('accepts an additional bearer token (remote daemon) and rejects unknown tokens', async () => {

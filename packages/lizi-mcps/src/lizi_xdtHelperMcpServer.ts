@@ -273,7 +273,8 @@ function registerStartSessionTaskEntry(
     category: 'bots',
     description: [
       'Start one real independent Cindy Session task in the background.',
-      'Use this when the user explicitly asks to create/start a task, Session, or background task, and for development or deliverable work that should run independently with progress, cancellation, verification, and automatic result/artifact return.',
+      'Proactively use this for coding implementation and medium or large work: reading/modifying a project and running checks, multi-source research, multi-file processing, or complex analysis and deliverables. Do not wait for the user to request delegation or ask permission merely to start a task. Handle short simple questions, code explanations, small snippets, and single-step work yourself unless the user explicitly requests a separate task. Respect an explicit request to work inline.',
+      'Pass the objective, constraints, known facts, relevant files, completed actions, and acceptance criteria in instruction; the task does not automatically inherit this chat. Do not duplicate its work. Review the returned result and follow up on the same task if needed.',
       "This never calls a Cindy Bot or any other teammate. Use send_to_agent for a bounded message to a named teammate.",
       "The task appears in the user's task list and returns its completion automatically. Start it once and use check_session_task, message_session_task, or stop_session_task only when there is a concrete reason.",
     ].join('\n'),
@@ -579,6 +580,7 @@ export interface XdtHelperMcpDeps {
 export interface XdtHelperMcpSessionCtx {
   agentKind: 'claude-code' | 'codex' | 'pi';
   workingDir: string;
+  remoteHostId?: string;
   getSessionContext?: () => import('./types.js').LiziMcpSessionContext | undefined;
   sessionId?: string;
   vendorOptions?: Record<string, unknown>;
@@ -595,15 +597,17 @@ export function createXdtHelperMcpServer(
 
   const registry = new XdtHelperToolRegistry();
   const allowedCategories = async (): Promise<ReadonlySet<string> | null> => {
-    const sessionId = resolveLiziMcpSessionContext(sessionCtx).sessionId;
+    const context = resolveLiziMcpSessionContext(sessionCtx);
+    const sessionId = context.sessionId;
+    const remoteBotOnly = !!context.remoteHostId && context.agentKind !== 'pi';
     const defaultCategories = new Set(CATEGORY_ENUM.filter((category) => category !== 'bots'));
-    if (!sessionId || !deps.resolveSurface) return defaultCategories;
+    if (!sessionId || !deps.resolveSurface) return remoteBotOnly ? new Set() : defaultCategories;
     const surface = await deps.resolveSurface({ sessionId }).catch(() => 'restricted' as const);
     // Bot-specific memory, Skills, messaging, delegation and durable notes all
     // live in this single category. Cindy-wide history/control/feedback/handoff
     // stay out of the Bot's discovery loop.
     if (surface === 'bot') return new Set(['bots']);
-    return surface === 'restricted' ? new Set() : defaultCategories;
+    return remoteBotOnly || surface === 'restricted' ? new Set() : defaultCategories;
   };
 
   // 'cindy' 类: 自省 (无 host 依赖, 始终注册)。

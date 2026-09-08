@@ -3254,6 +3254,7 @@ export class ClaudeCodeAgent extends BaseAgent {
 
         const remoteQuery = await this.deps.remoteCcQueryFactory({
           remoteHostId: opts.remoteHostId,
+          botSession: !reviewMode && !!opts.botRuntimeProfile,
           sessionId: opts.sessionId,
           ...(opts.sessionInstanceId ? { sessionInstanceId: opts.sessionInstanceId } : {}),
           startParams,

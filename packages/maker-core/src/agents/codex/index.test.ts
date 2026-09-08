@@ -7052,7 +7052,10 @@ describe('CodexAgent MCP thread context hooks', () => {
     await agent.dispose();
   });
 
-  it('does not retire an explicit credential host for Codex fork utility calls', async () => {
+  it.each([false, true])('keeps the source host alive while retiring the fork host (native=%s)', async (native) => {
+    MockCodexTransport.onCreate = transport => transport.setMockResponse('initialize', {
+      result: { userAgent: 'mock-codex/0.153.4' },
+    });
     const prepareCodexExtraSpawnConfig = vi.fn(async () => ({
       extraArgs: [],
       extraEnv: {},
@@ -7075,6 +7078,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const result = await agent.forkSdkSession({
       sourceSdkSessionId: 'thread-1',
       upToMessageId: undefined,
+      ...(native ? { lastTurnId: 'source-turn' } : {}),
       tailTurnsToDrop: 0,
     });
 
@@ -7086,6 +7090,11 @@ describe('CodexAgent MCP thread context hooks', () => {
     expect(createdTransports[0].closed).toBe(false);
     expect(createdTransports[1].closed).toBe(true);
     expect(prepareCodexLocalCredentialModeSwitch).not.toHaveBeenCalled();
+    expect(result.usedNativeForkAnchor).toBe(native ? true : undefined);
+    expect(createdTransports[0].lines.some(line => {
+      const request = JSON.parse(line);
+      return request.method === Method.ThreadFork || request.method === Method.ThreadUnsubscribe;
+    })).toBe(false);
 
     await handle.close();
     await agent.dispose();
@@ -8479,11 +8488,12 @@ describe('CodexAgent MCP thread context hooks', () => {
     );
   });
 
-  it.each([false, true])('registers discovery identity around native startup (resume=%s)', async (resume) => {
+  it.each([{ resume: false, remote: false }, { resume: true, remote: false }, { resume: false, remote: true }, { resume: true, remote: true }])('registers discovery identity around native startup ($resume, $remote)', async ({ resume, remote }) => {
     const order: string[] = [];
     const deps = createDeps();
     deps.withCodexMcpDiscoveryContext = async (ctx, run) => {
       expect(ctx).toMatchObject({ sessionId: 'bot-parent', sessionInstanceId: 'bot-instance' });
+      expect(ctx.remoteHostId).toBe(remote ? 'remote-bot-host' : undefined);
       order.push('discovery');
       try { return await run(); } finally { order.push('released'); }
     };
@@ -8499,11 +8509,40 @@ describe('CodexAgent MCP thread context hooks', () => {
     });
     const handle = await agent.startSession({
       sessionId: 'bot-parent', sessionInstanceId: 'bot-instance', workingDir: '/bot', model: 'gpt-5.4',
+      ...(remote ? { remoteHostId: 'remote-bot-host' } : {}),
       ...(resume ? { resumeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } : {}),
     });
     expect(order).toEqual(['discovery', 'native', 'released']);
     await handle.close();
   });
+
+  it.each([{ bot: true, resume: false }, { bot: true, resume: true }, { bot: false, resume: false }])(
+    'enables the remote helper transport only for a Bot (bot=$bot, resume=$resume)', async ({ bot, resume }) => {
+      const agent = new CodexAgent(createDeps());
+      const host = installFakeHost(agent, undefined, {
+        userAgent: 'mock-codex/0.145.0',
+        buildSessionMcpConfig: (instance) => ({
+          'mcp_servers.cindy_helper.url': `http://127.0.0.1:47921/mcp/cindy_helper?instance=${instance}`,
+          'mcp_servers.cindy_helper.bearer_token_env_var': 'LIZI_MCP_TOKEN',
+          'mcp_servers.cindy_helper.enabled': false,
+        }),
+      });
+      const handle = await agent.startSession({
+        sessionId: 'remote-bot', sessionInstanceId: 'remote-instance', remoteHostId: 'ssh-host', workingDir: '/bot', model: 'gpt-5.4',
+        ...(resume ? { resumeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } : {}),
+        ...(bot ? { botRuntimeProfile: {
+          botId: 'bot-1', profileVersion: 1,
+          skillPolicy: { mode: 'allowlist' as const, configured: [], catalog: [] },
+          mcpPolicy: { mode: 'allowlist' as const, configured: [], catalog: [] },
+          toolsetPolicy: { mode: 'allowlist' as const, configured: [], catalog: [] },
+        } } : {}),
+      });
+      const params = host.request.mock.calls.find(([method]) => method === (resume ? Method.ThreadResume : Method.ThreadStart))?.[1] as { config: Record<string, unknown> };
+      expect(params.config['mcp_servers.cindy_helper.enabled']).toBe(bot);
+      expect(params.config['mcp_servers.cindy_helper.url']).toBe('http://127.0.0.1:47921/mcp/cindy_helper?instance=remote-instance');
+      await handle.close();
+    },
+  );
 
   it('applies instance-bound MCP URLs to both thread/start and thread/resume', async () => {
     const buildConfig = (sessionInstanceId?: string) => ({
@@ -22434,11 +22473,11 @@ describe('CodexAgent.forkSdkSession', () => {
     expect(retire).toHaveBeenCalledOnce();
   });
 
-  it('reuses the shared host and forks directly at a native turn', async () => {
+  it.each(['0.145.0', '0.153.4'])('isolates a native-turn fork on Codex %s', async (version) => {
     const prepareCodexResumeSession = vi.fn(async () => {});
     const agent = new CodexAgent(createDeps({}, { prepareCodexResumeSession }));
     const host = installFakeHost(agent, undefined, {
-      userAgent: 'mock-codex/0.145.0',
+      userAgent: `mock-codex/${version}`,
       activeThreadIds: ['source-thread-id'],
     });
     const retireHostKey = vi.spyOn(
@@ -22455,9 +22494,10 @@ describe('CodexAgent.forkSdkSession', () => {
     });
 
     expect(host.getHost).toHaveBeenCalledWith(undefined, undefined, {
-      ignoreBindingLeases: 1,
+      keyOverride: expect.stringMatching(/^local-fork:/),
+      hostPurpose: 'control-plane',
     });
-    expect(prepareCodexResumeSession).not.toHaveBeenCalled();
+    expect(prepareCodexResumeSession).toHaveBeenCalledWith('source-thread-id');
     expect(host.request).toHaveBeenCalledTimes(1);
     expect(host.request).toHaveBeenCalledWith(Method.ThreadFork, {
       threadId: 'source-thread-id',
@@ -22467,7 +22507,12 @@ describe('CodexAgent.forkSdkSession', () => {
     });
     expect(host.request).not.toHaveBeenCalledWith(Method.ThreadRollback, expect.anything());
     expect(host.unsubscribeThread).toHaveBeenCalledWith('fork-thread-id');
-    expect(retireHostKey).not.toHaveBeenCalled();
+    expect(retireHostKey).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/^local-fork:/),
+      'Codex fork host is single-use',
+      expect.objectContaining({ expectedHost: host, throwOnShutdownFailure: true }),
+    );
+    expect(host.unsubscribeThread).not.toHaveBeenCalledWith('source-thread-id');
     expect(result).toMatchObject({
       newSdkSessionId: 'fork-thread-id',
       usedNativeForkAnchor: true,
@@ -22520,7 +22565,7 @@ describe('CodexAgent.forkSdkSession', () => {
     expect(result.usedNativeForkAnchor).toBeUndefined();
   });
 
-  it('fails a precise fork without retiring the shared host when child unload fails', async () => {
+  it('retires only the isolated native fork host when child unsubscribe fails', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent, undefined, {
       userAgent: 'mock-codex/0.145.0',
@@ -22538,8 +22583,73 @@ describe('CodexAgent.forkSdkSession', () => {
       lastTurnId: 'turn-at-boundary',
     })).rejects.toThrow('unsubscribe failed');
 
-    expect(retireHostKey).not.toHaveBeenCalled();
+    expect(retireHostKey).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/^local-fork:/),
+      'Codex fork host is single-use',
+      expect.objectContaining({ expectedHost: host, throwOnShutdownFailure: true }),
+    );
     expect(host.unsubscribeThread).not.toHaveBeenCalledWith('source-thread-id');
+  });
+
+  it('waits for the native fork writer to exit before the child can resume', async () => {
+    const childId = '123e4567-e89b-12d3-a456-426614174000';
+    const exit = deferred<void>();
+    const retiring = deferred<void>();
+    let writerActive = false;
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.ThreadFork) {
+        writerActive = true;
+        return { thread: { id: childId } };
+      }
+      if (method === Method.ThreadResume && writerActive) {
+        throw new Error(`thread ${childId} already has an active writer`);
+      }
+      return undefined;
+    }, { userAgent: 'mock-codex/0.153.4' });
+    vi.spyOn(agent as any, 'retireHostKey').mockImplementation(async () => {
+      retiring.resolve();
+      await exit.promise;
+      writerActive = false;
+    });
+    let forkPublished = false;
+    const resumed = agent.forkSdkSession({
+      sourceSdkSessionId: 'source-thread-id',
+      upToMessageId: undefined,
+      lastTurnId: 'turn-at-boundary',
+    }).then((fork) => {
+      forkPublished = true;
+      return agent.startSession({
+        sessionId: 'fork-child', model: 'gpt-5.4', workingDir: '/repo',
+        resumeSessionId: fork.newSdkSessionId,
+      });
+    });
+    try {
+      await retiring.promise;
+      expect(host.unsubscribeThread).toHaveBeenCalledWith(childId);
+      // Codex 0.153 acknowledges unsubscribe but retains the live writer.
+      expect(writerActive).toBe(true);
+      expect(forkPublished).toBe(false);
+      expect(host.request.mock.calls.some(([method]) => method === Method.ThreadResume)).toBe(false);
+    } finally {
+      exit.resolve();
+    }
+    const handle = await resumed;
+    expect(forkPublished).toBe(true);
+    expect(host.request.mock.calls.filter(([method]) => method === Method.ThreadResume)).toHaveLength(1);
+    await handle.close();
+  });
+
+  it.each([undefined, 'turn-at-boundary'])('rejects a fork if writer shutdown fails (anchor=%s)', async (lastTurnId) => {
+    const cause = new Error('process exit was not confirmed');
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, undefined, { userAgent: 'mock-codex/0.153.4' });
+    vi.spyOn(agent as any, 'retireHostKey').mockRejectedValue(cause);
+
+    await expect(agent.forkSdkSession({
+      sourceSdkSessionId: 'source-thread-id', upToMessageId: undefined, lastTurnId,
+    })).rejects.toMatchObject({ stage: 'host-retire', cause });
+    expect(host.unsubscribeThread).toHaveBeenCalledWith('fork-thread-id');
   });
 
   it('prepares an imported source thread before thread/fork', async () => {

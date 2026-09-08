@@ -962,7 +962,7 @@ export interface AgentDeps {
 
   /** Scope tools/list during native startup, before a real thread id exists. Never authorizes tools/call. */
   withCodexMcpDiscoveryContext?: <T>(
-    args: Pick<CodexMcpThreadContextArgs, 'sessionId' | 'sessionInstanceId' | 'workingDir' | 'vendorOptions'>,
+    args: Pick<CodexMcpThreadContextArgs, 'sessionId' | 'sessionInstanceId' | 'workingDir' | 'vendorOptions' | 'remoteHostId'>,
     run: () => Promise<T>,
   ) => Promise<T>;
   /**
@@ -1293,6 +1293,8 @@ export interface AgentDeps {
    */
   remoteCcQueryFactory?: (opts: {
     remoteHostId: string;
+    /** Inject the narrow helper transport for a Bot runtime. */
+    botSession?: boolean;
     sessionId: string;
     /** 当前 Maker Session 实例代号；只在宿主 MCP 身份上下文中流转。 */
     sessionInstanceId?: string;

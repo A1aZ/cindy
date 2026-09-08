@@ -13,6 +13,7 @@ import type { RemoteHost } from '@cindy/maker-remote-ssh';
 
 import {
   renderManagedMcpBlock,
+  buildRemoteCodexSessionMcpConfig,
   mergeManagedMcpBlock,
   ensureRemoteCodexMcpBridge,
   stripRemoteCodexMcpConfig,
@@ -1348,5 +1349,30 @@ describe('codex-connector R27 regressions', () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('bridge-unavailable');
     expect(execCmds.join('\n')).not.toContain('bootstrap');
+  });
+});
+
+
+describe('remote Bot helper transport', () => {
+  it('keeps the shared helper disabled and binds per-thread URLs with collab and memory off', async () => {
+    const { host, inputs } = fakeHost('host-helper-only', '');
+    const ensured = await ensureRemoteCodexMcpBridge(host, {
+      ensureBridgeStarted: async () => ({ port: 38991, serverNames: ['cindy_helper'], bridgeInstanceId: 'helper-bridge' }),
+      isCollabEnabled: () => false, isMakerMemoryEnabled: () => false,
+    });
+    expect(ensured.ok).toBe(true);
+    expect(decodeWrittenConfig(inputs)).toContain('[mcp_servers.cindy_helper]');
+    expect(decodeWrittenConfig(inputs)).toContain('enabled = false');
+    const config = buildRemoteCodexSessionMcpConfig(host.id, 'bot-instance');
+    expect(config).toMatchObject({
+      'mcp_servers.cindy_helper.url': 'http://127.0.0.1:47921/mcp/cindy_helper?instance=bot-instance',
+      'mcp_servers.cindy_helper.bearer_token_env_var': 'LIZI_MCP_TOKEN',
+      'mcp_servers.cindy_helper.enabled': false,
+    });
+    expect(buildRemoteCodexSessionMcpConfig('missing-host', 'bot-instance')).toEqual({});
+    expect(hasPendingRemoteMcpDrift(host.id, {
+      collabEnabled: false, makerMemoryEnabled: false, botHelperAvailable: true,
+      token: 'test-persistent-token', bridgeInstanceId: 'helper-bridge',
+    })).toBe(false);
   });
 });

@@ -1157,6 +1157,36 @@ describe('skillhub/installService', () => {
     );
   });
 
+  it('only removes selected project import links and metadata while retaining global imports', async () => {
+    const source = path.join(TEST_ROOT, 'scoped-external', 'foo');
+    const projectAlias = path.join(TEST_ROOT, 'selected-project', '.agents', 'skills', 'foo');
+    const fakeHome = path.join(TEST_ROOT, 'scoped-home');
+    const globalAlias = path.join(fakeHome, '.claude', 'skills', 'foo');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'fixture');
+    makeDirectoryLink(projectAlias, source);
+    makeDirectoryLink(globalAlias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { registryService } = await import('../registry');
+    const { uninstall } = await import('../installService');
+    const entry = { version: '1.0.0', authorId: 'owner', folderHash: 'hash',
+      installedAt: 1, updatedAt: 1, origin: 'installed' as const };
+    vi.mocked(registryService.getInstall).mockResolvedValue(entry);
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([
+      { skillName: 'foo', installPath: globalAlias, entry },
+      { skillName: 'foo', installPath: projectAlias, entry },
+    ]);
+    const home = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    try {
+      const result = await uninstall(source, inspectLocalSkillTarget(source, [projectAlias])!);
+      expect(result).toEqual({ success: true });
+      expect(fs.existsSync(projectAlias)).toBe(false);
+      expect(fs.existsSync(globalAlias)).toBe(true);
+      expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('fixture');
+      expect(registryService.removeInstall).toHaveBeenCalledExactlyOnceWith('foo', projectAlias);
+    } finally { home.mockRestore(); }
+  });
+
   it('refreshes the importing project when removing an external skill alias', async () => {
     const projectRoot = path.join(TEST_ROOT, 'importing-project');
     const alias = path.join(projectRoot, '.agents', 'skills', 'alias');

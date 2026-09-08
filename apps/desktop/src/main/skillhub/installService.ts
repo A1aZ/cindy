@@ -962,7 +962,11 @@ export async function uninstall(
   }
   try {
     // Keep the exact registry identity for metadata cleanup after trash succeeds.
-    const registryMatch = await findRegistryInstallForPath(skillName, absolutePath, resolved);
+    const registryMatch = target?.linkOnly
+      ? (await registryService.listAllInstalls()).find((record) =>
+        [skillName, path.basename(target.operationPath)].some((name) => skillInstallLockKey(name) === skillInstallLockKey(record.skillName))
+        && target.aliases.some((alias) => pathTextEquals(path.resolve(alias), path.resolve(record.installPath)))) ?? null
+      : await findRegistryInstallForPath(skillName, absolutePath, resolved);
     if (!registryMatch && !target) {
       return { success: false, errorCode: 'INTERNAL', message: 'No installation record or current local Skill grant' };
     }
@@ -1066,7 +1070,7 @@ async function uninstallLocked(
     try { await ignoreAutoSyncSkill(skillName, cloudUserId ?? undefined); }
     catch { return { success: false, errorCode: 'WRITE_FAILED', message: 'Could not save uninstall preference' }; }
   }
-  const candidates = [...new Set([
+  const candidates = target?.linkOnly ? [...new Set([...target.aliases, target.operationPath])] : [...new Set([
     ...(target?.aliases ?? []), absolutePath,
     path.join(os.homedir(), '.claude', 'skills', skillName),
     path.join(os.homedir(), '.codex', 'skills', skillName),

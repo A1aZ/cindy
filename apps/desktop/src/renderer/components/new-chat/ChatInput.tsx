@@ -8957,7 +8957,7 @@ export function ChatInput({
                 if (cmd.kind !== 'agent-skill' || cmd.source !== 'skill' || !cmd.path || cmd.origin === 'package') return;
                 if (!sessionId && cmd.scope !== 'global' && cmd.scope !== 'user') return;
                 draftSaveSchedulerRef.current?.flush();
-                navigate(buildLocalSkillPathRoute(cmd.path), { state: { resetHistory: true } });
+                navigate(buildLocalSkillPathRoute(cmd.path, { scope: cmd.scope, workingDir }), { state: { resetHistory: true } });
               } : undefined}
               onClose={() => {
                 if (trigger.kind === 'slash') setSuppressedSlashAt(trigger.from);

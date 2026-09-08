@@ -34,6 +34,26 @@ describe('local SkillHub routes', () => {
     }
   });
 
+  it('resolves the selected scope and nearest project for shared physical sources', () => {
+    const source = '/checkout/skill';
+    const global = entry({ id: 'global', scope: 'global', absolutePath: source,
+      discoveredPath: '/home/.agents/skills/foo', projectRoot: undefined });
+    const project = entry({ id: 'project', absolutePath: source, projectRoot: '/repo',
+      discoveredPath: '/repo/.agents/skills/foo' });
+    const nested = entry({ id: 'nested', absolutePath: source, projectRoot: '/repo/sub',
+      discoveredPath: '/repo/sub/.agents/skills/foo' });
+    const resolve = (scope?: string, workingDir?: string) => findLocalSkillRouteEntry(
+      [global, project, nested], {}, new URL(buildLocalSkillPathRoute(`${source}/SKILL.md`,
+        { scope, workingDir }), 'https://cindy.local').searchParams);
+    expect(resolve('project', '/repo')).toBe(project);
+    expect(resolve('repo', '/repo/sub/task')).toBe(nested);
+    expect(resolve('user', '/repo')).toBe(global);
+    expect(resolve('project', '/unrelated')).toBeNull();
+    expect(resolve()).toBeNull();
+    expect(findLocalSkillRouteEntry([global, project, nested], {},
+      new URLSearchParams({ path: '/repo/.agents/skills/foo/SKILL.md' }))).toBe(project);
+  });
+
   it('supports Windows entrypoints and standalone Skill files without guessing by name', () => {
     const windows = entry({ absolutePath: 'C:\\Skills\\Demo' });
     const standalone = entry({ absolutePath: '/package/skills', mdPath: '/package/skills/demo.md' });

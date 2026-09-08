@@ -78,6 +78,26 @@ describe('opened worktree refresh', () => {
     expect(result.current?.source).toBe('managed');
   });
 
+  it('resets liveness from the new snapshot when switching tasks in place', async () => {
+    const metaA = { path: '/tmp/wt/a', name: 'a', branch: 'feature-a' };
+    const metaB = { path: '/tmp/wt/b', name: 'b', branch: 'feature-b' };
+    mocks.official.mockImplementation((task: { id: string }, options?: { includeInvalid?: boolean }) => {
+      if (options?.includeInvalid) return task.id === 'a' ? metaA : metaB;
+      return task.id === 'a' ? null : metaB;
+    });
+    mocks.detect.mockResolvedValue({ isInsideWorktree: false });
+    const view = renderHook(
+      ({ current }) => useTaskInfoWorktree(current, true, { observeTelemetry: true }),
+      { initialProps: { current: { ...session, id: 'a' } } },
+    );
+    await act(async () => {});
+    expect(view.result.current).toBeNull();
+
+    mocks.detect.mockResolvedValue({ isInsideWorktree: true });
+    await act(async () => view.rerender({ current: { ...session, id: 'b' } }));
+    expect(view.result.current?.source).toBe('managed');
+  });
+
   it('applies recycle and restore events immediately', async () => {
     const { result } = renderHook(() => useTaskInfoWorktree(session, true, { observeTelemetry: true }));
     await act(async () => {});

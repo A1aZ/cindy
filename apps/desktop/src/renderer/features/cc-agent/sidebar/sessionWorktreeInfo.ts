@@ -9,7 +9,7 @@
  * 不写 store、不改变回收。目录没了摘掉徽标。外部 observed 不可 reveal。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { groupingWorktreeBaseRepo } from '@cindy/maker-shared/worktree-paths';
 
@@ -109,9 +109,16 @@ export function useTaskInfoWorktree(
   const reportLiveness = useReportWorktreeLiveness();
   const managed = resolveManagedWorktree(official);
   const [observed, setObserved] = useState<SessionWorktreeInfo | null>(null);
-  const [officialStillLive, setOfficialStillLive] = useState(
-    () => !observeTelemetry || liveOfficial !== null,
-  );
+  const initialOfficialStillLive = !observeTelemetry || liveOfficial !== null;
+  const [officialStillLive, setOfficialStillLive] = useState(initialOfficialStillLive);
+  const livenessRef = useRef({ sessionId: session.id, live: initialOfficialStillLive });
+  if (livenessRef.current.sessionId !== session.id) {
+    // The hook instance is reused when the route changes. Reset synchronously
+    // from the new snapshot so the previous task's state cannot leak for a
+    // render while the effect starts its probe.
+    livenessRef.current = { sessionId: session.id, live: initialOfficialStillLive };
+  }
+  const displayedOfficialStillLive = livenessRef.current.live;
   const officialPath = official?.path ?? null;
   const deviceId = session.deviceLinkDeviceId ?? null;
   const isRemote = Boolean(deviceId || session.remoteHostId);
@@ -119,6 +126,7 @@ export function useTaskInfoWorktree(
   useEffect(() => {
     setObserved(null);
     if (!enabled || isRemote || !observeTelemetry) {
+      livenessRef.current = { sessionId: session.id, live: !isRemote };
       setOfficialStillLive(!isRemote);
       return;
     }
@@ -132,6 +140,7 @@ export function useTaskInfoWorktree(
         const live = await probeIsInsideWorktree(officialPath, deviceId);
         if (cancelled || gen !== generation) return;
         if (live === null) return; // IPC 失败不代表目录已被删除，保留上次状态。
+        livenessRef.current = { sessionId: session.id, live };
         setOfficialStillLive(live);
         if (official) reportLiveness(official, live);
         if (live) {
@@ -139,6 +148,7 @@ export function useTaskInfoWorktree(
           return;
         }
       } else if (gen === generation) {
+        livenessRef.current = { sessionId: session.id, live: false };
         setOfficialStillLive(false);
       }
       if (isRemote) {
@@ -190,7 +200,7 @@ export function useTaskInfoWorktree(
   return selectDisplayedWorktree({
     enabled,
     managed,
-    officialStillLive,
+    officialStillLive: displayedOfficialStillLive,
     observed,
   });
 }

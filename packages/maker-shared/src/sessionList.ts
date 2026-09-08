@@ -2,6 +2,7 @@ import { messageContentToPreview } from './messageNormalize.js';
 import { stripTrailingPathSeparators } from './pathText.js';
 import { presentationDate, presentationText, type PresentationLocalizer } from './presentationLocalization.js';
 import { isSyntheticTriggerText } from './syntheticTrigger.js';
+import { hasPendingSessionInterruption, type SessionInterruptionState } from './sessionActivity.js';
 import type { RemoteSchedule, RemoteScheduleRun } from './scheduleTypes.js';
 import { toMillis, isUnreadScheduleRun, isUnreadFailedScheduleRun } from './scheduleModel.js';
 import { sessionCollaborationLabel, sessionWorktreeLabel } from './sessionIdentity.js';
@@ -9,7 +10,7 @@ import { isDefaultDraftSessionTitle } from './sessionTitle.js';
 import { getSessionListCollapseView } from './sessionListCollapse.js';
 import { collapseWorktreeDirForGrouping } from './worktreePaths.js';
 
-export interface RemoteSessionListSessionLike {
+export interface RemoteSessionListSessionLike extends SessionInterruptionState {
   _count?: { messages?: number } | null;
   agentKind: 'cc' | 'codex' | string;
   createdAt: string;
@@ -518,10 +519,14 @@ function remoteSessionListItemExemptFromCollapse(
 
 /** 需关注:等待处理交互 / 自动化未读 run / live activity 请求关注。 */
 function remoteSessionListItemNeedsAttention(item: RemoteSessionListItem): boolean {
+  if (hasPendingSessionInterruption(item.session)) return true;
   if (item.pendingInteractionCount > 0) return true;
   if ((item.scheduleInfo?.unreadCount ?? 0) > 0) return true;
   const live = item.liveActivity;
-  return !!live && (live.attention === true || live.phase === 'needs-interaction' || live.phase === 'error');
+  return (
+    !!live &&
+    (live.attention === true || live.phase === 'needs-interaction' || live.phase === 'error')
+  );
 }
 
 function remoteSessionListItemIsRunning(
@@ -639,7 +644,7 @@ export function buildSessionScheduleIndex(
       const isLatest = !existing || firedAt >= existing.latestRunAt;
       index.set(run.sessionId, {
         scheduleId: isLatest ? scheduleId : existing.scheduleId,
-        scheduleName: isLatest ? (schedule?.name || scheduleId) : existing.scheduleName,
+        scheduleName: isLatest ? schedule?.name || scheduleId : existing.scheduleName,
         scheduleStatus: isLatest ? schedule?.status : existing.scheduleStatus,
         allSchedulesStopped: false,
         unreadRunIds,
@@ -680,7 +685,9 @@ function matchesStatusFilter(
 ): boolean {
   if (filter === 'all') return session.status !== 'deleted';
   if (filter === 'waiting') {
-    return session.status !== 'deleted' && (options.pendingInteractionIndex?.get(session.id) ?? 0) > 0;
+    return (
+      session.status !== 'deleted' && (options.pendingInteractionIndex?.get(session.id) ?? 0) > 0
+    );
   }
   if (filter === 'automation') {
     return session.status !== 'deleted' && isAutomationSession(session, options.scheduleIndex);
@@ -864,7 +871,8 @@ function toAutomationGroupListItem(
   // 组行的活动时间取组内最新一条,不跟随 primary —— primary 可能是较旧的未读 / 运行中 run,
   // 用它的时间会让上游(首页项目卡 latestActivityAt、日期分桶、行右侧时间)把整组排成旧活动。
   const latestActivityAt = group.reduce(
-    (latest, item) => (item.lastActivityAt.localeCompare(latest) > 0 ? item.lastActivityAt : latest),
+    (latest, item) =>
+      item.lastActivityAt.localeCompare(latest) > 0 ? item.lastActivityAt : latest,
     primary.lastActivityAt,
   );
   return {
@@ -913,9 +921,14 @@ function toAutomationGroupListItem(
  * 与桌面折叠组一致：未读失败优先，其余打开最新运行；等待交互仍在展开子行显示。
  */
 function pickAutomationPrimaryItem(group: readonly RemoteSessionListItem[]): RemoteSessionListItem {
-  return group.find((item) => item.scheduleInfo?.hasUnreadFailedRun
-    || (item.liveActivity?.phase === 'error' && item.liveActivity.attention))
-    ?? group.reduce((a, b) => lastActivity(b.session) > lastActivity(a.session) ? b : a);
+  return (
+    group.find(
+      (item) =>
+        hasPendingSessionInterruption(item.session) ||
+        item.scheduleInfo?.hasUnreadFailedRun ||
+        (item.liveActivity?.phase === 'error' && item.liveActivity.attention),
+    ) ?? group.reduce((a, b) => (lastActivity(b.session) > lastActivity(a.session) ? b : a))
+  );
 }
 
 function mergeScheduleInfo(group: readonly RemoteSessionListItem[]): RemoteSessionScheduleInfo | null {
@@ -968,11 +981,13 @@ function isSearchablePreviewMessage(message: RemoteMessage): boolean {
   // 消息流渲染成「已自动继续」分隔卡,预览同样不能把它当用户消息展示——按文本
   // 过滤不可行(用户真发「继续」是合法消息),只认落库标记。
   if (message.role === 'user' && message.agentMeta?.autoResume === true) return false;
-  return message.role === 'user'
-    || message.role === 'assistant'
-    || message.role === 'system'
-    || message.role === 'ask_user'
-    || message.role === 'plan_review';
+  return (
+    message.role === 'user' ||
+    message.role === 'assistant' ||
+    message.role === 'system' ||
+    message.role === 'ask_user' ||
+    message.role === 'plan_review'
+  );
 }
 
 export function sessionRowMessagePreview(session: RemoteSession): string | null {

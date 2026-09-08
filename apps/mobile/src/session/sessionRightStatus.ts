@@ -16,18 +16,30 @@
  *     即使 liveActivity 缺失(relay 断连)也能点亮 awaiting。
  *   - scheduleUnreadCount / scheduleHasUnreadFailedRun:同桌面自动化运行账本。
  */
-import { projectSessionActivity, resolveSessionRightStatus, resolveCollapsedGroupRightStatus, type SessionRightStatus } from '@cindy/maker-shared/session-activity';
+import {
+  projectSessionActivity,
+  resolveSessionRightStatus,
+  resolveCollapsedGroupRightStatus,
+  type SessionRightStatus,
+  type SessionInterruptionState,
+} from '@cindy/maker-shared/session-activity';
 
 type SessionRow = import('@cindy/maker-shared/session-list').RemoteSessionListItem;
 export type MobileSessionRightStatus = SessionRightStatus;
 
 export function latestMobileSessionRow(item: SessionRow): SessionRow {
-  return item.automationGroup?.items.reduce((a, b) =>
-    Date.parse(b.session.userSendAt ?? b.session.updatedAt ?? b.session.createdAt) > Date.parse(a.session.userSendAt ?? a.session.updatedAt ?? a.session.createdAt) ? b : a,
-  ) ?? item;
+  return (
+    item.automationGroup?.items.reduce((a, b) =>
+      Date.parse(b.session.userSendAt ?? b.session.updatedAt ?? b.session.createdAt) >
+      Date.parse(a.session.userSendAt ?? a.session.updatedAt ?? a.session.createdAt)
+        ? b
+        : a,
+    ) ?? item
+  );
 }
 
 export interface MobileSessionRightStatusInput {
+  interruption?: SessionInterruptionState;
   /** liveActivity.phase(缺失 = 无 relay 数据)。 */
   livePhase: 'running' | 'needs-interaction' | 'completed' | 'error' | undefined;
   /** liveActivity.attention === true(未读标志,main 侧维护已读语义)。 */
@@ -42,6 +54,7 @@ export interface MobileSessionRightStatusInput {
 }
 
 export function resolveMobileSessionRightStatus({
+  interruption,
   livePhase,
   liveAttention,
   pendingInteractionCount,
@@ -49,14 +62,21 @@ export function resolveMobileSessionRightStatus({
   scheduleUnreadCount,
   scheduleHasUnreadFailedRun = false,
 }: MobileSessionRightStatusInput): MobileSessionRightStatus {
-  return resolveSessionRightStatus(projectSessionActivity({
-    sessionId: '',
-    livePhase,
-    running,
-    waitingForUser: pendingInteractionCount > 0,
-    terminal: scheduleHasUnreadFailedRun ? 'error' : scheduleUnreadCount > 0 ? 'completed' : null,
-    attention: liveAttention || pendingInteractionCount > 0 || scheduleUnreadCount > 0 || scheduleHasUnreadFailedRun,
-  }));
+  return resolveSessionRightStatus(
+    projectSessionActivity({
+      interruption,
+      sessionId: '',
+      livePhase,
+      running,
+      waitingForUser: pendingInteractionCount > 0,
+      terminal: scheduleHasUnreadFailedRun ? 'error' : scheduleUnreadCount > 0 ? 'completed' : null,
+      attention:
+        liveAttention ||
+        pendingInteractionCount > 0 ||
+        scheduleUnreadCount > 0 ||
+        scheduleHasUnreadFailedRun,
+    }),
+  );
 }
 
 /** Group header mirrors the latest run; collapsed errors remain discoverable. */
@@ -67,14 +87,17 @@ export function resolveMobileSessionRowStatus(
 ): { status: MobileSessionRightStatus; target: import('@cindy/maker-shared/session-list').RemoteSessionListItem } {
   const children = item.automationGroup?.items;
   const latest = latestMobileSessionRow(item);
-  const statusOf = (row: typeof item, isRunning: boolean) => resolveMobileSessionRightStatus({
-    livePhase: row.liveActivity?.phase,
-    liveAttention: row.liveActivity?.attention === true,
-    pendingInteractionCount: row.pendingInteractionCount,
-    running: isRunning || row.liveActivity?.phase === 'running' || row.scheduleInfo?.running === true,
-    scheduleUnreadCount: row.scheduleInfo?.unreadCount ?? 0,
-    scheduleHasUnreadFailedRun: row.scheduleInfo?.hasUnreadFailedRun,
-  });
+  const statusOf = (row: typeof item, isRunning: boolean) =>
+    resolveMobileSessionRightStatus({
+      interruption: row.session,
+      livePhase: row.liveActivity?.phase,
+      liveAttention: row.liveActivity?.attention === true,
+      pendingInteractionCount: row.pendingInteractionCount,
+      running:
+        isRunning || row.liveActivity?.phase === 'running' || row.scheduleInfo?.running === true,
+      scheduleUnreadCount: row.scheduleInfo?.unreadCount ?? 0,
+      scheduleHasUnreadFailedRun: row.scheduleInfo?.hasUnreadFailedRun,
+    });
   const error = children?.find((row) => statusOf(row, false) === 'error');
   const hasDone = children?.some((row) => statusOf(row, false) === 'done');
   return {

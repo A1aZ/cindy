@@ -1,6 +1,7 @@
 import {
   projectSessionActivity,
   type SessionActivitySnapshot,
+  type SessionInterruptionState,
 } from '@cindy/maker-shared/session-activity';
 
 import type { AttentionKind } from '@/lib/sessionAttentionStore';
@@ -9,6 +10,7 @@ export { resolveSessionRightStatus as resolveSidebarRightStatus } from '@cindy/m
 export type { SessionRightStatus as SidebarRightStatusKind } from '@cindy/maker-shared/session-activity';
 
 export interface SidebarRightStatusInput {
+  interruption?: SessionInterruptionState;
   sessionId: string;
   title?: string | null;
   recordStatus?: SessionActivitySnapshot['recordStatus'];
@@ -37,6 +39,7 @@ export interface SidebarRightStatusInput {
 
 /** Collapse local/remote live state and legacy attention fallbacks into one model. */
 export function projectSidebarSessionActivity({
+  interruption,
   sessionId,
   title,
   recordStatus,
@@ -51,6 +54,7 @@ export function projectSidebarSessionActivity({
   const awaitingAttention = hasAttentionNotification && attentionKind === 'awaiting';
   const doneAttention = hasAttentionNotification && !errorAttention && !awaitingAttention;
   return projectSessionActivity({
+    interruption,
     sessionId,
     recordStatus: liveActivity?.recordStatus ?? recordStatus,
     title,

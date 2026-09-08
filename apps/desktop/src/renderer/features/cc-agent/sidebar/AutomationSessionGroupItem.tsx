@@ -252,6 +252,7 @@ export const AutomationSessionGroupItem = memo(function AutomationSessionGroupIt
   // 只是档位改由整组决定。
   const latestHasNotification = latestSessionId != null && notifications.has(latestSessionId);
   const groupActivity = projectSidebarSessionActivity({
+    interruption: latestSession,
     sessionId: latestSessionId ?? '',
     title: latestSession?.title,
     recordStatus: latestSession?.status,

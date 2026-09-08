@@ -1,4 +1,8 @@
 import type { AttentionKind } from '@/lib/sessionAttentionStore';
+import {
+  hasPendingSessionInterruption,
+  type SessionInterruptionState,
+} from '@cindy/maker-shared/session-activity';
 import type { RemoteSessionActivityPhase } from '@/features/device-link/remoteSessionActivityStore';
 
 export type CollapsedAttentionTone = 'error' | 'done';
@@ -6,7 +10,7 @@ export type CollapsedAttentionTone = 'error' | 'done';
 export type CollapsedProjectAttentionTone = CollapsedAttentionTone;
 
 interface CollapsedAttentionInput {
-  sessions: readonly { id: string }[];
+  sessions: readonly ({ id: string } & SessionInterruptionState)[];
   runningSessionIds: ReadonlySet<string>;
   notifications: ReadonlySet<string>;
   attentionKinds: ReadonlyMap<string, AttentionKind>;
@@ -49,6 +53,10 @@ export function resolveCollapsedAttention({
   const errorSessionIds: string[] = [];
 
   for (const session of sessions) {
+    if (hasPendingSessionInterruption(session)) {
+      errorSessionIds.push(session.id);
+      continue;
+    }
     if (urgentSessionIds.has(session.id)) {
       errorSessionIds.push(session.id);
       continue;

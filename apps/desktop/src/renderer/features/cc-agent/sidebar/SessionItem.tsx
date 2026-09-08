@@ -404,6 +404,7 @@ export const SessionItem = memo(function SessionItem({
   const remoteActivity = useRemoteSessionActivity(session.id);
   const remoteSchedule = useRemoteSessionScheduleInfo(session.id);
   const sessionActivity = projectSidebarSessionActivity({
+    interruption: session,
     sessionId: session.id,
     title: session.title,
     recordStatus: session.status,

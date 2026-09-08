@@ -17,6 +17,35 @@ const base = {
   scheduleUnreadCount: 0,
 } as const;
 
+it('shows the host interruption without live activity, survives read ACK and clears on resolution', () => {
+  const interruption = {
+    status: 'active',
+    activeTurnStartedAt: 1000,
+    interruptedTurnStartedAt: 1000,
+    lastTurnEndedAt: 900,
+  };
+  expect(resolveMobileSessionRightStatus({ ...base, interruption })).toBe('error');
+  expect(
+    resolveMobileSessionRightStatus({
+      ...base,
+      interruption,
+      liveAttention: false,
+    }),
+  ).toBe('error');
+  expect(
+    resolveMobileSessionRightStatus({
+      ...base,
+      interruption: { ...interruption, lastTurnEndedAt: 1000 },
+    }),
+  ).toBe('time');
+  expect(
+    resolveMobileSessionRightStatus({
+      ...base,
+      interruption: { ...interruption, interruptedTurnStartedAt: undefined },
+    }),
+  ).toBe('time');
+});
+
 describe('resolveMobileSessionRightStatus', () => {
   it('error 未读压过一切(含 running 与待处理交互)', () => {
     expect(resolveMobileSessionRightStatus({

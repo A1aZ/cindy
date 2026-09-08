@@ -3429,6 +3429,7 @@ function MessageBubble({
               return (
                 <NativePullDownMenu
                   actions={messageMenu.map((item) => ({
+                    image: item.image,
                     destructive: item.destructive,
                     disabled: actionBusy && (item.id === 'rewind' || item.id === 'delete'),
                     id: item.id,
@@ -4029,6 +4030,7 @@ function AgentTaskCard({
   item: MobileAgentTaskItem;
   screenWidth?: number;
 }) {
+  const { colors } = useTheme();
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
   const model = useMemo(
@@ -4043,7 +4045,9 @@ function AgentTaskCard({
     }),
     [item.toolCall, item.update],
   );
-  const title = model.title ?? t('message.renderer.subagentTaskTitle');
+  const title = model.title
+    ? `${t('message.renderer.subagent')} · ${model.title}`
+    : t('message.renderer.subagentTaskTitle');
   const subtitle = buildAgentTaskMeta(model).join(' · ');
   const layout = useMemo(
     () => buildMessageHierarchyLayout({ screenWidth, summaryCount: 0 }),
@@ -4059,7 +4063,8 @@ function AgentTaskCard({
       subtitle={subtitle || undefined}
       chevronPosition="trailing"
       chevronSize={14}
-      leadingIcon={<AgentTaskStatusIcon status={model.status} />}
+      leadingIcon={<Bot color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />}
+      trailingMeta={<AgentTaskStatusIcon status={model.status} />}
       layout={layout}
       variant="card"
       testID="message.agentTaskToggle"

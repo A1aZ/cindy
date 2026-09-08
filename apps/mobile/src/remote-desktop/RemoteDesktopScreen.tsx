@@ -904,6 +904,7 @@ export default function RemoteDesktopScreen() {
           void remotePresentation?.playback(false).catch(() => {});
         setSettingNotice(t("remoteDesktop.pipUnavailable"));
         setOperations(true);
+        if (AppState.currentState === "background") pause();
         break;
       case "streaming":
         setFrameReady(true);

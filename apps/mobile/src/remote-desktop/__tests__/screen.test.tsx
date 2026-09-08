@@ -965,6 +965,30 @@ describe("remote desktop controls", () => {
     });
     expect(requests().filter((r) => r.op === "start")).toHaveLength(starts);
   });
+  it.each(["active", "background"])("handles failed PiP in %s without keeping a hidden stream alive", async (state) => {
+    fixture.systemAudio = true;
+    await connect();
+    expect(sent().find((m) => m.type === "init")).toMatchObject({ audio: true });
+    act(() => fixture.message!({ nativeEvent: { data: JSON.stringify({ type: "presentation", epoch: "lease", active: true }) } }));
+    act(() => {
+      AppState.currentState = state as typeof AppState.currentState;
+      fixture.appState!(state);
+    });
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    await act(async () => fixture.message!({ nativeEvent: { data: JSON.stringify({ type: "presentationFailed", epoch: "lease" }) } }));
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(state === "background" ? 1 : 0);
+    if (state === "background") {
+      expect(fixture.playback).toHaveBeenLastCalledWith(false);
+      const count = requests().length;
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(requests()).toHaveLength(count);
+      await act(async () => {
+        AppState.currentState = "active";
+        fixture.appState!("active");
+      });
+      expect(requests().filter((r) => r.op === "start")).toHaveLength(2);
+    }
+  });
   it("releases in background and reconnects only after foreground and focus return", async () => {
     await connect();
     act(() => {

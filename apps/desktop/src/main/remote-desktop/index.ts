@@ -62,10 +62,13 @@ const permissions = new RemoteDesktopPermissionsService({
   request: async (permission, isCurrent, signal) => {
     if (permission === 'accessibility') await requestDesktopInputPermission(isCurrent, signal);
     else
-      await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: 0, height: 0 },
-      });
+      await enumerateDesktopSources(
+        () => desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: 0, height: 0 },
+        }),
+        REMOTE_DESKTOP_OFFER_BUDGET.sourcesMs,
+      );
   },
   openSettings: (permission) =>
     shell.openExternal(

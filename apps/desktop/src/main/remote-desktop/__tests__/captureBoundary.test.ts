@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, any>(),
   windows: [] as any[],
   deps: null as any,
+  permissionDeps: null as any,
   lease: 'lease',
   ready: false,
   source: null as null | Promise<any[]>,
@@ -111,6 +112,7 @@ vi.mock('../inputHost', () => ({
 }));
 vi.mock('../permissions', () => ({
   RemoteDesktopPermissionsService: class {
+    constructor(deps: any) { h.permissionDeps = deps; }
     dismiss() {}
   },
 }));
@@ -163,6 +165,17 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('bounds a stalled screen permission probe so the guide can finish its request', async () => {
+  h.source = new Promise(() => {});
+  const pending = h.permissionDeps.request('screenRecording', () => true, new AbortController().signal);
+  const rejected = expect(pending).rejects.toThrow('DESKTOP_VIDEO_TIMEOUT');
+  await vi.advanceTimersByTimeAsync(5000);
+  await rejected;
+  h.source = Promise.resolve([]);
+  await expect(h.permissionDeps.request('screenRecording', () => true, new AbortController().signal)).resolves.toBeUndefined();
+  expect(h.stop).not.toHaveBeenCalled();
 });
 
 it('drops enumeration timeouts for one relay frame and resumes without stopping the host', async () => {

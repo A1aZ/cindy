@@ -86,10 +86,13 @@ const assistantBlocks = new Map<string, AssistantBlock>();
 // so expanding midway does not depend on deltas a collapsed controller never received.
 const historyThinkingBlocks = new Map<string, Map<string, Message>>();
 const historyThinkingOwners = new Map<string, OwnerScope>();
+export function clearSessionThinkingSnapshots(sessionId: string): void {
+  historyThinkingBlocks.delete(sessionId);
+  historyThinkingOwners.delete(sessionId);
+}
 export function getSessionThinkingSnapshots(sessionId: string): Message[] {
   if (!isOwnerScopeCurrent(historyThinkingOwners.get(sessionId) ?? null)) {
-    historyThinkingBlocks.delete(sessionId);
-    historyThinkingOwners.delete(sessionId);
+    clearSessionThinkingSnapshots(sessionId);
     return [];
   }
   return [...(historyThinkingBlocks.get(sessionId)?.values() ?? [])];
@@ -161,8 +164,7 @@ export function noteSessionClearBoundary(sessionId: string, clearedAt: string | 
   if (!Number.isFinite(parsed)) return;
   const current = clearBoundaryBySession.get(sessionId);
   if (current === undefined || parsed > current) {
-    historyThinkingBlocks.delete(sessionId);
-    historyThinkingOwners.delete(sessionId);
+    clearSessionThinkingSnapshots(sessionId);
     clearBoundaryBySession.set(sessionId, parsed);
     sealedAssistantLateFinalBySession.delete(sessionId);
     // A cleared transcript must not be revived by a late terminal update from an
@@ -1838,8 +1840,8 @@ export function flushOrphanToolResults(sessionId: string, agentMeta: AgentMeta |
  * + knownToolUseIds + lastAgentMeta。必须在 flushOrphanToolResults 之后调用。
  */
 export function resetTurnPersistState(sessionId: string): void {
-  historyThinkingBlocks.delete(sessionId);
-  historyThinkingOwners.delete(sessionId);
+  // Event-stream completion is not a persistence barrier. Thinking snapshots
+  // survive until their write succeeds or an explicit history/owner cleanup.
   toolResultIdByToolUseId.delete(sessionId);
   pendingFullTextByToolUseId.delete(sessionId);
   toolResultContentByClientId.delete(sessionId);
@@ -2448,8 +2450,7 @@ export function clearCodexPlanRowsForSession(sessionId: string): void {
 }
 
 export function clearSessionPersistState(sessionId: string): void {
-  historyThinkingBlocks.delete(sessionId);
-  historyThinkingOwners.delete(sessionId);
+  clearSessionThinkingSnapshots(sessionId);
   clearCodexPlanRowsForSession(sessionId);
   assistantBlocks.delete(sessionId);
   sealedAssistantLateFinalBySession.delete(sessionId);

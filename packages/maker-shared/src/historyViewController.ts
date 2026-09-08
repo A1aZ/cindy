@@ -65,6 +65,15 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     for (const listener of this.listeners) listener();
   }
 
+  /** Optimistic local display only. A fresh response or reset always wins over disk IO. */
+  async restoreCachedView(read: () => Promise<HistoryViewSnapshot<T> | null>): Promise<void> {
+    if (this.state.ready) return;
+    const generation = this.generation;
+    const cached = await read().catch(() => null);
+    if (!cached || this.state.ready || generation !== this.generation) return;
+    this.publish({ ...cached, loading: this.state.loading, error: this.state.error });
+  }
+
   refresh(older = false): Promise<void> {
     // Keep the existing raw fallback until an explicit reset; a later latest
     // page must not re-enable projection after an oversized older-page read.

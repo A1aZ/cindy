@@ -1,9 +1,10 @@
 import { HistoryViewController } from '@cindy/maker-shared/message-window';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import type { RemoteMessage } from './types';
+import { historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from './remoteHistoryDiskCache';
 
 // Retain only recently visited views in memory. The existing account/device and
-// session reclamation boundaries own invalidation; no second disk cache.
+// session reclamation boundaries own invalidation. Older views remain in the disk LRU.
 export const MAX_INACTIVE_HISTORY_VIEWS = 8;
 const MAX_INACTIVE_HISTORY_BYTES = 4 * 1024 * 1024;
 type Reader = Pick<MobileMakerTransport, 'readHistoryView' | 'readWorkDetails' | 'setHistoryExpanded'>;
@@ -36,7 +37,31 @@ export function mountRemoteHistoryView(entry: Entry, reader: Reader, active: boo
   entry.reader = reader;
   entry.consumers++;
   entry.view.setActive(active);
+  const authority = historyDiskAuthority(entry.deviceId, entry.sessionId);
+  void entry.view.restoreCachedView(() => readHistoryDisk(authority));
+  let writeAuthority = authority;
+  let pendingSnapshot = entry.view.getSnapshot();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const persist = () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    void writeHistoryDisk(writeAuthority, pendingSnapshot);
+  };
+  const unsubscribe = entry.view.subscribe(() => {
+    if (timer) clearTimeout(timer);
+    const snapshot = entry.view.getSnapshot();
+    if (!snapshot.ready) pendingSnapshot = snapshot;
+    if (!authority.ownerCurrent() || !snapshot.ready || snapshot.loading || snapshot.error) return;
+    pendingSnapshot = snapshot;
+    // A new authoritative snapshot after rewind gets new write authority. Old timers/unmounts
+    // keep their old authority and cannot repopulate a cleared snapshot.
+    writeAuthority = historyDiskAuthority(entry.deviceId, entry.sessionId);
+    if (!entry.view.isActive()) { persist(); return; }
+    timer = setTimeout(persist, 1200);
+  });
   return () => {
+    unsubscribe();
+    persist();
     if (--entry.consumers > 0) return;
     entry.view.setActive(false);
     const key = keyFor(entry.deviceId, entry.sessionId);

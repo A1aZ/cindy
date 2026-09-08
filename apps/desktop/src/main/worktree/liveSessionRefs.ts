@@ -82,6 +82,8 @@ export async function loadLiveSessionPathKeys(
     for (const meta of store.getAll()) {
       if (subagentReferences.has(meta.sessionId)
         || (meta.sessionId !== opts.excludeSessionId && !knownSessionIds.has(meta.sessionId))) {
+        const metaPathKey = pathKey(meta.path);
+        if (metaPathKey) keys.add(metaPathKey);
         keys.add(await physicalWorktreeKey(meta.path));
       }
     }

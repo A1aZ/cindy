@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { RoutineEngine, type RoutineState } from "../routine-engine.js";
+import { RoutineEngine, type RoutineState, type RoutineEngineDeps } from "../routine-engine.js";
 import { parseRoutineInput, type RoutineInput } from "../routines.js";
 
 const input: RoutineInput = {
@@ -25,22 +25,25 @@ const event = (id = "delivery-1") => ({
 });
 
 async function fixture(
-  execute = vi.fn(async () => ({})),
+  execute: RoutineEngineDeps["execute"] = vi.fn(async () => ({})),
   saved: RoutineState | null = null,
+  persist: (state: RoutineState) => Promise<void> = async () => {},
 ) {
   let snapshot = saved;
   let now = 1000;
   let id = 0;
+  const onError = vi.fn();
   const engine = new RoutineEngine({
     load: async () => structuredClone(snapshot),
     save: async (state) => {
+      await persist(state);
       snapshot = structuredClone(state);
     },
     execute,
     id: () => `id-${++id}`,
     now: () => now,
     changed: vi.fn(),
-    onError: vi.fn(),
+    onError,
   });
   await engine.start();
   engine.registerSource({
@@ -52,6 +55,7 @@ async function fixture(
   return {
     engine,
     execute,
+    onError,
     snapshot: () => snapshot,
     advance: (ms: number) => {
       now += ms;
@@ -118,7 +122,7 @@ describe("Routine event admission and execution", () => {
   });
 
   it("retains receipts across restart and does not replay an ambiguous interrupted run", async () => {
-    const first = await fixture(vi.fn(() => new Promise(() => {})));
+    const first = await fixture(vi.fn(() => new Promise<never>(() => {})));
     const routine = await first.engine.put("bot", input);
     await first.engine.publish("github", event());
     await vi.waitFor(() =>
@@ -245,5 +249,92 @@ it("does not acknowledge a failed durable write or a revoked publisher", async (
     accepted: 1,
     duplicate: false,
   });
+  await engine.stop();
+});
+
+it('locks a routine after its outcome cannot be saved, retries only persistence, and keeps other routines usable', async () => {
+  let blockedId = '';
+  let fail = true;
+  const executedIds: string[] = [];
+  const execute = vi.fn<RoutineEngineDeps['execute']>(async (_routine, run) => {
+    executedIds.push(run.id);
+    return { resultText: 'External action completed' };
+  });
+  const persist = vi.fn(async (state: RoutineState) => {
+    if (fail && state.runs.some((run) => run.routineId === blockedId && run.status === 'success'))
+      throw new Error('disk full');
+  });
+  const { engine, advance, snapshot, onError } = await fixture(execute, null, persist);
+  const routine = await engine.put('bot', input);
+  blockedId = routine.id;
+  await engine.runNow('bot', routine.id);
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'disk full' })));
+  expect(execute).toHaveBeenCalledTimes(1);
+  const firstRunId = engine.history(routine.id)[0].id;
+  await engine.runNow('bot', routine.id);
+  await engine.publish('github', event());
+  advance(3600_000);
+  await engine.tick();
+  expect(execute).toHaveBeenCalledTimes(1);
+  expect(engine.history(routine.id).find((run) => run.id === firstRunId)?.status).toBe('running');
+  expect(snapshot()?.runs.find((run) => run.id === firstRunId)?.status).toBe('running');
+
+  const other = await engine.put('other-bot', { ...input, enabled: false });
+  await engine.runNow('other-bot', other.id);
+  await vi.waitFor(() => expect(engine.history(other.id)[0].status).toBe('success'));
+  expect(execute).toHaveBeenCalledTimes(2);
+
+  fail = false;
+  advance(30_000);
+  await engine.tick();
+  await vi.waitFor(() => expect(engine.history(routine.id).every((run) => run.status === 'success')).toBe(true));
+  expect(execute).toHaveBeenCalledTimes(3);
+  expect(executedIds.filter((id) => id === firstRunId)).toHaveLength(1);
+  expect(engine.history(routine.id).find((run) => run.id === firstRunId)?.resultText).toBe('External action completed');
+  await engine.stop();
+});
+
+it('restores an unsaved completion as interrupted after restart without executing it again', async () => {
+  let fail = true;
+  const execute = vi.fn(async () => ({}));
+  const first = await fixture(execute, null, async (state) => {
+    if (fail && state.runs.some((run) => run.status === 'success')) throw new Error('disk full');
+  });
+  const routine = await first.engine.put('bot', input);
+  await first.engine.runNow('bot', routine.id);
+  await vi.waitFor(() => expect(first.onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'disk full' })));
+  await first.engine.stop();
+  fail = false;
+  const second = await fixture(vi.fn(async () => ({})), first.snapshot());
+  expect(second.engine.history(routine.id)[0].status).toBe('interrupted');
+  expect(second.execute).not.toHaveBeenCalled();
+  await second.engine.stop();
+});
+
+it('keeps a deferred batch after a failed save and waits for durable requeue before executing', async () => {
+  let fail = false;
+  const execute = vi.fn<RoutineEngineDeps['execute']>().mockImplementationOnce(async () => {
+    fail = true;
+    return { deferred: true };
+  }).mockResolvedValue({ resultText: 'done' });
+  const { engine, advance, onError } = await fixture(execute, null, async (state) => {
+    if (fail && state.runs.some((run) => run.status === 'queued')) throw new Error('disk full');
+  });
+  const routine = await engine.put('bot', input);
+  await engine.publish('github', event());
+  await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+  advance(30_000);
+  await engine.tick();
+  expect(execute).toHaveBeenCalledTimes(1);
+  fail = false;
+  advance(30_000);
+  await engine.tick();
+  expect(engine.history(routine.id)[0].status).toBe('queued');
+  expect(execute).toHaveBeenCalledTimes(1);
+  advance(30_000);
+  await engine.tick();
+  await vi.waitFor(() => expect(engine.history(routine.id)[0].status).toBe('success'));
+  expect(engine.history(routine.id)[0].events).toEqual([{ sourceId: 'github', event: event() }]);
+  expect(execute).toHaveBeenCalledTimes(2);
   await engine.stop();
 });

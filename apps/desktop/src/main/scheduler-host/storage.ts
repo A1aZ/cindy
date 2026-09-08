@@ -175,7 +175,7 @@ const unreadTerminalRunWhere = () =>
   sql`${scheduleRuns.readAt} IS NULL AND ${scheduleRuns.status} IN ('success', 'failed', 'aborted', 'interrupted')`;
 
 function toScheduleSource(value: string | null): Schedule['source'] | undefined {
-  if (value === 'user' || value === 'project') return value;
+  if (value === 'user' || value === 'project' || value === 'bot') return value;
   return undefined;
 }
 
@@ -325,6 +325,11 @@ function legacyRunFromSession(
     // so old imported history does not create new attention dots.
     readAt: finishedAt,
   };
+}
+
+/** Public automation history must not expose or mutate the routine execution ledger. */
+function publicScheduleRunWhere() {
+  return sql`${scheduleRuns.scheduleId} NOT IN (SELECT id FROM schedules WHERE source = 'bot')`;
 }
 
 export class DrizzleScheduleStorage implements ScheduleStorage {
@@ -725,7 +730,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
       });
     }
 
-    return [...indexedRuns, ...legacyRuns];
+    return [...indexedRuns, ...legacyRuns].filter((run) => run.scheduleSource !== 'bot');
   }
 
   /**
@@ -1034,13 +1039,17 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
     });
   }
 
-  async deleteRun(id: string): Promise<ScheduleRun | null> {
+  async deleteRun(id: string, options?: { excludeBotSchedules?: boolean }): Promise<ScheduleRun | null> {
     const db = this.getDb();
     // 先 select 一次拿到 scheduleId（callers 需要它来定位 'changed' 事件目标 schedule）；
     // 找不到直接返回 null，不抛错（与 update/updateRun 的契约对齐）。
-    const [row] = await db.select().from(scheduleRuns).where(eq(scheduleRuns.id, id)).limit(1);
+    const condition = and(
+      eq(scheduleRuns.id, id),
+      options?.excludeBotSchedules ? publicScheduleRunWhere() : undefined,
+    );
+    const [row] = await db.select().from(scheduleRuns).where(condition).limit(1);
     if (!row) return null;
-    await db.delete(scheduleRuns).where(eq(scheduleRuns.id, id));
+    await db.delete(scheduleRuns).where(condition);
     return scheduleRunToCamel(row);
   }
 
@@ -1184,7 +1193,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
     const [row] = await db
       .select({ n: sql<number>`count(*)` })
       .from(scheduleRuns)
-      .where(unreadTerminalRunWhere());
+      .where(and(unreadTerminalRunWhere(), publicScheduleRunWhere()));
     return Number(row?.n ?? 0);
   }
 
@@ -1241,7 +1250,7 @@ export class DrizzleScheduleStorage implements ScheduleStorage {
     const result = await db
       .update(scheduleRuns)
       .set({ readAt: Date.now() })
-      .where(unreadTerminalRunWhere())
+      .where(and(unreadTerminalRunWhere(), publicScheduleRunWhere()))
       .run();
     const changes = (result as unknown as { changes?: number }).changes;
     return typeof changes === 'number' ? changes : 0;

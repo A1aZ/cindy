@@ -67,6 +67,11 @@ export class RoutineEngine {
   private readonly sources = new Map<string, RoutineSource>();
   private readonly active = new Map<string, AbortController>();
   private readonly retryAfter = new Map<string, number>();
+  // Keep the outcome after execute returns: a failed save must retry persistence,
+  // never execution. The durable running row also blocks dispatch until settled.
+  private readonly pendingSettlements = new Map<
+    string, { routineId: string; apply: (state: RoutineState) => void }
+  >();
   private tail: Promise<unknown> = Promise.resolve();
   private stopped = true;
 
@@ -265,6 +270,7 @@ export class RoutineEngine {
 
   async tick(): Promise<void> {
     if (this.stopped) return;
+    await this.retrySettlements();
     this.pump();
     const now = this.deps.now();
     if (!Object.values(this.state.next).some((time) => time <= now)) return;
@@ -346,6 +352,9 @@ export class RoutineEngine {
     )) {
       if (
         this.active.has(pending.routineId) ||
+        this.state.runs.some(
+          (run) => run.routineId === pending.routineId && run.status === "running",
+        ) ||
         (this.retryAfter.get(pending.routineId) ?? 0) > this.deps.now()
       )
         continue;
@@ -364,6 +373,22 @@ export class RoutineEngine {
           this.active.delete(pending.routineId);
           if (succeeded) this.pump();
         });
+    }
+  }
+
+  private async retrySettlements(): Promise<void> {
+    for (const [id, settlement] of this.pendingSettlements) {
+      if (
+        this.active.has(settlement.routineId) ||
+        (this.retryAfter.get(settlement.routineId) ?? 0) > this.deps.now()
+      ) continue;
+      try {
+        await this.change(settlement.apply);
+        this.pendingSettlements.delete(id);
+      } catch (error) {
+        this.retryAfter.set(settlement.routineId, this.deps.now() + 30_000);
+        this.deps.onError(error);
+      }
     }
   }
 
@@ -400,10 +425,12 @@ export class RoutineEngine {
       result.error = error instanceof Error ? error.message : String(error);
     }
     if (this.stopped) return;
-    await this.change((state) => {
+    const aborted = controller.signal.aborted;
+    const finishedAt = this.deps.now();
+    const settle = (state: RoutineState) => {
       const run = state.runs.find((row) => row.id === id);
       if (!run) return;
-      if (result.deferred && !controller.signal.aborted) {
+      if (result.deferred && !aborted) {
         if (
           !state.routines.some(
             (routine) =>
@@ -412,7 +439,7 @@ export class RoutineEngine {
           )
         ) {
           run.status = "cancelled";
-          run.finishedAt = this.deps.now();
+          run.finishedAt = finishedAt;
           return;
         }
         run.status = "queued";
@@ -422,13 +449,16 @@ export class RoutineEngine {
       const completed = { ...result };
       delete completed.deferred;
       Object.assign(run, completed, {
-        status: controller.signal.aborted
+        status: aborted
           ? "cancelled"
           : result.error
             ? "failed"
             : "success",
-        finishedAt: this.deps.now(),
+        finishedAt,
       });
-    });
+    };
+    this.pendingSettlements.set(id, { routineId: claimed.routine.id, apply: settle });
+    await this.change(settle);
+    this.pendingSettlements.delete(id);
   }
 }

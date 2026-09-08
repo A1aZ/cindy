@@ -1008,7 +1008,7 @@ export class Scheduler extends EventEmitter {
   //   这反而更贴合"Once"语义：用户手动跑过一次就视作用完。
   // Internal callers with their own durable queue may own the deferred retry.
   // This option is not exposed through schedule CRUD or public MCP arguments.
-  async runNow(id: string, options?: { deferToCaller?: boolean }): Promise<{ runId: string; deferred?: boolean }> {
+  async runNow(id: string, options?: { deferToCaller?: boolean; internalRoutine?: true }): Promise<{ runId: string; deferred?: boolean }> {
     // 手动触发不受并发闸门拦截(用户显式动作要即时响应),但计入 in-flight 占用,
     // 会挤压后续自动触发的槽位。
     const runId = this.generateId();
@@ -1025,9 +1025,10 @@ export class Scheduler extends EventEmitter {
     }
   }
 
-  private async runNowInner(id: string, runId: string, options?: { deferToCaller?: boolean }): Promise<{ runId: string; deferred?: boolean }> {
+  private async runNowInner(id: string, runId: string, options?: { deferToCaller?: boolean; internalRoutine?: true }): Promise<{ runId: string; deferred?: boolean }> {
     const schedule = await this.storage.get(id);
-    if (!schedule) throw new Error(`Schedule not found: ${id}`);
+    if (!schedule || (schedule.source === 'bot' && !options?.internalRoutine))
+      throw new Error(`Schedule not found: ${id}`);
     this.updateInflightAttempt(runId, 'persisting', schedule);
     const firedAt = this.clock.now();
     const initialRun: ScheduleRun = {
@@ -1243,14 +1244,17 @@ export class Scheduler extends EventEmitter {
   // ---------- CRUD ----------
 
   async list(filter?: ListFilter): Promise<Schedule[]> {
-    return this.storage.list(filter);
+    return (await this.storage.list(filter)).filter((schedule) => schedule.source !== 'bot');
   }
 
   async get(id: string): Promise<Schedule | null> {
-    return this.storage.get(id);
+    const schedule = await this.storage.get(id);
+    return schedule?.source === 'bot' ? null : schedule;
   }
 
   async listRuns(scheduleId: string, limit?: number): Promise<ScheduleRun[]> {
+    if ((await this.storage.get(scheduleId))?.source === 'bot')
+      throw new Error(`Schedule not found: ${scheduleId}`);
     return this.storage.listRuns(scheduleId, limit);
   }
 
@@ -1262,7 +1266,7 @@ export class Scheduler extends EventEmitter {
    * - 成功 → emit 'changed'，订阅 useRuns 的 UI 自动刷新。
    */
   async deleteRun(runId: string): Promise<void> {
-    const target = await this.storage.deleteRun(runId);
+    const target = await this.storage.deleteRun(runId, { excludeBotSchedules: true });
     if (!target) throw new Error(`Schedule run not found: ${runId}`);
     if (target.status === 'running') {
       this.logger?.warn?.('deleteRun removed a running row', { runId, scheduleId: target.scheduleId });
@@ -1271,6 +1275,7 @@ export class Scheduler extends EventEmitter {
   }
 
   async create(input: CreateScheduleInput): Promise<Schedule> {
+    if ((input as Partial<Schedule>).source === 'bot') throw new Error('invalid schedule source');
     input = this.normalizeManagedWorkingDir(input);
     const now = this.clock.now();
     const id = this.generateId();
@@ -1338,13 +1343,14 @@ export class Scheduler extends EventEmitter {
     buildPatch: (current: Schedule) => Promise<UpdateScheduleInput>,
   ): Promise<Schedule> {
     return this.serializeScheduleMutation(id, async () => {
-      const current = await this.storage.get(id);
+      const current = await this.get(id);
       if (!current) throw new Error(`Schedule not found: ${id}`);
       return this.updateUnlocked(id, await buildPatch(current));
     });
   }
 
   private async updateUnlocked(id: string, patch: UpdateScheduleInput): Promise<Schedule> {
+    if ((patch as Partial<Schedule>).source === 'bot') throw new Error('invalid schedule source');
     patch = this.normalizeManagedWorkingDir(patch);
     // patch 显式给了真实 workingDir 而未指明 workspaceKind 时,同步翻成 project
     // (与 create 的推断对称)—— 否则 dialogue 任务被改了目录后仍是 dialogue,
@@ -1367,7 +1373,7 @@ export class Scheduler extends EventEmitter {
     if (Object.prototype.hasOwnProperty.call(patch, 'preRunHook') && patch.preRunHook === null) {
       updates.preRunHook = undefined;
     }
-    const existing = await this.storage.get(id);
+    const existing = await this.get(id);
     if (!existing) throw new Error(`Schedule not found: ${id}`);
     const candidate: Schedule = { ...existing, ...updates };
     validateScheduleExecutionShape(
@@ -1474,14 +1480,17 @@ export class Scheduler extends EventEmitter {
     return updated;
   }
 
-  async pause(id: string, opts?: { exemptRunId?: string }): Promise<Schedule> {
+  async pause(id: string, opts?: { exemptRunId?: string; internalRoutine?: true }): Promise<Schedule> {
     return this.serializeScheduleMutation(id, () => this.pauseUnlocked(id, opts));
   }
 
   private async pauseUnlocked(
     id: string,
-    opts?: { exemptRunId?: string },
+    opts?: { exemptRunId?: string; internalRoutine?: true },
   ): Promise<Schedule> {
+    const schedule = await this.storage.get(id);
+    if (!schedule || (schedule.source === 'bot' && !opts?.internalRoutine))
+      throw new Error(`Schedule not found: ${id}`);
     // 先中断这条 schedule 名下所有 in-flight run。pause 语义 = 立刻停 + 不再触发,
     // in-flight 跑完才算停就跟用户预期不符(且老行为还会更新 lastFinishedAt 把 schedule
     // 数据弄脏)。abort 触发后 fireOne 的 wasAborted 分支会自己把 run 标 'aborted'。
@@ -1501,7 +1510,7 @@ export class Scheduler extends EventEmitter {
   }
 
   private async resumeUnlocked(id: string): Promise<Schedule> {
-    const existing = await this.storage.get(id);
+    const existing = await this.get(id);
     if (!existing) throw new Error(`Schedule not found: ${id}`);
     const now = this.clock.now();
     // 与 create/update 对齐：恢复 interval 任务前也验证它保留的 cron 元数据，不能
@@ -1526,7 +1535,7 @@ export class Scheduler extends EventEmitter {
     return updated;
   }
 
-  async delete(id: string, opts?: { exemptRunId?: string }): Promise<void> {
+  async delete(id: string, opts?: { exemptRunId?: string; internalRoutine?: true }): Promise<void> {
     return this.serializeScheduleMutation(id, () => this.deleteUnlocked(id, opts));
   }
 
@@ -1553,7 +1562,10 @@ export class Scheduler extends EventEmitter {
     }
   }
 
-  private async deleteUnlocked(id: string, opts?: { exemptRunId?: string }): Promise<void> {
+  private async deleteUnlocked(id: string, opts?: { exemptRunId?: string; internalRoutine?: true }): Promise<void> {
+    const schedule = await this.storage.get(id);
+    if (schedule?.source === 'bot' && !opts?.internalRoutine)
+      throw new Error(`Schedule not found: ${id}`);
     // 先中断 in-flight,等它们 settle,再删 schedule 行。否则被删 schedule 名下的
     // in-flight run 会继续跑到底(原行为),用户点删除后看到的是"还在跑"。
     // abort + 等待逻辑见 abortInflightAndWait。

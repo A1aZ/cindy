@@ -1578,3 +1578,24 @@ describe('DrizzleScheduleStorage (in-memory)', () => {
     }
   });
 });
+
+it('excludes internal routine history from public indexes, unread counts and deletion', async () => {
+  const harness = createStorageHarness();
+  try {
+    await harness.storage.insert(baseSchedule({ id: 'public' }));
+    await harness.storage.insert(baseSchedule({ id: 'routine-owned', source: 'bot', manual: true }));
+    await harness.storage.insertRun({ id: 'public-run', scheduleId: 'public', firedAt: 1, finishedAt: 2, status: 'success' });
+    await harness.storage.insertRun({ id: 'routine-run', scheduleId: 'routine-owned', firedAt: 1, finishedAt: 2, status: 'success' });
+    expect((await harness.storage.listSidebarIndexRuns()).map((run) => run.runId)).toEqual(['public-run']);
+    expect(await harness.storage.getUnreadRunCount()).toBe(1);
+    await expect(harness.storage.deleteRun('routine-run', { excludeBotSchedules: true })).resolves.toBeNull();
+    expect(await harness.storage.listRuns('routine-owned')).toHaveLength(1);
+    await harness.storage.markAllUnreadRuns();
+    expect(await harness.storage.getUnreadRunCount()).toBe(0);
+    expect((await harness.storage.listRuns('routine-owned'))[0].readAt).toBeUndefined();
+    await expect(harness.storage.deleteRun('routine-run')).resolves.toMatchObject({ id: 'routine-run' });
+    await expect(harness.storage.deleteRun('public-run', { excludeBotSchedules: true })).resolves.toMatchObject({ id: 'public-run' });
+  } finally {
+    harness.close();
+  }
+});

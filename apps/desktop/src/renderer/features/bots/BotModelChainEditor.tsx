@@ -53,10 +53,11 @@ export function BotModelChainEditor({
   // roster. Remote callers supply their own device's hiddenVendors instead.
   const visibleVendors = (['pi', 'codex', 'cc'] as const)
     .filter((vendor) => !hiddenVendors.includes(vendor))
-    .filter((vendor) => remote || !loaded || availableVendors.has(vendor));
+    .filter((vendor) => remote || (loaded && availableVendors.has(vendor)));
   const unifiedAgents = visibleVendors.map(agentKindFor);
 
   const replace = (index: number, patch: Partial<BotModelRoute>) => {
+    if (!remote && !loaded) return;
     const editable = routes.length ? routes : [{ harness: 'pi' as const, model: '', providerId: null, effort: '', fastMode: false }];
     onChange(editable.map((route, at) => (at === index ? { ...route, ...patch } : route)));
   };
@@ -81,6 +82,7 @@ export function BotModelChainEditor({
   const picker = (route: BotModelRoute, index: number) => (
     <div className="min-w-0 flex-1">
       <ModelSelector
+        disabled={!remote && !loaded}
         vendorKey={vendorFor(route.harness)}
         modelId={route.model}
         effort={route.effort}

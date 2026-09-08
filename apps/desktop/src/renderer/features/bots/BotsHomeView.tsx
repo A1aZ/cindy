@@ -80,6 +80,14 @@ export function BotSettings({
   const [avatarColor, setAvatarColor] = useState(bot.avatarColor);
   const [selectedSkills, setSelectedSkills] = useState<string[]>(bot.skills);
   const [capabilities, setCapabilities] = useState<BotCapabilities>(bot.capabilities);
+  // Live defaults are display state, not form edits: refreshing them must not
+  // dirty autosave or overwrite a local model override / pending text edits.
+  useProviders();
+  useAvailableAgents();
+  useSyncExternalStore(subscribeBotGlobalModel, () => JSON.stringify(getEffectiveBotModelChain()));
+  const displayedModelChain = capabilities.modelChainOverride === null
+    ? getEffectiveBotModelChain()
+    : capabilities.modelChain;
   const [folderError, setFolderError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
@@ -292,7 +300,7 @@ export function BotSettings({
                 }));
                 autosave.onEdit('instant');
               }}
-              value={capabilities.modelChain}
+              value={displayedModelChain}
               onChange={(modelChain) => {
                 const primary = modelChain[0];
                 if (!primary) return;

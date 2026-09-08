@@ -165,11 +165,21 @@ describe('BotModelChainEditor', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('keeps the existing loading behavior and the remote callers runtime filter', () => {
+  it('blocks unknown local runtimes until the roster loads and preserves remote filtering', () => {
     roster.availableVendors = new Set();
     roster.loaded = false;
-    const view = render(<BotModelChainEditor value={[]} onChange={vi.fn()} />);
-    expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['pi', 'codex', 'claude-code']);
+    const onChange = vi.fn();
+    const view = render(<BotModelChainEditor value={[]} onChange={onChange} />);
+    expect(modelSelectorProps.mock.lastCall?.[0]).toMatchObject({ unifiedAgents: [], disabled: true });
+    fireEvent.click(screen.getByText('choose-official-codex-model'));
+    fireEvent.click(screen.getByText('set-high-effort'));
+    fireEvent.click(screen.getByText('enable-fast-mode'));
+    expect(onChange).not.toHaveBeenCalled();
+    roster.availableVendors = new Set(['codex']);
+    roster.loaded = true;
+    view.rerender(<BotModelChainEditor value={[]} onChange={onChange} />);
+    fireEvent.click(screen.getByText('choose-official-codex-model'));
+    expect(onChange).toHaveBeenCalledWith([expect.objectContaining({ harness: 'codex' })]);
     roster.loaded = true;
     view.rerender(<BotModelChainEditor value={[]} onChange={vi.fn()} remote hiddenVendors={['codex']} />);
     expect(modelSelectorProps.mock.lastCall?.[0].unifiedAgents).toEqual(['pi', 'claude-code']);

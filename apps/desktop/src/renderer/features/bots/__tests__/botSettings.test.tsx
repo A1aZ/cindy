@@ -77,10 +77,12 @@ vi.mock('../BotLifecycleSettings', () => ({
   BotLifecycleSettings: () => <div data-testid="bot-lifecycle-settings" />,
 }));
 vi.mock('@/components/new-chat/ModelSelector', () => ({
-  ModelSelector: ({ unifiedAgents, onUnifiedSelect }: {
+  ModelSelector: ({ unifiedAgents, onUnifiedSelect, modelId, onEffortChange }: {
+    modelId: string;
+    onEffortChange: (effort: string) => void;
     unifiedAgents: string[];
     onUnifiedSelect: (selection: unknown) => void;
-  }) => <>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
+  }) => <><button data-testid="current-model" onClick={() => onEffortChange('high')}>{modelId}</button>{(['pi', 'codex'] as const).filter((engine) => unifiedAgents.includes(engine)).map((engine) => (
     <button key={engine} data-testid={engine === 'pi' ? 'model-selector' : 'codex-model-selector'} onClick={() => onUnifiedSelect({ engine, providerId: 'custom', modelId: 'custom-model', effort: 'high', fast: false })}>select-{engine}-model</button>
   ))}</>,
 }));
@@ -348,6 +350,57 @@ describe('Bot settings profile consolidation', () => {
 });
 
 describe('Bot settings unified autosave', () => {
+  it.each(['provider', 'runtime', 'global chain'] as const)(
+    'refreshes a nonempty default chain after %s changes without saving or losing edits',
+    async (source) => {
+      vi.useFakeTimers();
+      const oldRoute = capabilities().modelChain[0]!;
+      mocks.defaultModelChain = [oldRoute];
+      const view = renderSettings();
+      const nextRoute = { ...oldRoute, harness: 'codex' as const, model: 'new-default', providerId: 'openai' };
+      act(() => {
+        mocks.defaultModelChain = [nextRoute];
+        if (source === 'provider') {
+          commitProvidersSnapshot(beginProvidersRefresh(), {
+            dataOwnerId: null, ownerGeneration: 0, providers: [], providerOrder: [],
+          });
+        } else if (source === 'runtime') {
+          mocks.availableVendors = new Set(['codex']);
+          for (const listener of mocks.runtimeListeners) listener();
+        } else {
+          for (const listener of mocks.modelListeners) listener();
+        }
+      });
+      expect(screen.getByTestId('current-model').textContent).toBe('new-default');
+      await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+      expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Pending name' } });
+      fireEvent.click(screen.getByTestId('current-model'));
+      act(() => {
+        mocks.defaultModelChain = [{ ...nextRoute, model: 'later-default' }];
+        for (const listener of mocks.modelListeners) listener();
+      });
+      expect(screen.getByTestId('current-model').textContent).toBe('new-default');
+      expect((screen.getByLabelText('bots.nameLabel') as HTMLInputElement).value).toBe('Pending name');
+      await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+      expect(mocks.updateBotProfile.mock.lastCall?.[1]).toMatchObject({
+        name: 'Pending name',
+        capabilities: { modelChainOverride: [{ ...nextRoute, effort: 'high' }] },
+      });
+      view.unmount();
+    },
+  );
+
+  it('does not persist a default refresh when leaving settings', () => {
+    const view = renderSettings();
+    act(() => {
+      mocks.defaultModelChain = [{ ...capabilities().modelChain[0]!, model: 'updated-default' }];
+      for (const listener of mocks.modelListeners) listener();
+    });
+    view.unmount();
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+  });
+
   it('debounces basic text edits through the existing profile channel', async () => {
     vi.useFakeTimers();
     renderSettings();

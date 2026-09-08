@@ -58,4 +58,24 @@ describe('sim-rebuild script invariants', () => {
     expect(source).toContain('`platform=iOS Simulator,id=${simulatorUdid}`');
     expect(source).toContain("'-destination', simulatorDestination");
   });
+
+  it('uses the Android debug client on Windows without invoking xcrun', () => {
+    expect(source).toContain("import { ensureWindowsAndroidEmulator } from './lib/android-simulator.mjs';");
+    expect(source).toContain("import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';");
+    expect(source).toContain("if (process.platform === 'win32') {");
+    expect(source).toContain('await rebuildAndroidSimulator();');
+    expect(source).toContain("'--platform', 'android', '--no-install'");
+    expect(source).toContain("const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';");
+    expect(source).toContain("process.env.ComSpec || 'cmd.exe'");
+    expect(source).toContain('resolvePnpmInvocation');
+    expect(source).toContain('function runPnpm(args, opts = {})');
+    expect(source).toContain("run(gradle, ['assembleDebug']");
+    expect(source).toContain("'install', '-r', apk");
+    expect(source).toContain("'shell', 'monkey', '-p', packageName, '1'");
+
+    const windowsBranch = source.indexOf("if (process.platform === 'win32') {");
+    const iosXcrunProbe = source.indexOf("capture('xcrun', ['simctl', 'list', 'devices', 'booted'])");
+    expect(windowsBranch).toBeGreaterThanOrEqual(0);
+    expect(iosXcrunProbe).toBeGreaterThan(windowsBranch);
+  });
 });

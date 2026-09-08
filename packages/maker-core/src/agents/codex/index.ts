@@ -13597,7 +13597,7 @@ export class CodexAgent extends BaseAgent {
       );
       const params: ThreadForkParams = {
         threadId: opts.sourceSdkSessionId,
-        persistExtendedHistory: true,
+        ...(!usedNativeForkAnchor ? { persistExtendedHistory: true } : {}),
         ...(usedNativeForkAnchor ? { lastTurnId } : {}),
         // 响应体瘦身:fork 后 Cindy 自己的会话数据负责历史展示,thread.turns 全量
         // 回传只会撑爆单行上限。老 daemon 不认识该字段则保持 legacy 行为 —— 此时

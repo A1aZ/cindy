@@ -22438,7 +22438,6 @@ describe('CodexAgent.forkSdkSession', () => {
     expect(host.request).toHaveBeenCalledWith(Method.ThreadFork, {
       threadId: 'source-thread-id',
       lastTurnId: 'turn-at-boundary',
-      persistExtendedHistory: true,
       excludeTurns: true,
       cwd: '/repo',
     });
@@ -22476,7 +22475,6 @@ describe('CodexAgent.forkSdkSession', () => {
     expect(host.request).toHaveBeenCalledWith(Method.ThreadFork, {
       threadId: 'imported-source-thread',
       lastTurnId: 'turn-at-boundary',
-      persistExtendedHistory: true,
       excludeTurns: true,
     });
   });

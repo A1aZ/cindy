@@ -52,7 +52,9 @@ Computers without this channel reject it and the phone asks for an upgrade. Scre
 data and signaling are never added to the generic broadcast allowlist.
 
 WebRTC carries a video track and an ordered input DataChannel. Capture runs in
-the existing, trusted main renderer, with exact Main-side host identity checks.
+a dedicated sandboxed renderer with a narrow preload and exact Main-side host
+identity checks. The main application renderer does not receive capture frames
+or the capture bridge. Main destroys the capture host when its authority ends.
 The phone runs a dedicated trusted inline WebView document; the untrusted HTML
 preview's restrictions are unchanged. The mobile presentation module requests scene rotation and a playback audio session
 for system picture in picture. This requires a new native mobile build. Voice
@@ -161,6 +163,25 @@ three seconds with a twelve-second expiry. Every input and completed capture is
 checked against current authorization. Local stop, revocation, relay loss, peer
 offline, display changes, and capture-host loss stop the lease. Stale operations
 cannot resurrect a stopped lease. Input sequence numbers prevent replay.
+
+### Local UI authority versus compromised application code
+
+Local control switches, controller restoration and revocation require a
+registered Cindy application top-level frame. Account capability alone does not
+authorize these IPC calls. None of the local remote-desktop or control-grant
+channels is available through the remote invoke allowlist. This source check
+does not add another confirmation to ordinary settings changes.
+
+These checks authenticate the calling surface, not the person behind each
+JavaScript call. They cannot distinguish the legitimate application from
+arbitrary JavaScript executing in the same main application frame. That frame
+also has existing terminal, file-editing and Agent-control bridges. Capture
+isolation and a native confirmation on one switch do not isolate those other
+capabilities or protect same-user settings against arbitrary local execution.
+The compromised-main-renderer opt-in path remains a security review concern;
+the source checks must not be presented as resolving it. Addressing that threat
+requires a coordinated application capability boundary, rather than treating
+one extra dialog as proof of local human consent.
 
 The native helper holds actual down/up state and releases it on EOF/stop, with a
 watchdog for an unresponsive parent. Input batches and queues are bounded; a

@@ -37,6 +37,11 @@ vi.mock('@/lib/sessionService', () => ({
   touchUserSend: vi.fn(async () => ({})),
 }));
 vi.mock('@/lib/sessionsBus', () => ({ emitPatch: vi.fn() }));
+vi.mock('@/features/device-link/mirrorCacheClient', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/features/device-link/mirrorCacheClient')>(),
+  readCachedMessages: vi.fn(async () => []),
+  clearCachedMessages: vi.fn(),
+}));
 vi.mock('@/lib/userPromptStore', () => ({ getUserPrompt: () => '' }));
 vi.mock('@/lib/imageRef', () => ({
   parseUserContent: vi.fn((c: string) => ({ text: c, images: [], files: [] })),
@@ -52,6 +57,7 @@ import { makerChatStore, getRemoteHistoryView } from '@/lib/makerChatStore';
 import { projectHistoryView } from '@cindy/maker-shared/message-window';
 import { getLatestMessageTodoState } from '@cindy/maker-shared/message-render';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
+import { readCachedMessages, clearCachedMessages } from '@/features/device-link/mirrorCacheClient';
 
 // ─── 忠实的被控端内存替身(单一真相源)───────────────────────────────────────────
 
@@ -224,6 +230,101 @@ afterEach(() => {
 });
 
 describe('device-link controller mirror — end-to-end scenarios', () => {
+  it.each(['empty', 'rewound', 'failure', 'late-cache'])('hands off cold cache to authoritative history (%s)', async (scenario) => {
+    const s = sid();
+    const create = { ...dbMessage(s, 'create', '', '2026-06-15T00:00:00.000Z', 'tool_use'),
+      content: { toolName: 'TodoWrite', input: { todos: [{ content: 'Deleted plan', status: 'pending', activeForm: 'Working' }] } } } as unknown as Message;
+    const cached = [create, dbMessage(s, 'same', 'stale text', '2026-06-15T00:00:01.000Z', 'user')];
+    let finishCache: (rows: Message[]) => void = () => {};
+    vi.mocked(readCachedMessages).mockImplementationOnce(() => scenario === 'late-cache'
+      ? new Promise((resolve) => { finishCache = resolve; }) : Promise.resolve(cached));
+    host.enableHistoryView();
+    host.seedSession(s, {}, scenario === 'rewound'
+      ? [dbMessage(s, 'same', 'current text', '2026-06-15T00:00:01.000Z', 'user')] : []);
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+    const invoke = host.invoke.getMockImplementation()!;
+    let finishPage: () => void = () => {};
+    host.invoke.mockImplementation(async (device, channel, args) => {
+      if (channel === 'local-db:messages:view') {
+        await new Promise<void>((resolve) => { finishPage = resolve; });
+        if (scenario === 'failure') throw new Error('timeout');
+      }
+      return invoke(device, channel, args);
+    });
+    try {
+      makerChatStore.ensureInitialMessages(s);
+      await flush();
+      if (scenario !== 'late-cache') {
+        expect(getLatestMessageTodoState(makerChatStore.getSnapshot(s).messages).hasPlanEvent).toBe(true);
+        expect(makerChatStore.getSnapshot(s).messages.every((row) => row.cacheHydrated)).toBe(true);
+      }
+      // A push arriving during the cache handoff is not part of the stale cache.
+      if (scenario === 'rewound') host.hostMessage(s, dbMessage(s, 'live', 'live output', '2026-06-15T00:00:02.000Z'));
+      finishPage();
+      await flush();
+      finishCache(cached);
+      await flush();
+      const state = makerChatStore.getSnapshot(s);
+      if (scenario === 'failure') {
+        expect(state.messages).toHaveLength(2);
+        expect(state.historyLoaded).toBe(false);
+        expect(clearCachedMessages).not.toHaveBeenCalled();
+      } else {
+        expect(state.historyLoaded).toBe(true);
+        expect(state.messages.some((row) => row.cacheHydrated)).toBe(false);
+        expect(getLatestMessageTodoState(state.messages).hasPlanEvent).toBe(false);
+        expect(clearCachedMessages).toHaveBeenCalledWith(DEVICE_ID, s);
+        if (scenario === 'rewound') {
+          expect(state.messages.map((row) => row.content)).toEqual(['current text', 'live output']);
+        } else expect(state.messages).toHaveLength(0);
+      }
+    } finally {
+      makerChatStore.purgeSession(s);
+    }
+  });
+
+  it.each(['demote', 'in-flight-demote', 'purge'])('releases unmounted prefetch without starting another read (%s)', async (mode) => {
+    vi.useFakeTimers();
+    const s = sid();
+    let finishPage: () => void = () => {};
+    try {
+      host.enableHistoryView();
+      host.seedSession(s, {}, [dbMessage(s, 'old', 'old text', '2026-06-15T00:00:00.000Z')]);
+      remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s } as Session]);
+      makerChatStore.ensureInitialMessages(s);
+      await vi.advanceTimersByTimeAsync(0);
+      const view = getRemoteHistoryView(s)!;
+      const invoke = host.invoke.getMockImplementation()!;
+      if (mode === 'in-flight-demote') {
+        host.invoke.mockImplementation(async (device, channel, args) => {
+          if (channel === 'local-db:messages:view') await new Promise<void>((resolve) => { finishPage = resolve; });
+          return invoke(device, channel, args);
+        });
+        void view.refresh();
+      }
+      const reads = host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view').length;
+      if (mode === 'purge') makerChatStore.purgeSession(s);
+      else await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(view.isActive()).toBe(false);
+      expect(getRemoteHistoryView(s)).toBeUndefined();
+      finishPage();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(reads);
+      expect(makerChatStore.getSnapshot(s).messages).toHaveLength(0);
+      host.invoke.mockImplementation(invoke);
+      host.seedSession(s, {}, [dbMessage(s, 'new', 'new text', '2026-06-15T00:00:01.000Z')]);
+      // Re-prefetch must work even without a mounted view to reactivate it.
+      makerChatStore.ensureInitialMessages(s);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(makerChatStore.getSnapshot(s).messages.map((row) => row.content)).toEqual(['new text']);
+      expect(host.invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:view')).toHaveLength(reads + 1);
+    } finally {
+      finishPage();
+      makerChatStore.purgeSession(s);
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['mounted', 'prefetched', 'resumed', 'discovered', 'stalled'])('discovers plans through visible pages and stops without progress (%s)', async (entry) => {
     vi.useFakeTimers();
     const s = sid();

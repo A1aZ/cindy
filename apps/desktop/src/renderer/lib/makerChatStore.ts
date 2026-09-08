@@ -3417,6 +3417,8 @@ function _purgeSession(sessionId: string): void {
   backgroundTaskStaleRetrySessions.delete(sessionId);
   // 代际递增(bump 而非 delete,原因见 _messagesEpoch 注释):作废 in-flight 翻页,
   // 避免其提交把旧窗口 merge 进 purge 后重建的空 slice。
+  getRemoteHistoryView(sessionId)?.setActive(false);
+  remoteHistoryViews.delete(sessionId);
   invalidateMessageHistoryWindow(sessionId);
   invalidateInputProjectionRequests(sessionId);
   // 删除 / 归档 / LRU 都是 renderer owner 边界。作废仍在附件物化或 composer
@@ -3425,8 +3427,6 @@ function _purgeSession(sessionId: string): void {
   cancelRemoteOptimisticSendsForSessionPurge(sessionId);
   clearWakeBridgeReconcileTimer(sessionId);
   cancelIdlePlanDiscovery(sessionId);
-  getRemoteHistoryView(sessionId)?.setActive(false);
-  remoteHistoryViews.delete(sessionId);
   sessions.delete(sessionId);
   localSentUserMessageIds.delete(sessionId);
   pendingLocalRetryIntents.delete(sessionId);
@@ -4051,6 +4051,10 @@ function _demoteIdleSessions(): void {
     // 分页锁。漏 bump 的后果是 in-flight 那一页按 demote 前的游标提交,把一段脱离上下文
     // 的旧历史 merge 进空切片(或重开后的新切片),最近的消息反而缺席(#676 review)。
     cancelIdlePlanDiscovery(sessionId);
+    // Discard the view with its message slice. Resetting an active prefetch would
+    // start another read and immediately repopulate the cache being evicted.
+    getRemoteHistoryView(sessionId)?.setActive(false);
+    remoteHistoryViews.delete(sessionId);
     invalidateMessageHistoryWindow(sessionId);
     setState(sessionId, (s) => ({
       ...s,
@@ -10678,7 +10682,7 @@ function createRemoteHistoryView(sessionId: string) {
     const available = snapshot.items.flatMap((item) => item.type === 'messages' ? item.messages : []);
     for (const detail of snapshot.details.values()) available.push(...detail.messages);
     setState(sessionId, (state) => ({ ...state, historyLoaded: true,
-      messages: mergeMessages(available, state.messages, { addOnly: true }),
+      messages: mergeMessages(available, state.messages.filter((message) => !message.cacheHydrated), { addOnly: true }),
       hasMoreMessages: snapshot.hasMore, isLoadingMore: snapshot.loading,
       oldestMessageId: snapshot.nextCursor,
       historyWindowHasIsland: false,
@@ -10817,6 +10821,12 @@ function ensureInitialMessages(sessionId: string): void {
       await view.refresh();
       const snapshot = view.getSnapshot();
       if (!snapshot.error && snapshot.ready) {
+        if (isCurrentHistoryLoad()) {
+          // This path bypasses the raw latest-page cache write. Retire that old
+          // cache instead of persisting an incomplete projection as raw history.
+          clearCachedMessages(historyOriginAtStart!, sessionId);
+          settleCacheHydration(sessionId);
+        }
         releaseHistoryFetchIfCurrent(sessionId, historyFetchToken);
         void reconcilePendingInteractions(sessionId);
         scheduleIdlePlanDiscoveryIfNeeded(sessionId);

@@ -66,12 +66,18 @@ describe('sim-rebuild script invariants', () => {
     expect(source).toContain('await rebuildAndroidSimulator();');
     expect(source).toContain("'--platform', 'android', '--no-install'");
     expect(source).toContain("const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';");
-    expect(source).toContain("process.env.ComSpec || 'cmd.exe'");
+    expect(source).toContain("run('cmd.exe', ['/d', '/s', '/c', 'gradlew.bat assembleDebug']");
+    expect(source).not.toContain('process.env.ComSpec');
     expect(source).toContain('resolvePnpmInvocation');
     expect(source).toContain('function runPnpm(args, opts = {})');
     expect(source).toContain("run(gradle, ['assembleDebug']");
     expect(source).toContain("'install', '-r', apk");
     expect(source).toContain("'shell', 'monkey', '-p', packageName, '1'");
+    expect(source).toContain('function ensureMetroOwnershipBeforeLaunch(packageName)');
+    const metroGate = source.indexOf('if (!ensureMetroOwnershipBeforeLaunch(packageName)) return;');
+    const androidLaunch = source.indexOf("'shell', 'monkey', '-p', packageName, '1'");
+    expect(metroGate).toBeGreaterThanOrEqual(0);
+    expect(metroGate).toBeLessThan(androidLaunch);
 
     const windowsBranch = source.indexOf("if (process.platform === 'win32') {");
     const iosXcrunProbe = source.indexOf("capture('xcrun', ['simctl', 'list', 'devices', 'booted'])");

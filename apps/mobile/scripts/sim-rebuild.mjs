@@ -120,6 +120,7 @@ const envResult = ensureMobileEnv({ mobileDir, authRegion: region, endpointEnv: 
 console.log(formatMobileEnvStatus(envResult, worktreeRoot));
 console.log(`==> Mobile dev region: ${region}`);
 const envChanged = envResult.created || envResult.addedKeys.length > 0;
+const currentSource = gitSourceIdentity(worktreeRoot);
 
 const run = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { stdio: 'inherit', cwd: mobileDir, env: devProcessEnv, ...opts });
@@ -168,6 +169,30 @@ if (!buildOnly) {
   }
 }
 
+function ensureMetroOwnershipBeforeLaunch(packageName) {
+  const metroPid = listenerPid(8081);
+  if (!metroPid) return true;
+  const metroCwd = cwdOfPid(metroPid);
+  const foreign = !metroCwd || !isInside(worktreeRoot, metroCwd);
+  const runningSource = gitSourceOfPid(metroPid);
+  if (foreign || runningSource !== currentSource) {
+    const why = foreign
+      ? `foreign worktree (${metroCwd || 'unknown'})`
+      : `stale source (${runningSource || 'unknown'}; current=${currentSource})`;
+    console.log(`\\nNative package installed (${packageName}).`);
+    console.error(`Metro on 8081 is not owned by the current source: ${why}.`);
+    console.error('Stop it, start this worktree with pnpm mobile:sim:start, then launch the app.');
+    return false;
+  }
+  if (envChanged) {
+    console.log(`\\nNative package installed (${packageName}).`);
+    console.error('Metro on 8081 was started with an older apps/mobile/.env.');
+    console.error('Restart Metro with pnpm mobile:sim:start before launching the app.');
+    return false;
+  }
+  return true;
+}
+
 async function rebuildAndroidSimulator() {
   const emulator = buildOnly
     ? { serial: null, adb: null }
@@ -180,7 +205,7 @@ async function rebuildAndroidSimulator() {
   const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';
   console.log('› Android gradle assembleDebug');
   if (process.platform === 'win32') {
-    run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${gradle} assembleDebug"`], {
+    run('cmd.exe', ['/d', '/s', '/c', 'gradlew.bat assembleDebug'], {
       cwd: androidDir,
       env: javaEnv,
       windowsVerbatimArguments: true,
@@ -214,6 +239,7 @@ async function rebuildAndroidSimulator() {
   console.log(`› 安装 Android debug 包到 ${serial}`);
   run(adb, [...target, 'install', '-r', apk]);
   run(adb, [...target, 'shell', 'am', 'force-stop', packageName]);
+  if (!ensureMetroOwnershipBeforeLaunch(packageName)) return;
   run(adb, [...target, 'shell', 'monkey', '-p', packageName, '1']);
   console.log(`\n✓ 完成: ${packageName} 已重装并启动。JS 改动直接由 Metro Fast Refresh 提供。`);
 }
@@ -329,7 +355,6 @@ const metroPid = listenerPid(8081);
 if (metroPid) {
   const metroCwd = cwdOfPid(metroPid);
   const foreign = !metroCwd || !isInside(worktreeRoot, metroCwd);
-  const currentSource = gitSourceIdentity(worktreeRoot);
   const runningSource = gitSourceOfPid(metroPid);
   if (foreign || runningSource !== currentSource) {
     const why = foreign

@@ -509,6 +509,8 @@ export async function runGrokOAuthLogin(opts?: {
   onProgress?: (msg: string) => void;
   /** Host-only callback; URL must never be persisted in chat. */
   onAuthorizationUrl?: (url: string) => void;
+  /** Main-only caller boundary, rechecked after token exchange before persistence. */
+  assertCurrent?: () => void;
 }): Promise<GrokOAuthLoginResult> {
   cancelGrokOAuthLogin(); // 同一时刻只允许一个登录流
 
@@ -587,6 +589,7 @@ export async function runGrokOAuthLogin(opts?: {
     // token exchange 的 fetch 带 signal,但 res.json() / nonce 校验期间到达的 abort
     // 不会中断已 resolve 的响应体 —— 落盘前最后检查,保证"已取消"的登录绝不写凭证。
     if (abort.signal.aborted) throw new Error('login_cancelled');
+    opts?.assertCurrent?.();
     writeBlob(blobFromTokenResponse(tok));
     bindNativeProviderAuth('xai');
     advanceGrokOAuthCredentialGeneration();

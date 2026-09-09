@@ -159,7 +159,7 @@ export function initializeBotAuthorizationHost(
           async execute(_action, _sender, _value, onAuthorizationUrl, assertCurrent) {
             await assertSession(sessionId);
             assertCurrent?.();
-            const result = await runGrokOAuthLogin({ onAuthorizationUrl });
+            const result = await runGrokOAuthLogin({ onAuthorizationUrl, assertCurrent });
             await assertSession(sessionId);
             if (result.ok) {
               bus.emit('host:grok', { source: 'oauth' });
@@ -245,6 +245,7 @@ export function initializeBotAuthorizationHost(
               action,
               responseTarget: sender,
               onAuthorizationUrl,
+              assertCurrent,
             });
             if (result.ok && action.kind === 'oauth_connect') reconnected = true;
             return result;

@@ -4977,6 +4977,7 @@ export async function executeGhostSetupAction(args: {
   action: GhostSetupAllowedAction;
   responseTarget?: GhostSetupInteractionResponseTarget;
   onAuthorizationUrl?: (url: string) => void;
+  assertCurrent?: () => void;
 }): Promise<GhostSetupActionResult> {
   const ghost = findAvailableGhost(args.ghostId);
   if (!ghost) {
@@ -5013,7 +5014,7 @@ export async function executeGhostSetupAction(args: {
       args.ghostId,
       secretKey,
       decl,
-      { deliveryHosts: runtimeManifest.network?.hosts, onAuthorizationUrl: args.onAuthorizationUrl },
+      { deliveryHosts: runtimeManifest.network?.hosts, onAuthorizationUrl: args.onAuthorizationUrl, assertCurrent: args.assertCurrent },
     );
     return connected.ok
       ? { ok: true }

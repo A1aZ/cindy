@@ -753,6 +753,26 @@ describe('missingAuthScopes(快照推断)', () => {
 });
 
 describe('connectAccount', () => {
+  it('does not commit OAuth tokens when the card is invalidated during identity lookup', async () => {
+    const vault = memoryVault({ [`${KEY}-client-id`]: 'cid' });
+    const before = new Map(vault.data);
+    let current = true;
+    const mgr = new GhostOauthAccountManager({
+      vault, openExternal: autoBrowser(),
+      fetchImpl: (async (input) => {
+        if (String(input) === DECL.tokenUrl)
+          return jsonResponse({ access_token: 'fake-access', refresh_token: 'fake-refresh', expires_in: 3600 });
+        current = false;
+        return jsonResponse({ email: 'test@example.com' });
+      }) as typeof fetch,
+    });
+    await expect(mgr.connectAccount(GHOST, KEY, DECL, {
+      assertCurrent: () => { if (!current) throw new Error('card withdrawn'); },
+    })).rejects.toThrow('card withdrawn');
+    expect(vault.data).toEqual(before);
+    expect(mgr.listAccounts(GHOST, KEY)).toHaveLength(0);
+  });
+
   it('端口回收器只对第一方官方意识放行(第三方 redirectPort 不许借刀杀进程)', async () => {
     const blocker = http.createServer();
     const heldPort = await new Promise<number>((resolve) => {

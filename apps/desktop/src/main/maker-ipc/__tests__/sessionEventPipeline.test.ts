@@ -819,6 +819,17 @@ describe('provider turn observer on real Session.send', () => {
     );
     await h.dispose();
   });
+  it('stops a removed explicit account before lease and provider dispatch', async () => {
+    const h = harness(), deps = observerDeps();
+    effects.fn('getSessionProvider').mockReturnValue('deleted-account');
+    effects.fn('verdictForModelRoute').mockResolvedValue({ kind: 'reject', reason: 'explicit-source-unavailable' });
+    const dispose = installSessionTurnObserver(deps, h.session);
+    try {
+      await expect(h.session.send('test')).rejects.toThrow('deleted-account');
+      expect(deps.sessionTurnLeaseTracker.markTurnStarted).not.toHaveBeenCalled();
+      expect(h.handle.send).not.toHaveBeenCalled();
+    } finally { dispose(); await h.dispose(); }
+  });
   it('leaves remote provider admission and leases to the remote host', async () => {
     const h = harness(),
       deps = observerDeps();

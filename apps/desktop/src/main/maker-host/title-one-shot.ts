@@ -43,6 +43,7 @@ import {
   findModelRegistryRoute,
   isModelSelectableForNewRoute,
   nativeDefaultSourceId,
+  providerCatalogId,
 } from '@cindy/model-providers';
 import { toSdkModelString } from '@cindy/maker-core';
 
@@ -169,7 +170,7 @@ function findTitleCatalogModel(provider: Provider, modelId: string) {
   return undefined;
 }
 
-type TitleRouteUnavailableReason = 'disabled' | 'retired' | 'capability-model';
+type TitleRouteUnavailableReason = 'disabled' | 'retired' | 'capability-model' | 'provider-unavailable';
 
 function titleRouteUnavailableReason(
   model: CatalogModel,
@@ -591,6 +592,7 @@ log.debug('title oneShot skipped: no title target', {
     }
     const currentCatalog = getActiveCatalog();
     const currentProvider = currentCatalog.providers.find((provider) => provider.id === providerId);
+    if (!currentProvider) return 'provider-unavailable';
     const currentModel = currentProvider
       ? findTitleCatalogModel(currentProvider, target.model)
       : undefined;
@@ -601,7 +603,7 @@ log.debug('title oneShot skipped: no title target', {
     // Registry tombstone 本身识别，不能把“未实体化”误当成“没有限制”。
     return findModelRegistryRoute(
       currentCatalog.modelRegistry,
-      providerId,
+      providerCatalogId(currentProvider),
       target.model,
       titleCatalogAgent(providerId) ?? undefined,
     )?.entry.status === 'retired'

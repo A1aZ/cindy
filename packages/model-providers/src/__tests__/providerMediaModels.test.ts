@@ -296,3 +296,21 @@ describe('V4 media model metadata', () => {
     ).toBe(false);
   });
 });
+
+it.each(modes)('moves existing media membership into the effective %s bucket', (mode) => {
+  const original: Provider = {
+    ...shell, imageModels: [{ id: 'model', name: 'Image', disabled: true }],
+    imageDefaults: { standard: 'model' }, videoModels: [], audioModels: [], embeddingModels: [],
+  };
+  const r = registry('image_generation');
+  const result = projectProviderMediaModels(original, r, { userMetadata: () => ({ mode }) });
+  const field = providerMediaField(mode)!;
+  expect(result[field]).toEqual([expect.objectContaining({ id: 'model', mode, disabled: true })]);
+  if (field !== 'imageModels') {
+    expect(result.imageModels).toEqual([]);
+    expect(result.imageDefaults).toBeUndefined();
+  }
+  const back = projectProviderMediaModels(result, r, { userMetadata: () => ({ mode: 'image_generation' }) });
+  expect(back.imageModels).toHaveLength(1);
+  expect(original.imageModels).toEqual([{ id: 'model', name: 'Image', disabled: true }]);
+});

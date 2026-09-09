@@ -1564,3 +1564,21 @@ describe('DS-6 field errors and save ownership', () => {
     expect(customProviderMocks.createCustomProvider).not.toHaveBeenCalled();
   });
 });
+
+it.each(['1,', '-5'])('saves a media type while its hidden context draft is %s', async (draft) => {
+  const user = userEvent.setup();
+  const initial: CustomProviderConfig = {
+    id: 'media-draft', name: 'Media Draft', auth: { method: 'apiKey' },
+    runtimes: { codex: { baseUrl: 'https://example.test/v1', models: [{ id: 'model', name: 'Model' }] } },
+  };
+  customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
+  render(<CustomProviderDialog initial={initial} focusAgent="codex" onSaved={vi.fn()} onClose={vi.fn()} />);
+  const context = await screen.findByRole('textbox', { name: 'settings.providers.custom.fields.modelContextWindowTitle' });
+  fireEvent.change(context, { target: { value: draft } });
+  await user.click(screen.getByRole('button', { name: 'settings.providers.custom.fields.modelType' }));
+  await user.click(screen.getByRole('menuitemradio', { name: /image/i }));
+  expect(screen.queryByRole('textbox', { name: 'settings.providers.custom.fields.modelContextWindowTitle' })).toBeNull();
+  await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+  await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+  expect(customProviderMocks.updateCustomProvider.mock.calls[0]?.[0].runtimes.codex.models[0].mode).toBe('image_generation');
+});

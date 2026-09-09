@@ -64,6 +64,7 @@ export function projectProviderMediaModels(
         ),
       })),
   );
+  const buckets: Partial<Record<ProviderMediaField, ProviderMediaModel[]>> = {};
   for (const field of PROVIDER_MEDIA_FIELDS) {
     const existing = provider[field];
     const models = [...(existing ?? [])];
@@ -84,7 +85,8 @@ export function projectProviderMediaModels(
       }
     }
     if (existing === undefined && models.length === 0) continue;
-    next[field] = models
+    buckets[field] ??= [];
+    const resolved = models
       .filter(
         (model) =>
           !declared.some(
@@ -111,11 +113,17 @@ export function projectProviderMediaModels(
           id: model.id,
           name: metadata.name ?? model.name,
         };
-      })
-      .filter(
-        (model) =>
-          model.mode === undefined || providerMediaField(model.mode) === field,
-      );
+      });
+    for (const model of resolved) {
+      const target = model.mode === undefined ? field : providerMediaField(model.mode);
+      if (!target) continue;
+      const bucket = (buckets[target] ??= []);
+      if (!bucket.some((existing) => existing.id === model.id)) bucket.push(model);
+    }
+  }
+  // Resolve membership first, then defaults: a later source can move into an earlier bucket.
+  for (const field of PROVIDER_MEDIA_FIELDS) {
+    if (buckets[field] !== undefined) next[field] = buckets[field];
     const defaultsField =
       field === "imageModels"
         ? "imageDefaults"
@@ -125,7 +133,7 @@ export function projectProviderMediaModels(
             ? "embeddingDefaults"
             : undefined;
     if (defaultsField && next[defaultsField]) {
-      const ids = new Set(next[field]!.map((model) => model.id));
+      const ids = new Set((next[field] ?? []).map((model) => model.id));
       const defaults = next[defaultsField]!;
       if (!ids.has(defaults.standard)) delete next[defaultsField];
       else

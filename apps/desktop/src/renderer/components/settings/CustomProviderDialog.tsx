@@ -1808,6 +1808,10 @@ export function CustomProviderDialog({
       if (!rf.baseUrl.trim()) continue;
       const row = rf.models[Number(draftKey.slice(sep + 1))];
       if (!row || !row.id.trim() || !row.name.trim()) continue;
+      if (!isAgentSelectableModel(
+        { id: row.id, group: 'custom', mode: row.mode ?? row.discoveredMetadata?.mode },
+        { userProvider: true },
+      )) continue;
       setActiveTab(draftAgent);
       // OAuth 鉴权模式下模型列表(含窗口输入)折在「高级」里;不展开的话用户看不到
       // 需要修的这个输入框,报错后无从下手,只能瞎猜着点开(review P1)。

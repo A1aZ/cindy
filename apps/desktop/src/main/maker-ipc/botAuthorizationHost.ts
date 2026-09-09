@@ -156,8 +156,9 @@ export function initializeBotAuthorizationHost(
             };
           },
           subscribe: (wake) => bus.subscribe('host:grok', wake),
-          async execute(_action, _sender, _value, onAuthorizationUrl) {
+          async execute(_action, _sender, _value, onAuthorizationUrl, assertCurrent) {
             await assertSession(sessionId);
+            assertCurrent?.();
             const result = await runGrokOAuthLogin({ onAuthorizationUrl });
             await assertSession(sessionId);
             if (result.ok) {
@@ -224,8 +225,9 @@ export function initializeBotAuthorizationHost(
             if (event.source === 'oauth') reconnected = true;
             wake();
           }),
-        async execute(action, sender, value, onAuthorizationUrl) {
+        async execute(action, sender, value, onAuthorizationUrl, assertCurrent) {
           await validate();
+          assertCurrent?.();
           const release = acquireGhostMutationLeaseForMcp(captureGhostMutationOwnerForMcp());
           try {
             if (action.kind === 'inline_form') {

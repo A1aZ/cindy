@@ -661,3 +661,19 @@ it('retires a cancelled entry when its terminal save fails so a later request is
   expect(h.adapter.execute).toHaveBeenCalledTimes(1);
   await h.service.dispose();
 });
+
+it('reassesses after saving the subscribed card when readiness changed before subscribe', async () => {
+  const h = harness();
+  const required = await h.adapter.assess();
+  // Return a stale read while completing configuration before the caller attaches.
+  h.adapter.assess = vi.fn<BotAuthorizationAdapter['assess']>(async () => {
+    return { state: 'ready' as const, revision: 2, groups: [] };
+  }).mockImplementationOnce(async () => {
+    h.complete();
+    return required;
+  });
+  await h.service.request('s', { kind: 'plugin', id: 'p' });
+  expect(h.deps.resume).toHaveBeenCalledTimes(1);
+  expect(h.card().snapshot.terminal).toBe(true);
+  await h.service.dispose();
+});

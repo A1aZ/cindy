@@ -54,6 +54,7 @@ export interface BotAuthorizationAdapter {
     sender?: GhostSetupInteractionResponseTarget,
     value?: string,
     onAuthorizationUrl?: (url: string) => void,
+    assertCurrent?: () => void,
   ): Promise<GhostSetupActionResult>;
 }
 export interface BotAuthorizationDeps {
@@ -168,6 +169,8 @@ export class BotAuthorizationService {
       this.close(entry);
       throw error;
     }
+    // subscribe() does not replay changes between the first read and attachment.
+    await this.check(entry).catch(this.deps.warn);
     return this.waitingResult(card);
   }
 
@@ -332,6 +335,11 @@ export class BotAuthorizationService {
     value?: string,
   ) {
     if (entry.action) return;
+    const assertBoundary = this.deps.captureRequestGuard?.(entry.card.sessionId);
+    const assertCurrent = () => {
+      if (entry.closed || entry.cancelled) throw new Error('Authorization action is no longer active');
+      assertBoundary?.();
+    };
     entry.action = (async () => {
       // Re-resolve the adapter at the action boundary: current owner, bot and plugin policy win.
       await this.deps.adapter(entry.card.sessionId, entry.card.target);
@@ -360,7 +368,7 @@ export class BotAuthorizationService {
         entry.authorizationUrl = url;
         entry.card.snapshot.reopenActionId = 'reopen-authorization';
         void this.phase(entry, 'waiting_external', actionId).catch(this.deps.warn);
-      });
+      }, assertCurrent);
       if (entry.closed) return;
       if (!result.ok) {
         this.stopPoll(entry);
@@ -394,8 +402,10 @@ export class BotAuthorizationService {
     sender: GhostSetupInteractionResponseTarget | undefined,
     value: string | undefined,
     onUrl: (url: string) => void,
+    assertCurrent: () => void,
   ): Promise<GhostSetupActionResult> {
-    if (action.kind !== 'oauth_connect') return entry.adapter.execute(action, sender, value, onUrl);
+    assertCurrent();
+    if (action.kind !== 'oauth_connect') return entry.adapter.execute(action, sender, value, onUrl, assertCurrent);
     const key = `${entry.card.target.kind}:${entry.card.target.id}:${action.id}`;
     let flight = this.oauthFlights.get(key);
     if (!flight) {
@@ -411,7 +421,7 @@ export class BotAuthorizationService {
         .execute(action, sender, value, (url) => {
           next.url = url;
           for (const listener of next.listeners) listener(url);
-        })
+        }, assertCurrent)
         .finally(() => this.oauthFlights.delete(key));
       flight = next;
     } else {

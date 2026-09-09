@@ -76,6 +76,17 @@ describe('authorization Host frozen plugin policy', () => {
     });
   });
 
+  it.each(['oauth_connect', 'inline_form'] as const)('checks the action generation after asynchronous Host validation for %s', async (kind) => {
+    const adapter = await state.deps.adapter('session', target);
+    let current = true;
+    const executing = adapter.execute({ id: 'connect', kind } as never, undefined,
+      kind === 'inline_form' ? 'fake-secret' : undefined, undefined,
+      () => { if (!current) throw new Error('card cleared or rewound'); });
+    current = false;
+    await expect(executing).rejects.toThrow('card cleared or rewound');
+    expect(state.execute).not.toHaveBeenCalled();
+  });
+
   it('rejects a card prepared before a clear even when its timestamp is newer', async () => {
     let generation = 0;
     initializeBotAuthorizationHost(async () => {}, () => {

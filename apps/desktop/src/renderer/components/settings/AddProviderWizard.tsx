@@ -717,8 +717,10 @@ export function AddProviderWizard({
             created = true;
             if (accountLoginRef.current !== login) return;
             const result = await window.electronAPI.maker.providerOAuthLogin(id, { ownerId: login.ownerId });
-            ok = result.ok;
             if (accountLoginRef.current !== login || result.reason === 'login_cancelled') return;
+            // A late success belongs to a cancelled wizard until ownership is checked.
+            // Keep ok false so finally also removes credentials committed before cancellation.
+            ok = result.ok;
           } finally {
             if (accountLoginRef.current === login) accountLoginRef.current = null;
             if (created && !ok) await deleteCustomProvider(id);

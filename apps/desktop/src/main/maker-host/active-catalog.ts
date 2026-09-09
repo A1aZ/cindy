@@ -1490,8 +1490,9 @@ function computeMerged(): Catalog {
   // Subscription providers use the same small default selection, scoped per harness so
   // chatgpt/ aliases never hide their sibling Codex route. Explicit user visibility stays external.
   providers = providers.map((provider) => {
+    const catalogId = providerCatalogId(provider);
     if (!isOpenAiSubscriptionProvider(provider) &&
-      (provider.source === 'user' || !['anthropic', 'xai'].includes(provider.id)))
+      ((provider.source === 'user' && !provider.auth.native) || !['anthropic', 'xai'].includes(catalogId)))
       return provider;
     return {
       ...provider,

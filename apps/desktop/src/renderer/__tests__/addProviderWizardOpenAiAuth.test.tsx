@@ -181,6 +181,45 @@ afterEach(() => {
 });
 
 describe('AddProviderWizard — OpenAI 授权边界', () => {
+  it.each(['openai', 'anthropic', 'xai'].flatMap(id =>
+    ['cancel', 'unmount'].map(exit => ({ id, exit })),
+  ))('removes $id when login succeeds after $exit', async ({ id, exit }) => {
+    let finish!: (value: { ok: boolean }) => void;
+    providerOAuthLogin.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const onDone = vi.fn();
+    const { unmount } = render(<AddProviderWizard providers={[{ ...OPENAI_PROVIDER, id, name: id }]}
+      entry={{ kind: 'builtin', providerId: id }} onOpenCustomForm={vi.fn()} onClose={vi.fn()} onDone={onDone} />);
+    fireEvent.click(screen.getByText(id === 'openai'
+      ? 'settings.providers.openai.addIndependentAccount'
+      : 'settings.providers.button.authorize'));
+    await waitFor(() => expect(providerOAuthLogin).toHaveBeenCalledTimes(1));
+    const [accountId, options] = providerOAuthLogin.mock.calls[0];
+    if (exit === 'unmount') unmount();
+    else fireEvent.click(screen.getByText('settings.providers.wizard.cancel'));
+    expect(providerOAuthCancel).toHaveBeenCalledWith(accountId, { ownerId: options.ownerId, releaseOwner: true });
+    await act(async () => { finish({ ok: true }); });
+    expect(deleteAccount).toHaveBeenCalledExactlyOnceWith(accountId);
+    expect(onDone).not.toHaveBeenCalled();
+  });
+  it('keeps the retry account when the cancelled login succeeds later', async () => {
+    let finishOld!: (value: { ok: boolean }) => void;
+    providerOAuthLogin.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }));
+    const onDone = vi.fn();
+    render(<AddProviderWizard providers={[OPENAI_PROVIDER]}
+      entry={{ kind: 'builtin', providerId: 'openai' }} onOpenCustomForm={vi.fn()} onClose={vi.fn()} onDone={onDone} />);
+    fireEvent.click(screen.getByText('settings.providers.openai.addIndependentAccount'));
+    await waitFor(() => expect(providerOAuthLogin).toHaveBeenCalledTimes(1));
+    const oldId = providerOAuthLogin.mock.calls[0][0];
+    fireEvent.click(screen.getByText('settings.providers.wizard.cancel'));
+    fireEvent.click(screen.getByText('settings.providers.openai.addIndependentAccount'));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    const newId = providerOAuthLogin.mock.calls[1][0];
+    expect(newId).not.toBe(oldId);
+    expect(onDone).toHaveBeenCalledWith(newId);
+    await act(async () => { finishOld({ ok: true }); });
+    expect(deleteAccount).toHaveBeenCalledExactlyOnceWith(oldId);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
   it.each(['anthropic', 'xai'])('cancels only the pending independent %s authorization', async id => {
     let finish!: (value: { ok: boolean; reason: string }) => void;
     providerOAuthLogin.mockReturnValue(new Promise(resolve => { finish = resolve; }));

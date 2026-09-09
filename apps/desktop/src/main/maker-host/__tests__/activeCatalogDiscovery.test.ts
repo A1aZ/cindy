@@ -89,6 +89,35 @@ function legacyCatalog(): Catalog {
 }
 
 describe('active-catalog discovered augment', () => {
+  it.each([
+    ['anthropic', 'claude', 'claude-sonnet-4-5', 'claude-sonnet-4-6'],
+    ['xai', 'xai', 'grok-4.5', 'grok-4.6'],
+  ] as const)('uses the same default selection for builtin and independent %s accounts', (id, native, oldId, newId) => {
+    const catalog = bundledWithoutRegistry();
+    const builtin = catalog.providers.find(provider => provider.id === id)!;
+    const models = [fake(oldId), fake(newId)].map(model => ({ ...model, group: id === 'anthropic' ? 'claude' : 'grok' }));
+    builtin.models = { codex: models, 'claude-code': models, pi: models };
+    const account = { ...builtin, id: `${id}-second`, source: 'user' as const,
+      auth: { method: 'oauth' as const, native } };
+    const api = { ...builtin, id: `${id}-api`, source: 'user' as const,
+      auth: { method: 'apiKey' as const } };
+    setActiveCatalog({ ...catalog, providers: [builtin, account, api] });
+    if (id === 'anthropic') setAnthropicDiscoveredModels(models);
+    const actual = getActiveCatalog();
+    for (const agent of ['codex', 'claude-code', 'pi'] as const) {
+      const listed = (providerId: string) => actual.providers.find(provider => provider.id === providerId)!.models[agent]!;
+      expect(listed(account.id).map(model => [model.id, model.defaultEnabled]))
+        .toEqual(listed(builtin.id).map(model => [model.id, model.defaultEnabled]));
+      for (const providerId of [builtin.id, account.id]) {
+        expect(listed(providerId).find(model => model.id === oldId)?.defaultEnabled,
+          `${providerId}/${agent}: ${listed(providerId).map(model => model.id).join(',')}`).toBe(false);
+        // Claude's Codex bridge is explicitly disabled by default; keep it disabled.
+        expect(listed(providerId).find(model => model.id === newId)?.defaultEnabled)
+          .toBe(!(id === 'anthropic' && agent === 'codex'));
+      }
+      expect(listed(api.id).find(model => model.id === oldId)?.defaultEnabled).toBe(true);
+    }
+  });
   it('clears only the selected Grok account until the owner boundary is cleared', () => {
     const account = buildUserProvider({
       id: 'grok-second', name: 'Second Grok', auth: { method: 'oauth', native: 'xai' },
@@ -135,6 +164,7 @@ describe('active-catalog discovered augment', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     clearDiscoveredProviderModels();
     setDiscoveredCodexModels([]);
+    setAnthropicDiscoveredModels([]);
     setXaiDiscoveredModels(null);
     setDiscoveredProviderMediaModels('xai', null);
   });

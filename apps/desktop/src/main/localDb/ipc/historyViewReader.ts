@@ -98,12 +98,11 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
       const finalize = async (page: HistoryDetailPage<T>): Promise<HistoryDetailPage<T>> => {
         // Like the summary scan, every detail exit must reject a clear/rewind
         // that happened while an earlier DB batch was already collected.
-        const ids = new Set([ref.firstMessageId, ref.lastMessageId, ...(ref.liveMessageIds ?? [])]);
-        await Promise.all([...ids].map((id) => deps.anchor(sessionId, id)));
+        const ids = new Set([ref.firstMessageId, ref.lastMessageId, ...page.messages.map((row) => row.id)]);
+        for (const id of ids) await deps.anchor(sessionId, id);
         return page;
       };
       if (ref.liveMessageIds?.length) {
-        const live = await Promise.all(ref.liveMessageIds.map((id) => deps.anchor(sessionId, id)));
         const liveCursor = after ? ref.liveMessageIds.indexOf(after) : -1;
         const stored = liveCursor >= 0 || !ref.firstStoredMessageId || !ref.lastStoredMessageId
           ? { version: 1 as const, messages: [] as T[], hasMore: false, nextCursor: null }
@@ -112,8 +111,8 @@ export function createHistoryViewReader<T extends HistoryMessageSource>(deps: Hi
         const collected = [...stored.messages];
         let bytes = Buffer.byteLength(JSON.stringify(collected), 'utf8') + 1024;
         let cursor = stored.messages.at(-1)?.id ?? after ?? ref.lastStoredMessageId;
-        for (let index = liveCursor + 1; index < live.length; index++) {
-          const row = live[index];
+        for (let index = liveCursor + 1; index < ref.liveMessageIds.length; index++) {
+          const row = await deps.anchor(sessionId, ref.liveMessageIds[index]);
           if (collected.some((storedRow) => storedRow.clientId === row.clientId)) continue;
           const size = Buffer.byteLength(JSON.stringify(row), 'utf8');
           if (collected.length > 0 && bytes + size > HISTORY_DETAIL_PAGE_BYTES) {

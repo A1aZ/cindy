@@ -78,6 +78,59 @@ describe('host history view', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('bounds live anchor reads to each delivered page after persistence, preserving reference cursors', async () => {
+    const source = Array.from({ length: 2000 }, (_, n) => ({ ...row(n), content: 'x'.repeat(4000) }));
+    const ids = source.map((message) => `history-live:${message.clientId}`);
+    const anchor = vi.fn(async (_sid: string, id: string) => {
+      const index = id.startsWith('history-live:c') ? Number(id.slice('history-live:c'.length)) : Number(id);
+      return source[index];
+    });
+    const api = createHistoryViewReader({ list: vi.fn(), anchor, running: () => true });
+    const ref = { key: 'w', firstMessageId: ids[0], lastMessageId: ids.at(-1)!, liveMessageIds: ids };
+    const received: string[] = [];
+    let after: string | undefined;
+    do {
+      anchor.mockClear();
+      const page = await api.details('s', ref, after);
+      received.push(...page.messages.map((message) => message.id));
+      expect(anchor.mock.calls.length).toBeLessThanOrEqual(page.messages.length * 2 + 3);
+      if (page.hasMore) expect(page.nextCursor).toBe(`history-live:${page.messages.at(-1)!.clientId}`);
+      after = page.nextCursor ?? undefined;
+    } while (after);
+    expect(received).toEqual(source.map((message) => message.id));
+  });
+
+  it('does not read future live bodies while the stored range still has another page', async () => {
+    const source = [row(1), row(2), row(3)].map((message) => ({ ...message, content: 'x'.repeat(200000) }));
+    const ids = ['history-live:c4', 'history-live:c5', 'history-live:c6'];
+    const base = reader(source);
+    const anchor = vi.fn(async (_sid: string, id: string) => source.find((message) => message.id === id) ?? { ...row(6), id });
+    const api = createHistoryViewReader({ list: base.list, anchor, running: () => true });
+    const page = await api.details('s', { key: 'w', firstMessageId: '1', lastMessageId: ids[2],
+      firstStoredMessageId: '1', lastStoredMessageId: '3', liveMessageIds: ids });
+    expect(page.messages.map((message) => message.id)).toEqual(['1']);
+    expect(page.nextCursor).toBe('1');
+    expect(anchor.mock.calls.map((call) => call[1]).filter((id) => ids.includes(id))).toEqual([ids[2]]);
+  });
+
+  it.each(['clear', 'rewind', 'middle'])('rejects a live page invalidated after collection: %s', async (change) => {
+    const source = new Map([1, 2, 3, 4].map((n) => [`history-live:c${n}`, { ...row(n), id: `history-live:c${n}`, content: 'x'.repeat(80000) }]));
+    const ids = [...source.keys()];
+    const api = createHistoryViewReader({ list: vi.fn(), running: () => true,
+      anchor: async (_sid: string, id: string) => {
+        const message = source.get(id);
+        if (!message) throwIpcError('NOT_FOUND', 'History range changed');
+        if (id === ids[3]) {
+          if (change === 'clear') source.clear();
+          else source.delete(change === 'middle' ? ids[1] : ids[3]);
+        }
+        return message;
+      },
+    });
+    await expect(api.details('s', { key: 'w', firstMessageId: ids[0], lastMessageId: ids[3], liveMessageIds: ids }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
   it('rejects same-millisecond backwards ranges and detail cursors beyond the upper rowid', async () => {
     const source = [row(1), row(2), row(3)].map((r) => ({ ...r, createdAt: row(0).createdAt }));
     const { api } = reader(source);

@@ -109,8 +109,6 @@ import {
   listPiSubagentRunDiagnostics,
   listPiSubagentRunDirectoryIds,
   listPiSubagentRuns,
-  isPiHostProcessInstanceAliveAsync,
-  piHostProcessStartTimeSec,
   piSubagentRunRoot,
   piSubagentApprovalScope,
   piSubagentRuntimeOwnerId,
@@ -122,7 +120,6 @@ import {
   syncPiSubagentPermissions,
   type PiSubagentRunDiagnostic,
   type PiSubagentRunStatus,
-  type ProcessStartTimeMemo,
 } from './pi-subagent-runs.js';
 import {
   annotatePermissionRequestForUnavailableReview,
@@ -538,7 +535,6 @@ interface LocalConfigHomeOwnerV1 {
 interface LocalConfigHomeOwnerV2 {
   version: typeof LOCAL_CONFIG_HOME_OWNER_VERSION;
   ownerPid: number;
-  ownerStartTimeSec: number;
   createdAt: number;
   directoryName: string;
   runtimeId: string;
@@ -588,7 +584,6 @@ async function registerLocalConfigHome(
   const owner: LocalConfigHomeOwnerV2 = {
     version: LOCAL_CONFIG_HOME_OWNER_VERSION,
     ownerPid: process.pid,
-    ownerStartTimeSec: piHostProcessStartTimeSec(),
     createdAt: Date.now(),
     directoryName: path.basename(normalized),
     runtimeId,
@@ -635,8 +630,6 @@ async function readLocalConfigHomeOwner(configHome: string): Promise<LocalConfig
     }
     if (
       parsed.version !== LOCAL_CONFIG_HOME_OWNER_VERSION
-      || !Number.isSafeInteger(parsed.ownerStartTimeSec)
-      || (parsed.ownerStartTimeSec as number) <= 0
       || typeof parsed.runtimeId !== 'string'
       || parsed.runtimeId !== parsed.directoryName
       || !LOCAL_CONFIG_HOME_RUNTIME_ID_RE.test(parsed.runtimeId)
@@ -646,7 +639,6 @@ async function readLocalConfigHomeOwner(configHome: string): Promise<LocalConfig
     return {
       version: LOCAL_CONFIG_HOME_OWNER_VERSION,
       ownerPid: parsed.ownerPid as number,
-      ownerStartTimeSec: parsed.ownerStartTimeSec as number,
       createdAt: parsed.createdAt as number,
       directoryName: parsed.directoryName,
       runtimeId: parsed.runtimeId,
@@ -666,22 +658,17 @@ function isLocalProcessAlive(pid: number): boolean {
   }
 }
 
-async function localConfigHomeOwnerIsActive(
+function localConfigHomeOwnerIsActive(
   owner: LocalConfigHomeOwner,
   configHome: string,
-  startTimeMemo?: ProcessStartTimeMemo,
-): Promise<boolean> {
-  if (owner.version === 1) {
-    return owner.ownerPid === process.pid
-      ? activeLocalConfigHomes.has(localConfigHomeKey(configHome))
-      : isLocalProcessAlive(owner.ownerPid);
-  }
-  if (!await isPiHostProcessInstanceAliveAsync({
-    pid: owner.ownerPid,
-    startTimeSec: owner.ownerStartTimeSec,
-  }, startTimeMemo)) return false;
-  return owner.ownerPid !== process.pid
-    || activeLocalConfigHomes.has(localConfigHomeKey(configHome));
+): boolean {
+  // A wall-clock start-time estimate cannot prove a foreign process exited:
+  // clock corrections make a live owner look like a different incarnation.
+  // Retain live/unknown foreign PIDs, including possible PID reuse, until exit.
+  // Our own active set also covers startup publication and unconfirmed shutdown.
+  return owner.ownerPid === process.pid
+    ? activeLocalConfigHomes.has(localConfigHomeKey(configHome))
+    : isLocalProcessAlive(owner.ownerPid);
 }
 
 function sameLocalConfigHomeOwner(
@@ -696,7 +683,6 @@ function sameLocalConfigHomeOwner(
   ) return false;
   return left.version === 1 || (
     right.version === LOCAL_CONFIG_HOME_OWNER_VERSION
-    && left.ownerStartTimeSec === right.ownerStartTimeSec
     && left.runtimeId === right.runtimeId
     && left.sessionIdHash === right.sessionIdHash
   );
@@ -735,7 +721,6 @@ async function sweepStaleLocalConfigHomes(
     });
     return;
   }
-  let ownerStartTimeMemo: ProcessStartTimeMemo = new Map();
   let roundStartedAt = Date.now();
   let inspected = 0;
   // Stream the directory: the backlog itself must not become one unbounded allocation.
@@ -746,7 +731,6 @@ async function sweepStaleLocalConfigHomes(
         const timer = setTimeout(resolve, 0);
         timer.unref();
       });
-      ownerStartTimeMemo = new Map();
       roundStartedAt = Date.now();
       inspected = 0;
     }
@@ -758,7 +742,7 @@ async function sweepStaleLocalConfigHomes(
     // Markerless homes may belong to an older Cindy instance between directory
     // creation and Pi spawn. No process snapshot can prove them reclaimable.
     if (!owner) continue;
-    if (await localConfigHomeOwnerIsActive(owner, candidate, ownerStartTimeMemo)) continue;
+    if (localConfigHomeOwnerIsActive(owner, candidate)) continue;
 
     // Re-read immediately before deletion. A directory whose marker changed or
     // whose owner became active is no longer the orphan we proved above.
@@ -767,7 +751,7 @@ async function sweepStaleLocalConfigHomes(
       !currentOwner
       || !sameLocalConfigHomeOwner(currentOwner, owner)
     ) continue;
-    if (await localConfigHomeOwnerIsActive(currentOwner, candidate, ownerStartTimeMemo)) continue;
+    if (localConfigHomeOwnerIsActive(currentOwner, candidate)) continue;
 
     const outcome = await removeLocalConfigHomeWithRetry(candidate);
     if (!outcome.removed) {

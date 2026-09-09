@@ -2679,7 +2679,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     }
   });
 
-  it('records process incarnation plus redacted session/runtime identity in the local owner marker', async () => {
+  it('records process ownership plus redacted session/runtime identity in the local owner marker', async () => {
     const sessionId = 'owner-marker-session';
     const handle = await new PiAgent(buildDeps()).startSession({
       sessionId,
@@ -2698,7 +2698,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
         runtimeId: path.basename(configHome),
         sessionIdHash: createHash('sha256').update(sessionId).digest('hex'),
       });
-      expect(owner.ownerStartTimeSec).toEqual(expect.any(Number));
+      expect(owner.createdAt).toEqual(expect.any(Number));
       expect(owner).not.toHaveProperty('sessionId');
     } finally {
       await handle.close();
@@ -2860,46 +2860,46 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     }
   });
 
-  it('shares one process-start probe memo across config homes owned by the same process', async () => {
-    const ownerPid = process.ppid;
-    const ownerStartTimeSec = 1;
-    const ownerHomes = ['c'.repeat(32), 'd'.repeat(32)].map((runtimeId) => {
-      const ownerHome = path.join(agentHome, 'run-tmp', runtimeId);
-      mkdirSync(ownerHome, { recursive: true });
-      writeFileSync(
-        path.join(ownerHome, '.cindy-owner.json'),
-        `${JSON.stringify({
-          version: 2,
-          ownerPid,
-          ownerStartTimeSec,
-          createdAt: 1,
-          directoryName: runtimeId,
-          runtimeId,
-          sessionIdHash: 'e'.repeat(64),
-        })}\n`,
-      );
-      return ownerHome;
+  it.each([-60_000, 60_000])('preserves live foreign owners after a wall-clock correction of %i ms', async (clockStep) => {
+    const runtimeId = 'c'.repeat(32);
+    const ownerHome = path.join(agentHome, 'run-tmp', runtimeId);
+    mkdirSync(ownerHome, { recursive: true });
+    writeFileSync(path.join(ownerHome, '.cindy-owner.json'), JSON.stringify({
+      version: 2,
+      ownerPid: process.ppid,
+      // Earlier builds estimated this timestamp. Even a mismatch cannot prove
+      // whether the PID was reused or the wall clock changed since publication.
+      ownerStartTimeSec: 1,
+      createdAt: Date.now(),
+      directoryName: runtimeId,
+      runtimeId,
+      sessionIdHash: 'e'.repeat(64),
+    }));
+    writeFileSync(path.join(ownerHome, 'models.json'), '{}\n');
+    const { promises: fs } = await import('node:fs');
+    const originalOpendir = fs.opendir.bind(fs);
+    let sweepFinished!: () => void;
+    const swept = new Promise<void>((resolve) => { sweepFinished = resolve; });
+    vi.spyOn(fs, 'opendir').mockImplementation(async (...args) => {
+      const directory = await originalOpendir(...args);
+      if (path.resolve(String(args[0])) !== path.resolve(agentHome, 'run-tmp')) return directory;
+      const iterate = directory[Symbol.asyncIterator].bind(directory);
+      directory[Symbol.asyncIterator] = async function* () {
+        try { yield* iterate(); } finally { sweepFinished(); }
+        return undefined;
+      };
+      return directory;
     });
-    const probeMemos: unknown[] = [];
-    vi.spyOn(piSubagentRuns, 'isPiHostProcessInstanceAliveAsync')
-      .mockImplementation(async (identity, memo) => {
-        if (identity.pid === ownerPid) probeMemos.push(memo);
-        return true;
-      });
-
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + clockStep);
     const handle = await new PiAgent(buildDeps()).startSession({
-      sessionId: 'shared-owner-probe-memo',
-      workingDir: cwd,
-      model: 'm',
+      sessionId: 'live-owner-after-clock-step', workingDir: cwd, model: 'm',
     });
     try {
-      await vi.waitFor(() => expect(probeMemos).toHaveLength(ownerHomes.length));
-      // pi-subagent-runs separately locks that one shared memo means one
-      // PowerShell/ps start-time probe per owner pid and sweep.
-      expect(probeMemos[0]).toBeInstanceOf(Map);
-      expect(probeMemos[1]).toBe(probeMemos[0]);
-      for (const ownerHome of ownerHomes) expect(existsSync(ownerHome)).toBe(true);
+      await swept;
+      expect(readFileSync(path.join(ownerHome, 'models.json'), 'utf8')).toBe('{}\n');
     } finally {
+      clock.mockRestore();
       await handle.close();
     }
   });

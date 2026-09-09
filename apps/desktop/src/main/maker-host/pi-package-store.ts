@@ -692,12 +692,15 @@ function mutationLockPath(): string {
   return path.join(app.getPath('userData'), 'pi-package-home.mutation.lock');
 }
 
-async function withPiPackageMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+async function withPiPackageMutationLock<T>(
+  operation: () => Promise<T>,
+  waitMs = PACKAGE_MUTATION_LOCK_WAIT_MS,
+): Promise<T> {
   const lockPath = mutationLockPath();
   await fs.mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   return withSecurityBoundaryLock(
     lockPath,
-    { label: 'pi-package-mutation', waitMs: PACKAGE_MUTATION_LOCK_WAIT_MS },
+    { label: 'pi-package-mutation', waitMs },
     async (status) => {
       if (!status.held) {
         throw new Error('Pi extension store is busy or unavailable');
@@ -2409,8 +2412,18 @@ export async function resolveManagedPiPackageResources(
       if (!snapshotRoot) {
         // Native Pi owns loading. Cache only advisory inspection limits here;
         // startup timing must not reintroduce per-session package copies.
-        if (startupTiming && await persistSnapshotUnavailableProjection([], inspected)) {
-          await publishPiPackagesChanged({ invalidateCache: false });
+        if (startupTiming && (snapshotUnavailablePackages.size > 0
+          || inspected.some((pkg) => pkg.snapshotUnavailable))) {
+          // Persist advisory cache data off the startup path. Keep the existing
+          // state-write boundary, but skip this optional write when another
+          // instance owns it instead of waiting for an install/update to finish.
+          void enqueueMutation(async () => {
+            if (await persistSnapshotUnavailableProjection([], inspected)) {
+              await publishPiPackagesChanged({ invalidateCache: false });
+            }
+          }, undefined, 0).catch(() => {
+            log.debug('Pi package inspection cache persistence skipped');
+          });
         }
         return resources;
       }
@@ -2601,12 +2614,12 @@ export async function resolveManagedPiPackageResources(
         recordPiPackageStartupDuration(startupTiming, 'package-snapshot', snapshotStartedAt);
       }
     };
-    if (snapshotRoot || startupTiming) {
-      // Only an explicitly requested snapshot needs fresh byte verification.
-      // Startup diagnostics share the existing short cache and in-flight inspection.
-      return await enqueueMutation(() => resolveResources(Boolean(snapshotRoot)));
+    if (snapshotRoot) {
+      return await enqueueMutation(() => resolveResources(true));
     }
-    await mutationTail;
+    // Native startup diagnostics are read-only and must not queue behind package
+    // mutations. Concurrent readers share the existing in-flight/short cache.
+    if (!startupTiming) await mutationTail;
     return await resolveResources();
   } catch (error) {
     if (startupTiming) startupTiming.degraded = true;
@@ -2795,6 +2808,7 @@ async function findAffectedInspectedPackage(
 function enqueueMutation<T>(
   operation: () => Promise<T>,
   onErrorUnderLock?: (error: unknown) => Promise<void>,
+  waitMs = PACKAGE_MUTATION_LOCK_WAIT_MS,
 ): Promise<T> {
   // mutationTail prevents overlapping work inside one Main process. The
   // strict file lock extends the same critical section across packaged, dev,
@@ -2808,7 +2822,7 @@ function enqueueMutation<T>(
       throw error;
     }
   };
-  const result = mutationTail.then(() => withPiPackageMutationLock(guardedOperation));
+  const result = mutationTail.then(() => withPiPackageMutationLock(guardedOperation, waitMs));
   mutationTail = result.then(() => undefined, () => undefined);
   return result;
 }

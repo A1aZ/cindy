@@ -405,7 +405,7 @@ function parseLaunchFence(value: unknown): PiSubagentLaunchFence | null {
  */
 function fenceMatchesOwnIncarnation(fence: PiSubagentLaunchFence): boolean {
   if (fence.hostStartTimeSec === undefined) return true;
-  return Math.abs(piHostProcessStartTimeSec() - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
+  return Math.abs(ownProcessStartTimeSec() - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
 }
 
 /**
@@ -516,7 +516,7 @@ export async function acquirePiSubagentLaunchFence(agentHome: string): Promise<(
       await writeAtomicJson(file, {
         version: 1,
         hostPid: process.pid,
-        hostStartTimeSec: piHostProcessStartTimeSec(),
+        hostStartTimeSec: ownProcessStartTimeSec(),
         leaseId,
         createdAt: Date.now(),
       } satisfies PiSubagentLaunchFence);
@@ -677,7 +677,7 @@ export async function clearStalePiSubagentLaunchFence(agentHome: string): Promis
       if (fence && isProcessAlive(fence.hostPid) !== false) {
         if (fence.hostStartTimeSec === undefined) return;
         const startTimeSec = fence.hostPid === process.pid
-          ? piHostProcessStartTimeSec()
+          ? ownProcessStartTimeSec()
           : probeProcessStartTimeSec(fence.hostPid, Date.now());
         if (startTimeSec === null) return;
         if (Math.abs(startTimeSec - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC) return;
@@ -1018,12 +1018,12 @@ export function piSubagentRuntimeOwnerId(hostPid: number, scopeId: string): stri
   // a live foreign owner reads as an orphan the moment the gap exceeds the
   // tolerance. A legacy id has no start time, so liveness stays conservative.
   return hostPid === process.pid
-    ? `${hostPid}.${piHostProcessStartTimeSec()}:${scopeId}`
+    ? `${hostPid}.${ownProcessStartTimeSec()}:${scopeId}`
     : `${hostPid}:${scopeId}`;
 }
 
-/** Wall-clock start second shared by host-owned Pi runtime records. */
-export function piHostProcessStartTimeSec(): number {
+/** Wall-clock second this process started, in the form the owner id records. */
+function ownProcessStartTimeSec(): number {
   return OWN_PROCESS_START_TIME_SEC;
 }
 
@@ -1213,43 +1213,6 @@ function probeProcessStartTimeSec(pid: number, now: number): number | null {
 }
 
 /**
- * Reclaim probes must never block Electron Main while Windows starts PowerShell.
- * An unreadable or timed-out probe remains conservative: the owner is treated
- * as alive and the directory is left for a later sweep.
- */
-const PROCESS_START_TIME_PROBE_TIMEOUT_MS = 1_000;
-
-async function probeProcessStartTimeSecAsync(pid: number, now: number): Promise<number | null> {
-  try {
-    if (process.platform === 'win32') {
-      const { stdout } = await execFileAsync(
-        'powershell.exe',
-        [
-          '-NoProfile', '-NonInteractive', '-Command',
-          `[int64]((Get-Process -Id ${pid}).StartTime.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds`,
-        ],
-        {
-          encoding: 'utf8',
-          timeout: PROCESS_START_TIME_PROBE_TIMEOUT_MS,
-          windowsHide: true,
-        },
-      );
-      const match = (typeof stdout === 'string' ? stdout : '').match(/-?\d+/);
-      const seconds = match ? Number(match[0]) : NaN;
-      return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : null;
-    }
-    const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'etime='], {
-      encoding: 'utf8',
-      timeout: PROCESS_START_TIME_PROBE_TIMEOUT_MS,
-    });
-    const elapsed = parseElapsedSeconds(typeof stdout === 'string' ? stdout : '');
-    return elapsed === null ? null : Math.round(now / 1_000 - elapsed);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Per-sweep memo for the start-time probe, passed down rather than held.
  *
  * The reason for memoising at all is that one sweep asks the same question once
@@ -1261,22 +1224,12 @@ async function probeProcessStartTimeSecAsync(pid: number, now: number): Promise<
  * cannot detect reuse; only a fresh probe can, and a sweep-scoped memo is the
  * largest window in which reuse is not observable anyway.
  */
-export type ProcessStartTimeMemo = Map<number, number | null>;
+type ProcessStartTimeMemo = Map<number, number | null>;
 
 function readProcessStartTimeSec(pid: number, memo?: ProcessStartTimeMemo): number | null {
   const cached = memo?.get(pid);
   if (cached !== undefined) return cached;
   const startTimeSec = probeProcessStartTimeSec(pid, Date.now());
-  memo?.set(pid, startTimeSec);
-  return startTimeSec;
-}
-
-async function readProcessStartTimeSecAsync(
-  pid: number,
-  memo?: ProcessStartTimeMemo,
-): Promise<number | null> {
-  if (memo?.has(pid)) return memo.get(pid) ?? null;
-  const startTimeSec = await probeProcessStartTimeSecAsync(pid, Date.now());
   memo?.set(pid, startTimeSec);
   return startTimeSec;
 }
@@ -1305,22 +1258,8 @@ function isOwnerInstanceAlive(
   if (isProcessAlive(identity.pid) === false) return false;
   if (identity.startTimeSec === undefined) return true;
   const startTimeSec = identity.pid === process.pid
-    ? piHostProcessStartTimeSec()
+    ? ownProcessStartTimeSec()
     : readProcessStartTimeSec(identity.pid, memo);
-  if (startTimeSec === null) return true;
-  return Math.abs(startTimeSec - identity.startTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
-}
-
-/** Non-blocking incarnation check for background config-home reclamation. */
-export async function isPiHostProcessInstanceAliveAsync(
-  identity: PiSubagentOwnerIdentity,
-  startTimeMemo?: ProcessStartTimeMemo,
-): Promise<boolean> {
-  if (isProcessAlive(identity.pid) === false) return false;
-  if (identity.startTimeSec === undefined) return true;
-  const startTimeSec = identity.pid === process.pid
-    ? piHostProcessStartTimeSec()
-    : await readProcessStartTimeSecAsync(identity.pid, startTimeMemo);
   if (startTimeSec === null) return true;
   return Math.abs(startTimeSec - identity.startTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
 }
@@ -2300,7 +2239,7 @@ async function acquirePiSubagentResumeClaim(
     version: 1,
     ...(runtimeOwnerId ? { runtimeOwnerId } : {}),
     hostPid,
-    hostStartTimeSec: piHostProcessStartTimeSec(),
+    hostStartTimeSec: ownProcessStartTimeSec(),
     claimedAt: Date.now(),
   })}\n`;
   const release = async (): Promise<void> => {

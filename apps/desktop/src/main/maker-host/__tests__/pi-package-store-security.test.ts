@@ -644,6 +644,38 @@ describe('Pi package executable-code boundary', () => {
     }
   });
 
+  it('returns startup diagnostics while cache persistence waits for another instance', async () => {
+    const { root } = await createPackage({ oversizedManifest: true });
+    const store = await import('../pi-package-store.js');
+    let release!: () => void;
+    lockRuntime.tail = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const result = await store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' });
+      expect(result.packageRoots).toEqual([]);
+      await vi.waitFor(() => expect(lockRuntime.calls).toHaveLength(1));
+      expect(lockRuntime.calls[0]).toMatchObject({ label: 'pi-package-mutation', waitMs: 0 });
+      // Native loading is independent of both advisory analysis and its write.
+      await expect(store.resolveManagedPiNativePackagePaths()).resolves.toEqual([root]);
+    } finally {
+      release();
+      await store.listPiPackages();
+    }
+  });
+
+  it.each(['busy', 'unavailable'] as const)('skips optional cache persistence when the mutation lock is %s', async (reason) => {
+    const { root } = await createPackage({ oversizedManifest: true });
+    const store = await import('../pi-package-store.js');
+    lockRuntime.nextStatus = { held: false, reason };
+    await expect(store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' }))
+      .resolves.toEqual({ extensions: [], skills: [], promptTemplates: [], packageRoots: [] });
+    await store.listPiPackages();
+    expect(lockRuntime.calls).toHaveLength(1);
+    expect(lockRuntime.calls[0]?.waitMs).toBe(0);
+    await expect(fs.readFile(path.join(runtime.userData, 'pi-package-home', 'cindy-package-state.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(store.resolveManagedPiNativePackagePaths()).resolves.toEqual([root]);
+  });
+
   it('coalesces startup diagnostics and honors the existing short inspection cache', async () => {
     const { root } = await createSkillOnlyPackage('npm:concurrent-startup-metadata');
     const store = await import('../pi-package-store.js');
@@ -2162,6 +2194,7 @@ describe('Pi package executable-code boundary', () => {
       packageRoots: [],
     });
 
+    await store.listPiPackages(); // Wait for the optional background cache write.
     const statePath = path.join(
       runtime.userData,
       'pi-package-home',

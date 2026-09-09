@@ -436,7 +436,7 @@ type PiPackageStartupStage = typeof PI_PACKAGE_STARTUP_STAGES[number];
 
 interface PiPackageStartupTiming {
   startupTraceId: string;
-  durationsMs: Record<PiPackageStartupStage, number>;
+  durationsMs: Partial<Record<PiPackageStartupStage, number>>;
   packageCount: number;
   resourceCount: number;
   skippedPackageCount: number;
@@ -447,13 +447,7 @@ function createPiPackageStartupTiming(startupTraceId: string | undefined): PiPac
   if (!startupTraceId || !/^[a-f0-9]{16}$/.test(startupTraceId)) return undefined;
   return {
     startupTraceId,
-    durationsMs: {
-      'package-list': 0,
-      'package-inspection': 0,
-      'package-compatibility': 0,
-      'package-fingerprint': 0,
-      'package-snapshot': 0,
-    },
+    durationsMs: {},
     packageCount: 0,
     resourceCount: 0,
     skippedPackageCount: 0,
@@ -467,7 +461,7 @@ function recordPiPackageStartupDuration(
   startedAt: number,
 ): void {
   if (!timing) return;
-  timing.durationsMs[stage] += Math.max(0, Date.now() - startedAt);
+  timing.durationsMs[stage] = (timing.durationsMs[stage] ?? 0) + Math.max(0, Date.now() - startedAt);
 }
 
 async function measurePiPackageStartupStage<T>(
@@ -486,11 +480,12 @@ async function measurePiPackageStartupStage<T>(
 function emitPiPackageStartupTiming(timing: PiPackageStartupTiming | undefined): void {
   if (!timing) return;
   for (const stage of PI_PACKAGE_STARTUP_STAGES) {
+    const durationMs = timing.durationsMs[stage];
     log.info('pi startup stage', {
       startupTraceId: timing.startupTraceId,
       stage,
-      durationMs: timing.durationsMs[stage],
-      status: timing.degraded ? 'degraded' : 'ok',
+      durationMs: durationMs ?? 0,
+      status: durationMs === undefined ? 'skipped' : timing.degraded ? 'degraded' : 'ok',
       packageCount: timing.packageCount,
       resourceCount: timing.resourceCount,
       skippedPackageCount: timing.skippedPackageCount,

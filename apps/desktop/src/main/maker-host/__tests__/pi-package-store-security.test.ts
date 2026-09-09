@@ -5071,6 +5071,40 @@ describe('Pi package executable-code boundary', () => {
     expect(serialized).not.toContain(snapshotRoot);
   });
 
+  it('distinguishes skipped startup stages from work completed within the same millisecond', async () => {
+    await createSkillOnlyPackage('npm:startup-timing-native');
+    const store = await import('../pi-package-store.js');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      await store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' });
+      const events = loggerRuntime.info.mock.calls
+        .filter(([message]) => message === 'pi startup stage')
+        .map(([, fields]) => fields as Record<string, unknown>);
+      expect(events).toHaveLength(5);
+      expect(events.find((event) => event.stage === 'package-snapshot')).toMatchObject({
+        status: 'skipped', durationMs: 0, packageCount: 1, resourceCount: 1,
+      });
+      for (const event of events.filter((event) => event.stage !== 'package-snapshot')) {
+        expect(event).toMatchObject({ status: 'ok', durationMs: 0 });
+      }
+
+      loggerRuntime.info.mockClear();
+      await store.resolveManagedPiPackageResources({ startupTraceId: 'fedcba9876543210' });
+      const cachedEvents = loggerRuntime.info.mock.calls
+        .filter(([message]) => message === 'pi startup stage')
+        .map(([, fields]) => fields as Record<string, unknown>);
+      expect(cachedEvents).toHaveLength(5);
+      for (const event of cachedEvents) {
+        expect(event).toMatchObject({
+          startupTraceId: 'fedcba9876543210', status: 'skipped', durationMs: 0,
+          packageCount: 1, resourceCount: 1,
+        });
+      }
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('marks startup timing degraded when snapshot limits quarantine a package', async () => {
     await createSkillOnlyPackage('npm:startup-timing-limited');
     const store = await import('../pi-package-store.js');

@@ -9332,7 +9332,6 @@
       "noDialogues": "No sessions",
       "dialogueSettings": "Organize Chat",
       "dialogueSettingsAria": "Organize Chat (Status: {{status}}, Sort by: {{sortBy}})",
-      "dialogueStatusFilterAria": "Filter Chat status: {{status}}",
       "dialogueSortHeading": "Sort by",
       "dialogueSort": {
         "recency": "Recent first",

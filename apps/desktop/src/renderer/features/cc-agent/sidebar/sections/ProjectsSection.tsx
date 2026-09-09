@@ -965,6 +965,7 @@ export function ProjectsSection({
           sessionVariant={mainSessionVariant}
           status={filter.status}
           onStatusChange={filter.setStatus}
+          sortByLabel={t(`ccAgent.sidebar.filterSortBy.${filter.sortBy}`)}
         />
       );
     }
@@ -1254,6 +1255,8 @@ function SessionGroupNode({
   /** 仅对话组传入:把活跃/已归档/全部入口放到组头,与全局 filter.status 同步。 */
   status?: UseSidebarFilterReturn['status'];
   onStatusChange?: UseSidebarFilterReturn['setStatus'];
+  /** 混排组头 AT 的真实排序文案,对应 filter.sortBy / filterSortBy。 */
+  sortByLabel?: string;
 }) {
   const { t } = useTranslation();
   // 与 ProjectNode 同款:标题右侧 hover 渐显的展开/收起指示箭头。
@@ -1311,6 +1314,7 @@ function SessionGroupNode({
             <DialogueStatusMenu
               status={status}
               onStatusChange={onStatusChange}
+              sortByLabel={sortByLabel}
               buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground"
               iconSize={14}
               stopRowToggle

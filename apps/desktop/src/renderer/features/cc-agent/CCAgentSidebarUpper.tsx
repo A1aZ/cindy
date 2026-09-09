@@ -4371,6 +4371,7 @@ function RailPanels({
                 <DialogueStatusMenu
                   status={status}
                   onStatusChange={onStatusChange}
+                  sortByLabel={t(`ccAgent.sidebar.dialogueSort.${dialogueSortBy}`)}
                   buttonClassName="h-6 w-6 -my-1 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
                   iconSize={14}
                 />

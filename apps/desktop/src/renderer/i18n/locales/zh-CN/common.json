@@ -9317,7 +9317,6 @@
       "noDialogues": "暂无任务",
       "dialogueSettings": "整理对话",
       "dialogueSettingsAria": "整理对话（状态：{{status}}，排序：{{sortBy}}）",
-      "dialogueStatusFilterAria": "筛选对话状态：{{status}}",
       "dialogueSortHeading": "排序",
       "dialogueSort": {
         "recency": "最近优先",

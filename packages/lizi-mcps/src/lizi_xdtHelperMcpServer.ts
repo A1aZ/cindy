@@ -1,4 +1,3 @@
-import { registerBotCapabilityTools, type BotCapabilityCallbacks } from './xdt-helper/bot_capabilities.js';
 /**
  * lizi_xdtHelperMcpServer.ts
  * ---------------------------------------------------------------------------
@@ -63,6 +62,11 @@ import {
   registerBotSkillTools,
   type BotSkillCallbacks,
 } from './xdt-helper/bot_skills.js';
+import {
+  registerBotCapabilityTools,
+  withCindyGatedBotToolDescriptions,
+  type BotCapabilityCallbacks,
+} from './xdt-helper/bot_capabilities.js';
 import type { XdtHelperHistoryDeps } from './xdt-helper/_history_types.js';
 import type { SessionQueueDeps } from './xdt-helper/list_session_queue.js';
 import type { SessionControlDeps } from './xdt-helper/session_control.js';
@@ -157,10 +161,15 @@ interface BotMessagingCallbacks {
 
 // ── Entry tool registration ──────────────────────────────────────────────────
 
+function cindyAvailableForSession(sessionCtx: XdtHelperMcpSessionCtx): boolean {
+  return !resolveLiziMcpSessionContext(sessionCtx).remoteHostId;
+}
+
 function registerListToolsEntry(
   server: McpServer,
   registry: XdtHelperToolRegistry,
   allowedCategories: () => Promise<ReadonlySet<string> | null>,
+  sessionCtx: XdtHelperMcpSessionCtx,
 ): void {
   server.tool(
     'list_tools',
@@ -172,7 +181,10 @@ function registerListToolsEntry(
         if (allowed && !allowed.has(category)) {
           return errorPayload('CAPABILITY_NOT_AVAILABLE', '这个类目不属于当前任务的能力面。');
         }
-        const tools = registry.list(category as (typeof CATEGORY_ENUM)[number]);
+        const tools = withCindyGatedBotToolDescriptions(
+          registry.list(category as (typeof CATEGORY_ENUM)[number]),
+          cindyAvailableForSession(sessionCtx),
+        );
         return {
           content: [
             {
@@ -707,7 +719,7 @@ export function createXdtHelperMcpServer(
       callbacks: deps.botProfiles,
     });
   }
-  registerListToolsEntry(server, registry, allowedCategories);
+  registerListToolsEntry(server, registry, allowedCategories, sessionCtx);
   registerCallToolEntry(server, registry, {
     logger: deps.logger,
     // per-call 解析:codex HTTP bridge 的 server factory 阶段 ctx 是空的,
@@ -745,8 +757,12 @@ export function createXdtHelperMcpServer(
     const botTools: Tool[] = directTools.map((definition) => ({
       name: definition.name, description: definition.description, inputSchema: schema(definition.inputShape),
     }));
+    // Codex/remote Claude share one helper factory; rewrite ghost guidance from
+    // the request-time session, not the empty factory ctx.
     server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: (await allowedCategories())?.has('bots') ? [...entryTools, ...botTools] : entryTools,
+      tools: (await allowedCategories())?.has('bots')
+        ? [...entryTools, ...withCindyGatedBotToolDescriptions(botTools, cindyAvailableForSession(sessionCtx))]
+        : entryTools,
     }));
   }
   return server;

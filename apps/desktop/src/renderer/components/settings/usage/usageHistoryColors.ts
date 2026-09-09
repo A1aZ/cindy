@@ -24,12 +24,12 @@ export function usageHistoryModelColor(rank: number, colorCount: number): string
   return `oklch(from ${base} l c calc(h + ${hueRotation.toFixed(3)}))`;
 }
 
-/** Reuse the app's engine identity colors; never follow usage rank. */
+/** Claude/Codex use engine colors; pi uses the owner-chosen teal. Never follow rank. */
 export function usageHistoryAgentColor(agentKind: UsageAgentKind): string {
   const colors: Record<UsageAgentKind, string> = {
     'claude-code': 'var(--engine-badge-cc)',
     codex: 'var(--engine-badge-codex)',
-    pi: 'var(--engine-badge-pi)',
+    pi: MODEL_COLORS[0],
   };
   return colors[agentKind];
 }

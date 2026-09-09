@@ -30,7 +30,7 @@ describe('Usage History model colors', () => {
       ['claude-code', 'codex', 'pi'].map((kind) =>
         usageHistoryAgentColor(kind as 'claude-code' | 'codex' | 'pi'),
       ),
-    ).toEqual(['var(--engine-badge-cc)', 'var(--engine-badge-codex)', 'var(--engine-badge-pi)']);
+    ).toEqual(['var(--engine-badge-cc)', 'var(--engine-badge-codex)', 'var(--usage-model-1)']);
     const rows = (['claude-code', 'codex', 'pi'] as const).map((agentKind, i) => ({
       agentKind,
       tokens: (3 - i) * 100,

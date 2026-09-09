@@ -1,6 +1,10 @@
 # 用量历史分类配色
 
-## 当前：harness 身份色调整
+## 当前：pi 青绿
+
+所有者认为蓝色与紫色不易区分，指定 pi 改为青绿。三处 pi 标记统一消费 `--usage-model-1`，Light 实测 `rgb(20, 184, 166)`，Dark 实测 `rgb(45, 212, 191)`；Claude 陶土橙与 Codex 蓝色保持。沿用下述真实 Electron 沙箱与模拟数据重新检查，35 个模型、三处 harness 颜色对应与单日筛选检查通过。当前文件为同一忽略目录下 `pi-light.png`、`pi-dark.png`、`pi-light.json`、`pi-dark.json` 和 `pi-manifest.json`；之前的 brand 文件保留作历史对照。
+
+## 上一版：harness 身份色调整
 
 同日按所有者反馈，harness 的三处标记改为已有引擎身份色；下文初版青绿 / 靛蓝 / 琥珀记录仅保留作历史对照。真实 Electron 再次检查 Default Light 与 Default Dark：三种颜色分别为 `rgb(217, 119, 87)`（Claude 陶土橙）、`rgb(122, 157, 255)`（Codex 蓝）、`rgb(167, 139, 250)`（pi 紫）。两种模式同值符合这些身份 Token 的既有合同，模型颜色与日期筛选检查继续通过。
 

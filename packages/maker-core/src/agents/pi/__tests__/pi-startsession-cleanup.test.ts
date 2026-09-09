@@ -1299,8 +1299,13 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       resolver: ReturnType<typeof vi.fn>;
     } {
       const run = pendingSubagentRun({ toolName: 'write', input: { path: 'a.txt' } });
-      vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
-      vi.spyOn(piSubagentRuns, 'countPiSubagentRunDirectories').mockResolvedValue(1);
+      const runRoot = piSubagentRuns.piSubagentRunRoot(agentHome, 's1');
+      vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockImplementation(async (root) => (
+        root === runRoot ? [run] : []
+      ));
+      vi.spyOn(piSubagentRuns, 'countPiSubagentRunDirectories').mockImplementation(async (root) => (
+        root === runRoot ? 1 : 0
+      ));
       let openPublish!: () => void;
       let releasePublish!: () => void;
       const publishStarted = new Promise<void>((resolve) => { openPublish = resolve; });
@@ -1309,7 +1314,8 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       // Stands in for the helper's own multi-await stretch between the caller's
       // check and the mailbox write.
       vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockImplementation(
-        async (_root, _taskId, _action, options) => {
+        async (root, _taskId, _action, options) => {
+          if (root !== runRoot) return 0;
           captured = (options as { beforeMailboxWrite?: () => boolean } | undefined)
             ?.beforeMailboxWrite;
           openPublish();
@@ -1335,12 +1341,23 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       // Captured while the boundary is still down: it must answer "write".
       expect(fixture.gate()?.()).toBe(true);
 
+      // A detached supervisor from another handle may publish while this
+      // fixture owns the mock. It must not replace the predicate under test.
+      const foreignPublish = piSubagentRuns.controlPiSubagentRuns(
+        piSubagentRuns.piSubagentRunRoot(agentHome, 'other-session'),
+        'other-task',
+        'approval',
+        { beforeMailboxWrite: () => true },
+      );
       const closing = handle.close({ reason: 'account-boundary' });
-      // Same closure, after the flag went up. A snapshot would still say true,
-      // and the answer would land in a child's mailbox behind the sweep.
-      expect(fixture.gate()?.()).toBe(false);
-      fixture.releasePublish();
-      await closing;
+      try {
+        // Same closure, after the flag went up. A snapshot would still say true,
+        // and the answer would land in a child's mailbox behind the sweep.
+        expect(fixture.gate()?.()).toBe(false);
+      } finally {
+        fixture.releasePublish();
+        await Promise.all([closing, foreignPublish]);
+      }
     });
 
     it('does not start the stop sweep until the publish has left the write phase', async () => {

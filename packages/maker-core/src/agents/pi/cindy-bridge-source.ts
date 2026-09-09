@@ -2481,6 +2481,8 @@ const CINDY_DIRECT_BOT_TOOLS = new Set([
   CINDY_STOP_SESSION_TASK_TOOL,
   CINDY_SEND_TO_AGENT_TOOL,
   CINDY_CREATE_TEAMMATE_TOOL,
+  'routine_list', 'routine_save', 'routine_sources',
+  'routine_history', 'routine_delete', 'routine_run_now',
 ]);
 
 interface ConnectedMcpTool {
@@ -3259,6 +3261,58 @@ class CindyMcpGateway {
         },
         execute: async (_toolCallId: string, params: unknown, signal?: AbortSignal) =>
           this.executeDirectHelperTool(CINDY_STOP_SESSION_TASK_TOOL, params, signal),
+      });
+    }
+
+    // Native companion routines use the same direct facade and permission identity
+    // as teammate creation. A generic MCP gateway would require nested discovery
+    // and would not disclose the inner routine arguments to the model.
+    const routineTriggerProperties = {
+      id: { type: 'string' },
+    };
+    const routineTools = [
+      { name: 'routine_list', description: 'List your own persistent Cindy routines. Use before creating to avoid duplicates, and after saving to verify.', properties: {}, required: [] },
+      { name: 'routine_sources', description: 'List available local event sources, event types, filter fields and listening status. Read before creating event triggers; never guess source IDs.', properties: {}, required: [] },
+      { name: 'routine_save', description: 'Create or fully update your own persistent Cindy routine when the user requests scheduled reminders, recurring work or event-triggered automation. Multiple triggers are OR. Do not use a background Session or shell loop for recurring work. Do not invent an end time. Read back with routine_list before confirming success.',
+        properties: {
+          id: { type: 'string', description: 'Existing routine ID for updates; omit to create.' },
+          name: { type: 'string', minLength: 1 },
+          prompt: { type: 'string', minLength: 1, description: 'Instructions to execute at each trigger.' },
+          enabled: { type: 'boolean' },
+          triggers: { type: 'array', minItems: 1, maxItems: 32, items: { anyOf: [
+            { type: 'object', properties: { ...routineTriggerProperties,
+              kind: { type: 'string', enum: ['interval'] },
+              intervalMs: { type: 'integer', minimum: 60000, description: 'Interval in milliseconds. One minute = 60000.' },
+            }, required: ['id', 'kind', 'intervalMs'], additionalProperties: false },
+            { type: 'object', properties: { ...routineTriggerProperties,
+              kind: { type: 'string', enum: ['cron'] },
+              expression: { type: 'string' }, timezone: { type: 'string' },
+            }, required: ['id', 'kind', 'expression', 'timezone'], additionalProperties: false },
+            { type: 'object', properties: { ...routineTriggerProperties,
+              kind: { type: 'string', enum: ['event'] },
+              sourceId: { type: 'string' }, eventType: { type: 'string' },
+              filters: { type: 'array', items: { type: 'object', properties: {
+                field: { type: 'string' }, operator: { type: 'string', enum: ['equals', 'contains', 'not-equals'] },
+                value: { type: 'string' },
+              }, required: ['field', 'operator', 'value'], additionalProperties: false } },
+            }, required: ['id', 'kind', 'sourceId', 'eventType', 'filters'], additionalProperties: false },
+          ] } },
+        }, required: ['name', 'prompt', 'enabled', 'triggers'] },
+      ...[
+        { name: 'routine_history', description: 'Read execution history and results of one of your routines.' },
+        { name: 'routine_delete', description: 'Delete one of your routines when requested. To pause instead, save its complete configuration with enabled=false.' },
+        { name: 'routine_run_now', description: 'Run one of your saved routines now when requested.' },
+      ].map((tool) => ({ ...tool, properties: { id: { type: 'string', minLength: 1 } }, required: ['id'] })),
+    ];
+    for (const tool of routineTools) {
+      if (!this.resolveDirectHelperTool(tool.name, {})) continue;
+      pi.registerTool({
+        name: tool.name,
+        label: tool.name,
+        description: tool.description,
+        parameters: { type: 'object', properties: tool.properties, required: tool.required, additionalProperties: false },
+        execute: async (_toolCallId: string, params: unknown, signal?: AbortSignal) =>
+          this.executeDirectHelperTool(tool.name, params, signal),
       });
     }
 
@@ -4410,7 +4464,7 @@ export default async function cindyBridge(pi: any) {
   if (servers.length > 0) {
     try {
       mcpGateway.register(pi, { botMemoryFacade: cfg.botMemoryFacade === true });
-      console.error('[cindy-bridge] MCP gateway ready (' + mcpGateway.size + ' tools)');
+      console.error('[cindy-bridge] MCP gateway ready (' + mcpGateway.size + ' tools; companion facade=' + (cfg.botMemoryFacade === true) + ')');
     } catch (err) {
       console.error('[cindy-bridge] MCP gateway registration failed: ' + String(err));
     }

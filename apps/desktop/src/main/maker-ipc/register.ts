@@ -391,6 +391,7 @@ import {
   type BotDirectMessageService,
 } from './botDirectMessageService.js';
 import { registerBotLifecycleHandlers } from './botLifecycleService.js';
+import { updateBotRoutineLifecycle } from '../routines/service.js';
 import {
   createBotCompactRuntimeRefreshCoordinator,
   replaceBotRuntimeAfterPreflight,
@@ -3445,13 +3446,15 @@ export function getPendingCredentialSwitchTarget(
 
 export interface SchedulerQueuedPromptRequest {
   sessionId: string;
+  /** Routine dispatch preserves the teammate's current planning preference. */
+  inheritTargetPlanMode?: boolean;
   /** 发给 agent 的正文(可含静默运行隐藏协议后缀)。 */
   text: string;
   /** 落库与队列气泡展示的用户原始 prompt(不含隐藏协议)。 */
   persistedContent: string;
   origin: { kind: 'scheduler'; scheduleId: string; scheduleName: string; runId?: string };
   /** 排队项被 drain 派发、turn 已被会话接受时回调(等价直发路径的 send onAccepted)。 */
-  onAccepted: () => void | Promise<void>;
+  onAccepted: (queuedPermissions?: { permissionMode?: string; planMode?: boolean }) => void | Promise<void>;
   /** 派发已 accept 但最终未成为运行 turn(取消/回滚)时回调。 */
   onAcceptedRollback?: () => void | Promise<void>;
   /** 排队项未派发即被丢弃(用户删除队列行 / stop 清队列 / 会话清理)时回调。 */
@@ -9079,6 +9082,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerBotLifecycleHandlers({
     maker,
     getDelegationService: () => botDelegationServiceHolder,
+    onPaused: (botId) => updateBotRoutineLifecycle(botId, 'pause'),
+    onResumed: (botId) => updateBotRoutineLifecycle(botId, 'resume'),
+    onBeforeDelete: (botId) => updateBotRoutineLifecycle(botId, 'delete'),
   });
   const delegationForRestore = botDelegationServiceHolder;
   void restoreBotRuntimeForCurrentOwner();
@@ -9374,6 +9380,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   async function buildCreateOptsForQueuedSession(
     sessionId: string,
     meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>,
+    inheritTargetPlanMode = false,
   ): Promise<AgentInputCreateOpts> {
     const db = getDbClient().drizzle;
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
@@ -9390,7 +9397,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       effort: (row.effort ?? undefined) as CreateOpts['effort'],
       fastMode: !!row.fastMode,
       permissionMode: permissionModeOrAsk(row.permissionMode),
-      planMode: false,
+      planMode: inheritTargetPlanMode ? !!row.planModeEnabled : false,
       title: row.title ?? undefined,
       remoteHostId: row.remoteHostId ?? undefined,
       orcaRole: row.orcaRole as CreateOpts['orcaRole'],
@@ -9430,12 +9437,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   async function enqueueSendToSessionMessage(params: {
     targetSessionId: string;
+    inheritTargetPlanMode?: boolean;
     message: string;
     persistedContent: string;
     clientId: string;
     meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>;
     dbRow: NonNullable<Awaited<ReturnType<typeof getSessionRowSnapshot>>>;
-    onAccepted?: () => void | Promise<void>;
+    onAccepted?: SchedulerQueuedPromptRequest['onAccepted'];
     onAcceptedRollback?: () => void | Promise<void>;
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
@@ -9444,7 +9452,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (params.onAccepted) {
       orcaInterAgentDispatcher.registerQueuedOrcaInterAgentAcceptedCallback(
         params.clientId,
-        params.onAccepted,
+        () => params.onAccepted?.({
+          permissionMode: queued.createOpts.permissionMode,
+          planMode: queued.createOpts.planMode,
+        }),
         params.onAcceptedRollback,
         params.onAcceptedCommit,
       );
@@ -9461,6 +9472,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   async function buildSessionControlInputItem(params: {
     targetSessionId: string;
+    inheritTargetPlanMode?: boolean;
     message: string;
     persistedContent: string;
     clientId: string;
@@ -9468,7 +9480,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     files?: AgentInputQueuedMessage['files'];
     origin?: AgentInputQueuedMessage['origin'];
   }): Promise<AgentInputQueuedMessage> {
-    const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
+    const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta, params.inheritTargetPlanMode);
     const imageAttachments: NonNullable<AgentInputQueuedMessage['chatMessage']['images']> = [];
     for (const file of params.files ?? []) {
       if (file.category !== 'image') continue;
@@ -13315,6 +13327,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           targetSessionId: req.sessionId,
           message: req.text,
           persistedContent: req.persistedContent,
+          inheritTargetPlanMode: req.inheritTargetPlanMode,
           clientId,
           meta,
           dbRow,

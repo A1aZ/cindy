@@ -424,8 +424,8 @@ async function invoke(channel: string, body: unknown): Promise<any> {
 const capabilityDeps = {
   getMaker, getPluginRegistry, isBotToolsetAvailable,
   resolveBotAgentKind: async (): Promise<AgentKind | null> => 'pi',
-  listMcpServers: async ({ agentKind }: { agentKind: AgentKind }) => buildBotMcpCatalog({
-    agentKind, providers: h.mcpProviders, builtinNames: getBuiltinMcpServerNames(),
+  listMcpServers: async ({ agentKind, remoteHostId }: { agentKind: AgentKind; remoteHostId?: string }) => buildBotMcpCatalog({
+    agentKind, remoteHostId, providers: h.mcpProviders, builtinNames: getBuiltinMcpServerNames(),
     customServers: h.customMcpConfigs.map((config) => ({ ...config, updatedAt: 1 })),
   }),
 };
@@ -1995,6 +1995,41 @@ describe('Bot canonical Session lifecycle', () => {
         name: 'sse', available: agentKind === 'claude-code',
       }));
     }
+  });
+
+  it('rejects unforwarded custom MCPs on SSH Codex while preserving saved references and supported routes', async () => {
+    await invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: ['shared-docs'], mcpMode: 'allowlist' },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    h.sqlite!.prepare('UPDATE sessions SET remote_host_id = ? WHERE id = ?').run('ssh-host', created.session.id);
+    const input = { callerSessionId: created.session.id, kind: 'mcp' as const, id: 'shared-docs' };
+    for (const agentKind of ['codex', 'claude-code', 'pi'] as const) {
+      const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind: async () => agentKind });
+      await expect(service.list(input)).resolves.toMatchObject({
+        capabilities: [expect.objectContaining({ id: 'shared-docs', joined: true, available: agentKind !== 'codex' })],
+      });
+      const opts: MakerSessionCreateOpts = {
+        id: created.session.id, agentKind, workingDir: '/srv/bot', remoteHostId: 'ssh-host',
+        workspaceKind: 'project', model: 'test-model', permissionMode: 'auto',
+      };
+      const snapshot = await hydrateBotProfileRuntime(opts, { listMcpServers: capabilityDeps.listMcpServers });
+      expect(snapshot).toMatchObject({
+        configuredMcpServers: ['shared-docs'],
+        resolvedMcpServers: agentKind === 'codex' ? [] : ['shared-docs'],
+        unavailableMcpServers: agentKind === 'codex' ? ['shared-docs'] : [],
+      });
+    }
+    const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind: async () => 'codex' });
+    h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+    await expect(service.select({ ...input, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+    await expect(service.select({ ...input, joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] } }))
+      .rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    h.sqlite!.prepare('UPDATE sessions SET remote_host_id = NULL WHERE id = ?').run(created.session.id);
+    await expect(service.select({ ...input, joined: true })).resolves.toMatchObject({ ok: true, joined: true });
   });
 
   it.each(['contacts', 'lsp'])('rejects gated %s despite registry enablement and keeps joined references removable', async (id) => {

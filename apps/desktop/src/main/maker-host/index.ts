@@ -742,9 +742,10 @@ export function isBotToolsetAvailable(input: BotToolsetContext & { toolsetId: st
 }
 
 /** Shared by Bot tools, settings and hydration; never infer registration from raw DB rows. */
-export async function listBotRuntimeMcpServers({ agentKind }: { agentKind: AgentKind }) {
+export async function listBotRuntimeMcpServers({ agentKind, remoteHostId }: { agentKind: AgentKind; remoteHostId?: string }) {
   return buildBotMcpCatalog({
     agentKind,
+    remoteHostId,
     providers: _mcpProviders[agentKind] ?? [],
     builtinNames: getBuiltinMcpServerNames(),
     customServers: await listCustomMcpRuntimeGenerations(),

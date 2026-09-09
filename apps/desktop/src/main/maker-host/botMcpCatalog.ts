@@ -5,6 +5,7 @@ import { isPiCustomMcpProviderAvailable } from '../mcp-integrations/piMcpTranspo
 /** Freeze only metadata; compatibility is recomputed for each actual start route. */
 export function buildBotMcpCatalog(input: {
   agentKind: McpProviderContext['agentKind'];
+  remoteHostId?: string;
   providers: readonly McpProvider[];
   builtinNames: readonly string[];
   customServers: readonly { id: string; transport: McpTransport; updatedAt: number }[];
@@ -16,9 +17,11 @@ export function buildBotMcpCatalog(input: {
     const custom = customServers.get(provider.name);
     // Evaluate registered user configs using Pi's actual serialization and URL gate.
     // Builtins retain their SDK bridge path and are not instantiated by catalog queries.
-    const available = builtin || (input.agentKind === 'pi' && custom
-      ? isPiCustomMcpProviderAvailable(provider)
-      : input.agentKind !== 'codex' || custom?.transport !== 'sse');
+    // SSH Codex receives only the remote builtin allowlist; local custom configs
+    // are not serialized into its daemon. Claude forwards them and Pi tunnels them.
+    const available = builtin || (input.agentKind === 'codex'
+      ? !input.remoteHostId && custom?.transport !== 'sse'
+      : input.agentKind === 'pi' && custom ? isPiCustomMcpProviderAvailable(provider) : true);
     return [provider.name, {
       name: provider.name,
       source: builtin ? 'builtin' as const : 'custom' as const,

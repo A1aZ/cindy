@@ -30,8 +30,10 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 export interface McpHandlerDeps {
   /** Same registered runtime catalog used by Bot capability tools and hydration. */
-  listMcpServers(context: CustomMcpListContext): ReturnType<NonNullable<BotProfileRuntimeDeps['listMcpServers']>>;
-  resolveBotAgentKind(sessionId: string, chain?: BotModelRoute[]): Promise<CustomMcpListContext['agentKind'] | null>;
+  listMcpServers(context: { agentKind: CustomMcpListContext['agentKind']; remoteHostId?: string }): ReturnType<NonNullable<BotProfileRuntimeDeps['listMcpServers']>>;
+  resolveBotContext(sessionId: string, chain?: BotModelRoute[]): Promise<{
+    agentKind: CustomMcpListContext['agentKind']; remoteHostId?: string;
+  } | null>;
   /** CRUD 成功后刷新 agent mcpProviders 数组（生产 = refreshCustomMcpProviders）。 */
   refreshProviders(): Promise<void>;
   /** CRUD 成功后广播变更（生产 = 向所有窗口 send MCP_CHANGED）。 */
@@ -71,12 +73,14 @@ export function registerMcpHandlers(registry: IpcHandlerRegistry, deps: McpHandl
     const parsed = context === undefined ? undefined : listContextSchema.safeParse(context);
     if (parsed && !parsed.success) throwIpcError('INVALID_PARAMS', 'Invalid MCP catalog context');
     const input = parsed?.data;
-    const agentKind = input?.botSessionId
-      ? await deps.resolveBotAgentKind(input.botSessionId, input.modelChain) : input?.agentKind;
-    if (input?.botSessionId && !agentKind) throwIpcError('NOT_FOUND', 'Canonical Bot task not found');
+    const runtime = input?.botSessionId
+      ? await deps.resolveBotContext(input.botSessionId, input.modelChain)
+      : input ? { agentKind: input.agentKind } : undefined;
+    if (input?.botSessionId && !runtime) throwIpcError('NOT_FOUND', 'Canonical Bot task not found');
     const servers = await listCustomMcpServers();
-    if (!agentKind) return { servers };
-    const catalog = await deps.listMcpServers({ agentKind });
+    if (!runtime) return { servers };
+    const { agentKind } = runtime;
+    const catalog = await deps.listMcpServers(runtime);
     const available = new Set(catalog
       .filter((entry) => entry.source === 'custom' && entry.available !== false)
       .map((entry) => entry.name));

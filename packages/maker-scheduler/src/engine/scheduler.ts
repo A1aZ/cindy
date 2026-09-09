@@ -56,9 +56,14 @@ function normalizeScriptConfig(
 }
 
 function validateScheduleExecutionShape(
-  schedule: Pick<Schedule, 'executionMode' | 'scriptConfig' | 'workspaceKind' | 'workingDir' | 'useWorktree' | 'targetSessionId' | 'persistentSession' | 'prompt' | 'silentWhenIdle'>,
+  schedule: Pick<Schedule, 'executionMode' | 'scriptConfig' | 'workspaceKind' | 'workingDir' | 'useWorktree' | 'targetSessionId' | 'persistentSession' | 'prompt' | 'silentWhenIdle' | 'modelAgentKind' | 'model'>,
   opts: { checkAgentPrompt: boolean } = { checkAgentPrompt: true },
 ): void {
+  if (schedule.modelAgentKind != null) {
+    if (!['claude-code', 'codex', 'pi'].includes(schedule.modelAgentKind) || !schedule.model?.trim()) {
+      throw new Error('Explicit scheduled model Harness requires a supported Harness and model');
+    }
+  }
   if ((schedule.executionMode ?? 'agent') !== 'script') {
     // 堵 update 逃逸:script 任务(prompt 合法为空)经 patch 只切 executionMode='agent'
     // 时,若不校验会落库空提示词的 agent 任务,触发即烧一轮空输入。checkAgentPrompt
@@ -106,6 +111,7 @@ export interface SchedulerOptions {
   validateTargetSession?: (
     targetSessionId: string,
     operation: 'create' | 'update' | 'fire',
+    selection: Pick<Schedule, 'modelAgentKind'>,
   ) => Promise<void>;
   /**
    * 被动模式:本实例不参与自动触发 —— start() 不装 tick 时钟、不做僵尸 run 清理
@@ -771,7 +777,7 @@ export class Scheduler extends EventEmitter {
     this.updateInflightAttempt(runId, 'running');
     try {
       if (schedule.targetSessionId) {
-        await this.validateTargetSession?.(schedule.targetSessionId, 'fire');
+        await this.validateTargetSession?.(schedule.targetSessionId, 'fire', schedule);
       }
       const result = await this.runner.fire(schedule, {
         runId,
@@ -1081,7 +1087,7 @@ export class Scheduler extends EventEmitter {
     this.updateInflightAttempt(runId, 'running');
     try {
       if (schedule.targetSessionId) {
-        await this.validateTargetSession?.(schedule.targetSessionId, 'fire');
+        await this.validateTargetSession?.(schedule.targetSessionId, 'fire', schedule);
       }
       const result = await this.runner.fire(schedule, {
         runId,
@@ -1323,7 +1329,7 @@ export class Scheduler extends EventEmitter {
     };
     validateScheduleExecutionShape(schedule);
     if (schedule.targetSessionId) {
-      await this.validateTargetSession?.(schedule.targetSessionId, 'create');
+      await this.validateTargetSession?.(schedule.targetSessionId, 'create', schedule);
     }
     const inserted = await this.storage.insert(schedule);
     this.activeSchedules.set(id, inserted);
@@ -1386,7 +1392,7 @@ export class Scheduler extends EventEmitter {
       },
     );
     if (candidate.targetSessionId) {
-      await this.validateTargetSession?.(candidate.targetSessionId, 'update');
+      await this.validateTargetSession?.(candidate.targetSessionId, 'update', candidate);
     }
     // expired 是一次性任务已消费的终态。编辑后的配置若已经表达为“循环且非手动”，
     // 继续保留 expired 会让持久化状态与排期语义冲突：即使算出了 nextFireAt，任务也

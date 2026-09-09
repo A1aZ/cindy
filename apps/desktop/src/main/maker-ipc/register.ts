@@ -69,6 +69,7 @@ import {
   DL_SESSION_REFERENCE_CAPABILITY_CHANNEL,
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { applyScheduledModelSelection, ScheduledModelSelectionBusyError, type ScheduledModelSelection, type ScheduledModelSelectionLease } from './scheduledModelSelection';
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
 import {
   activeOwnerScopeKey,
@@ -866,6 +867,7 @@ import {
 import {
   pinExclusiveSessionProvider,
   resolveLenientSessionRoute,
+  resolveScheduledModelSelectionLive,
   shouldApplyExclusiveProviderRerouteLive,
   verdictForModelRoute,
 } from '../maker-host/model-route-guard-live.js';
@@ -3157,7 +3159,7 @@ function settlePendingCredentialSwitch(sessionId: string, source: string): void 
 let refreshRemoteCodexMcpOnTurnSettledHolder: ((sessionId: string) => void) | null = null;
 let deferredCodexRestartHolder: DeferredCodexRestartService | null = null;
 let pendingAgentSwitchApplyHolder:
-  ((sessionId: string, signal?: AbortSignal) => Promise<() => void>) | null = null;
+  ((sessionId: string, signal?: AbortSignal, selection?: ScheduledModelSelection) => Promise<{ release: () => void; selection?: ScheduledModelSelection }>) | null = null;
 let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
@@ -3337,11 +3339,25 @@ export function clearWorkingDirectoryRecoveryForOwnerBoundary(): void {
  * 并完成 send 后才 release。启动期 holder 尚未就绪时不可能已有进程内 pending
  * intent,返回 no-op release 即可。
  */
+export function acquirePendingAgentSwitchForDirectSend(
+  sessionId: string, signal?: AbortSignal,
+): Promise<() => void>;
+export function acquirePendingAgentSwitchForDirectSend(
+  sessionId: string, signal: AbortSignal | undefined, selection: ScheduledModelSelection,
+): Promise<ScheduledModelSelectionLease>;
 export async function acquirePendingAgentSwitchForDirectSend(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<() => void> {
-  return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
+  selection?: ScheduledModelSelection,
+): Promise<(() => void) | ScheduledModelSelectionLease> {
+  if (selection && !pendingAgentSwitchApplyHolder) throw new Error('Scheduled model selection is not initialized');
+  const lease = await pendingAgentSwitchApplyHolder?.(sessionId, signal, selection);
+  if (!selection) return lease?.release ?? (() => {});
+  if (!lease?.selection) {
+    lease?.release();
+    throw new Error('Scheduled model selection was not resolved');
+  }
+  return { release: lease.release, selection: lease.selection };
 }
 
 /** 直发路径在 createSession / 重读 live session 之前关掉不健康原生会话。 */
@@ -5108,6 +5124,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 已设间隔算出 now+null 立即触发,mobile 必须据此回退旧 wire 形态(省略
       // key,由旧引擎的隐式清空承担等价语义)。
       supportsScheduleIntervalNullClear: true,
+      // Full scheduled model selection, including bound Harness changes and template overrides.
+      supportsScheduleModelSelection: true,
     };
   });
 
@@ -8060,15 +8078,48 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     withCloseSuppressed: withRehydrateCloseSuppressed,
     log,
   });
-  pendingAgentSwitchApplyHolder = async (sessionId, signal) => {
+  pendingAgentSwitchApplyHolder = async (sessionId, signal, selection) => {
     const release = await acquireSendToSessionLock(sessionId);
     try {
       await applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
         bootstrapAfterSwitch: true,
         signal,
       });
+      let resolvedSelection: ScheduledModelSelection | undefined;
+      if (selection) {
+        resolvedSelection = await applyScheduledModelSelection(selection, {
+          getTarget: async () => {
+            const row = await agentSwitchDeps.getSessionRow(sessionId);
+            return row ? { agentKind: dbToMakerAgentKind(row.agentKind), status: row.status,
+              remoteHostId: row.remoteHostId, orcaRole: row.orcaRole } : null;
+          },
+          isBusy: () => isSessionInTurn(sessionId) || !!maker.getSession(sessionId)?.isTurnRunning(),
+          resolveSelection: async (route) => {
+            const reroute = await assertModelRouteUsable(route.agentKind, route.model, route.providerId);
+            return resolveScheduledModelSelectionLive({ ...route,
+              providerId: reroute && shouldApplyExclusiveProviderRerouteLive(route.providerId)
+                ? reroute : route.providerId,
+            });
+          },
+          switchHarness: (route) => performSessionAgentSwitch(agentSwitchDeps, {
+            sessionId, targetAgentKind: route.agentKind, model: route.model,
+            providerId: route.providerId, effort: route.effort, fastMode: route.fastMode,
+            applyNow: true, signal,
+          }),
+          applyModel: async (route) => {
+            if (signal?.aborted) throw new Error('Scheduled model selection aborted');
+            const result = await applySessionRuntimeSelection(sessionId, route.model, route.providerId,
+              { effort: route.effort, fastMode: route.fastMode },
+              { source: 'user', sessionLockHeld: true, applyingUserSelectionOnSend: true });
+            if (result.deferred) throw new ScheduledModelSelectionBusyError('Scheduled model selection deferred');
+            if (result.superseded || runtimeSelectionRequiresModelWindowConfirmation(result)) {
+              throw new Error('Scheduled model selection could not be applied');
+            }
+          },
+        });
+      }
       await contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId);
-      return release;
+      return { release, selection: resolvedSelection };
     } catch (err) {
       release();
       throw err;

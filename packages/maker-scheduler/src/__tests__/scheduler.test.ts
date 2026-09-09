@@ -163,6 +163,7 @@ function makeHarness(opts?: {
   validateTargetSession?: (
     targetSessionId: string,
     operation: 'create' | 'update' | 'fire',
+    selection: Pick<Schedule, 'modelAgentKind'>,
   ) => Promise<void>;
   /** 传入共享 storage / clock 模拟"两个 app 实例共用同一 DB"的双开场景。 */
   storage?: InMemoryStorage;
@@ -214,6 +215,16 @@ describe('Scheduler', () => {
     h = makeHarness();
   });
 
+
+  it('persists an explicit Harness with its model and clears it when following the target', async () => {
+    const saved = await h.scheduler.create({ ...baseInput, modelAgentKind: 'pi', model: 'grok-4.6' });
+    expect(saved.modelAgentKind).toBe('pi');
+    await expect(h.scheduler.update(saved.id, { model: undefined })).rejects.toThrow(/Harness/);
+    const followed = await h.scheduler.update(saved.id, { modelAgentKind: undefined, model: undefined });
+    expect(followed?.modelAgentKind).toBeUndefined();
+    await expect(h.scheduler.create({ ...baseInput, modelAgentKind: 'pi', model: '' })).rejects.toThrow(/Harness/);
+  });
+
   it('create() computes nextFireAt and adds to active map', async () => {
     const sch = await h.scheduler.create({ ...baseInput });
     // From 00:00:30, next minute boundary = 00:01:00
@@ -263,6 +274,43 @@ describe('Scheduler', () => {
     // 空白串 workingDir 等同未传 → dialogue
     const blankDir = await h.scheduler.create({ ...baseInput, workingDir: '  ' });
     expect(blankDir.workspaceKind).toBe('dialogue');
+  });
+
+  it('passes the complete candidate Harness to host validation before saving and firing', async () => {
+    let allowedAgent = 'codex';
+    const validateTargetSession = vi.fn(async (
+      _target: string,
+      _operation: 'create' | 'update' | 'fire',
+      selection: Pick<Schedule, 'modelAgentKind'>,
+    ) => {
+      if (selection.modelAgentKind && selection.modelAgentKind !== allowedAgent) {
+        throw new Error('target Harness is fixed');
+      }
+    });
+    const local = makeHarness({ validateTargetSession });
+    await expect(local.scheduler.create({ ...baseInput, targetSessionId: 'bound',
+      modelAgentKind: 'pi', model: 'test-model' })).rejects.toThrow('Harness is fixed');
+    expect(local.storage.schedules.size).toBe(0);
+    const schedule = await local.scheduler.create({ ...baseInput, targetSessionId: 'bound',
+      modelAgentKind: 'codex', model: 'test-model' });
+    await expect(local.scheduler.update(schedule.id, { modelAgentKind: 'pi' }))
+      .rejects.toThrow('Harness is fixed');
+    expect((await local.storage.get(schedule.id))?.modelAgentKind).toBe('codex');
+    await local.scheduler.update(schedule.id, { name: 'same route' });
+    expect(validateTargetSession).toHaveBeenLastCalledWith('bound', 'update',
+      expect.objectContaining({ modelAgentKind: 'codex' }));
+
+    // A changed host capability must also be checked on automatic and manual runs.
+    allowedAgent = 'pi';
+    local.clock.setTo(Date.UTC(2026, 0, 1, 0, 1, 5));
+    await local.scheduler.tick();
+    expect(local.fireCalls).toHaveLength(0);
+    expect(validateTargetSession).toHaveBeenLastCalledWith('bound', 'fire',
+      expect.objectContaining({ modelAgentKind: 'codex' }));
+    await local.scheduler.runNow(schedule.id);
+    expect(local.fireCalls).toHaveLength(0);
+    const follow = await local.scheduler.update(schedule.id, { modelAgentKind: undefined });
+    expect(follow.modelAgentKind).toBeUndefined();
   });
 
   it('rejects persisted Review targets at create, update, automatic fire, and runNow after restart', async () => {

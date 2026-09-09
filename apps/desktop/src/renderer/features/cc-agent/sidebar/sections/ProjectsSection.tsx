@@ -1311,7 +1311,7 @@ function SessionGroupNode({
             <DialogueStatusMenu
               status={status}
               onStatusChange={onStatusChange}
-              buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground focus:outline-none"
+              buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground"
               iconSize={14}
               stopRowToggle
             />

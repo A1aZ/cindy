@@ -77,6 +77,17 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     expect(sidebarSource).toContain('onStatusChange={filter.setStatus}');
   });
 
+  it('keeps DialogueStatusMenu status-only for AT and shows a keyboard focus ring', () => {
+    expect(dialogueStatusMenuSource).toContain("'ccAgent.sidebar.dialogueStatusFilterAria'");
+    expect(dialogueStatusMenuSource).not.toContain('sortByLabel');
+    expect(dialogueStatusMenuSource).toContain('focus-visible:ring-[var(--focus-ring)]');
+    expect(projectsSectionSource).not.toContain('sortByLabel');
+    expect(projectsSectionSource).not.toContain(
+      'buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground focus:outline-none"',
+    );
+    expect(sidebarSource).not.toContain('sortByLabel={t(`ccAgent.sidebar.dialogueSort.${dialogueSortBy}`)}');
+  });
+
   it('drops the removed date-grouped section entirely', () => {
     expect(sidebarSource).not.toContain('<DateGroupedSessionsSection');
     expect(sidebarSource).not.toContain("filter.groupBy === 'date'");

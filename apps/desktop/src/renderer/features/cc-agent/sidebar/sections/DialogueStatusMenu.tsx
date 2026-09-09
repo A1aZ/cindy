@@ -4,6 +4,9 @@
  * 全局 Status 仍由 SidebarFilterPopover 持有;本组件复用同一份
  * filter.status / setStatus,把「活跃 / 已归档 / 全部」放到混排「对话」组头
  * 和折叠 rail 对话面板上,避免入口只活在未挂载的 DialogueSection 里。
+ *
+ * 本菜单只有状态选项、没有排序项,可访问名称只用状态,不把状态文案填进
+ * `dialogueSettingsAria` 的 {{sortBy}} 占位符。
  */
 
 import { Check, SlidersHorizontal } from 'lucide-react';
@@ -29,18 +32,18 @@ export const DIALOGUE_STATUS_OPTIONS: ReadonlyArray<{
   { value: 'all', labelKey: 'ccAgent.sidebar.filterStatus.all' },
 ];
 
+const STATUS_BUTTON_FOCUS =
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]';
+
 export function DialogueStatusMenu({
   status,
   onStatusChange,
-  sortByLabel,
   buttonClassName,
   iconSize = 14,
   stopRowToggle = false,
 }: {
   status: FilterStatus;
   onStatusChange: (status: FilterStatus) => void;
-  /** 与 i18n `dialogueSettingsAria` 的 {{sortBy}} 对齐;省略时复用状态文案。 */
-  sortByLabel?: string;
   buttonClassName?: string;
   iconSize?: number;
   /** 组头整行可点折叠时,阻止菜单点击冒泡成收起/展开。 */
@@ -61,9 +64,8 @@ export function DialogueStatusMenu({
         <Tip text={t('ccAgent.sidebar.dialogueSettings')} side="bottom">
           <button
             type="button"
-            aria-label={t('ccAgent.sidebar.dialogueSettingsAria', {
+            aria-label={t('ccAgent.sidebar.dialogueStatusFilterAria', {
               status: statusLabel,
-              sortBy: sortByLabel ?? statusLabel,
             })}
             onClick={stop}
             onPointerDown={stop}
@@ -72,6 +74,7 @@ export function DialogueStatusMenu({
               'flex shrink-0 items-center justify-center rounded-md',
               'text-[var(--sidebar-list-muted)]',
               'transition-colors hover:text-[var(--sidebar-nav-text)]',
+              STATUS_BUTTON_FOCUS,
               buttonClassName,
             )}
           >

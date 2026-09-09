@@ -196,6 +196,10 @@ export async function getPiExtraSpawnConfig(
         return !disabledPluginIds.includes(pluginId)
           && (!allowedPluginIds || allowedPluginIds.includes(pluginId));
       }
+      // cindy is the always-on plugin gateway (ghost_list / ghost_info / ghost_call).
+      // It has no plugin id on purpose — empty ghost_list, not a missing server.
+      // Frozen Bot allowlists therefore must not treat it as an unknown host provider.
+      if (server.name === 'cindy') return true;
       // A frozen Bot runtime may use explicitly configured custom MCPs, but it
       // must not inherit miscellaneous host providers merely because the shared
       // Pi bridge knows about them. Unknown providers absent from the Bot's

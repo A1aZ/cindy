@@ -267,6 +267,7 @@ describe('piEnvironment per-session identity', () => {
 
   it('gives a Bot only its frozen built-ins plus configured custom MCPs', async () => {
     const config = await getPiExtraSpawnConfig([
+      makeProvider('cindy'),
       makeProvider('cindy_memory'),
       makeProvider('cindy_helper'),
       makeProvider('cindy_orca'),
@@ -290,6 +291,7 @@ describe('piEnvironment per-session identity', () => {
     });
 
     expect(config?.mcpBridge?.servers.map((server) => server.name).sort()).toEqual([
+      'cindy',
       'cindy_helper',
       'cindy_memory',
       'custom_probe',

@@ -8,6 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { extractIpcError } from '@/utils/ipcError';
 import { toast } from '@/lib/toast';
 import { refresh } from '../hooks/useSkillhub';
+import { showUninstallCleanup } from '../lib/uninstallCleanupNotifications';
 
 /** Local management for Skill details, independent of cloud ownership. */
 export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
@@ -53,26 +54,7 @@ export function LocalSkillControls({ skill, disabled = false, onUninstalled }: {
         return;
       }
       if (result.cleanupToken) {
-        const token = result.cleanupToken;
-        let retrying = false;
-        const showCleanup = () => {
-          const id = toast.warning(t('skillhub.management.cleanupIncomplete'), {
-            duration: 0,
-            action: { label: t('skillhub.management.retryCleanup'), onClick: () => {
-              if (retrying) return;
-              retrying = true;
-              void window.electronAPI.skillhub.retryUninstallCleanup(token).then(({ complete }) => {
-                if (complete) {
-                  toast.dismiss(id);
-                  toast.success(t('skillhub.management.cleanupComplete'));
-                  void refresh();
-                }
-              }).catch((error: unknown) => reportError(error, 'uninstallFailed'))
-                .finally(() => { retrying = false; });
-            } },
-          });
-        };
-        showCleanup();
+        showUninstallCleanup(result.cleanupToken, skill.name, refresh);
       } else {
         toast.success(t('skillhub.detail.uninstalledToast', { name: skill.name }));
       }

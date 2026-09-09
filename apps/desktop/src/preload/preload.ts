@@ -2957,6 +2957,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       error?: string;
       skills?: import('../main/skillhub/scanner').Skill[];
       sources?: import('../main/skillhub/scanner').SourceReport[];
+      pendingCleanups?: Array<{ token: string; name: string }>;
     }> => ipcRenderer.invoke('skillhub:scan', params),
 
     readSkill: (params: {

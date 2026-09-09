@@ -3170,6 +3170,7 @@ interface ElectronAPI {
       error?: string;
       skills?: SkillhubSkill[];
       sources?: SkillhubSourceReport[];
+      pendingCleanups?: Array<{ token: string; name: string }>;
     }>;
     readSkill: (params: { mdPath: string }) => Promise<{
       success: boolean;

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { app } from 'electron';
 import { createLogger } from '../logger';
 import { createOverrideSettingsFile } from '../maker-host/override-settings-file';
@@ -8,6 +9,7 @@ import { createOverrideSettingsFile } from '../maker-host/override-settings-file
 interface SkillActivationPreferences {
   disabledPaths: string[];
   discoveryPaths?: Record<string, string[]>;
+  revisions?: Record<string, string>;
 }
 
 export function skillActivationKey(source: string): string {
@@ -29,6 +31,8 @@ const store = createOverrideSettingsFile<SkillActivationPreferences>({
         .filter(([source, aliases]) => path.isAbsolute(source) && Array.isArray(aliases))
         .map(([source, aliases]) => [source, aliases.filter((alias): alias is string =>
           typeof alias === 'string' && path.isAbsolute(alias))])),
+      revisions: Object.fromEntries(Object.entries((raw as SkillActivationPreferences | null)?.revisions ?? {})
+        .filter(([source, revision]) => path.isAbsolute(source) && typeof revision === 'string')),
     };
   },
   log: createLogger('skillhub:activation'),
@@ -52,15 +56,43 @@ export function isCindySkillEnabled(source: string): boolean {
   return !readDisabledSkillPaths().includes(skillActivationKey(source));
 }
 
+export interface SkillActivationSnapshot { key: string; revision?: string; aliases: string[] }
+
+export function snapshotSkillActivation(source: string): SkillActivationSnapshot | null {
+  store.invalidateIfChanged();
+  const value = store.read();
+  const key = skillActivationKey(source);
+  return value.disabledPaths.includes(key)
+    ? { key, revision: value.revisions?.[key], aliases: value.discoveryPaths?.[key] ?? [] } : null;
+}
+
+/** Compare the captured intent inside the settings lock; later toggles always win. */
+export async function clearSkillActivationSnapshot(snapshot: SkillActivationSnapshot, canMutate: () => boolean): Promise<void> {
+  await store.updateAtomic(({ value }) => {
+    if (!canMutate()) throw new Error('Skill mutation context changed');
+    const { key } = snapshot;
+    if (value.revisions?.[key] !== snapshot.revision
+      || JSON.stringify(value.discoveryPaths?.[key] ?? []) !== JSON.stringify(snapshot.aliases)) return value;
+    const discoveryPaths = { ...value.discoveryPaths };
+    const revisions = { ...value.revisions };
+    delete discoveryPaths[key];
+    delete revisions[key];
+    return { disabledPaths: value.disabledPaths.filter((item) => item !== key), discoveryPaths, revisions };
+  });
+}
+
 export async function setCindySkillEnabled(source: string, enabled: boolean, canMutate: () => boolean = () => true, discoveryPaths: readonly string[] = []): Promise<void> {
   const key = skillActivationKey(source);
   await store.updateAtomic(({ value }) => {
     if (!canMutate()) throw new Error('Skill mutation context changed');
     const aliases = { ...value.discoveryPaths };
+    const revisions = { ...value.revisions };
+    delete revisions[key];
+    if (!enabled) revisions[key] = randomUUID();
     delete aliases[key];
     if (!enabled) aliases[key] = [...new Set([...(value.discoveryPaths?.[key] ?? []), ...discoveryPaths])]
       .filter((alias) => path.isAbsolute(alias) && skillActivationKey(alias) === key);
-    return { discoveryPaths: aliases, disabledPaths: enabled
+    return { revisions, discoveryPaths: aliases, disabledPaths: enabled
       ? value.disabledPaths.filter((item) => item !== key)
       : [...new Set([...value.disabledPaths, key])].sort(),
     };
@@ -80,9 +112,13 @@ export async function renameSkillWithActivation(
     const disabledPaths = value.disabledPaths.filter((key) => key !== oldKey && key !== newKey);
     if (value.disabledPaths.includes(oldKey)) disabledPaths.push(newKey);
     const discoveryPaths = { ...value.discoveryPaths };
+    const revisions = { ...value.revisions };
+    delete revisions[oldKey];
+    delete revisions[newKey];
+    if (value.disabledPaths.includes(oldKey)) revisions[newKey] = randomUUID();
     delete discoveryPaths[oldKey];
     delete discoveryPaths[newKey];
     if (value.disabledPaths.includes(oldKey)) discoveryPaths[newKey] = [destination];
-    return { disabledPaths: [...new Set(disabledPaths)].sort(), discoveryPaths };
+    return { disabledPaths: [...new Set(disabledPaths)].sort(), discoveryPaths, revisions };
   });
 }

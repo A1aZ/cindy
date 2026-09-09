@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   confirm: vi.fn(), setEnabled: vi.fn(), uninstall: vi.fn(), retry: vi.fn(), refresh: vi.fn(),
   success: vi.fn(), error: vi.fn(), warning: vi.fn(), dismiss: vi.fn(),
 }));
+vi.mock('@/i18n', () => ({ i18n: { t: (key: string) => key } }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/components/ui/confirm-dialog-provider', () => ({ useConfirmDialog: () => ({ confirm: mocks.confirm }) }));
 vi.mock('../../hooks/useSkillhub', () => ({ refresh: mocks.refresh }));
@@ -13,6 +14,7 @@ vi.mock('@/lib/toast', () => ({ toast: {
   success: mocks.success, error: mocks.error, warning: mocks.warning, dismiss: mocks.dismiss,
 } }));
 import { LocalSkillControls } from '../LocalSkillControls';
+import { resetUninstallCleanupNotices } from '../../lib/uninstallCleanupNotifications';
 
 const skill = { id: 'global-example', name: 'example', kind: 'skill', absolutePath: '/fixture/.agents/skills/example',
   scope: 'global', cindyEnabled: true, canUninstall: true } as SkillhubSkill;
@@ -24,6 +26,7 @@ async function chooseUninstall() {
 }
 
 beforeEach(() => {
+  resetUninstallCleanupNotices();
   vi.clearAllMocks();
   mocks.confirm.mockResolvedValue(true);
   mocks.refresh.mockResolvedValue(undefined);

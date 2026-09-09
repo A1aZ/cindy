@@ -341,20 +341,210 @@ describe('skillhub/installService', () => {
     expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('restored');
   });
 
-  it('releases a discarded cleanup receipt without retrying filesystem or registry operations', async () => {
-    const { source, target } = await localFixture('cleanup-discarded');
+  it('recovers a receipt after restart while retaining every alias barrier', async () => {
+    const { source, target } = await localFixture('cleanup-restarted');
     const { registryService } = await import('../registry');
     vi.mocked(registryService.getInstall).mockResolvedValue({
       origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
     });
     vi.mocked(registryService.removeInstall).mockRejectedValueOnce(new Error('disk unavailable'));
-    const { uninstall, retryUninstallCleanup, discardUninstallCleanup } = await import('../installService');
+    const { uninstall } = await import('../installService');
     const { shell } = await import('electron');
     const result = await uninstall(source, target);
     if (!result.success || !result.cleanupToken) throw new Error('expected receipt');
-    discardUninstallCleanup(result.cleanupToken);
+    vi.resetModules();
+    const { retryUninstallCleanup, listPendingUninstallCleanups } = await import('../installService');
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    expect(listPendingUninstallCleanups()).toEqual([{ token: result.cleanupToken, name: 'cleanup-restarted' }]);
+    expect(await acquireSharedSkillMutationLease(['cleanup-restarted'])).toBeNull();
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(listPendingUninstallCleanups()).toEqual([]);
+    const next = await acquireSharedSkillMutationLease(['cleanup-restarted']);
+    expect(next).not.toBeNull();
+    await next!();
+    expect(shell.trashItem).toHaveBeenCalledOnce();
+  });
+
+  it.each(['retry-then-install', 'external-replacement'] as const)('finishes old imported aliases without losing the source (%s)', async (scenario) => {
+    const source = path.join(TEST_ROOT, 'external', 'old-source');
+    const alias = path.join(TEST_ROOT, '.agents', 'skills', 'reinstalled-alias');
+    const compatibilityAlias = path.join(TEST_ROOT, '.claude', 'skills', 'different-alias');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'old external skill');
+    for (const entry of [alias, compatibilityAlias]) makeDirectoryLink(entry, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.listAllInstalls).mockResolvedValue([]);
+    const target = inspectLocalSkillTarget(source, [alias, compatibilityAlias])!;
+    expect(target.linkOnly).toBe(true);
+    const originalUnlink = fs.unlinkSync;
+    const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementation((entry) => {
+      if (entry === compatibilityAlias) throw Object.assign(new Error('fixture link is busy'), { code: 'EPERM' });
+      return originalUnlink(entry);
+    });
+    const { uninstall, install } = await import('../installService');
+    const { shell } = await import('electron');
+    let result: Awaited<ReturnType<typeof uninstall>>;
+    try { result = await uninstall(source, target); }
+    finally { unlink.mockRestore(); }
+    if (!result.success || !result.cleanupToken) throw new Error('expected unfinished cleanup');
+    vi.resetModules();
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    for (const name of ['old-source', 'reinstalled-alias', 'different-alias']) {
+      expect(await acquireSharedSkillMutationLease([name])).toBeNull();
+    }
+    const unrelated = await acquireSharedSkillMutationLease(['unrelated-skill']);
+    expect(unrelated).not.toBeNull();
+    await unrelated!();
+    const zip = await makeZip({ 'SKILL.md': 'new installed skill' });
+    await setupInstallDownload('reinstalled-alias', zip);
+    const params = { name: 'reinstalled-alias', installPath: alias, version: '1.0.0' };
+    expect((await install(params, () => {})).success).toBe(false);
+    if (scenario === 'external-replacement') {
+      // External CLIs do not participate in Cindy's shared mutation protocol.
+      fs.mkdirSync(alias);
+      fs.writeFileSync(path.join(alias, 'SKILL.md'), 'new installed skill');
+    }
+    const { retryUninstallCleanup } = await import('../installService');
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(fs.lstatSync(compatibilityAlias, { throwIfNoEntry: false })).toBeUndefined();
+    if (scenario === 'retry-then-install') expect((await install(params, () => {})).success).toBe(true);
+    expect(fs.readFileSync(path.join(alias, 'SKILL.md'), 'utf8')).toBe('new installed skill');
+    expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('old external skill');
+    expect(shell.trashItem).toHaveBeenCalledOnce();
+  });
+
+  it('preserves restored source links and newer disabled intent during delayed cleanup', async () => {
+    const { source } = await localFixture('restored-source');
+    const alias = path.join(TEST_ROOT, '.claude', 'skills', 'restored-alias');
+    makeDirectoryLink(alias, source);
+    const { inspectLocalSkillTarget } = await import('../localSkillTarget');
+    const target = inspectLocalSkillTarget(source, [source, alias])!;
+    const prefs = await import('../activationPreferences');
+    await prefs.setCindySkillEnabled(source, false);
+    const originalUnlink = fs.unlinkSync;
+    const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementation((entry) => {
+      if (entry === alias) throw Object.assign(new Error('busy'), { code: 'EPERM' });
+      return originalUnlink(entry);
+    });
+    const { uninstall, retryUninstallCleanup } = await import('../installService');
+    let result: Awaited<ReturnType<typeof uninstall>>;
+    try { result = await uninstall(source, target); }
+    finally { unlink.mockRestore(); }
+    if (!result.success || !result.cleanupToken) throw new Error('expected receipt');
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'SKILL.md'), 'restored source');
+    await prefs.setCindySkillEnabled(source, true);
+    await prefs.setCindySkillEnabled(source, false);
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(fs.readFileSync(path.join(alias, 'SKILL.md'), 'utf8')).toBe('restored source');
+    expect(prefs.isCindySkillEnabled(source)).toBe(false);
+  });
+
+  it.each(['before-trash', 'after-trash', 'barrier-release'] as const)('recovers interrupted persistence without replaying trash (%s)', async (failure) => {
+    const { source, target } = await localFixture('persistence-failure');
+    const { shell } = await import('electron');
+    const journal = await import('../uninstallJournal');
+    const realWrite = journal.writeUninstallCleanup;
+    const write = vi.spyOn(journal, 'writeUninstallCleanup').mockImplementation((record) => {
+      if (failure === 'before-trash' || (failure === 'after-trash' && record.phase !== 'prepared')) throw new Error('disk full');
+      realWrite(record);
+    });
+    const originalUnlink = fs.unlinkSync;
+    const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementation((entry) => {
+      if (failure === 'barrier-release' && String(entry).includes('shared-skill-mutation-locks') && String(entry).endsWith('.json')) {
+        throw Object.assign(new Error('busy'), { code: 'EPERM' });
+      }
+      return originalUnlink(entry);
+    });
+    const { uninstall } = await import('../installService');
+    let result: Awaited<ReturnType<typeof uninstall>>;
+    try { result = await uninstall(source, target); }
+    finally { write.mockRestore(); unlink.mockRestore(); }
+    if (failure === 'before-trash') {
+      expect(result.success).toBe(false);
+      expect(shell.trashItem).not.toHaveBeenCalled();
+      expect(fs.existsSync(source)).toBe(true);
+      return;
+    }
+    if (!result.success || !result.cleanupToken) throw new Error('expected durable receipt');
+    vi.resetModules();
+    const { retryUninstallCleanup } = await import('../installService');
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    expect(await acquireSharedSkillMutationLease(['persistence-failure'])).toBeNull();
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+    expect(shell.trashItem).toHaveBeenCalledOnce();
+    expect(fs.existsSync(source)).toBe(false);
+  });
+
+  it('retries only finalization after completed journal deletion fails', async () => {
+    const { source, target } = await localFixture('completed-receipt');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    const originalUnlink = fs.unlinkSync;
+    const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementation((entry) => {
+      if (String(entry).includes('uninstall-cleanups') && String(entry).endsWith('.json')) {
+        throw Object.assign(new Error('busy journal'), { code: 'EPERM' });
+      }
+      return originalUnlink(entry);
+    });
+    const { uninstall, retryUninstallCleanup } = await import('../installService');
+    let result: Awaited<ReturnType<typeof uninstall>>;
+    try { result = await uninstall(source, target); }
+    finally { unlink.mockRestore(); }
+    if (!result.success || !result.cleanupToken) throw new Error('expected receipt');
+    const { readUninstallCleanup } = await import('../uninstallJournal');
+    expect(readUninstallCleanup(result.cleanupToken)?.phase).toBe('completed');
+    expect(registryService.removeInstall).toHaveBeenCalledOnce();
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    const next = await acquireSharedSkillMutationLease(['completed-receipt']);
+    expect(next).not.toBeNull();
+    await next!();
     expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
     expect(registryService.removeInstall).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the receipt and barrier when a retry cannot inspect the source', async () => {
+    const { source, target } = await localFixture('unreadable-source');
+    const { registryService } = await import('../registry');
+    vi.mocked(registryService.getInstall).mockResolvedValue({
+      origin: 'imported', version: '1', authorId: '', folderHash: 'hash', installedAt: 1, updatedAt: 1,
+    });
+    vi.mocked(registryService.removeInstall).mockRejectedValueOnce(new Error('busy registry'));
+    const { uninstall, retryUninstallCleanup, listPendingUninstallCleanups } = await import('../installService');
+    const result = await uninstall(source, target);
+    if (!result.success || !result.cleanupToken) throw new Error('expected receipt');
+    const originalStat = fs.lstatSync;
+    const stat = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+      if (String(args[0]) === target.sourcePath) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      return originalStat(...args);
+    });
+    try { expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(false); }
+    finally { stat.mockRestore(); }
+    expect(listPendingUninstallCleanups()).toHaveLength(1);
+    const { acquireSharedSkillMutationLease } = await import('../sharedMutationLease');
+    expect(await acquireSharedSkillMutationLease(['unreadable-source'])).toBeNull();
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
+  });
+
+  it('retains cleanup across owner changes and refuses to run it as another owner', async () => {
+    const { source, target } = await localFixture('owner-cleanup');
+    const { shell } = await import('electron');
+    const { getCurrentDataOwnerId } = await import('../../authManager');
+    vi.mocked(shell.trashItem).mockImplementationOnce(async (entry) => {
+      await fs.promises.rename(entry, source + '-trash');
+      vi.mocked(getCurrentDataOwnerId).mockReturnValue('other-owner');
+    });
+    const { uninstall, retryUninstallCleanup, listPendingUninstallCleanups } = await import('../installService');
+    const result = await uninstall(source, target);
+    if (!result.success || !result.cleanupToken) throw new Error('expected durable receipt');
+    expect(listPendingUninstallCleanups()).toEqual([]);
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(false);
+    vi.mocked(getCurrentDataOwnerId).mockReturnValue('user-1');
+    expect(listPendingUninstallCleanups()).toHaveLength(1);
+    expect(await retryUninstallCleanup(result.cleanupToken, () => true)).toBe(true);
     expect(shell.trashItem).toHaveBeenCalledOnce();
   });
 
@@ -469,6 +659,7 @@ describe('skillhub/installService', () => {
       expect(registryService.removeInstall).toHaveBeenCalledWith(
         'imported-offline',
         expect.stringMatching(/[/\\]imported-offline$/),
+        expect.objectContaining({ expected: expect.any(Object), canMutate: expect.any(Function), shouldRemove: expect.any(Function) }),
       );
     } finally {
       vi.mocked(getAppCapabilities).mockImplementation(() => ({
@@ -1183,7 +1374,7 @@ describe('skillhub/installService', () => {
       expect(fs.existsSync(projectAlias)).toBe(false);
       expect(fs.existsSync(globalAlias)).toBe(true);
       expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('fixture');
-      expect(registryService.removeInstall).toHaveBeenCalledExactlyOnceWith('foo', projectAlias);
+      expect(registryService.removeInstall).toHaveBeenCalledExactlyOnceWith('foo', projectAlias, expect.objectContaining({ expected: expect.any(Object), canMutate: expect.any(Function), shouldRemove: expect.any(Function) }));
     } finally { home.mockRestore(); }
   });
 
@@ -1205,7 +1396,7 @@ describe('skillhub/installService', () => {
     const { uninstall } = await import('../installService');
     const result = await uninstall(target.sourcePath, target);
     expect(result).toEqual({ success: true, projectWorkingDir: projectRoot });
-    expect(sharedSkills.prepareSharedProjectSkillLinks).toHaveBeenCalledWith({ workingDir: projectRoot });
+    expect(sharedSkills.prepareSharedProjectSkillLinks).not.toHaveBeenCalled();
     expect(fs.existsSync(alias)).toBe(false);
     expect(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8')).toBe('external content');
   });
@@ -1236,9 +1427,7 @@ describe('skillhub/installService', () => {
     const result = await uninstall(finalDir);
 
     expect(result).toEqual({ success: true, projectWorkingDir: projectRoot });
-    expect(sharedSkills.prepareSharedProjectSkillLinks).toHaveBeenCalledWith({
-      workingDir: projectRoot,
-    });
+    expect(sharedSkills.prepareSharedProjectSkillLinks).not.toHaveBeenCalled();
   });
 
   it('trashes a market install in local mode while cloud is unavailable', async () => {
@@ -1298,7 +1487,7 @@ describe('skillhub/installService', () => {
     const result = await uninstall(physicalDir);
     expect(result).toEqual({ success: true });
     expect(fs.existsSync(physicalDir)).toBe(false);
-    expect(registryService.removeInstall).toHaveBeenCalledWith('foo', logicalDir);
+    expect(registryService.removeInstall).toHaveBeenCalledWith('foo', logicalDir, expect.objectContaining({ expected: expect.any(Object), canMutate: expect.any(Function), shouldRemove: expect.any(Function) }));
   });
 
   it('uninstalls a linked install when the scanner passes its physical path', async () => {
@@ -1334,7 +1523,7 @@ describe('skillhub/installService', () => {
 
     expect(result.success).toBe(true);
     expect(fs.existsSync(physicalDir)).toBe(false);
-    expect(registryService.removeInstall).toHaveBeenCalledWith(skillName, logicalDir);
+    expect(registryService.removeInstall).toHaveBeenCalledWith(skillName, logicalDir, expect.objectContaining({ expected: expect.any(Object), canMutate: expect.any(Function), shouldRemove: expect.any(Function) }));
   });
 
   it('clears a previous auto-sync ignore marker after a successful manual install', async () => {

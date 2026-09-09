@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { skillhubCatalogKey } from '../../../../shared/skillhubCatalog';
+import { syncUninstallCleanupNotices, resetUninstallCleanupNotices } from '../lib/uninstallCleanupNotifications';
 import { invalidateSkillSyncRequests, registerSyncStoreSetters } from './useSkillSync';
 
 interface SkillhubProject {
@@ -89,6 +90,7 @@ export function refresh(): Promise<SkillhubSkill[]> {
         return latestScan?.id === scanRequestId ? latestScan.promise : state.skills;
       }
       if (result.success) {
+        syncUninstallCleanupNotices(result.pendingCleanups ?? [], refresh);
         const skills = result.skills ?? [];
         setState({
           skills,
@@ -196,6 +198,7 @@ export function setSyncError(err: string | null): void {
  * owner's late result cannot repopulate the new owner's store.
  */
 export function reset(): void {
+  resetUninstallCleanupNotices();
   scanRequestId += 1;
   latestScan = null;
   invalidateSkillSyncRequests();
@@ -238,6 +241,7 @@ function ensureAuthListener(): void {
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
+    resetUninstallCleanupNotices();
     authListenerUnsubscribe?.();
     localStateListenerUnsubscribe?.();
     authListenerUnsubscribe = null;

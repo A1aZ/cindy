@@ -5,9 +5,49 @@ import { app } from 'electron';
 import { withCrossProcessLock } from '../device-link/crossProcessLock';
 import { createLogger } from '../logger';
 import { skillInstallLockKey } from './installLock';
+import { atomicWriteFileSync, readAtomicFileSync } from '../utils/atomicWriteFile';
 
 const log = createLogger('skillhub:shared-mutation');
-export type SkillMutationRelease = () => Promise<void>;
+export type SkillMutationRelease = (() => Promise<void>) & {
+  /** Keep conflicting writers out after releasing the process lease. */
+  retainUntilComplete(token: string): void;
+  complete(token: string): void;
+};
+
+export function skillMutationNames(names: readonly string[]): string[] {
+  return [...new Set(names.map(skillInstallLockKey))].sort();
+}
+
+export function isSkillMutationToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
+}
+
+interface PendingMutation { token: string; keys: string[] }
+
+function readPending(root: string, keys: string[]): PendingMutation[] {
+  // Read only the held resource names: a damaged receipt must not block unrelated Skills.
+  return keys.flatMap((key) => {
+    const dir = path.join(root, 'pending', key);
+    let files: string[];
+    try { files = fs.readdirSync(dir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    return [...new Set(files.filter((file) => /\.json(?:\.bak)?$/.test(file))
+      .map((file) => file.replace(/\.bak$/, '')))].flatMap((file) => {
+      const raw = readAtomicFileSync(path.join(dir, file));
+      if (raw === null) return [];
+      const value = JSON.parse(raw) as PendingMutation;
+      if (!isSkillMutationToken(value.token) || file !== `${value.token}.json`
+        || !Array.isArray(value.keys) || !value.keys.includes(key)
+        || value.keys.some((item) => typeof item !== 'string' || !/^[a-f0-9]{64}$/.test(item))) {
+        throw new Error('Invalid pending Skill mutation');
+      }
+      return [value];
+    });
+  });
+}
 
 /**
  * All Desktop profiles share native Skill directories. Keep the lease root
@@ -17,6 +57,7 @@ export type SkillMutationRelease = () => Promise<void>;
  */
 export async function acquireSharedSkillMutationLease(
   names: readonly string[],
+  pendingToken?: string,
 ): Promise<SkillMutationRelease | null> {
   let root: string;
   try {
@@ -26,7 +67,8 @@ export async function acquireSharedSkillMutationLease(
     log.warn('Skill mutation lock directory is unavailable');
     return null;
   }
-  const keys = [...new Set(names.map(skillInstallLockKey))].sort();
+  const keys = skillMutationNames(names).map((name) => createHash('sha256').update(name).digest('hex'));
+  if (keys.length === 0 || (pendingToken !== undefined && !isSkillMutationToken(pendingToken))) return null;
   let enter!: (release: SkillMutationRelease | null) => void;
   const entered = new Promise<SkillMutationRelease | null>((resolve) => { enter = resolve; });
   let release!: () => void;
@@ -34,11 +76,41 @@ export async function acquireSharedSkillMutationLease(
   let finished: Promise<void>;
   const acquire = async (index: number): Promise<void> => {
     if (index === keys.length) {
-      enter(async () => { release(); await finished; });
+      const matchesKeys = (record: PendingMutation) =>
+        record.keys.length === keys.length && record.keys.every((key) => keys.includes(key));
+      if (readPending(root, keys).some((record) => record.keys.some((key) => keys.includes(key))
+        && !(record.token === pendingToken && matchesKeys(record)))) return;
+      let active = true;
+      const assertActive = (token: string) => {
+        if (!active || !isSkillMutationToken(token)) throw new Error('Skill mutation lease is no longer held');
+      };
+      const leased = Object.assign(async () => { active = false; release(); await finished; }, {
+        retainUntilComplete(token: string) {
+          assertActive(token);
+          const existing = readPending(root, keys).filter((record) => record.token === token);
+          if (existing.some((record) => !matchesKeys(record))) throw new Error('Skill mutation resources changed');
+          for (const key of keys) {
+            atomicWriteFileSync(path.join(root, 'pending', key, `${token}.json`), JSON.stringify({ token, keys }));
+          }
+        },
+        complete(token: string) {
+          assertActive(token);
+          const existing = readPending(root, keys).find((record) => record.token === token);
+          if (!existing) return;
+          if (!matchesKeys(existing)) throw new Error('Skill mutation resources changed');
+          for (const key of keys) {
+            for (const suffix of ['.json.bak', '.json']) {
+              try { fs.unlinkSync(path.join(root, 'pending', key, `${token}${suffix}`)); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            }
+          }
+        },
+      });
+      enter(leased);
       await released;
       return;
     }
-    const key = createHash('sha256').update(keys[index]!).digest('hex');
+    const key = keys[index]!;
     await withCrossProcessLock(path.join(root, `${key}.lock`),
       { label: 'skill-mutation', waitMs: 0 }, async (status) => {
         if (status.held) await acquire(index + 1);

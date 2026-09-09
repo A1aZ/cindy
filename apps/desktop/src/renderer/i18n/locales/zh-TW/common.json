@@ -11228,7 +11228,7 @@
       "sharedImpact": "共用此技能的其他 Agent 也會受影響。雲端發布和其他安裝位置不受影響。",
       "managedElsewhere": "此技能由其他套件或共用目錄管理，需在其來源處移除",
       "managedByPlugin": "此技能由插件提供，請到所屬插件頁面管理。",
-      "cleanupIncomplete": "技能已移除，但部分記錄或連結未清理完成。請在關閉或重新整理視窗前重試。",
+      "cleanupIncomplete": "「{{name}}」的解除安裝清理尚未完成。請重試；重新開啟技能中心後也可繼續。清理完成前無法重新安裝。",
       "retryCleanup": "重試清理",
       "cleanupComplete": "清理完成"
     }

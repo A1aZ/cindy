@@ -28,7 +28,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { app, net, shell } from 'electron';
 import { isLocalSkillTargetCurrent, type LocalSkillTarget } from './localSkillTarget';
-import { isCindySkillEnabled, setCindySkillEnabled } from './activationPreferences';
+import { isCindySkillEnabled, setCindySkillEnabled, snapshotSkillActivation, clearSkillActivationSnapshot } from './activationPreferences';
+import { fileIdentity, writeUninstallCleanup, readUninstallCleanup, listUninstallCleanups, deleteUninstallCleanup, type UninstallCleanup } from './uninstallJournal';
 import JSZip from 'jszip';
 import { skillhubApiFetch } from './hubApi';
 import { getCurrentDataOwnerId, getCurrentUserId } from '../authManager';
@@ -41,7 +42,7 @@ import { registryService } from './registry';
 import type { StoredInstall } from './registry/types';
 import { computeFolderHash } from './folderHash';
 import { getSkillInstallLockOwner, skillInstallLockKey, tryAcquireSkillInstallLock } from './installLock';
-import { acquireSharedSkillMutationLease, type SkillMutationRelease } from './sharedMutationLease';
+import { acquireSharedSkillMutationLease, skillMutationNames, type SkillMutationRelease } from './sharedMutationLease';
 import {
   prepareSharedGlobalSkillLinks,
   prepareSharedProjectSkillLinks,
@@ -180,13 +181,19 @@ async function pathExists(p: string): Promise<boolean> {
  * Skill 目录变化后维护项目级双 Agent 兼容链接，并返回需要失效缓存的 cwd。
  * 链接维护本身保持 best-effort；即使失败也返回 cwd，让调用层刷新实际磁盘状态。
  */
-async function reconcileProjectSkillLinksForPaths(...skillPaths: string[]): Promise<string | undefined> {
+function projectWorkingDirForSkillPaths(...skillPaths: string[]): string | undefined {
   const projectWorkingDir = skillPaths
     .map((skillPath) => projectWorkingDirFromSkillPath(skillPath))
     .find((workingDir): workingDir is string => Boolean(workingDir));
   if (!projectWorkingDir || path.resolve(projectWorkingDir) === path.resolve(os.homedir())) {
     return undefined;
   }
+  return projectWorkingDir;
+}
+
+async function reconcileProjectSkillLinksForPaths(...skillPaths: string[]): Promise<string | undefined> {
+  const projectWorkingDir = projectWorkingDirForSkillPaths(...skillPaths);
+  if (!projectWorkingDir) return undefined;
 
   try {
     const linkResult = await prepareSharedProjectSkillLinks({ workingDir: projectWorkingDir });
@@ -959,7 +966,8 @@ export async function uninstall(
   // 共享安装锁:同名 install / learn apply 的 final-switch 进行中时拒绝删除,
   // 避免 rm 掉对方刚切入的目录、registry 写入交错。
   const releaseLocks: Array<() => void> = [];
-  const lockNames = [...new Set([skillName, path.basename(target?.operationPath ?? absolutePath)].map(skillInstallLockKey))];
+  const lockNames = skillMutationNames([skillName, path.basename(absolutePath),
+    path.basename(target?.operationPath ?? absolutePath), ...(target?.aliases ?? []).map((alias) => path.basename(alias))]);
   // An imported discovery link can have a different name from its source. Install
   // replaces that entry under its discovery name, so hold both locks through trash.
   for (const lockName of lockNames) {
@@ -994,6 +1002,8 @@ export async function uninstall(
       registryMatch?.skillName ?? skillName,
       cloudUserId,
       registryMatch,
+      releaseShared,
+      lockNames,
       target,
       canMutate,
     );
@@ -1064,139 +1074,164 @@ async function findRegistryInstallForPath(
   return null;
 }
 
-/** uninstall 的持锁主体（锁获取/释放在 uninstall 外壳完成）。 */
+/** The durable receipt owns cleanup; window grants only authorize execution. */
 async function uninstallLocked(
   absolutePath: string,
   resolved: string,
   skillName: string,
   cloudUserId: string | null,
   registryMatch: RegistryInstallMatch | null,
+  lease: SkillMutationRelease,
+  lockNames: string[],
   target?: LocalSkillTarget,
   canMutate: () => boolean = () => true,
 ): Promise<UninstallResult> {
-  const registryEntry = registryMatch?.entry;
-
-  if (!canMutate()) return { success: false, errorCode: 'CANCELLED', message: 'Skill mutation context changed' };
-  const recordIgnore = !!(registryEntry && await shouldRecordAutoSyncIgnore(skillName, registryEntry, cloudUserId ?? undefined));
+  const ownerId = getCurrentDataOwnerId();
+  if (!ownerId || !canMutate()) return { success: false, errorCode: 'CANCELLED', message: 'Skill mutation context changed' };
+  const allowed = () => ownerId === getCurrentDataOwnerId() && canMutate();
+  const recordIgnore = !!(registryMatch && await shouldRecordAutoSyncIgnore(skillName, registryMatch.entry, cloudUserId ?? undefined));
   const wasIgnored = recordIgnore && (await listIgnoredAutoSyncSkills(cloudUserId ?? undefined)).has(skillName);
-  // Persist the user's opt-out before touching files, so auto-sync cannot recreate the Skill.
-  if (recordIgnore && !wasIgnored) {
-    try { await ignoreAutoSyncSkill(skillName, cloudUserId ?? undefined); }
-    catch { return { success: false, errorCode: 'WRITE_FAILED', message: 'Could not save uninstall preference' }; }
-  }
   const candidates = target?.linkOnly ? [...new Set([...target.aliases, target.operationPath])] : [...new Set([
-    ...(target?.aliases ?? []), absolutePath,
+    ...(target?.aliases ?? []), absolutePath, ...(registryMatch ? [registryMatch.installPath] : []),
     path.join(os.homedir(), '.claude', 'skills', skillName),
     path.join(os.homedir(), '.codex', 'skills', skillName),
     path.join(os.homedir(), '.agents', 'skills', skillName),
   ])];
-  // Capture exact links while their target still exists. Never sweep unrelated broken links.
-  const links = candidates.flatMap((candidate) => {
-    try {
-      return fs.lstatSync(candidate).isSymbolicLink() && fs.realpathSync.native(candidate) === resolved
-        ? [{ path: candidate, value: fs.readlinkSync(candidate), ino: fs.lstatSync(candidate).ino }] : [];
-    } catch { return []; }
-  });
+  const operationPath = target?.operationPath ?? resolved;
+  let cleanup: UninstallCleanup;
   try {
-    const exists = fs.existsSync(resolved);
-    if (!canMutate() || (target && !isLocalSkillTargetCurrent(target))) throw new Error('Skill source changed; refresh and retry');
-    if (exists) await shell.trashItem(target?.operationPath ?? resolved);
-  } catch (err) {
-    if (recordIgnore && !wasIgnored) {
-      await clearIgnoredAutoSyncSkill(skillName, cloudUserId ?? undefined).catch((error) => log.warn('[skillInstall] restore auto-sync preference failed:', error));
+    const sourceIdentity = fileIdentity(resolved, true);
+    const operationIdentity = fileIdentity(operationPath);
+    if (!allowed() || !sourceIdentity || !operationIdentity || (target && !isLocalSkillTargetCurrent(target))
+      || candidates.some((candidate) => !lockNames.includes(skillInstallLockKey(path.basename(candidate))))) {
+      throw new Error('Skill source changed; refresh and retry');
     }
-    return { success: false, errorCode: 'WRITE_FAILED', message: err instanceof Error ? err.message : String(err) };
+    const links = candidates.flatMap((candidate) => {
+      try {
+        return fs.lstatSync(candidate).isSymbolicLink() && fs.realpathSync.native(candidate) === resolved
+          ? [{ path: candidate, value: fs.readlinkSync(candidate), identity: fileIdentity(candidate)! }] : [];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
+      }
+    });
+    cleanup = {
+      version: 1, token: crypto.randomUUID(), ownerId, phase: 'prepared', lockNames,
+      skillName, resolved, sourceIdentity, operationPath, operationIdentity,
+      registryMatch, links, linkOnly: target?.linkOnly ?? false,
+      activation: target?.linkOnly ? null : snapshotSkillActivation(resolved),
+      undoIgnore: recordIgnore && !wasIgnored, cloudUserId,
+    };
+    // Journal first, then the shared barrier, then side effects. A crash in any
+    // gap leaves either no effects or enough information to finish without trashing twice.
+    writeUninstallCleanup(cleanup);
+    lease.retainUntilComplete(cleanup.token);
+  } catch (error) {
+    return { success: false, errorCode: 'WRITE_FAILED', message: error instanceof Error ? error.message : String(error) };
   }
 
-  const cleanup: UninstallCleanup = {
-    skillName, resolved, operationPath: target?.operationPath ?? resolved, absolutePath,
-    registryMatch, links, linkOnly: target?.linkOnly ?? false,
-  };
-  const complete = await finishUninstallCleanup(cleanup, canMutate);
-  const cleanupToken = complete ? undefined : crypto.randomUUID();
-  if (cleanupToken) pendingUninstallCleanup.set(cleanupToken, cleanup);
-  const projectWorkingDir = await reconcileProjectSkillLinksForPaths(
-    target?.operationPath ?? absolutePath, resolved, absolutePath,
-  );
-  return { success: true, ...(cleanupToken ? { cleanupToken } : {}),
+  let trashError: unknown;
+  try {
+    if (cleanup.undoIgnore) await ignoreAutoSyncSkill(skillName, cloudUserId ?? undefined);
+    if (!allowed() || (target && !isLocalSkillTargetCurrent(target))) throw new Error('Skill source changed; refresh and retry');
+    await shell.trashItem(operationPath);
+    cleanup.phase = 'removed';
+    writeUninstallCleanup(cleanup);
+  } catch (error) { trashError = error; }
+
+  // Even a rejected trash call can have removed its entry. Recovery inspects
+  // the original identity; it never repeats the destructive operation.
+  const complete = await finishUninstallCleanup(cleanup, lease, allowed);
+  if (trashError && cleanup.phase === 'completed' && fileIdentity(operationPath) === cleanup.operationIdentity) {
+    return { success: false, errorCode: 'WRITE_FAILED', message: trashError instanceof Error ? trashError.message : String(trashError) };
+  }
+  // Cache invalidation needs the cwd, not a broad link reconciliation: that
+  // would project a remaining import back into an entry we just removed.
+  const projectWorkingDir = projectWorkingDirForSkillPaths(operationPath, resolved, absolutePath);
+  return { success: true, ...(!complete ? { cleanupToken: cleanup.token } : {}),
     ...(projectWorkingDir ? { projectWorkingDir } : {}) };
 }
 
-interface UninstallCleanup {
-  skillName: string;
-  resolved: string;
-  operationPath: string;
-  linkOnly: boolean;
-  absolutePath: string;
-  registryMatch: RegistryInstallMatch | null;
-  links: Array<{ path: string; value: string; ino: number }>;
+/** Only the current profile/data owner can receive a new window grant. */
+export function listPendingUninstallCleanups(): Array<{ token: string; name: string }> {
+  const ownerId = getCurrentDataOwnerId();
+  return listUninstallCleanups().filter((record) => record.ownerId === ownerId)
+    .map((record) => ({ token: record.token, name: record.skillName }));
 }
 
-// Only Main-issued receipts can retry metadata/link cleanup; no second trash operation.
-const pendingUninstallCleanup = new Map<string, UninstallCleanup>();
-
-/** End a window-scoped retry receipt without performing any filesystem mutation. */
-export function discardUninstallCleanup(token: string): void {
-  pendingUninstallCleanup.delete(token);
-}
-
-async function finishUninstallCleanup(cleanup: UninstallCleanup, canMutate: () => boolean): Promise<boolean> {
-  const { skillName, resolved, operationPath, registryMatch, links } = cleanup;
+async function finishUninstallCleanup(
+  cleanup: UninstallCleanup,
+  lease: SkillMutationRelease,
+  canMutate: () => boolean,
+): Promise<boolean> {
   if (!canMutate()) return false;
-  // Restore/reinstall wins over a delayed cleanup. Never alter a new installation.
-  if (fs.existsSync(operationPath)) return true;
-  let complete = true;
   try {
-    if (registryMatch) {
-      const current = await registryService.getInstall(skillName, registryMatch.installPath);
+    if (cleanup.phase !== 'completed') {
+      if (cleanup.phase === 'prepared' && fileIdentity(cleanup.operationPath) === cleanup.operationIdentity) {
+        // The trash operation never committed (or the original was restored).
+        if (cleanup.undoIgnore) await clearIgnoredAutoSyncSkill(cleanup.skillName, cleanup.cloudUserId ?? undefined);
+      } else {
+        for (const link of cleanup.links) {
+          if (!canMutate()) return false;
+          if (fileIdentity(link.path) !== link.identity || fs.readlinkSync(link.path) !== link.value) continue;
+          const currentTarget = fileIdentity(link.path, true);
+          // Remove only links still serving the old source (external imports),
+          // or broken links whose source is still absent. A replaced source wins.
+          if ((cleanup.linkOnly && currentTarget === cleanup.sourceIdentity
+              && fileIdentity(cleanup.operationPath) !== cleanup.operationIdentity)
+            || (currentTarget === null && fileIdentity(cleanup.resolved, true) === null)) fs.unlinkSync(link.path);
+        }
+        const { registryMatch } = cleanup;
+        if (registryMatch && fileIdentity(registryMatch.installPath) === null) {
+          await registryService.removeInstall(registryMatch.skillName, registryMatch.installPath, {
+            expected: registryMatch.entry, canMutate,
+            shouldRemove: () => fileIdentity(registryMatch.installPath) === null,
+          });
+        }
+        if (cleanup.activation && fileIdentity(cleanup.resolved, true) === null) {
+          await clearSkillActivationSnapshot(cleanup.activation,
+            () => canMutate() && fileIdentity(cleanup.resolved, true) === null);
+        }
+      }
       if (!canMutate()) return false;
-      if (JSON.stringify(current) === JSON.stringify(registryMatch.entry)) {
-        await registryService.removeInstall(skillName, registryMatch.installPath);
-      }
+      // Completion is durable before the barrier opens. Failure to delete a
+      // completed receipt can only retry finalization, never old cleanup effects.
+      writeUninstallCleanup({ ...cleanup, phase: 'completed' });
+      cleanup.phase = 'completed';
     }
-  } catch (err) {
-    complete = false;
-    log.warn('[skillInstall] uninstall registry cleanup failed:', err);
+    lease.complete(cleanup.token);
+    deleteUninstallCleanup(cleanup.token);
+    return true;
+  } catch (error) {
+    log.warn('[skillInstall] uninstall cleanup remains pending:', error);
+    return false;
   }
-  for (const link of links) {
-    if (!canMutate()) return false;
-    try {
-      const stat = fs.lstatSync(link.path);
-      if (stat.isSymbolicLink() && stat.ino === link.ino && fs.readlinkSync(link.path) === link.value) {
-        // Keep validation and unlink adjacent; no awaited boundary can replace the link.
-        fs.unlinkSync(link.path);
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        complete = false;
-        log.warn('[skillInstall] uninstall link cleanup failed:', err);
-      }
-    }
-  }
-  // Unlinking an import does not remove the physical Skill or the user's shared
-  // preference. Other scopes (and later reimports) must keep that explicit state.
-  if (!cleanup.linkOnly && !isCindySkillEnabled(resolved)) {
-    await setCindySkillEnabled(resolved, true, canMutate).catch((err) => {
-      complete = false;
-      log.warn('[skillInstall] activation cleanup failed:', err);
-    });
-  }
-  return complete;
 }
 
 export async function retryUninstallCleanup(token: string, canMutate: () => boolean): Promise<boolean> {
-  const cleanup = pendingUninstallCleanup.get(token);
+  const cleanup = readUninstallCleanup(token);
   if (!cleanup) return true;
-  const release = tryAcquireSkillInstallLock(cleanup.skillName, 'market-uninstall');
-  if (!release) return false;
-  let releaseShared: SkillMutationRelease | null = null;
+  const allowed = () => cleanup.ownerId === getCurrentDataOwnerId() && canMutate();
+  if (!allowed()) return false;
+  const releases: Array<() => void> = [];
+  let lease: SkillMutationRelease | null = null;
   try {
-    releaseShared = await acquireSharedSkillMutationLease([cleanup.skillName, path.basename(cleanup.operationPath), path.basename(cleanup.resolved)]);
-    if (!releaseShared) return false;
-    const complete = await finishUninstallCleanup(cleanup, canMutate);
-    if (complete) pendingUninstallCleanup.delete(token);
-    return complete;
-  } finally { await releaseShared?.(); release(); }
+    for (const name of cleanup.lockNames) {
+      const release = tryAcquireSkillInstallLock(name, 'market-uninstall');
+      if (!release) return false;
+      releases.push(release);
+    }
+    lease = await acquireSharedSkillMutationLease(cleanup.lockNames, token);
+    if (!lease) return false;
+    // A second process may have completed the same receipt while this caller
+    // waited for a lease. Always re-read under the acquired lock.
+    const current = readUninstallCleanup(token);
+    if (!current) return true;
+    return await finishUninstallCleanup(current, lease, allowed);
+  } finally {
+    await lease?.();
+    for (const release of releases) release();
+  }
 }
 
 async function shouldRecordAutoSyncIgnore(skillName: string, registryEntry: StoredInstall, userId?: string): Promise<boolean> {

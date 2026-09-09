@@ -22,7 +22,7 @@ const installServiceMocks = vi.hoisted(() => ({
   cancelInstall: vi.fn(),
   uninstall: vi.fn(),
   retryUninstallCleanup: vi.fn(),
-  discardUninstallCleanup: vi.fn(),
+  listPendingUninstallCleanups: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -128,6 +128,7 @@ const marketService = {
 
 describe('registerSkillhubIpc usage handlers', () => {
   beforeEach(async () => {
+    installServiceMocks.listPendingUninstallCleanups.mockReturnValue([]);
     handlers.clear();
     vi.clearAllMocks();
     getManagedSkillRoots.mockReturnValue([]);
@@ -766,7 +767,7 @@ describe('registerSkillhubIpc usage handlers', () => {
     expect(setCindySkillEnabled).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['destroyed', 'reload'] as const)('revokes cleanup grants and receipts on window %s', async (lifecycle) => {
+  it.each(['destroyed', 'reload'] as const)('revokes window cleanup grants and reissues them after a fresh scan (%s)', async (lifecycle) => {
     const { event, absolutePath } = await scanLocalFixture();
     installServiceMocks.uninstall.mockResolvedValueOnce({ success: true, cleanupToken: 'receipt' });
     await handlers.get('skillhub:uninstall')!(event, { absolutePath });
@@ -775,19 +776,38 @@ describe('registerSkillhubIpc usage handlers', () => {
     } else {
       event.sender.on.mock.calls.find(([name]) => name === 'did-start-navigation')![1]({}, '', false, true);
     }
-    expect(installServiceMocks.discardUninstallCleanup).toHaveBeenCalledWith('receipt');
     await expect(handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'receipt')).rejects.toThrow('PRECONDITION_FAILED');
     expect(installServiceMocks.retryUninstallCleanup).not.toHaveBeenCalled();
+    installServiceMocks.listPendingUninstallCleanups.mockReturnValue([{ token: 'receipt', name: 'example' }]);
+    installServiceMocks.retryUninstallCleanup.mockResolvedValueOnce(true);
+    expect(await handlers.get('skillhub:scan')!(event, {})).toMatchObject({
+      success: true, pendingCleanups: [{ token: 'receipt', name: 'example' }],
+    });
+    expect(await handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'receipt')).toEqual({ complete: true });
   });
 
-  it('discards a late cleanup receipt when its window reloads during uninstall', async () => {
+  it('issues independent recovery grants to two scanned windows and rejects account changes', async () => {
+    const { event } = await scanLocalFixture();
+    const second = { sender: { id: event.sender.id + 1, once: vi.fn(), on: vi.fn() } };
+    installServiceMocks.listPendingUninstallCleanups.mockReturnValue([{ token: 'receipt', name: 'example' }]);
+    installServiceMocks.retryUninstallCleanup.mockImplementation(async (_token, canMutate) => canMutate());
+    await handlers.get('skillhub:scan')!(event, {});
+    await handlers.get('skillhub:scan')!(second, {});
+    expect(await handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'receipt')).toEqual({ complete: true });
+    expect(await handlers.get('skillhub:retry-uninstall-cleanup')!(second, 'receipt')).toEqual({ complete: true });
+    await handlers.get('skillhub:scan')!(event, {});
+    getCurrentDataOwnerId.mockReturnValue('other-owner');
+    await expect(handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'receipt')).rejects.toThrow('PRECONDITION_FAILED');
+  });
+
+  it('withholds a late cleanup receipt when its window reloads during uninstall', async () => {
     const { event, absolutePath } = await scanLocalFixture();
     installServiceMocks.uninstall.mockImplementationOnce(async () => {
       event.sender.on.mock.calls.find(([name]) => name === 'did-start-navigation')![1]({}, '', false, true);
       return { success: true, cleanupToken: 'late-receipt' };
     });
     expect(await handlers.get('skillhub:uninstall')!(event, { absolutePath })).toEqual({ success: true });
-    expect(installServiceMocks.discardUninstallCleanup).toHaveBeenCalledWith('late-receipt');
+    await expect(handlers.get('skillhub:retry-uninstall-cleanup')!(event, 'late-receipt')).rejects.toThrow('PRECONDITION_FAILED');
   });
 
   it('rejects direct uninstall of a plugin snapshot even when the scanned UI claims it is removable', async () => {

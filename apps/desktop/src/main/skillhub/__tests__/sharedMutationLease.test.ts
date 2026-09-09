@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-skill-lease-'));
@@ -13,6 +14,43 @@ import { acquireSharedSkillMutationLease } from '../sharedMutationLease';
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe('shared Skill mutation lease', () => {
+  it('contains a damaged durable barrier to its own resource name', async () => {
+    const token = randomUUID();
+    const key = createHash('sha256').update('damaged-receipt').digest('hex');
+    const file = path.join(root, 'Cindy', 'shared-skill-mutation-locks', 'pending', key, `${token}.json`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{');
+    try {
+      expect(await acquireSharedSkillMutationLease(['damaged-receipt'])).toBeNull();
+      const other = await acquireSharedSkillMutationLease(['healthy-receipt']);
+      expect(other).not.toBeNull();
+      await other!();
+    } finally { fs.unlinkSync(file); }
+  });
+
+  it('retains a durable barrier after release and allows only its full receipt to resume', async () => {
+    const token = randomUUID();
+    const names = ['durable-source', 'durable-alias'];
+    const lease = await acquireSharedSkillMutationLease(names);
+    lease!.retainUntilComplete(token);
+    await lease!();
+    vi.resetModules();
+    const restarted = (await import('../sharedMutationLease')).acquireSharedSkillMutationLease;
+    expect(await restarted(['durable-alias'])).toBeNull();
+    expect(await restarted(names, randomUUID())).toBeNull();
+    expect(await restarted(['durable-alias'], token)).toBeNull();
+    const resumed = await restarted(names, token);
+    expect(resumed).not.toBeNull();
+    try {
+      resumed!.complete(token);
+      // Releasing the barrier never releases an executing process's lease early.
+      expect(await restarted(['durable-source'])).toBeNull();
+    } finally { await resumed!(); }
+    const next = await restarted(['durable-alias']);
+    expect(next).not.toBeNull();
+    await next!();
+  });
+
   it('excludes independent callers through the shared lock file, preserving case-folded alias locks', async () => {
     const first = await acquireSharedSkillMutationLease(['source', 'Alias']);
     expect(first).not.toBeNull();

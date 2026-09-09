@@ -9,6 +9,24 @@ vi.mock('../../logger', () => ({ createLogger: () => ({ info: vi.fn(), warn: vi.
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe('Skill activation preferences', () => {
+  it('clears only captured disabled intent, preserving later toggles and unrelated paths', async () => {
+    const prefs = await import('../activationPreferences');
+    const source = path.join(root, 'intent-source');
+    const other = path.join(root, 'intent-other');
+    await prefs.setCindySkillEnabled(source, false);
+    const snapshot = prefs.snapshotSkillActivation(source)!;
+    await prefs.setCindySkillEnabled(source, true);
+    await prefs.setCindySkillEnabled(source, false);
+    await prefs.setCindySkillEnabled(other, false);
+    await prefs.clearSkillActivationSnapshot(snapshot, () => true);
+    expect(prefs.isCindySkillEnabled(source)).toBe(false);
+    const current = prefs.snapshotSkillActivation(source)!;
+    await prefs.clearSkillActivationSnapshot(current, () => true);
+    expect(prefs.isCindySkillEnabled(source)).toBe(true);
+    expect(prefs.isCindySkillEnabled(other)).toBe(false);
+    await prefs.setCindySkillEnabled(other, true);
+  });
+
   it('defaults to native behavior, persists only disabled paths, and preserves concurrent changes', async () => {
     const { isCindySkillEnabled, setCindySkillEnabled, readDisabledSkillPaths, skillActivationKey } = await import('../activationPreferences');
     const a = path.join(root, 'project-a', 'skill');

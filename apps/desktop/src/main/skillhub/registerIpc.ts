@@ -117,6 +117,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   const marketService = options.marketService ?? new SkillhubMarketService();
   const localImportGrants = new Map<string, LocalImportGrant>();
   const uninstallConfirmations = new Set<number>();
+  const cleanupGrantKey = (senderId: number, token: string) => `${senderId}:${token}`;
   const cleanupGrants = new Map<string, { ownerId: string | null; senderId: number }>();
   const scannedSkillRootsBySender = new Map<number, ScannedSkillGrant>();
   const localSkillsBySender = new Map<number, Array<{
@@ -175,7 +176,6 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       for (const [token, grant] of cleanupGrants) {
         if (grant.senderId !== event.sender.id) continue;
         cleanupGrants.delete(token);
-        installService.discardUninstallCleanup(token);
       }
       scannedSkillRootsBySender.delete(event.sender.id);
       localSkillsBySender.delete(event.sender.id);
@@ -408,6 +408,11 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
           && getCurrentDataOwnerId() === scanOwnerId
         ) {
           rememberScannedSkillRoots(event, scanOwnerId, result.skills);
+          const pendingCleanups = installService.listPendingUninstallCleanups();
+          for (const { token } of pendingCleanups) {
+            cleanupGrants.set(cleanupGrantKey(event.sender.id, token), { ownerId: scanOwnerId, senderId: event.sender.id });
+          }
+          return { success: true, ...result, pendingCleanups };
         }
         return { success: true, ...result };
       } catch (err) {
@@ -1052,15 +1057,18 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
       const result = await installService.uninstall(absolutePath, target,
         () => approvalCurrent()
           && !isPluginManagedSkillPath(target.sourcePath, options.getManagedSkillRoots()));
-      if (!result.success) throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
+      if (!result.success) {
+        // A failed trash/preparation can still leave durable rollback work.
+        broadcastLocalChange();
+        throwIpcError('INTERNAL', 'Could not move Skill to the trash; retry');
+      }
       await refreshCodexProjectSkillCache(result.projectWorkingDir);
       broadcastLocalChange();
       if (result.cleanupToken) {
-        if ((cleanupGenerationBySender.get(event.sender) ?? 0) !== cleanupGeneration) {
-          installService.discardUninstallCleanup(result.cleanupToken);
+        if (!approvalCurrent()) {
           return { success: true };
         }
-        cleanupGrants.set(result.cleanupToken, { ownerId, senderId: event.sender.id });
+        cleanupGrants.set(cleanupGrantKey(event.sender.id, result.cleanupToken), { ownerId, senderId: event.sender.id });
       }
       return { success: true, ...(result.cleanupToken ? { cleanupToken: result.cleanupToken } : {}) };
     },
@@ -1068,13 +1076,14 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
 
   ipcMain.handle('skillhub:retry-uninstall-cleanup', async (event, token: string) => {
     assertTrustedAppRendererEvent(event);
-    const grant = cleanupGrants.get(token);
+    const key = cleanupGrantKey(event.sender.id, token);
+    const grant = cleanupGrants.get(key);
     const canMutate = () => !!grant && grant.ownerId === getCurrentDataOwnerId()
-      && cleanupGrants.get(token) === grant
+      && cleanupGrants.get(key) === grant
       && grant.senderId === event.sender.id && !isAppSessionBoundaryPending();
     if (!canMutate()) throwIpcError('PRECONDITION_FAILED', 'Cleanup is no longer available');
     const complete = await installService.retryUninstallCleanup(token, canMutate);
-    if (complete) cleanupGrants.delete(token);
+    if (complete) cleanupGrants.delete(key);
     broadcastLocalChange();
     return { complete };
   });

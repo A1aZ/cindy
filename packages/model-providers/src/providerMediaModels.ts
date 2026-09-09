@@ -44,7 +44,7 @@ export function projectProviderMediaModels(
   options: {
     addDeclared?: boolean;
     live?: boolean;
-    userMetadata?: (modelId: string) => ModelMetadata | undefined;
+    userMetadata?: (modelId: string, model: ProviderMediaModel) => ModelMetadata | undefined;
   } = {},
 ): Provider {
   if (!registry || registry.schemaVersion < 4) return provider;
@@ -100,7 +100,7 @@ export function projectProviderMediaModels(
           provider.id,
           model.id,
           options.live ? pickModelMetadata(model) : model.discoveredMetadata,
-          options.userMetadata?.(model.id),
+          options.userMetadata?.(model.id, model),
         );
         const nativeApi = declared.find(
           ({ route }) => route.modelId === model.id,

@@ -498,7 +498,7 @@ export function buildUserProvider(
       "imageModels" | "videoModels" | "audioModels" | "embeddingModels"
     >
   > = {};
-  for (const list of Object.values(models)) {
+  for (const [agent, list] of Object.entries(models)) {
     for (const model of list ?? []) {
       const field = providerMediaField(model.mode);
       if (!field) continue;
@@ -510,6 +510,7 @@ export function buildUserProvider(
           name: model.name,
           mode: model.mode,
           discoveredMetadata: model.discoveredMetadata,
+          sourceAgent: agent as AgentKind,
           ...(model.modalities ? { modalities: model.modalities } : {}),
           ...(model.description ? { description: model.description } : {}),
         });

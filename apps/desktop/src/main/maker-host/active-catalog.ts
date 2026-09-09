@@ -1664,16 +1664,15 @@ function computeMerged(): Catalog {
     : undefined;
   providers = providers.map((provider) =>
     projectProviderMediaModels(provider, b.modelRegistry, {
-      userMetadata: (modelId) => {
+      userMetadata: (modelId, mediaModel) => {
         const identity =
           findModelRegistryRoute(b.modelRegistry, provider.id, modelId)?.entry.modelRef ??
           findBaseModel(b.modelRegistry, modelId)?.id;
         const key = `${encodeURIComponent(provider.id)}:${modelId}`;
         const userModel =
-          provider.source === 'user'
-            ? Object.values(provider.models)
-                .flat()
-                .find((m) => m?.id === modelId)?.userModelConfig
+          provider.source === 'user' && mediaModel.sourceAgent
+            ? provider.models[mediaModel.sourceAgent]
+                ?.find((m) => m.id === modelId)?.userModelConfig
             : undefined;
         return {
           ...(identity ? localOverrides.baseModels?.[identity] : {}),

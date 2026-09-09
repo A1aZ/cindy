@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { BUNDLED_CATALOG } from '@cindy/model-providers';
+import { BUNDLED_CATALOG, providerMediaField } from '@cindy/model-providers';
 
 import {
   commitModelPlaneFromCatalog,
@@ -120,6 +120,32 @@ describe('active catalog revision', () => {
       modalities: { input: [], output: [] },
     });
     expect(read().routing.codex?.upstream).toBe('https://private.example/v1');
+  });
+
+  it.each([
+    ['chat', 'image_generation'],
+    ['image_generation', 'chat'],
+    ['image_generation', 'video_generation'],
+    ['video_generation', 'image_generation'],
+  ])('keeps duplicate IDs scoped to their producing runtime: %s / %s', (claudeMode, codexMode) => {
+    setActiveCatalog(structuredClone(BUNDLED_CATALOG));
+    setCustomProviderConfigs([{
+      id: 'duplicate-media', name: 'Duplicate', runtimes: {
+        'claude-code': { baseUrl: 'https://claude.example/v1', models: [{ id: 'shared', name: 'Claude Row', mode: claudeMode }] },
+        codex: { baseUrl: 'https://codex.example/v1', models: [{ id: 'shared', name: 'Codex Row', mode: codexMode }] },
+      },
+    }]);
+    const check = () => {
+      const provider = getActiveCatalog().providers.find((p) => p.id === 'duplicate-media')!;
+      for (const [agent, mode, name] of [['claude-code', claudeMode, 'Claude Row'], ['codex', codexMode, 'Codex Row']] as const) {
+        const field = providerMediaField(mode);
+        expect(provider.models[agent]?.[0].mode).toBe(mode);
+        if (field) expect(provider[field]).toContainEqual(expect.objectContaining({ id: 'shared', mode, name, sourceAgent: agent }));
+      }
+    };
+    check();
+    setActiveCatalog(structuredClone(BUNDLED_CATALOG));
+    check();
   });
 
   it('routes Anthropic discovery through the same revision listener', () => {

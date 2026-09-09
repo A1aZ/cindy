@@ -462,6 +462,8 @@ export interface ProviderMediaModel extends Pick<
 > {
   nativeApi?: import("./modelAccessBean.js").ModelNativeApi | null;
   discoveredMetadata?: ModelMetadata;
+  /** Local projection provenance; not part of the public Registry metadata. */
+  sourceAgent?: AgentKind;
   id: string;
   name: string;
   availability?: "available" | "requires_payment";

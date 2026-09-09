@@ -21,6 +21,7 @@ import {
 } from '@cindy/maker-shared/brand-identity';
 import { stageMacIOSSimulatorHelper } from './forge-ios-simulator-helper';
 import { stagePackagedThirdPartyNotices } from './forge-third-party-notices';
+import { swiftTargetTriple, swiftTargetTriplesForForgeArch } from './src/main/remote-desktop/swiftTarget';
 import { READ_SHEET_RUNTIME_PACKAGES } from '../../packages/lizi-mcps/src/cindy-docs/readSheetRuntimeDeps';
 import { reviewPdfRuntimePackages } from './src/main/reviewer/reviewPdfRuntimeDeps';
 import {
@@ -912,26 +913,6 @@ const MACOS_COMPUTER_PERMISSION_GUIDE_HELPER_DEPLOYMENT_TARGET = 'macos13.0';
 const MACOS_SESSION_DRAG_RELEASE_HELPER_DEPLOYMENT_TARGET = 'macos10.15';
 const MACOS_XBOX_GAMEPAD_HELPER_DEPLOYMENT_TARGET = 'macos11.0';
 const MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET = 'macos10.15';
-
-function swiftTargetTriple(cpuArch: 'arm64' | 'x86_64', deploymentTarget: string): string {
-  return `${cpuArch}-apple-${deploymentTarget}`;
-}
-
-function swiftTargetTriplesForForgeArch(arch: ForgeArch, deploymentTarget: string): string[] {
-  switch (arch) {
-    case 'x64':
-      return [swiftTargetTriple('x86_64', deploymentTarget)];
-    case 'arm64':
-      return [swiftTargetTriple('arm64', deploymentTarget)];
-    case 'universal':
-      return [
-        swiftTargetTriple('x86_64', deploymentTarget),
-        swiftTargetTriple('arm64', deploymentTarget),
-      ];
-    default:
-      throw new Error(`[forge] unsupported macOS Swift helper arch: ${arch}`);
-  }
-}
 
 function swiftArchLabel(arch: ForgeArch, deploymentTarget: string): string {
   return swiftTargetTriplesForForgeArch(arch, deploymentTarget)

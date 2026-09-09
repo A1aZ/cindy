@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import type { ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { swiftTargetTriple, swiftTargetTriplesForForgeArch } from '../remote-desktop/swiftTarget.js';
 
 const h = vi.hoisted(() => ({
   spawn: vi.fn(),
@@ -148,6 +149,12 @@ describe('SessionDragReleaseNativeHost', () => {
       "MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET,\n      [],\n      'remote desktop input'",
     );
     expect(forgeSource).not.toContain("dest, arch, '10.15', [], 'remote desktop input'");
+    expect(swiftTargetTriple('arm64', 'macos10.15')).toBe('arm64-apple-macos10.15');
+    expect(swiftTargetTriple('x86_64', 'macos10.15')).toBe('x86_64-apple-macos10.15');
+    expect(swiftTargetTriplesForForgeArch('universal', 'macos10.15')).toEqual([
+      'x86_64-apple-macos10.15',
+      'arm64-apple-macos10.15',
+    ]);
   });
 });
 

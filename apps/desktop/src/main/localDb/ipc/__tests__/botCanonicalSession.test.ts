@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import type { ProviderView } from '@cindy/model-providers';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -6,6 +7,8 @@ import { rmSync } from 'node:fs';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOT_TEMPLATE_PRESET_IDENTITIES } from '../../../../shared/botTemplatePreset';
+import { isBotToolsetAvailableOnTarget } from '../../../../shared/botRemoteCapabilities';
+import { resolveBotAllowedBuiltinPluginIds } from '../../../maker-host/plugins/types';
 
 import {
   botDelegations,
@@ -54,6 +57,7 @@ const h = await vi.hoisted(async () => {
   searchConversations: vi.fn(),
   requestRuntimeRefresh: vi.fn(),
   seedTemplateSkills: vi.fn(async () => ({ completedNow: true, skills: [] })),
+  providers: [] as ProviderView[],
   ownerScopeKey: 'owner-a:1',
   ownerBoundaryPending: false,
 });
@@ -92,8 +96,12 @@ vi.mock('../../../git-snapshot/projectGitBootstrap.js', () => ({
 vi.mock('../../../maker-host/git-safety-settings-store.js', () => ({
   readGitSafetySettings: () => ({ autoSnapshotEnabled: true }),
 }));
+vi.mock('../../../maker-host/createDesktopProviderService.js', () => ({
+  getDesktopProviderService: () => ({ listProviders: async () => h.providers }),
+}));
 vi.mock('../../../maker-host/index.js', () => ({
   getMakerIfReady: () => ({
+    listAvailableAgents: () => ['claude-code', 'codex', 'pi'],
     isSessionAlive: h.isSessionAlive,
     closeSession: h.closeSession,
     getSession: h.getSession,
@@ -145,6 +153,7 @@ import {
   listBotRemoteResourceSources,
 } from '../bots';
 import { tx as runWorkerTx } from '../../worker/opHandlers/tx.js';
+import * as modelSettings from '../../../maker-host/bot-model-chain-settings-store.js';
 import { assertTrustedAppRendererEvent } from '../../../security/trustedAppRenderer.js';
 import { runDeviceLinkInvokeContext } from '../../../device-link/invoke-context.js';
 import {
@@ -391,6 +400,11 @@ beforeEach(async () => {
   vi.clearAllMocks();
   h.handlers.clear();
   h.nextSession = 0;
+  h.providers = [{
+    id: 'xd', connected: true, source: 'builtin', agents: ['pi'], access: { kind: 'managed' },
+    models: { pi: [{ id: 'z-ai/glm-5.3-flash', efforts: ['high'], defaultEffort: 'high',
+      newSessionDefault: ['pi'], supportsImageInput: true }] },
+  }] as ProviderView[];
   h.worktrees = [];
   h.isSessionAlive.mockReturnValue(false);
   h.ensureGit.mockResolvedValue(undefined);
@@ -418,6 +432,36 @@ beforeEach(async () => {
       model: 'grok-4.5',
       permissions: 'trusted',
     },
+  });
+});
+
+describe('Bot global model restore IPC', () => {
+  it('checks the sender before clearing settings', async () => {
+    const reset = vi.spyOn(modelSettings, 'resetBotModelChainSettings');
+    vi.mocked(assertTrustedAppRendererEvent).mockImplementationOnce(() => { throw new Error('untrusted'); });
+    try {
+      await expect(invoke('local-db:bots:model-chain-settings-reset', undefined)).rejects.toThrow('untrusted');
+      expect(reset).not.toHaveBeenCalled();
+    } finally { reset.mockRestore(); }
+  });
+
+  it('returns the resolved state and sanitizes filesystem failures', async () => {
+    const reset = vi.spyOn(modelSettings, 'resetBotModelChainSettings');
+    try {
+      reset.mockResolvedValueOnce({ value: { modelChain: [] }, defaults: { modelChain: [] }, isCustomized: false, customizedKeys: [] });
+      await expect(invoke('local-db:bots:model-chain-settings-reset', undefined)).resolves.toEqual({ modelChain: [], isCustomized: false });
+      reset.mockRejectedValueOnce(new Error('/private/account/settings.json: denied'));
+      await expect(invoke('local-db:bots:model-chain-settings-reset', undefined)).rejects.toThrow('Could not restore Bot model defaults');
+    } finally { reset.mockRestore(); }
+  });
+
+  it('rejects an account transition before clearing settings', async () => {
+    const reset = vi.spyOn(modelSettings, 'resetBotModelChainSettings');
+    try {
+      h.ownerBoundaryPending = true;
+      await expect(invoke('local-db:bots:model-chain-settings-reset', undefined)).rejects.toThrow('PRECONDITION_FAILED');
+      expect(reset).not.toHaveBeenCalled();
+    } finally { reset.mockRestore(); }
   });
 });
 
@@ -475,6 +519,23 @@ describe('Bot canonical Session lifecycle', () => {
     expect((await listBotRemoteResourceSources()).map((row) => row.id)).toContain(created.id);
     h.sqlite!.prepare('UPDATE bot_profiles SET hidden_at = 1 WHERE id = ?').run(created.id);
     expect((await listBotRemoteResourceSources()).map((row) => row.id)).not.toContain(created.id);
+  });
+
+  it('creates the first canonical task on Codex when only its subscription is connected', async () => {
+    h.providers = [{
+      id: 'openai', source: 'builtin', connected: true, agents: ['codex'],
+      access: { kind: 'subscription', product: 'ChatGPT' },
+      routing: { codex: { upstream: 'https://example.invalid', authStrategy: 'oauth-passthrough' } },
+      models: { codex: [{ id: 'gpt-5.6-sol', mode: 'chat', status: 'active', efforts: ['medium'], defaultEffort: 'medium' }] },
+    }] as ProviderView[];
+    const created = await invoke('local-db:bots:create', { id: 'codex-only', name: 'Codex Bot' });
+    const canonical = await invoke('local-db:bots:create-canonical-session', {
+      botId: created.id, expectedCanonicalSessionId: created.canonicalSessionId ?? null,
+      expectedProfileVersion: 1,
+    });
+    const row = h.sqlite!.prepare('SELECT agent_kind, model, provider_id, effort FROM sessions WHERE id = ?')
+      .get(canonical.session.id);
+    expect(row).toMatchObject({ agent_kind: 'codex', model: 'gpt-5.6-sol', provider_id: 'openai', effort: 'medium' });
   });
 
   it('uses the official Bot defaults when created without renderer capabilities', async () => {
@@ -824,7 +885,7 @@ describe('Bot canonical Session lifecycle', () => {
     expect(reopened.session.permissionMode).toBe('ask');
   });
 
-  it('preserves an explicitly empty model when a Pi Bot has no selectable model', async () => {
+  it('keeps an unconfigured profile but rejects a model-less canonical task', async () => {
     await invoke('local-db:bots:create', {
       id: 'bot-pi-default',
       name: 'Pi Default Bot',
@@ -837,17 +898,11 @@ describe('Bot canonical Session lifecycle', () => {
       },
     });
 
-    const created = await invoke('local-db:bots:create-canonical-session', {
+    await expect(invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-pi-default',
       expectedCanonicalSessionId: null,
       expectedProfileVersion: 1,
-    });
-
-    expect(created.session).toMatchObject({
-      agentKind: 'pi',
-      providerId: null,
-      model: '',
-    });
+    })).rejects.toThrow('请先连接模型供应商或选择伙伴模型');
   });
 
   it('repairs a physically missing canonical task using the persisted pointer as its CAS', async () => {
@@ -1212,7 +1267,12 @@ describe('Bot canonical Session lifecycle', () => {
     expect(snapshots).toEqual([]);
   });
 
-  it('resolves every remote capability catalog against the target host', async () => {
+  it.each([
+    { agentKind: 'codex' as const, helperEnabled: true },
+    { agentKind: 'claude-code' as const, helperEnabled: true },
+    { agentKind: 'codex' as const, helperEnabled: false },
+    { agentKind: 'claude-code' as const, helperEnabled: false },
+  ])('resolves remote capabilities and helper guidance from the same catalog ($agentKind, helper=$helperEnabled)', async ({ agentKind, helperEnabled }) => {
     const created = await invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-1',
       expectedCanonicalSessionId: null,
@@ -1221,7 +1281,7 @@ describe('Bot canonical Session lifecycle', () => {
     const inputs: Array<{ kind: string; remoteHostId?: string }> = [];
     const opts: MakerSessionCreateOpts = {
       id: created.session.id,
-      agentKind: 'codex',
+      agentKind,
       workingDir: '/srv/cindy-bot',
       remoteHostId: 'remote-host-1',
       workspaceKind: 'project',
@@ -1240,7 +1300,10 @@ describe('Bot canonical Session lifecycle', () => {
       },
       listToolsets: async (input) => {
         inputs.push({ kind: 'toolsets', remoteHostId: input.remoteHostId });
-        return [];
+        return [{
+          id: 'xdt_helper', name: 'Helper', essential: true,
+          available: helperEnabled && isBotToolsetAvailableOnTarget({ ...input, toolsetId: 'xdt_helper' }),
+        }];
       },
     });
 
@@ -1249,6 +1312,10 @@ describe('Bot canonical Session lifecycle', () => {
       { kind: 'mcp', remoteHostId: 'remote-host-1' },
       { kind: 'toolsets', remoteHostId: 'remote-host-1' },
     ]);
+    const policy = opts.botRuntimeProfile!.toolsetPolicy;
+    const allowed = resolveBotAllowedBuiltinPluginIds(policy.catalog, policy.configured);
+    expect(allowed.includes('xdt_helper')).toBe(helperEnabled);
+    expect(opts.botProfileContextPrompt?.includes('`start_session_task`')).toBe(helperEnabled);
   });
 
   it('keeps ambient catalogs only as explicit disabled rows under legacy inherit', async () => {

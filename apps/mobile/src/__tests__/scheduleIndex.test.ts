@@ -9,6 +9,7 @@ import {
   invalidateTransientScheduleIndexFailureFor,
   invalidateScheduleIndexesAfterLinkRecovery,
   loadSessionScheduleIndex,
+  loadSharedSessionScheduleIndex,
   loadSessionScheduleIndexThrottled,
   replaceSessionScheduleIndexEntries,
   resetScheduleIndexThrottleForTesting,
@@ -32,6 +33,29 @@ function makerWithSchedules(
 }
 
 describe('scheduleIndex', () => {
+  it('stops retries after blur without negative-caching cancellation for the next screen', async () => {
+    vi.useFakeTimers();
+    resetScheduleIndexThrottleForTesting();
+    try {
+      let active = true;
+      const list = vi.fn().mockRejectedValueOnce(new Error('[NOT_CONNECTED] offline')).mockResolvedValue([]);
+      const maker = { schedule: { list, listRuns: vi.fn() } } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+      const first = loadSharedSessionScheduleIndex('blur-device', maker, () => active);
+      const rejected = expect(first).rejects.toThrow('consumer inactive');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(list).toHaveBeenCalledTimes(1);
+      active = false;
+      await vi.runAllTimersAsync();
+      await rejected;
+      expect(list).toHaveBeenCalledTimes(1);
+      await expect(loadSharedSessionScheduleIndex('blur-device', maker)).resolves.toEqual(new Map());
+      expect(list).toHaveBeenCalledTimes(2);
+    } finally {
+      resetScheduleIndexThrottleForTesting();
+      vi.useRealTimers();
+    }
+  });
+
   it('loads schedule unread and running metadata without failing the whole index on one bad schedule', async () => {
     const listRuns = vi.fn(async (scheduleId: string) => {
       if (scheduleId === 'broken') throw new Error('remote schedule runs unavailable');

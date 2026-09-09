@@ -57,6 +57,7 @@ import {
   BaseAgent,
   OneShotError,
   AgentNotAuthenticatedError,
+  AgentStartupStoppedError,
   TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
   type AgentDeps,
@@ -138,6 +139,7 @@ import {
   appendAutoReviewUserIntent,
   isAutoReviewUnavailableMetadata,
   isSystemPermissionDenialReason,
+  formatPermissionDenial,
   resolveAutoReviewDecision,
   toolAutoReviewAction,
   type AutoReviewDecision,
@@ -1160,9 +1162,15 @@ export class ClaudeCodeAgent extends BaseAgent {
     if (reviewMode && opts.remoteHostId) {
       throw new Error('Cindy Review currently supports local Claude Code sessions only');
     }
-    const reviewReadGrants = reviewMode
-      ? await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? [])
-      : [];
+    let reviewReadGrants: Awaited<ReturnType<typeof buildReviewReadGrants>> = [];
+    if (reviewMode) {
+      try {
+        reviewReadGrants = await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? []);
+      } catch (error) {
+        // Claude has not spawned a CLI process before review grants are validated.
+        throw new AgentStartupStoppedError(error);
+      }
+    }
     // 开 debug 时让每个 session 的 cc 子进程写到各自 session 目录的 raw 文件 (host 注入
     // resolveCcDebugFile 拼路径 + mkdir); 没注入则回退全局 XDT_CC_DEBUG_FILE。
     const ccDebugFile = process.env.XDT_CC_DEBUG_NET === '1'
@@ -2244,7 +2252,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // (审阅器故障已在 resolveAutoReviewDecision 降级成 ask,不会走到这条分支。)
           return {
             behavior: 'deny',
-            message: autoDecision.reason ?? 'Cindy Auto Review blocked this action. Choose a safer alternative.',
+            message: formatPermissionDenial('auto', autoDecision.reason),
           };
         } else {
           // AI `ask` and deterministic red-line verdicts are never persisted.
@@ -2325,7 +2333,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         }
         return out;
       }
-      return { behavior: 'deny', message: decision.reason ?? 'denied by user' };
+      return { behavior: 'deny', message: formatPermissionDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason) };
     };
 
     // ── thinking display 配置（与 vendor/claude/runtime.ts:121-126 等价） ─────
@@ -2370,12 +2378,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       const settings = buildClaudeFlagSettings({
         showThinkingSummaries,
         availableModels: currentAvailableSdkModels(mutableModel),
-        // Do not carry the local manager's native-memory suppression across the
+        // Bots keep memory in their own Cindy scope, including remote sessions.
+        // For ordinary sessions, do not carry native-memory suppression across the
         // SSH boundary: the remote host retains its own Claude memory
         // configuration. Maker Memory on remote sessions is injected via the
         // host bridge (prompt + http MCP), which coexists with — but does not
         // rewrite — the remote machine's native memory settings.
-        memoryOverride: reviewMode ? false : opts.remoteHostId ? undefined : this.memoryOverride,
+        memoryOverride: reviewMode || opts.botRuntimeProfile ? false : opts.remoteHostId ? undefined : this.memoryOverride,
         // Fast 模式:进 flag settings 层(= --settings),解锁 cc 二进制在 Agent SDK 通道下的
         // fast(否则二进制按 "Agent SDK 不可用" 拒绝)。是否 Opus/官方/firstParty 由二进制把关,
         // agent 层不重复硬判(规则 9:确定性逻辑就近,但 fast 的最终门槛是二进制 + 配置门控)。
@@ -3235,6 +3244,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // options (cc-mgr.ts:106), 所以 extraOptions 是任意 SDK 字段的统一透传出口。
           extraOptions: {
             includePartialMessages: true,
+            ...(opts.botRuntimeProfile ? { disallowedTools: ['Task', 'Agent'], strictMcpConfig: true } : {}),
             ...thinkingOpts,
             ...(currentSdkEffort ? { effort: currentSdkEffort } : {}),
             // settings 对象跟本地分支同源 — 不透传则远端 SDK 拿不到
@@ -3252,6 +3262,7 @@ export class ClaudeCodeAgent extends BaseAgent {
 
         const remoteQuery = await this.deps.remoteCcQueryFactory({
           remoteHostId: opts.remoteHostId,
+          botSession: !reviewMode && !!opts.botRuntimeProfile,
           sessionId: opts.sessionId,
           ...(opts.sessionInstanceId ? { sessionInstanceId: opts.sessionInstanceId } : {}),
           startParams,
@@ -3451,7 +3462,7 @@ export class ClaudeCodeAgent extends BaseAgent {
                 return {
                   kind: 'permission',
                   behavior: 'deny',
-                  reason: autoDecision.reason ?? 'Cindy Auto Review blocked this action. Choose a safer alternative.',
+                  reason: formatPermissionDenial('auto', autoDecision.reason),
                 };
               }
               // 与本地分支同口径:故障降级来的 ask 提示一次,让用户知道为何开始被问。
@@ -3506,7 +3517,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               behavior: decision.behavior,
               updatedInput: decision.updatedInput,
               permissionUpdates: remoteForcePrompt ? undefined : decision.permissionUpdates,
-              reason: decision.reason,
+              reason: decision.behavior === 'deny'
+                ? formatPermissionDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason)
+                : decision.reason,
             };
           },
           onSubagentModelAccessRequest: async (rawParams: unknown) => {
@@ -3779,6 +3792,8 @@ export class ClaudeCodeAgent extends BaseAgent {
           // permissionMode=auto 时再调用远程安全分类器。动态聚合入口不在列表中。
           ...(claudeAllowedTools ? { allowedTools: [...claudeAllowedTools] } : {}),
           canUseTool,
+          // Bot work is delegated through tracked Cindy Session tasks.
+          ...(opts.botRuntimeProfile ? { disallowedTools: ['Task', 'Agent'], strictMcpConfig: true } : {}),
           settingSources: reviewMode || !!opts.botRuntimeProfile
             ? []
             : ['user', 'project', 'local'],

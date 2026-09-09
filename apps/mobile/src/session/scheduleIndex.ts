@@ -279,10 +279,18 @@ export async function loadSharedSessionScheduleIndex(
     // Check again when an invalidated in-flight scan finishes. Throw before
     // creating an entry so an abandoned waiter cannot poison active consumers.
     if (!canStart()) throw new Error('Schedule index consumer inactive');
-    return withTransientRemoteRetry(() => loadSessionScheduleIndex(maker, {
-      throwOnTransientRunListError: true,
-      isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId),
-    }));
+    return withTransientRemoteRetry(() => {
+      if (!canStart()) {
+        // Cancellation is not a device failure: discard this pending entry on
+        // settle so the next visible consumer can start immediately.
+        invalidateScheduleIndexForDevice(deviceId);
+        throw new Error('Schedule index consumer inactive');
+      }
+      return loadSessionScheduleIndex(maker, {
+        throwOnTransientRunListError: true,
+        isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId),
+      });
+    });
   });
 }
 

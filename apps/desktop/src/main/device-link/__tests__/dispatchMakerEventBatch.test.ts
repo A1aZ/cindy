@@ -783,6 +783,33 @@ describe('running session recovery on slow links', () => {
     expect(readSnapshot).toHaveBeenCalledTimes(3);
   });
 
+  it('does not let a late failed admission delay a newer repair stage', async () => {
+    const h = mkClient();
+    __testing.setActiveClient(h.client as never);
+    subscriptions.subscribe('phone', ['session:s1'], 'phone', capabilities);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    setRemoteBotSessionLookup(async () => { await pending; return 'visible'; });
+    const readSnapshot = vi.fn(() => snapshot);
+    setSessionTextSnapshotReader(readSnapshot);
+    h.client.getReliableSendQueueDepth.mockReturnValue(16);
+    __testing.forwardPush('maker:event', delta('first'));
+    await vi.advanceTimersByTimeAsync(WINDOW_MS);
+    h.client.getReliableSendQueueDepth.mockReturnValue(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(readSnapshot).toHaveBeenCalledTimes(1);
+    h.client.getReliableSendQueueDepth.mockReturnValue(16);
+    __testing.forwardPush('maker:event', delta('new stage'));
+    await vi.advanceTimersByTimeAsync(WINDOW_MS);
+    h.client.getReliableSendQueueDepth.mockReturnValue(0);
+    h.sendPush.mockImplementationOnce(() => { throw new DeviceLinkError('BACKPRESSURE', 'full'); });
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+    expect(h.sent.map(p => p.channel)).toEqual([SESSION_SYNC_CHANNEL]);
+  });
+
   it('replays only the requested current block after old deltas and before new deltas', () => {
     const h = mkClient();
     __testing.setActiveClient(h.client as never);

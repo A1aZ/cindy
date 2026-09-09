@@ -14,6 +14,18 @@
   ],
   "terms": [
     {
+      "id": "cindy-make",
+      "status": "proposed",
+      "en": "Cindy Make",
+      "translations": {
+        "zh-CN": "Cindy Make",
+        "zh-TW": "Cindy Make",
+        "ja": "Cindy Make",
+        "ko": "Cindy Make"
+      },
+      "note": "用户通过内置 /cindy-make 显式开启的 Cindy 个人版制作流程，先复用 /cindy-make-doctor 检查本机环境，再按平台补齐缺少的便携工具，并在消息流卡片中保留修改需求；Doctor 自身只检查，上游查询与构建分阶段接入。命令名已由用户指定，卡片保留同一专名。"
+    },
+    {
       "id": "cindy-ai-free-tier",
       "status": "proposed",
       "en": "Free tier",
@@ -1940,6 +1952,30 @@
         "ko": "Doubao"
       },
       "note": "模型显示品牌采用官方中文名称，版本号和变体原样保留；仅用于展示与搜索，不改模型 ID 或用户保存的名称。"
+    },
+    {
+      "id": "routine",
+      "status": "proposed",
+      "en": "Routine",
+      "translations": {
+        "zh-CN": "例行任务",
+        "zh-TW": "例行任務",
+        "ja": "ルーティン",
+        "ko": "루틴"
+      },
+      "note": "伙伴的长期指令，可由多个时间或事件条件触发；沿用 Chris 提供的 Grok Bot 界面用语。"
+    },
+    {
+      "id": "routine-trigger",
+      "status": "proposed",
+      "en": "Trigger",
+      "translations": {
+        "zh-CN": "触发器",
+        "zh-TW": "觸發器",
+        "ja": "トリガー",
+        "ko": "트리거"
+      },
+      "note": "例行任务的时间或事件触发条件。"
     }
   ]
 }

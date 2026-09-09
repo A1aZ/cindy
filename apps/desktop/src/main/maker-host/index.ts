@@ -9,6 +9,7 @@
  */
 
 import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
+import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, type WorktreeRuntimeLease } from '../worktree/runtimeLeases';
 import { readCodexContextWindowInfo } from './codex-context-window.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
@@ -235,6 +236,8 @@ import {
 import { cleanupComputerDriverSession } from '../mcp-integrations/computer.js';
 import { createPluginRegistry, resetPluginRegistry } from './plugins/index.js';
 import {
+  withCodexMcpDiscoveryContext,
+  getActiveCodexBridgeInstanceId,
   getActiveCodexBridgeServerNames,
   getCodexExtraSpawnConfig,
   registerCodexMcpThreadContext,
@@ -246,11 +249,12 @@ import { setRemoteMcpBridgeTokenRotatedHook } from '../mcp-integrations/remoteMc
 import { isBotToolsetAvailableOnTarget } from '../../shared/botRemoteCapabilities.js';
 import {
   ensureRemoteMcpForward,
+  buildRemoteCodexSessionMcpConfig,
   setRemoteMcpForwardRearmedHook,
   stripRemoteCodexMcpConfig,
 } from '../remote-ssh/codex-remote-mcp.js';
 import {
-  buildCcRemoteHttpMcpServers,
+  prepareCcRemoteQueryMcp,
   CC_MCP_DISABLED_FINGERPRINT,
   readCcAppliedFingerprint,
   writeCcAppliedFingerprint,
@@ -332,6 +336,8 @@ type RemoteCcQuery = Awaited<
 let _maker: Maker | null = null;
 /** Prepared Bot runtime records waiting for the matching Maker startup result. */
 const pendingBotRuntimeSnapshots = new Map<string, BotProfileRuntimeSnapshot>();
+// Maker copies start options for every runtime, including rebuilds of one task.
+const worktreeRuntimeLeases = new WeakMap<object, WorktreeRuntimeLease>();
 let botRuntimeResourcePreflight:
   | ((opts: MakerSessionCreateOpts) => Promise<BotProfileRuntimeSnapshot | null>)
   | null = null;
@@ -1106,6 +1112,7 @@ export function getMaker(): Maker {
         onOAuthRefresh,
         makerMemoryEnabled,
         makerMemoryScopeKey,
+        botSession,
       }) => {
         const host = getRemoteSshPool().get(remoteHostId);
         if (host?.getStatus() !== 'ready') {
@@ -1125,47 +1132,43 @@ export function getMaker(): Maker {
         // 远端 cc 的协同 MCP 恢复通道:bridge + remote-forward + per-session
         // token,把 cindy_orca / orca_worker_bridge 以 http 形态追加进
         // startParams.mcpServers (cc remote 过滤器本来就放行 http transport)。
-        // 注入失败降级为"远端无协同 MCP"(历史行为),不阻塞 session 建立。
-        let mcpCleanup: () => void = () => {};
-        let injectedServerCount = 0;
-        let mcpNeedsFreshStart = false;
-        let mcpInjectFingerprint: string | undefined;
-        try {
-          const injected = await buildCcRemoteHttpMcpServers(
-            {
-              host,
-              sessionId,
-              sessionInstanceId,
-              workingDir: typeof startParams.cwd === 'string' ? startParams.cwd : '',
-              vendorOptions,
-              // per-session Maker Memory 开关 (maker-core 归一后透传)。
-              makerMemoryEnabled,
-              // 同源的 scope key: Bot 会话恒为 `bot:<botId>`, 缺失时远端工具
-              // 会回落 workdir 键, 与本地 prompt 注入的伙伴记忆分家。
-              ...(makerMemoryScopeKey ? { makerMemoryScopeKey } : {}),
-            },
-            {
-              ensureBridgeStarted: ensureCodexMcpBridgeStartedForRemote,
-              ensureForward: ensureRemoteMcpForward,
-              // collab 全局禁用 (Tier 4) 时整个不注入 — bridge 名单不反映
-              // 开关 (codex-connector R20 P2, 与 codex daemon 侧同闸门)。
-              isCollabEnabled: () => pluginRegistry.isEnabled('collab'),
-            },
-          );
-          mcpCleanup = injected.cleanup;
-          mcpNeedsFreshStart = injected.needsFreshStart === true;
-          mcpInjectFingerprint = injected.fingerprint;
-          if (Object.keys(injected.servers).length > 0) {
-            injectedServerCount = Object.keys(injected.servers).length;
-            const mutableParams = startParams as { mcpServers?: Record<string, unknown> };
-            mutableParams.mcpServers = { ...(mutableParams.mcpServers ?? {}), ...injected.servers };
-          }
-        } catch (err) {
-          desktopMakerLogger.warn('cc remote MCP injection skipped', {
-            remoteHostId,
+        // 普通任务保留可选 MCP 降级;伙伴缺少 helper 时必须在 query 建立前失败。
+        const injected = await prepareCcRemoteQueryMcp(
+          {
+            host,
             sessionId,
-            message: err instanceof Error ? err.message : String(err),
-          });
+            sessionInstanceId,
+            workingDir: typeof startParams.cwd === 'string' ? startParams.cwd : '',
+            vendorOptions,
+            // per-session Maker Memory 开关 (maker-core 归一后透传)。
+            makerMemoryEnabled,
+            botSession,
+            // 同源的 scope key: Bot 会话恒为 `bot:<botId>`, 缺失时远端工具
+            // 会回落 workdir 键, 与本地 prompt 注入的伙伴记忆分家。
+            ...(makerMemoryScopeKey ? { makerMemoryScopeKey } : {}),
+          },
+          {
+            ensureBridgeStarted: ensureCodexMcpBridgeStartedForRemote,
+            ensureForward: ensureRemoteMcpForward,
+            // collab 全局禁用 (Tier 4) 时整个不注入 — bridge 名单不反映
+            // 开关 (codex-connector R20 P2, 与 codex daemon 侧同闸门)。
+            isCollabEnabled: () => pluginRegistry.isEnabled('collab'),
+            onOptionalInjectionError: (err) => {
+              desktopMakerLogger.warn('cc remote MCP injection skipped', {
+                remoteHostId,
+                sessionId,
+                message: err instanceof Error ? err.message : String(err),
+              });
+            },
+          },
+        );
+        const mcpCleanup = injected.cleanup;
+        const mcpNeedsFreshStart = injected.needsFreshStart === true;
+        const mcpInjectFingerprint = injected.fingerprint;
+        const injectedServerCount = Object.keys(injected.servers).length;
+        if (injectedServerCount > 0) {
+          const mutableParams = startParams as { mcpServers?: Record<string, unknown> };
+          mutableParams.mcpServers = { ...(mutableParams.mcpServers ?? {}), ...injected.servers };
         }
 
         // maker-core computes the initial permission mode before this factory
@@ -1450,6 +1453,13 @@ export function getMaker(): Maker {
             extraEnv: {},
             codexProxyActive: false,
             codexBrowserUseAvailable: true,
+            buildSessionMcpConfig: (instance: string) =>
+              buildRemoteCodexSessionMcpConfig(ctx.remoteHostId!, instance, {
+                bridgeInstanceId: getActiveCodexBridgeInstanceId(),
+                serverNames: getActiveCodexBridgeServerNames() ?? [],
+                collabEnabled: pluginRegistry.isEnabled('collab'),
+                makerMemoryEnabled: _maker?.makerMemory?.isEnabled() ?? false,
+              }),
           };
         }
         const isControlPlane = ctx.hostPurpose === 'control-plane';
@@ -1704,6 +1714,8 @@ export function getMaker(): Maker {
             : {}),
         };
       },
+      withCodexMcpDiscoveryContext: (ctx, run) =>
+        withCodexMcpDiscoveryContext({ ...ctx, agentKind: 'codex' }, run),
       registerCodexMcpThreadContext: ({
         threadId,
         sessionId,
@@ -2414,6 +2426,10 @@ export function getMaker(): Maker {
           const createOpts = opts as MakerSessionCreateOpts;
           createOpts.id ??= sessionId;
           await prepareBotWorkspaceRuntime(createOpts);
+          if (!createOpts.remoteHostId && createOpts.workingDir) {
+            const lease = await acquireWorktreeRuntimeLease(sessionId, createOpts.workingDir);
+            if (lease) worktreeRuntimeLeases.set(opts, lease);
+          }
           let skillLinksChanged = false;
           if (!createOpts.remoteHostId && createOpts.workingDir) {
             const result = await prepareSharedProjectSkillLinks({
@@ -2509,7 +2525,13 @@ export function getMaker(): Maker {
             }
           }
         },
-        onStartFailed: async ({ sessionId, stage, error }) => {
+        onStartFailed: async ({ sessionId, options, stage, error, runtimeMayBeAlive }) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease && !runtimeMayBeAlive) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           const snapshot = pendingBotRuntimeSnapshots.get(sessionId);
           if (!snapshot) return;
           try {
@@ -2525,11 +2547,25 @@ export function getMaker(): Maker {
             pendingBotRuntimeSnapshots.delete(sessionId);
           }
         },
+        onStartCleanupSucceeded: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
+        },
         getCodexHistoryHasProductPrompt: (sessionId) => readCodexHistoryHasProductPrompt(sessionId),
         onCodexProductPromptDelivery: async ({ sessionId, historyHasProductPrompt }) => {
           await writeCodexHistoryHasProductPrompt(sessionId, historyHasProductPrompt);
         },
-        onClose: async (sessionId) => {
+        onClose: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           // rehydrate close suppression 只跳过 worktree / temp file 这类重副作用;
           // registry 必须先清,后续 resume 会在首个 /responses 前重新登记,避免旧 thread prompt 驻留。
           unregisterCodexProxyPrompt(sessionId);

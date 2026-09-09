@@ -1372,6 +1372,33 @@ describe('utility one-shot candidates', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps auxiliary requests on the selected connection for identical model names', async () => {
+    activeCatalog.mockReturnValue({ providers: ['account-a', 'account-b'].map(id => ({
+      id, name: 'Same provider', source: 'user', agents: ['codex'],
+      auth: { method: 'apiKey' },
+      routing: { codex: { upstream: `https://${id}.example/v1`, authStrategy: 'api-key-header' } },
+      models: { codex: [{ id: 'same-model', name: 'Same model', contextWindow: 100000 }] },
+    })) } as never);
+    readCustomKey.mockImplementation(id => `test-key-${id}`);
+    for (const id of ['account-a', 'account-b', 'account-a']) {
+      fetchMock.mockResolvedValueOnce({ ok: true,
+        text: async () => 'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
+      } as never);
+      const result = await requestUtilityText(makerMock(false), 'generate', {
+        providerId: id, agentKind: 'codex', model: 'same-model',
+      });
+      expect(result).toMatchObject({ ok: true, providerId: id });
+      expect(fetchMock).toHaveBeenLastCalledWith(`https://${id}.example/v1/responses`,
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer test-key-${id}` }) }));
+    }
+    readCustomKey.mockImplementation(id => id === 'account-b' ? 'test-key-b' : null);
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'account-a', agentKind: 'codex', model: 'same-model',
+    });
+    expect(result.ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('sends the required Anthropic version header for a custom Claude provider', async () => {
     activeCatalog.mockReturnValue({
       providers: [{

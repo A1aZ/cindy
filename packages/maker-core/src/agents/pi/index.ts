@@ -2404,7 +2404,7 @@ export class PiAgent extends BaseAgent {
         const canonicalSubscriptionId = !model.id.includes('/')
           ? sourceProviderId === 'xai'
             ? `xai/${model.id}`
-            : sourceProviderId === 'openai'
+            : sourceProviderId === 'openai' || model.api === 'openai-codex-responses'
               ? `chatgpt/${model.id}`
               : undefined
           : undefined;
@@ -5518,14 +5518,15 @@ export class PiAgent extends BaseAgent {
           model: modelId,
           resumeSessionId: sdkSessionId || opts.resumeSessionId,
         });
+        const sourceProviderId = providerId ?? 'xai';
         const liveXai = live?.providers.find(
-          (provider) => (provider.sourceProviderId ?? provider.id) === 'xai',
+          (provider) => (provider.sourceProviderId ?? provider.id) === sourceProviderId,
         );
         if (!live || !liveXai) return false;
         // 远端 hostProxyForward 依赖启动时注入的 session token / 代理登记。
         // 登录后才出现的 xAI 块带上隧道,请求会因没有 CINDY_PI_SESSION_TOKEN 失败。
         if (liveXai.hostProxyForward && !proxySessionToken) return false;
-        const currentXai = nativeProviderForSource('xai');
+        const currentXai = nativeProviderForSource(sourceProviderId);
         if (currentXai) {
           if (currentXai.baseUrl !== liveXai.baseUrl) return false;
           if (!sameRecord(currentXai.headers, liveXai.headers)) return false;
@@ -5542,7 +5543,7 @@ export class PiAgent extends BaseAgent {
         nativeProviderBySourceId.set(liveXai.sourceProviderId ?? liveXai.id, liveXai);
         nativeProviders = [
           ...nativeProviders.filter(
-            (provider) => (provider.sourceProviderId ?? provider.id) !== 'xai',
+            (provider) => (provider.sourceProviderId ?? provider.id) !== sourceProviderId,
           ),
           liveXai,
         ];
@@ -5661,7 +5662,7 @@ export class PiAgent extends BaseAgent {
         ? (model.startsWith('xai/') ? 'xai' : undefined)
         : (requestedProviderId ?? undefined);
       const liveProviderHint = sourceHint ? nativeProviderForSource(sourceHint) : undefined;
-      const needsXaiCatalogReload = sourceHint === 'xai'
+      const needsXaiCatalogReload = (sourceHint === 'xai' || Boolean(liveProviderHint?.hostProxyForward))
         && (!liveProviderHint || !nativeOffersModel(liveProviderHint.id, model));
       if (needsXaiCatalogReload) {
         const previousProviders = nativeProviders.slice();

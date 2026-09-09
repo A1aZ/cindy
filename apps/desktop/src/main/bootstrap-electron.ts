@@ -1,3 +1,4 @@
+import { codexAccountState } from './maker-host/codex-account-auth.js';
 import { startWorktreeRecycleMaintenance, stopWorktreeRecycleMaintenance, auditRegisteredWorktrees } from './worktree/recycleMaintenance';
 import { requestWorktreeRecycle } from './worktree/managedRecycle';
 import { recycleSessionWorktreeForStatusChange } from './localDb/ipc/sessions';
@@ -2400,6 +2401,7 @@ registerLayoutIpc();
 // 图片通道的 ChatGPT 鉴权必须由 Main 静态装配；禁止在请求时 import maker-host
 // 生成延迟 chunk（Main bundle 反向 require 会重复执行启动副作用）。
 setCodexImageAuthBinding({
+  hasAuth: (providerId) => codexAccountState(providerId).authenticated,
   getAuth: getChatgptBridgeAuth,
   onAuthFailure: invalidateChatgptBridgeAuth,
 });

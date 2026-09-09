@@ -1,3 +1,4 @@
+import { isOpenAiSubscriptionProviderId } from '../maker-host/codex-account-auth.js';
 import type { AgentEvent, Session } from '@cindy/maker-core';
 
 import { createLogger } from '../logger.js';
@@ -11,7 +12,7 @@ import {
   getGatewayAccountCurrency,
   getGatewayModelPricingForModel,
 } from '../usage/modelPricing.js';
-import { getReferenceModelPricing } from '../usage/referenceModelPricing.js';
+import { getReferenceModelPricing, getCodexProviderSubscriptionValuePrice } from '../usage/referenceModelPricing.js';
 import {
   ClaudeOutputLagTimingGuard,
   computeModelUsageDeltas,
@@ -282,7 +283,9 @@ export function recordSessionClaudeTurnUsage(
             isClaudeSubscriptionValueRow || isBridgeSubscriptionRow
               ? computePriceQuoteTurnMoney(
                   m.deltas,
-                  getSubscriptionValuePriceFor('claude-code', m.model, pricing),
+                  sessionProviderForBilling && isOpenAiSubscriptionProviderId(sessionProviderForBilling) && m.model.startsWith(CHATGPT_MODEL_PREFIX)
+                    ? getCodexProviderSubscriptionValuePrice(sessionProviderForBilling, m.model, pricing, undefined, undefined, 'claude-code')
+                    : getSubscriptionValuePriceFor('claude-code', m.model, pricing),
                   currentLedgerCurrency(),
                   m.segments,
                 )
@@ -480,8 +483,9 @@ export function recordSessionClaudeTurnUsage(
     // chip 的订阅额度实时更新 —— bridge 轮不产生 codex account_usage 事件,须主动触发。
     void modelPromise
       .then((m) => {
-        if (m && m.startsWith(CHATGPT_MODEL_PREFIX)) triggerCodexAccountUsageRefresh();
-        if (m && isExclusiveXaiModelId(m)) triggerXaiSubscriptionUsageRefresh();
+        const providerId = getSessionProvider(session.id);
+        if (m && m.startsWith(CHATGPT_MODEL_PREFIX) && (providerId == null || isOpenAiSubscriptionProviderId(providerId))) triggerCodexAccountUsageRefresh(providerId ?? undefined);
+        if (m && isExclusiveXaiModelId(m)) triggerXaiSubscriptionUsageRefresh(providerId ?? undefined);
       })
       .catch(() => {
         /* 模型解析失败: 跳过, 非致命 */
@@ -489,6 +493,6 @@ export function recordSessionClaudeTurnUsage(
     // Claude 订阅账号余量 (oauth/usage 端点) 同理 turn-done 触发一次 —— 节流 (180s) /
     // 429 退避 / 未连订阅 no-op 都在 reader 内部; turn 内的实时刷新由 proxy 旁路读
     // unified headers 兜住, 这里只负责把 scoped 分模型窗口等端点独有数据拉新。
-    triggerClaudeSubscriptionUsageRefresh();
+    triggerClaudeSubscriptionUsageRefresh(getSessionProvider(session.id) ?? undefined);
   }
 }

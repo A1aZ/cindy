@@ -2332,7 +2332,7 @@ describe('provider:custom:* CRUD handlers', () => {
     await expect(second).resolves.toEqual({ ok: true });
     expect(calls).toEqual(['remove-1', 'restore-1', 'remove-2']);
     const savedAuth = (await listCustomProviders())[0]?.auth;
-    expect(savedAuth?.method === 'oauth' ? savedAuth.oauth.clientId : undefined).toBe(
+    expect(savedAuth?.method === 'oauth' ? savedAuth.oauth?.clientId : undefined).toBe(
       'winning-client',
     );
   });

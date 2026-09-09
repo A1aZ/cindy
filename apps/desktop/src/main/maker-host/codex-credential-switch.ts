@@ -1,8 +1,9 @@
+import { isOpenAiSubscriptionProvider } from '@cindy/model-providers';
 import {
   canReuseCodexHostForCredentialMode,
   canReuseHostForCredentialMode,
   isCindyProviderCodexRemoteCompactionRoute,
-  resolveAgentCredentialMode,
+  resolveAgentCredentialMode as resolveBaseCredentialMode,
   type AgentCredentialMode,
   type AgentKind,
 } from '@cindy/maker-core';
@@ -17,6 +18,14 @@ import {
 import { crossesCodexAppliedCustomProviderIdentity } from './codex-custom-provider-route.js';
 import type { CodexProxyAuthInjection } from './codex-proxy-host.js';
 import { withRehydrateCloseSuppressed } from './rehydrateCloseSuppression.js';
+import { getActiveCatalog } from './active-catalog.js';
+
+function resolveAgentCredentialMode(input: Parameters<typeof resolveBaseCredentialMode>[0]): AgentCredentialMode | undefined {
+  if (input.agentKind === 'codex' && getActiveCatalog().providers.some(
+    (provider) => provider.id === input.providerId && provider.auth.native === 'codex',
+  )) return 'oauth-bearer';
+  return resolveBaseCredentialMode(input);
+}
 
 export interface ShouldCloseSessionForCredentialSwitchInput {
   agentKind: AgentKind;
@@ -272,6 +281,16 @@ export function shouldCloseSessionForCredentialSwitch(
     input.agentKind === 'pi'
     && piProxyProviderIdentity(currentProviderId) !== piProxyProviderIdentity(nextProviderId)
   ) {
+    // Native ChatGPT accounts have independent startup provider blocks and placeholder
+    // credentials. Pi's verified set_model switches the live proxy/subagent identity;
+    // no account token is frozen in the process. Missing startup routes still fail
+    // before RPC inside Pi, preserving the old route and pending message.
+    const providers = getActiveCatalog().providers;
+    const current = providers.find(provider => provider.id === currentProviderId);
+    const next = providers.find(provider => provider.id === nextProviderId);
+    if (current && next && isOpenAiSubscriptionProvider(current) && isOpenAiSubscriptionProvider(next)) {
+      return false;
+    }
     return true;
   }
   const currentMode = resolveAgentCredentialMode({

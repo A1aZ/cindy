@@ -1,3 +1,4 @@
+import { isOpenAiSubscriptionProvider } from '@cindy/model-providers';
 import { randomUUID } from 'node:crypto';
 
 import { type AgentKind, type Maker } from '@cindy/maker-core';
@@ -858,7 +859,7 @@ async function requestExplicitProviderText(
     opts = { ...opts, maxTokens: Math.min(opts.maxTokens, catalogModel.maxOutput) };
   }
 
-  if (provider.id === 'xd' || provider.id === 'anthropic' || provider.id === 'openai' || provider.id === 'xai') {
+  if (provider.id === 'xd' || provider.id === 'anthropic' || isOpenAiSubscriptionProvider(provider) || provider.id === 'xai') {
     return requestBuiltinProviderText(prompt, {
       provider,
       agentKind,
@@ -1169,10 +1170,10 @@ async function requestBuiltinProviderText(
     }], prompt, [], input);
   }
 
-  if (input.provider.id === 'openai') {
+  if (isOpenAiSubscriptionProvider(input.provider)) {
     let creds: Awaited<ReturnType<typeof getChatgptBridgeAuth>>;
     try {
-      creds = await getChatgptBridgeAuth();
+      creds = await (input.provider.id === 'openai' ? getChatgptBridgeAuth() : getChatgptBridgeAuth(input.provider.id));
     } catch {
       return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
     }
@@ -1220,7 +1221,7 @@ async function requestBuiltinProviderText(
         credentialStillCurrent: requestOpts?.beforeDispatch
           ? async () => {
               try {
-                const current = await getChatgptBridgeAuth();
+                const current = await (input.provider.id === 'openai' ? getChatgptBridgeAuth() : getChatgptBridgeAuth(input.provider.id));
                 return current.accountId === accountId && current.accessToken === creds.accessToken;
               } catch {
                 return false;

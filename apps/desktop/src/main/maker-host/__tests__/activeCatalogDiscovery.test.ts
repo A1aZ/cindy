@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   BUNDLED_CATALOG,
+  buildUserProvider,
   type AgentKind,
   type Catalog,
   type CatalogModel,
@@ -87,6 +88,30 @@ function legacyCatalog(): Catalog {
 }
 
 describe('active-catalog discovered augment', () => {
+  it('shares OpenAI protocol and Pi metadata with an independent account without sharing identity', () => {
+    const account = buildUserProvider({
+      id: 'openai-parity', name: 'Separate account', auth: { method: 'oauth', native: 'codex' },
+      runtimes: { codex: { baseUrl: 'https://chatgpt.com/backend-api/codex', models: [{ id: 'gpt-5.6-luna', name: 'Luna' }] } },
+    }, { modelRegistry: BUNDLED_CATALOG.modelRegistry });
+    setActiveCatalog({ ...BUNDLED_CATALOG, providers: [...BUNDLED_CATALOG.providers, account] });
+    const catalog = getActiveCatalog();
+    const selected = catalog.providers.find(p => p.id === account.id)!;
+    const original = catalog.providers.find(p => p.id === 'openai')!;
+    for (const agent of ['codex', 'claude-code', 'pi'] as const) {
+      const id = agent === 'codex' ? 'gpt-5.6-luna' : 'chatgpt/gpt-5.6-luna';
+      const model = selected.models[agent]?.find(m => m.id === id);
+      expect(model?.nativeApi).toBe('openai-responses');
+      if (agent === 'pi') {
+        const baseline = original.models.pi?.find(m => m.id === id);
+        expect(model?.contextWindow).toBe(baseline?.contextWindow);
+        expect(model?.maxOutput).toBe(baseline?.maxOutput);
+        expect(model?.cost).toEqual(baseline?.cost);
+        expect(model?.defaultEffort).toBe(baseline?.defaultEffort);
+      }
+    }
+    expect(selected.id).toBe('openai-parity');
+    expect(selected.auth).toEqual({ method: 'oauth', native: 'codex' });
+  });
   afterEach(() => {
     // 复位全局状态,避免测试间串扰
     setActiveCatalog(BUNDLED_CATALOG);
@@ -180,7 +205,7 @@ describe('active-catalog discovered augment', () => {
     expect(openaiIds('pi')).not.toContain('chatgpt/gpt-5.7');
   });
 
-  it('旧服务端缺少或下发空 Pi 数组时仍保留客户端原生名单', () => {
+  it('missing Pi declarations use fallback but explicit empty lists remove public Pi membership', () => {
     const expected = openaiIds('pi');
     const omitted = bundledWithoutRegistry();
     delete omitted.providers.find((provider) => provider.id === 'openai')!.models.pi;
@@ -190,7 +215,7 @@ describe('active-catalog discovered augment', () => {
     const empty = bundledWithoutRegistry();
     empty.providers.find((provider) => provider.id === 'openai')!.models.pi = [];
     setActiveCatalog(empty, { authorityCatalog: empty });
-    expect(openaiIds('pi')).toEqual(expected);
+    expect(openaiIds('pi')).toEqual([]);
   });
 
   it('明确的服务端 Pi 条目直接叠加本地目录，不依赖 Codex discovery', () => {
@@ -243,15 +268,12 @@ describe('active-catalog discovered augment', () => {
     });
   });
 
-  it('xAI account snapshot is authoritative and projects canonical ids per harness', () => {
+  it('xAI discovery augments public declarations and projects canonical ids per harness', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     setXaiDiscoveredModels([{ id: 'xai/grok-4.5' }, { id: 'xai/grok-4.6' }]);
     const xai = getActiveCatalog().providers.find((provider) => provider.id === 'xai');
-    expect(xai?.models['claude-code']?.map((model) => model.id)).toEqual([
-      'xai/grok-4.5',
-      'xai/grok-4.6',
-    ]);
-    expect(xai?.models.codex?.map((model) => model.id)).toEqual(['xai/grok-4.5', 'xai/grok-4.6']);
+    expect(xai?.models['claude-code']?.map((model) => model.id)).toEqual(expect.arrayContaining(['xai/grok-4.5', 'xai/grok-4.6']));
+    expect(xai?.models.codex?.map((model) => model.id)).toEqual(expect.arrayContaining(['xai/grok-4.5', 'xai/grok-4.6']));
     expect(xai?.models.pi?.map((model) => model.id)).toEqual([
       'grok-4.3',
       'grok-4.5',
@@ -348,12 +370,13 @@ describe('active-catalog discovered augment', () => {
     });
   });
 
-  it('xAI account discovery can clear Claude/Codex without clearing independent Pi membership', () => {
+  it('empty xAI discovery cannot erase server-declared models', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     setXaiDiscoveredModels([]);
     const xai = getActiveCatalog().providers.find((provider) => provider.id === 'xai');
-    expect(xai?.models['claude-code']).toEqual([]);
-    expect(xai?.models.codex).toEqual([]);
+    for (const agent of ['claude-code', 'codex'] as const) {
+      expect(xai?.models[agent]?.map(model => model.id)).toContain('xai/grok-4.6');
+    }
     expect(xai?.models.pi?.map((model) => model.id)).toEqual([
       'grok-4.3',
       'grok-4.5',

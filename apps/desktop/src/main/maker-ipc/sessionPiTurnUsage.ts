@@ -1,3 +1,5 @@
+import { isOpenAiSubscriptionProviderId } from '../maker-host/codex-account-auth.js';
+import { isClaudeSubscriptionProviderId, isXaiSubscriptionProviderId } from '../maker-host/subscription-account-auth.js';
 import type { AgentEvent, Session } from '@cindy/maker-core';
 
 import { buildTurnUsageDetails } from '../../shared/turnUsageDetails.js';
@@ -9,7 +11,7 @@ import {
 } from '../turnCostBroadcaster.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
 import { getGatewayModelPricingForModel } from '../usage/modelPricing.js';
-import { getReferenceModelPricing } from '../usage/referenceModelPricing.js';
+import { getReferenceModelPricing, getCodexProviderSubscriptionValuePrice } from '../usage/referenceModelPricing.js';
 import {
   getSubscriptionValuePriceFor,
   piSubscriptionUsageModelKey,
@@ -127,11 +129,11 @@ export function recordSessionPiTurnUsage(
               ? 'xai'
               : null);
         const isSubscriptionValue =
-          effectiveProvider === 'openai' ||
+          effectiveProvider && isOpenAiSubscriptionProviderId(effectiveProvider) ||
           effectiveProvider === 'anthropic' ||
           effectiveProvider === 'xai' ||
           (!isCustomProviderRoute && isSubscriptionDirectRoute(pricingModel));
-        const billingRoute: BillingRoute = isCustomProviderRoute
+        const billingRoute: BillingRoute = isCustomProviderRoute && !isSubscriptionValue
           ? 'provider-api'
           : isSubscriptionValue
             ? 'subscription'
@@ -200,7 +202,9 @@ export function recordSessionPiTurnUsage(
             const pricingSegments = piSegmentsReliable ? group.segments : [];
             let money: RegionalMoney | null = null;
             if (billingRoute === 'subscription') {
-              const quote = getSubscriptionValuePriceFor('pi', model, pricing);
+              const quote = effectiveProvider && isOpenAiSubscriptionProviderId(effectiveProvider) && model.startsWith(CHATGPT_MODEL_PREFIX)
+                ? getCodexProviderSubscriptionValuePrice(effectiveProvider, model, pricing, undefined, undefined, 'pi')
+                : getSubscriptionValuePriceFor('pi', model, pricing);
               money = computePriceQuoteTurnMoney(
                 group.tokens,
                 quote ?? undefined,
@@ -310,12 +314,12 @@ export function recordSessionPiTurnUsage(
           }
         }
 
-        if (effectiveProvider === 'openai') {
-          triggerCodexAccountUsageRefresh();
-        } else if (effectiveProvider === 'anthropic') {
-          triggerClaudeSubscriptionUsageRefresh();
-        } else if (effectiveProvider === 'xai') {
-          triggerXaiSubscriptionUsageRefresh();
+        if (effectiveProvider && isOpenAiSubscriptionProviderId(effectiveProvider)) {
+          triggerCodexAccountUsageRefresh(effectiveProvider);
+        } else if (isClaudeSubscriptionProviderId(effectiveProvider)) {
+          triggerClaudeSubscriptionUsageRefresh(effectiveProvider ?? undefined);
+        } else if (isXaiSubscriptionProviderId(effectiveProvider)) {
+          triggerXaiSubscriptionUsageRefresh(effectiveProvider ?? undefined);
         } else if (effectiveProvider === 'xd' || effectiveProvider == null) {
           void triggerClaudeAccountUsageRefresh();
         }

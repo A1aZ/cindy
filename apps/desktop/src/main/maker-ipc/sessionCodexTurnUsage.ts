@@ -27,7 +27,8 @@ import {
 import { isExclusiveXaiModelId } from '../../shared/subscriptionModels.js';
 import { type RegionalMoney } from '../../shared/regionalMoney.js';
 import { currentLedgerCurrency } from '../usage/ledgerCurrency.js';
-import { triggerXaiSubscriptionUsageRefresh } from './usage.js';
+import { triggerClaudeSubscriptionUsageRefresh, triggerXaiSubscriptionUsageRefresh } from './usage.js';
+import { isClaudeSubscriptionProviderId } from '../maker-host/subscription-account-auth.js';
 import {
   rebroadcastCodexTodayUsage,
   recordCodexTurnUsage,
@@ -115,6 +116,11 @@ export function recordSessionCodexTurnUsage(
           isExclusiveXaiModelId(pricingModel);
         const isCodexOpenAiProviderRoute = sessionProvider == null || sessionProvider === 'openai';
         const hasGatewayKey = Boolean(readClaudeApiKey());
+        const quotaProvider = getSessionProvider(session.id) ?? undefined;
+        if (!isRemoteCodexSession && isClaudeSubscriptionProviderId(quotaProvider)) {
+          triggerClaudeSubscriptionUsageRefresh(quotaProvider);
+          return;
+        }
         const hasEffectiveGatewayRoute =
           !isRemoteCodexSession &&
           !isCustomProviderRoute &&
@@ -262,7 +268,7 @@ export function recordSessionCodexTurnUsage(
       .then((model) => {
         const hasGatewayKey = Boolean(readClaudeApiKey());
         if (!isRemoteCodexSession && isExclusiveXaiModelId(model)) {
-          triggerXaiSubscriptionUsageRefresh();
+          triggerXaiSubscriptionUsageRefresh(getSessionProvider(session.id) ?? undefined);
           return;
         }
         if (

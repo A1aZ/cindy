@@ -910,6 +910,21 @@ describe('usage through the production event pipeline', () => {
     },
   );
 
+  it('keeps independent OpenAI Pi turns as subscription value and uses their own price override', async () => {
+    const h = harness();
+    pricing(true);
+    effects.fn('getSessionProvider').mockReturnValue('openai-account');
+    effects.fn('isUserProviderSession').mockReturnValue(true);
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'openai-account', source: 'user', auth: { method: 'oauth', native: 'codex' }, access: { kind: 'subscription' } }] });
+    const model = 'chatgpt/gpt-5.6-luna';
+    h.emit(event('done', { usage: { ...tokens, segments: [{ ...segment, model }], segmentsComplete: true } }, { source: 'pi' }));
+    await microtasks();
+    expect(effects.fn('getCodexProviderSubscriptionValuePrice')).toHaveBeenCalledWith('openai-account', model, expect.anything(), undefined, undefined, 'pi');
+    expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
+    expect(effects.fn('recordSchedulerTurnCost')).toHaveBeenCalledWith(expect.objectContaining({ money: expect.objectContaining({ kind: 'value-estimate' }) }));
+    await h.dispose();
+  });
+
   it.each(['codex', 'claude-code'] as const)(
     'keeps remote %s usage out of local gateway charges',
     async (source) => {

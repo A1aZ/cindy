@@ -643,6 +643,25 @@ describe('buildTitleTarget(锁定 catalog titleModel 配置)', () => {
 // ── generateTitleViaProvider — anthropic(Messages)────────────────────────
 
 describe('generateTitleViaProvider — anthropic(Messages)', () => {
+  it('uses the selected independent Claude account for every credential recheck', async () => {
+    const original = BUNDLED_CATALOG.providers.find(provider => provider.id === 'anthropic')!;
+    const id = 'anthropic-second';
+    setActiveCatalog({ ...BUNDLED_CATALOG, providers: [...BUNDLED_CATALOG.providers,
+      { ...original, id, source: 'user', auth: { method: 'oauth', native: 'claude' } },
+    ] });
+    try {
+      const fetchImpl = fakeFetch(() => ({ json: { content: [{ type: 'text', text: '账号隔离测试' }] } }));
+      const readAnthropicOAuth = vi.fn((providerId?: string) => ({ accessToken: providerId === id ? 'test-selected' : 'test-wrong' }));
+      const title = await generateTitleViaProvider(
+        { sessionId: 's-scoped', agentKind: 'claude-code', prompt: '为账号隔离测试起标题' },
+        { fetchImpl, readSessionProviderId: async () => id, listConnectedProviders: async () => [providerStub(id)], readAnthropicOAuth },
+      );
+      expect(title).toBe('账号隔离测试');
+      expect(readAnthropicOAuth.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(readAnthropicOAuth.mock.calls.every(([providerId]) => providerId === id)).toBe(true);
+      expect(vi.mocked(fetchImpl).mock.calls[0]?.[1]).toMatchObject({ headers: { authorization: 'Bearer test-selected' } });
+    } finally { setActiveCatalog(BUNDLED_CATALOG); }
+  });
   it('200 → 解析 content[].text;请求形状正确', async () => {
     const fetchImpl = fakeFetch(() => ({
       json: { content: [{ type: 'text', text: 'TS 编译报错排查' }] },

@@ -87,14 +87,9 @@ export function projectProviderMediaModels(
     next[field] = models
       .filter(
         (model) =>
-          !(
-            provider.source !== "user" &&
-            provider.id !== "xd" &&
-            !model.discoveredMetadata &&
-            declared.some(
-              ({ entry, route }) =>
-                route.modelId === model.id && entry.status === "retired",
-            )
+          !declared.some(
+            ({ entry, route }) =>
+              route.modelId === model.id && entry.status === "retired",
           ),
       )
       .map((model): ProviderMediaModel => {

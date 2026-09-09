@@ -6,8 +6,14 @@ import {
   projectProviderMediaModels,
   providerMediaField,
 } from '../providerMediaModels.js';
+import { deriveModelList } from '../modelList.js';
+import { buildRegistry, chatEligibleSourcesForModel } from '../registry.js';
 import { buildUserProvider } from '../user-provider.js';
-import { isChatEligible } from '../classification.js';
+import {
+  isChatEligible,
+  isAgentSelectableModel,
+  isModelSelectableForNewRoute,
+} from '../classification.js';
 import type { ModelRegistry } from '../modelAccessBean.js';
 import type { Provider } from '../types.js';
 
@@ -110,6 +116,22 @@ describe('V4 media model metadata', () => {
       });
       expect(provider[providerMediaField(mode)!]).toHaveLength(1);
       expect(isChatEligible(provider.models.codex![0])).toBe(false);
+      expect(
+        isAgentSelectableModel(provider.models.codex![0], {
+          userProvider: true,
+        }),
+      ).toBe(false);
+      expect(
+        isModelSelectableForNewRoute(provider.models.codex![0], {
+          userProvider: true,
+        }),
+      ).toBe(false);
+      const views = buildRegistry(
+        { version: '4', providers: [provider], modelRegistry: r },
+        { [provider.id]: true },
+      );
+      expect(deriveModelList({ providers: views, agent: 'codex' })).toEqual([]);
+      expect(chatEligibleSourcesForModel(views, 'model', 'codex')).toEqual([]);
     },
   );
 
@@ -171,8 +193,14 @@ describe('V4 media model metadata', () => {
 
   it('does not resurrect registry members excluded by an explicit provider list', () => {
     const r = registry('video_generation');
-    const explicit = { ...shell, videoModels: [{ id: 'replacement', name: 'Replacement' }] };
-    expect(projectProviderMediaModels(explicit, r, { addDeclared: true }).videoModels).toEqual(explicit.videoModels);
+    const explicit = {
+      ...shell,
+      videoModels: [{ id: 'replacement', name: 'Replacement' }],
+    };
+    expect(
+      projectProviderMediaModels(explicit, r, { addDeclared: true })
+        .videoModels,
+    ).toEqual(explicit.videoModels);
   });
 
   it('retirement removes the route and its stale default without mutating the old snapshot', () => {
@@ -191,6 +219,37 @@ describe('V4 media model metadata', () => {
     ).toBeUndefined();
     expect(provider.imageModels).toHaveLength(1);
   });
+
+  it.each(['supplier', 'xd', 'private'])(
+    'retired exact routes override discovered members for %s',
+    (id) => {
+      const r = registry('image_generation');
+      r.models[0].routes[0].providerId = id;
+      r.models[0].status = 'retired';
+      const provider: Provider = {
+        ...shell,
+        id,
+        source: id === 'private' ? 'user' : 'builtin',
+        imageModels: [
+          {
+            id: 'model',
+            name: 'Still discovered',
+            discoveredMetadata: { name: 'Still discovered' },
+          },
+        ],
+        imageDefaults: { standard: 'model' },
+      };
+      const result = projectProviderMediaModels(provider, r);
+      expect(result.imageModels).toEqual([]);
+      expect(result.imageDefaults).toBeUndefined();
+      // A different provider's tombstone must never retire a user's same-named private model.
+      r.models[0].routes[0].providerId = 'unrelated';
+      expect(projectProviderMediaModels(provider, r).imageModels).toHaveLength(
+        1,
+      );
+      expect(provider.imageModels).toHaveLength(1);
+    },
+  );
 
   it('allows explicit empty capabilities throughout V4 catalog parsing', () => {
     const r = registry('image_generation');

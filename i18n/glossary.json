@@ -2024,6 +2024,30 @@
         "ko": "연결 넘겨받기"
       },
       "note": "Explicit user action that replaces the current remote desktop viewer; never used for automatic recovery."
+    },
+    {
+      "id": "routine",
+      "status": "proposed",
+      "en": "Routine",
+      "translations": {
+        "zh-CN": "例行任务",
+        "zh-TW": "例行任務",
+        "ja": "ルーティン",
+        "ko": "루틴"
+      },
+      "note": "伙伴的长期指令，可由多个时间或事件条件触发；沿用 Chris 提供的 Grok Bot 界面用语。"
+    },
+    {
+      "id": "routine-trigger",
+      "status": "proposed",
+      "en": "Trigger",
+      "translations": {
+        "zh-CN": "触发器",
+        "zh-TW": "觸發器",
+        "ja": "トリガー",
+        "ko": "트리거"
+      },
+      "note": "例行任务的时间或事件触发条件。"
     }
   ]
 }

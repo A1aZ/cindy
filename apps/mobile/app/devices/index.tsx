@@ -3843,7 +3843,7 @@ function HomeSessionRowInner({
     const primary = statusTarget;
     if (primary) onOpenSession(primary);
   };
-  const groupRowOpensPrimary = !!group && attention && !groupExpanded;
+  const groupRowOpensPrimary = !!group && (attention || rightStatus === 'error') && !groupExpanded;
   const handlePress = selectionMode && onPressSelection
     ? onPressSelection
     : group

@@ -401,7 +401,6 @@ export function useRemoteSessionSync(
             .catch((err) => log.warn('device-link subscribe(session) failed', err));
         },
         unsubscribe: (d, topics) => {
-          if (!canRead()) return;
           return window.electronAPI.deviceLink.unsubscribe(d, topics).catch(() => {});
         },
         reconcile: (s) => {

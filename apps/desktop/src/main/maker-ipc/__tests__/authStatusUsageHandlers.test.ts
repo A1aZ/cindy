@@ -1198,6 +1198,7 @@ describe('maker usage IPC handlers', () => {
       triggerClaudeAccountUsageRefresh: vi.fn(),
       readModelPricing: vi.fn(),
       readReferenceModelPricing: vi.fn(() => ({})),
+      assertTrustedSender: vi.fn(),
       readUsageHistory: vi.fn().mockResolvedValue(emptyHistory),
       emptyUsageHistory: vi.fn(() => emptyHistory),
       ...over,
@@ -1219,14 +1220,19 @@ describe('maker usage IPC handlers', () => {
 
   it('rejects SuperGrok usage reads from untrusted senders', async () => {
     const harness = new IpcHarness();
-    const readXaiSubscriptionUsageSnapshot = vi.fn().mockResolvedValue({ planLabel: 'SuperGrok Heavy' });
+    const readXaiSubscriptionUsageSnapshot = vi
+      .fn()
+      .mockResolvedValue({ planLabel: 'SuperGrok Heavy' });
     const assertTrustedSender = vi.fn(() => {
       throw new Error('[PERMISSION_DENIED] untrusted');
     });
-    registerMakerUsageHandlers(harness, makeUsageDeps({
-      readXaiSubscriptionUsageSnapshot,
-      assertTrustedSender,
-    }));
+    registerMakerUsageHandlers(
+      harness,
+      makeUsageDeps({
+        readXaiSubscriptionUsageSnapshot,
+        assertTrustedSender,
+      }),
+    );
 
     await expect(harness.invoke(MAKER_INVOKE.USAGE_XAI_SUBSCRIPTION)).rejects.toThrow(
       /PERMISSION_DENIED/,
@@ -1239,10 +1245,13 @@ describe('maker usage IPC handlers', () => {
     const snapshot = { planLabel: 'SuperGrok Heavy', creditUsagePercent: 2 };
     const readXaiSubscriptionUsageSnapshot = vi.fn().mockResolvedValue(snapshot);
     const assertTrustedSender = vi.fn();
-    registerMakerUsageHandlers(harness, makeUsageDeps({
-      readXaiSubscriptionUsageSnapshot,
-      assertTrustedSender,
-    }));
+    registerMakerUsageHandlers(
+      harness,
+      makeUsageDeps({
+        readXaiSubscriptionUsageSnapshot,
+        assertTrustedSender,
+      }),
+    );
 
     await expect(harness.invoke(MAKER_INVOKE.USAGE_XAI_SUBSCRIPTION)).resolves.toEqual(snapshot);
     expect(assertTrustedSender).toHaveBeenCalledOnce();
@@ -1262,6 +1271,29 @@ describe('maker usage IPC handlers', () => {
 
     await expect(harness.invoke(MAKER_INVOKE.USAGE_ACCOUNT, 'claude-code')).resolves.toBeNull();
     expect(triggerClaudeAccountUsageRefresh).toHaveBeenCalledWith(true);
+  });
+
+  it('refreshes a cached Gateway quota through the throttled fetcher and returns the updated value', async () => {
+    const harness = new IpcHarness();
+    const previous = {
+      spend: 1,
+      maxBudget: 100,
+      currency: 'USD',
+      todaySpend: 1,
+      fetchedAt: 1,
+    } as const;
+    const next = { ...previous, spend: 2, fetchedAt: 2 };
+    const readClaudeAccountUsageSnapshot = vi
+      .fn()
+      .mockReturnValueOnce(previous)
+      .mockReturnValue(next);
+    const triggerClaudeAccountUsageRefresh = vi.fn().mockResolvedValue(undefined);
+    registerMakerUsageHandlers(
+      harness,
+      makeUsageDeps({ readClaudeAccountUsageSnapshot, triggerClaudeAccountUsageRefresh }),
+    );
+    await expect(harness.invoke(MAKER_INVOKE.USAGE_ACCOUNT, 'claude-code')).resolves.toEqual(next);
+    expect(triggerClaudeAccountUsageRefresh).toHaveBeenCalledWith(false);
   });
 
   it('keeps the legacy device-link pricing channel flat and USD-only', async () => {
@@ -1484,6 +1516,26 @@ describe('maker usage IPC handlers', () => {
 
     await harness.invoke(MAKER_INVOKE.USAGE_HISTORY);
     expect(readUsageHistory).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('rejects usage-history reads from an untrusted sender before parsing or querying', async () => {
+    const harness = new IpcHarness();
+    const readUsageHistory = vi.fn().mockResolvedValue(emptyHistory);
+    const assertTrustedSender = vi.fn(() => {
+      throw new Error('[PERMISSION_DENIED] untrusted');
+    });
+
+    registerMakerUsageHandlers(harness, makeUsageDeps({ readUsageHistory, assertTrustedSender }));
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.USAGE_HISTORY, {
+        days: 'all',
+        modelDays: 'all',
+        forceRefresh: true,
+      }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    expect(assertTrustedSender).toHaveBeenCalledOnce();
+    expect(readUsageHistory).not.toHaveBeenCalled();
   });
 
   it('falls back to empty history payload when the read throws', async () => {

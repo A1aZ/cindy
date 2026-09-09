@@ -405,7 +405,7 @@ function parseLaunchFence(value: unknown): PiSubagentLaunchFence | null {
  */
 function fenceMatchesOwnIncarnation(fence: PiSubagentLaunchFence): boolean {
   if (fence.hostStartTimeSec === undefined) return true;
-  return Math.abs(ownProcessStartTimeSec() - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
+  return Math.abs(piHostProcessStartTimeSec() - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
 }
 
 /**
@@ -516,7 +516,7 @@ export async function acquirePiSubagentLaunchFence(agentHome: string): Promise<(
       await writeAtomicJson(file, {
         version: 1,
         hostPid: process.pid,
-        hostStartTimeSec: ownProcessStartTimeSec(),
+        hostStartTimeSec: piHostProcessStartTimeSec(),
         leaseId,
         createdAt: Date.now(),
       } satisfies PiSubagentLaunchFence);
@@ -677,7 +677,7 @@ export async function clearStalePiSubagentLaunchFence(agentHome: string): Promis
       if (fence && isProcessAlive(fence.hostPid) !== false) {
         if (fence.hostStartTimeSec === undefined) return;
         const startTimeSec = fence.hostPid === process.pid
-          ? ownProcessStartTimeSec()
+          ? piHostProcessStartTimeSec()
           : probeProcessStartTimeSec(fence.hostPid, Date.now());
         if (startTimeSec === null) return;
         if (Math.abs(startTimeSec - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC) return;
@@ -1018,18 +1018,13 @@ export function piSubagentRuntimeOwnerId(hostPid: number, scopeId: string): stri
   // a live foreign owner reads as an orphan the moment the gap exceeds the
   // tolerance. A legacy id has no start time, so liveness stays conservative.
   return hostPid === process.pid
-    ? `${hostPid}.${ownProcessStartTimeSec()}:${scopeId}`
+    ? `${hostPid}.${piHostProcessStartTimeSec()}:${scopeId}`
     : `${hostPid}:${scopeId}`;
 }
 
-/** Wall-clock second this process started, in the form the owner id records. */
-function ownProcessStartTimeSec(): number {
-  return OWN_PROCESS_START_TIME_SEC;
-}
-
-/** Process-incarnation stamp shared by other host-owned Pi runtime records. */
+/** Wall-clock start second shared by host-owned Pi runtime records. */
 export function piHostProcessStartTimeSec(): number {
-  return ownProcessStartTimeSec();
+  return OWN_PROCESS_START_TIME_SEC;
 }
 
 export interface PiSubagentOwnerIdentity {
@@ -1310,18 +1305,10 @@ function isOwnerInstanceAlive(
   if (isProcessAlive(identity.pid) === false) return false;
   if (identity.startTimeSec === undefined) return true;
   const startTimeSec = identity.pid === process.pid
-    ? ownProcessStartTimeSec()
+    ? piHostProcessStartTimeSec()
     : readProcessStartTimeSec(identity.pid, memo);
   if (startTimeSec === null) return true;
   return Math.abs(startTimeSec - identity.startTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
-}
-
-/** Conservative liveness check for a Pi host process incarnation. */
-export function isPiHostProcessInstanceAlive(
-  identity: PiSubagentOwnerIdentity,
-  startTimeMemo?: ProcessStartTimeMemo,
-): boolean {
-  return isOwnerInstanceAlive(identity, startTimeMemo);
 }
 
 /** Non-blocking incarnation check for background config-home reclamation. */
@@ -1332,7 +1319,7 @@ export async function isPiHostProcessInstanceAliveAsync(
   if (isProcessAlive(identity.pid) === false) return false;
   if (identity.startTimeSec === undefined) return true;
   const startTimeSec = identity.pid === process.pid
-    ? ownProcessStartTimeSec()
+    ? piHostProcessStartTimeSec()
     : await readProcessStartTimeSecAsync(identity.pid, startTimeMemo);
   if (startTimeSec === null) return true;
   return Math.abs(startTimeSec - identity.startTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
@@ -2313,7 +2300,7 @@ async function acquirePiSubagentResumeClaim(
     version: 1,
     ...(runtimeOwnerId ? { runtimeOwnerId } : {}),
     hostPid,
-    hostStartTimeSec: ownProcessStartTimeSec(),
+    hostStartTimeSec: piHostProcessStartTimeSec(),
     claimedAt: Date.now(),
   })}\n`;
   const release = async (): Promise<void> => {

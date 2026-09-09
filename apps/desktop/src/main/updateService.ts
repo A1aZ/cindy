@@ -34,11 +34,13 @@ import {
 } from '@cindy/maker-core/pi-subagent-runs';
 import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 
+import { supportsBetaUpdateChannel } from '../shared/updateChannelCapability';
 import { fetchManifest, getBaseUrl, isDev, probeBetaManifest, clearCachedManifest } from './manifestService';
 import type { Manifest } from './manifestService';
 import { download, DownloadError } from './downloader/index';
 import { ProgressNormalizer } from './updateProgressNormalizer';
 import { compareAppUpdateVersions } from './updateVersionPolicy';
+import { writeStartupBinaryUpdateMarker } from './agent-binaries/startup-update';
 
 import { createLogger, maskPath } from './logger';
 import {
@@ -76,6 +78,7 @@ import {
 } from './windowsUpdaterPrerequisites';
 
 const log = createLogger('updateService');
+let cancelStartupBinaryUpdateCheck: (() => void) | undefined;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -214,7 +217,7 @@ function broadcastStatus(payload: UpdateStatusPayload): void {
 
 function channelSettingsWire() {
   return {
-    enableBeta: process.platform === 'linux' ? false : readUpdateChannelSettings().enableBeta,
+    enableBeta: readObservedEnableBetaFromDisk(),
     isCustomized: isEnableBetaUserCustomized(),
   };
 }
@@ -647,7 +650,7 @@ function checkExistingPatch(): { action: 'relaunch' | 'check' | 'none'; version?
     return { action: 'check' };
   }
 
-  const currentEnableBeta = readUpdateChannelSettings().enableBeta;
+  const currentEnableBeta = readObservedEnableBetaFromDisk();
   if (typeof patchInfo.enableBeta === 'boolean' && patchInfo.enableBeta !== currentEnableBeta) {
     log.info(
       'discarding staged patch v%s from another update channel (patch=%s current=%s)',
@@ -735,7 +738,10 @@ function invalidateInFlightChannelDownloads(): void {
 }
 
 function readObservedEnableBetaFromDisk(): boolean {
-  return readUpdateChannelSettings().enableBeta;
+  return (
+    supportsBetaUpdateChannel(process.platform, process.arch) &&
+    readUpdateChannelSettings().enableBeta
+  );
 }
 
 function restoreObservedEnableBetaFromDisk(): boolean {
@@ -1368,6 +1374,8 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
 // ── Spawn failure handler ─────────────────────────────────────────────────
 
 function handleApplyFailure(reason: string): void {
+  cancelStartupBinaryUpdateCheck?.();
+  cancelStartupBinaryUpdateCheck = undefined;
   log.error('Update apply failed (reason=%s), clearing patch and notifying renderer', reason);
   removePatchInfo();
   readyVersion = undefined;
@@ -1820,9 +1828,9 @@ function executeUpdateLinux(debPath: string): void {
   });
 }
 
-async function executeRelaunch(theme: 'light' | 'dark'): Promise<void> {
+async function executeRelaunch(theme: 'light' | 'dark', checkForBinaryUpdates = false): Promise<void> {
   try {
-    await executeRelaunchUnguarded(theme);
+    await executeRelaunchUnguarded(theme, checkForBinaryUpdates);
   } catch (err) {
     log.error('executeRelaunch() failed: %s', err instanceof Error ? err.stack ?? err.message : String(err));
     try {
@@ -1834,11 +1842,15 @@ async function executeRelaunch(theme: 'light' | 'dark'): Promise<void> {
     // Any return from here that is not `process.exit` means the relaunch did
     // not happen, so the fence must come down — including the early returns
     // inside the guarded body.
-    if (!isRelaunching) await clearSubagentLaunchFence();
+    if (!isRelaunching) {
+      cancelStartupBinaryUpdateCheck?.();
+      cancelStartupBinaryUpdateCheck = undefined;
+      await clearSubagentLaunchFence();
+    }
   }
 }
 
-async function executeRelaunchUnguarded(theme: 'light' | 'dark'): Promise<void> {
+async function executeRelaunchUnguarded(theme: 'light' | 'dark', checkForBinaryUpdates: boolean): Promise<void> {
   if (isRelaunching) {
     log.info('executeRelaunch() skipped — already in progress');
     return;
@@ -1928,6 +1940,10 @@ async function executeRelaunchUnguarded(theme: 'light' | 'dark'): Promise<void> 
     maskPath(readyFilePath), fs.statSync(readyFilePath).size,
   );
 
+  if (checkForBinaryUpdates && readyVersion) {
+    cancelStartupBinaryUpdateCheck = writeStartupBinaryUpdateMarker(app.getPath('userData'), readyVersion);
+  }
+
   switch (process.platform) {
     case 'win32':
       executeUpdateWindows(readyFilePath, theme);
@@ -1967,7 +1983,7 @@ export function initUpdateService(): void {
     // default and the .env'd-out look most users have.
     const resolved = theme === 'light' || theme === 'dark' ? theme : 'dark';
     resolvedRelaunchTheme = resolved;
-    void executeRelaunch(resolved);
+    void executeRelaunch(resolved, true);
   });
 
   ipcMain.handle(
@@ -2030,8 +2046,8 @@ export function initUpdateService(): void {
 
   ipcMain.handle('update-channel-settings-set', async (event, payload: unknown) => {
     assertTrustedAppRendererEvent(event);
-    if (process.platform === 'linux') {
-      throwIpcError('INVALID_PARAMS', 'Linux does not support the beta update channel');
+    if (!supportsBetaUpdateChannel(process.platform, process.arch)) {
+      throwIpcError('INVALID_PARAMS', 'This build does not support the beta update channel');
     }
     if (!payload || typeof payload !== 'object') {
       throwIpcError('INVALID_PARAMS', 'update channel settings payload required');
@@ -2311,7 +2327,7 @@ export function initUpdateService(): void {
     }, POLL_INTERVAL_MS);
   }, FIRST_CHECK_DELAY_MS);
 
-  observedEnableBeta = readUpdateChannelSettings().enableBeta;
+  observedEnableBeta = readObservedEnableBetaFromDisk();
   log.info('Initialized — first check in 10s, polling every 30min');
 }
 
@@ -2323,8 +2339,8 @@ export function initUpdateService(): void {
 export async function enableUncustomizedBetaChannel(
   shouldWrite: () => boolean = () => true,
 ): Promise<boolean> {
-  // Linux 没有 beta 清单,组织默认打开只会把客户端钉在不可达渠道。
-  if (process.platform === 'linux') return false;
+  // Linux 目前仅 x64 发布 beta .deb；arm64 等不支持构建不得写入组织默认。
+  if (!supportsBetaUpdateChannel(process.platform, process.arch)) return false;
   const wasBeta = readUpdateChannelSettings().enableBeta;
   // 先拦住 apply 再等落盘。身份守卫拒绝或写入失败时,旧补丁还得能用。
   if (!wasBeta) {

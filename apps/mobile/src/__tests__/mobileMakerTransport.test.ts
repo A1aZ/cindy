@@ -35,6 +35,9 @@ describe('mobile maker transport', () => {
       'local-db:sessions:ack-interrupted',
       'maker:regenerate-title',
       'local-db:messages:list',
+      'local-db:messages:view',
+      'local-db:messages:work-details',
+      'local-db:messages:view-intent',
       'local-db:messages:around',
       'local-db:messages:around-client-id',
       'maker:send',
@@ -54,6 +57,7 @@ describe('mobile maker transport', () => {
       'maker:get-new-maker-worktree-branch-pref',
       'maker:apply-new-maker-worktree-branch-pref',
       'maker:usage:model-pricing',
+      'local-db:messages:estimatedSessionValue',
       'maker:usage:codex-rate-limits',
       'maker:usage:codex-rate-limit-reset',
       'maker:api-key:present',
@@ -182,7 +186,7 @@ describe('mobile maker transport', () => {
       {
         deviceId: 'dev-1',
         channel: 'maker:list-active',
-        args: [],
+        args: [{ summary: true }],
       },
     ]);
   });

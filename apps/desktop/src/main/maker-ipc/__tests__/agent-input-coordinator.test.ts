@@ -1,3 +1,4 @@
+import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, appendAutoReviewUserIntent } from '@cindy/maker-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentInputCoordinator } from '../agent-input-coordinator.js';
 import { createOrcaInterAgentDispatcher } from '../orcaInterAgentDispatcher.js';
@@ -50,6 +51,24 @@ describe('AgentInputCoordinator Orca priority queue transactions', () => {
     makeItem(clientId, text, {
       origin: { kind: 'orca', senderLabel: 'Lead', displayText: text },
     });
+
+  it('forwards main-stamped device-link provenance from enqueue to send', async () => {
+    const h = createHarness();
+    const sid = 'device-link-lead';
+    await h.coordinator.ensureQueueRestored(sid);
+
+    h.coordinator.enqueue(sid, makeItem('device-link-input', 'hello', {
+      fromDeviceLinkClient: true,
+    }));
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledWith(
+      sid,
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ fromDeviceLinkClient: true }),
+    );
+  });
 
   it('restores first, reserves at the head with a host stamp, deduplicates, and emits once', async () => {
     const h = createHarness();
@@ -700,6 +719,9 @@ function createHarness(opts?: {
   const resolveSessionReferences = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['resolveSessionReferences']>
   >(async () => []);
+  const refreshAgentReferencesBeforeDispatch = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['refreshAgentReferencesBeforeDispatch']>
+  >(async () => {});
   const emitProjection = vi.fn((projection: AgentInputProjection) => {
     projections.push(projection);
   });
@@ -793,6 +815,7 @@ function createHarness(opts?: {
     onResumableTurnErrorDiscarded,
     noteSessionClearBoundary,
     resolveSessionReferences,
+    refreshAgentReferencesBeforeDispatch,
     hasPendingCredentialSwitch: () => hasPendingCredentialSwitch?.() === true,
     screenUserMessage: (sessionId, agentFacingText, item) =>
       screenUserMessage
@@ -832,6 +855,7 @@ function createHarness(opts?: {
     onResumableTurnErrorDiscarded,
     noteSessionClearBoundary,
     resolveSessionReferences,
+    refreshAgentReferencesBeforeDispatch,
     emitProjection,
     projections,
     onUiRetry,
@@ -1247,6 +1271,24 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.pendingQueue).toEqual([]);
     expect(projection.error).toBeNull();
     expect(projection.recovery).toBeNull();
+  });
+
+  it('attributes synchronous provider output to its active input and clears after completion', async () => {
+    const h = createHarness();
+    const sid = 'private-reply-attribution';
+    expect(h.coordinator.getActiveInputClientId(sid)).toBeNull();
+    h.sendToAgent.mockImplementationOnce(async () => {
+      expect(h.coordinator.getActiveInputClientId(sid)).toBe('bot-dm:thread:delivery');
+      h.setRunning(true);
+      return sendSuccess();
+    });
+    h.coordinator.enqueue(sid, makeItem('bot-dm:thread:delivery', 'private message'));
+    await flush();
+    expect(h.coordinator.getActiveInputClientId(sid)).toBe('bot-dm:thread:delivery');
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.coordinator.getActiveInputClientId(sid)).toBeNull();
   });
 
   it('silently keeps a queue head when host dispatch returns SESSION_RUNNING', async () => {
@@ -2191,6 +2233,51 @@ describe('AgentInputCoordinator send transaction', () => {
     await flush();
 
     expect(callbackDoneAtSendResolve).toBe(true);
+  });
+
+  it('refreshes transient Bot status when a queued message actually dispatches', async () => {
+    const h = createHarness();
+    const sid = 'refresh-bot-reference-at-dispatch';
+    const href = 'cindy://bot/bot-b';
+    const item = makeItem('q-refresh-bot', href, {
+      agentReferences: [{
+        kind: 'bot',
+        start: 0,
+        end: href.length,
+        href,
+        botId: 'bot-b',
+        name: 'Dash Bot',
+        hostSnapshot: {
+          availability: 'ready',
+          activity: 'idle',
+          activeDelegations: 0,
+        },
+      }],
+    });
+    h.refreshAgentReferencesBeforeDispatch.mockImplementationOnce(async (queued) => {
+      queued.agentReferences = queued.agentReferences?.map((reference) => reference.kind === 'bot'
+        ? {
+            ...reference,
+            hostSnapshot: {
+              availability: 'ready',
+              activity: 'working',
+              activeDelegations: 1,
+            },
+          }
+        : reference);
+    });
+
+    h.coordinator.enqueue(sid, item);
+    await flush();
+
+    expect(h.refreshAgentReferencesBeforeDispatch).toHaveBeenCalledOnce();
+    const sentMessage = h.sendToAgent.mock.calls[0]?.[1];
+    expect(JSON.stringify(sentMessage)).toContain(
+      'availability=ready; activity=working; active_tracked_tasks=1',
+    );
+    expect(JSON.stringify(sentMessage)).not.toContain(
+      'availability=ready; activity=idle; active_tracked_tasks=0',
+    );
   });
 
   it('awaits the pre-dispatch hook after persistence and before vendor dispatch', async () => {
@@ -5931,12 +6018,27 @@ describe('AgentInputCoordinator steer transaction', () => {
     expect(projection.steeringQueueClientIds).toEqual([]);
   });
 
+  it('clears an earlier deictic grant when a new attachment arrives through steer', async () => {
+    const h = createHarness();
+    h.coordinator.enqueue('resource-steer', makeItem('first', 'Send this.'));
+    await flush();
+    const item = stampTrustedDesktopQueuedOrigin(makeItem('image', 'Inspect the new image.', {
+      persistedContent: JSON.stringify({ text: 'Inspect the new image.', images: ['/new.png'] }),
+    }), true);
+    expect(item.origin).toBeUndefined(); // Device-link input does not gain Pi desktop privileges.
+    expect(item.autoReviewUserText).toBe('Inspect the new image.');
+    await h.coordinator.steer('resource-steer', item);
+    const opts = h.steerToAgent.mock.calls[0][2];
+    expect(opts[AUTO_REVIEW_USER_INTENT]).toBe('Inspect the new image.');
+    expect(appendAutoReviewUserIntent('Send this.', 'decorated', opts)).toBe('Inspect the new image.');
+  });
+
   it('screens same-turn steers through ghost hooks: rewrite injects and persists the rewritten text', async () => {
     const h = createHarness();
     h.setAgentKind('codex');
     const sid = 'steer-ghost-rewrite';
     const first = makeItem('q-1', 'first');
-    const second = makeItem('q-2', 'second');
+    const second = stampTrustedDesktopQueuedOrigin(makeItem('q-2', 'second'), false);
     h.setScreenUserMessage(async (_sid, agentFacingText) =>
       agentFacingText === 'second'
         ? { action: 'rewrite', ghostId: 'g-1', ghostName: 'guard', text: 'rewritten text' }
@@ -5955,7 +6057,7 @@ describe('AgentInputCoordinator steer transaction', () => {
     expect(h.steerToAgent).toHaveBeenCalledWith(
       sid,
       { type: 'user', content: 'rewritten text' },
-      expect.objectContaining({ messageUuid: expect.any(String) }),
+      expect.objectContaining({ messageUuid: expect.any(String), [AUTO_REVIEW_SOURCE_CONTENT]: 'second' }),
     );
     expect(h.onUserMessageRewritten).toHaveBeenCalledWith(
       sid,
@@ -5968,7 +6070,7 @@ describe('AgentInputCoordinator steer transaction', () => {
       expect.objectContaining({
         clientId: second.clientId,
         content: 'rewritten text',
-        agentMeta: expect.objectContaining({ delivery: 'steer' }),
+        agentMeta: expect.objectContaining({ delivery: 'steer', autoReviewUserText: 'second' }),
       }),
       expect.objectContaining({ shouldBroadcast: expect.any(Function) }),
     );
@@ -9749,11 +9851,12 @@ describe('AgentInputCoordinator 意识拦截钩(订阅槽①,will-user-message)'
           text: '优化后的问题',
         }) as const,
     );
-    h.coordinator.enqueue('s1', makeItem('c1', '润色 原始问题'));
+    h.coordinator.enqueue('s1', stampTrustedDesktopQueuedOrigin(makeItem('c1', '润色 原始问题'), false));
     await flush();
     // 送 agent 的消息是改写版(buildMakerUserMessage 读 head.text)
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
     expect(h.sendToAgent.mock.calls[0][1]).toMatchObject({ content: '优化后的问题' });
+    expect(h.sendToAgent.mock.calls[0][3][AUTO_REVIEW_SOURCE_CONTENT]).toBe('润色 原始问题');
     // 落库内容也是改写版(persistUserMessage.content = head.persistedContent)
     expect(
       mocks.createMessage.mock.calls.some(

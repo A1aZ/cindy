@@ -21,6 +21,7 @@ import {
   MOBILE_REMOTE_INVOKE_CHANNELS,
 } from '@cindy/maker-shared/device-link-contract';
 import { CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2 } from '@cindy/device-link';
+import type { HistoryViewPage, HistoryDetailPage, HistoryWorkSummary } from '@cindy/maker-shared/message-window';
 import type {
   MobileGoalLimitsInput,
   MobileGoalStatusPayload,
@@ -128,6 +129,7 @@ export interface MobileLearnStartRequest {
   input: string;
   sourceKind: 'freetext' | 'session' | 'hub';
   hubSlug?: string;
+  hubCatalogScope?: 'market' | 'team';
   originSessionId?: string;
 }
 
@@ -414,6 +416,9 @@ export interface MobileMakerTransport {
    */
   regenerateSessionTitle(sessionId: string): Promise<{ title: string | null }>;
   listMessages(sessionId: string, opts?: MessageListOptions): Promise<RemoteMessage[]>;
+  readHistoryView(sessionId: string, before?: string): Promise<HistoryViewPage<RemoteMessage>>;
+  readWorkDetails(sessionId: string, ref: HistoryWorkSummary, after?: string): Promise<HistoryDetailPage<RemoteMessage>>;
+  setHistoryExpanded(sessionId: string, refs: readonly HistoryWorkSummary[]): Promise<void>;
   aroundMessages(sessionId: string, messageId: string, opts?: MessageAroundOptions): Promise<RemoteMessage[]>;
   aroundMessagesByClientId(sessionId: string, clientId: string, opts?: MessageAroundOptions): Promise<RemoteMessage[]>;
   send(
@@ -459,6 +464,7 @@ export interface MobileMakerTransport {
    * 网关配额。老被控端 CHANNEL_NOT_ALLOWED → 调用方隐藏限额区块。
    */
   getAccountUsage(agentKind: MobileAgentKind): Promise<unknown>;
+  getSessionEstimatedValue(sessionId: string): Promise<{ totalValueMoney?: unknown; totalValueUsd?: number }>;
   /** Codex app-server authoritative windows plus banked reset credits and a bound reset offer. */
   getCodexRateLimits(): Promise<MobileCodexRateLimitsResult>;
   /** Consume the desktop-issued offer; retries must pass the same idempotency key. */
@@ -679,13 +685,16 @@ export function createMobileMakerTransport({
     ackInterruptedTurn: (sessionId) => call('local-db:sessions:ack-interrupted', [sessionId]),
     regenerateSessionTitle: (sessionId) => call('maker:regenerate-title', [{ sessionId }]),
     listMessages: (sessionId, opts) => call('local-db:messages:list', [sessionId, opts]),
+    readHistoryView: (sessionId, before) => call('local-db:messages:view', [sessionId, { before }]),
+    readWorkDetails: (sessionId, ref, after) => call('local-db:messages:work-details', [sessionId, ref, { after }]),
+    setHistoryExpanded: (sessionId, refs) => call('local-db:messages:view-intent', [sessionId, refs]),
     aroundMessages: (sessionId, messageId, opts) =>
       call('local-db:messages:around', [sessionId, messageId, opts]),
     aroundMessagesByClientId: (sessionId, clientId, opts) =>
       call('local-db:messages:around-client-id', [sessionId, clientId, opts]),
     send: (sessionId, message, createOpts, sendOpts) =>
       call('maker:send', [sessionId, message, createOpts, sendOpts]),
-    listActiveSessions: () => call('maker:list-active'),
+    listActiveSessions: () => call('maker:list-active', [{ summary: true }]),
     setModel: async (sessionId, model, providerId, selection) => {
       const wireArgs = selection
         ? [sessionId, model, providerId ?? null, null, selection]
@@ -735,6 +744,7 @@ export function createMobileMakerTransport({
     setExtraDirs: (sessionId, dirs) => call('maker:set-extra-dirs', [sessionId, dirs]),
     getModelPricing: () => call('maker:usage:model-pricing'),
     getAccountUsage: (agentKind) => call('maker:usage:account', [agentKind]),
+    getSessionEstimatedValue: (sessionId) => call('local-db:messages:estimatedSessionValue', [sessionId]),
     getCodexRateLimits: () => call('maker:usage:codex-rate-limits'),
     resetCodexRateLimits: (idempotencyKey) => (
       call('maker:usage:codex-rate-limit-reset', [idempotencyKey])

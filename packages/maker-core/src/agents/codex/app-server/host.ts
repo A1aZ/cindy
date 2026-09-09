@@ -278,6 +278,14 @@ export interface AppServerHostOptions {
   remoteCompactionProviderId?: string;
   /** Cindy Provider codex/* 的内部 OpenAI transport identity。 */
   cindyRemoteCompactionProviderId?: string;
+  localCompactionProviderId?: string;
+  /** Generic custom Provider identities and capabilities frozen into this process. */
+  codexCustomProviderRoutes?: Array<{
+    providerId: string;
+    modelProviderId: string;
+    capabilities: Readonly<Record<string, boolean | undefined>>;
+    responseModels: readonly string[];
+  }>;
   /** Per-thread host-owned MCP URL overrides keyed by the Session instance. */
   buildSessionMcpConfig?: (sessionInstanceId: string) => Record<string, unknown>;
   /** Cindy-side fallback used only when a subagent's actual model is not reported. */
@@ -286,12 +294,25 @@ export interface AppServerHostOptions {
   subagentRoute?: {
     providerId: string;
     catalogModel: string;
-    reasoningEffort: ReasoningEffort | null;
+    reasoningEffort?: ReasoningEffort | null;
   };
+  smartSubagentRoutes?: Array<{
+    providerId: string;
+    catalogModel: string;
+    reasoningEffort?: ReasoningEffort | null;
+  }>;
+  /** Frozen identity of the Subagent routing/catalog snapshot used by this host. */
+  codexSubagentRoutingSignature?: string;
+  getSubagentIdentity?: (childThreadId: string) => {
+    model: string;
+    reasoningEffort?: string;
+  } | undefined;
   /** Whether the OpenAI identity provider may use Responses WebSocket on this host. */
   codexOpenAiWebSocketsEnabled?: boolean;
   /** Host-level Subagent route profile used to prevent incompatible local host reuse. */
   codexSubagentRoutingProfile?: CodexSubagentRoutingProfile;
+  /** One-shot cleanup for resources owned by this Host generation, run only on terminal retire. */
+  onRetired?: () => void | Promise<void>;
 }
 
 interface BufferedNotification {
@@ -338,7 +359,9 @@ export class AppServerHost {
   private lastAccountRateLimits: AccountRateLimitsUpdatedNotification['params'] | null = null;
 
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
   private retired = false;
+  private retirementPromise: Promise<void> | null = null;
 
   constructor(private readonly opts: AppServerHostOptions) {
     if (typeof opts.createTransport !== 'function') {
@@ -437,8 +460,51 @@ export class AppServerHost {
     return this.opts.remoteCompactionProviderId ?? null;
   }
 
+  getLocalCompactionProviderId(): string | null {
+    return this.opts.localCompactionProviderId ?? null;
+  }
+
   getCindyRemoteCompactionProviderId(): string | null {
     return this.opts.cindyRemoteCompactionProviderId ?? null;
+  }
+
+  getCustomProviderModelProviderId(
+    providerId: string | null | undefined,
+    model: string | null | undefined,
+  ): string | null {
+    if (!providerId || !model) return null;
+    const route = this.opts.codexCustomProviderRoutes?.find(
+      (candidate) => candidate.providerId === providerId,
+    );
+    return route?.responseModels.includes(model) ? route.modelProviderId : null;
+  }
+
+  getCustomProviderThreadPolicy(
+    providerId: string | null | undefined,
+    model: string | null | undefined,
+  ): {
+    dynamicIdentity: boolean;
+    disableSubagents: boolean;
+    disableModelOverrides: boolean;
+  } {
+    const route = providerId && model
+      ? this.opts.codexCustomProviderRoutes?.find(
+          (candidate) =>
+            candidate.providerId === providerId && candidate.responseModels.includes(model),
+        )
+      : undefined;
+    if (!route) {
+      return { dynamicIdentity: false, disableSubagents: false, disableModelOverrides: false };
+    }
+    const child = this.opts.subagentRoute;
+    const childCompatible = !child || (
+      child.providerId === route.providerId && route.responseModels.includes(child.catalogModel)
+    );
+    return {
+      dynamicIdentity: true,
+      disableSubagents: !childCompatible,
+      disableModelOverrides: true,
+    };
   }
 
   /**
@@ -459,9 +525,24 @@ export class AppServerHost {
   getSubagentRoute(): {
     providerId: string;
     catalogModel: string;
-    reasoningEffort: ReasoningEffort | null;
+    reasoningEffort?: ReasoningEffort | null;
   } | undefined {
     return this.opts.subagentRoute;
+  }
+
+  getSmartSubagentRoutes(): AppServerHostOptions['smartSubagentRoutes'] {
+    return this.opts.smartSubagentRoutes;
+  }
+
+  getSubagentRoutingSignature(): string | undefined {
+    return this.opts.codexSubagentRoutingSignature;
+  }
+
+  getObservedSubagentIdentity(childThreadId: string): {
+    model: string;
+    reasoningEffort?: string;
+  } | undefined {
+    return this.opts.getSubagentIdentity?.(childThreadId);
   }
 
   getOpenAiWebSocketsEnabled(): boolean {
@@ -487,16 +568,28 @@ export class AppServerHost {
       return Promise.reject(new Error('AppServerHost: cannot ensureStarted() after retirement'));
     }
     if (this.shuttingDown) {
+      if (!this.shutdownPromise) {
+        return this.shutdown('recheck failed shutdown before restart', { throwOnTransportError: true })
+          .then(() => this.ensureStarted(capabilities));
+      }
       return Promise.reject(new Error('AppServerHost: cannot ensureStarted() during shutdown'));
     }
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.bootstrap(capabilities).catch((err) => {
-      // bootstrap 失败 → 清掉 startPromise 让下次调用能重试
-      this.startPromise = null;
-      this.client = null;
+    const startPromise = this.bootstrap(capabilities).catch(async (err) => {
+      // 旧启动的迟到失败不能关闭新 client；重试必须等旧进程真正退出。
+      if (this.startPromise === startPromise) {
+        try {
+          await this.shutdown('AppServerHost bootstrap failed', { throwOnTransportError: true });
+        } catch (closeError) {
+          this.logger.warn('failed to close app-server client after bootstrap failure', {
+            error: closeError instanceof Error ? closeError.message : String(closeError),
+          });
+        }
+      }
       throw err;
     });
-    return this.startPromise;
+    this.startPromise = startPromise;
+    return startPromise;
   }
 
   /**
@@ -794,28 +887,42 @@ export class AppServerHost {
    * **必须** 在 app.before-quit 显式调一次 — Windows 子进程不会随父进程死,
    * 不显式收割就成孤儿。
    */
-  async shutdown(reason = 'AppServerHost.shutdown()'): Promise<void> {
-    if (this.shuttingDown) return;
-    this.shuttingDown = true;
-    // MCP readiness is scoped to the concrete app-server process. A normal
-    // transport recovery reuses this host object, so never carry a positive
-    // probe result into the replacement process.
-    this.mcpToolAvailability.clear();
-    this.subscribers.clear();
-    this.lineageRoots.clear();
-    this.pendingLineage.clear();
-    this.buffered.clear();
-    for (const threadId of this.threadHandlerWaiters.keys()) {
-      this.notifyThreadHandlerWaiters(threadId);
+  async shutdown(
+    reason = 'AppServerHost.shutdown()',
+    opts?: { throwOnTransportError?: boolean },
+  ): Promise<void> {
+    if (!this.shutdownPromise) {
+      this.shuttingDown = true;
+      const client = this.client;
+      const shutdownPromise = Promise.resolve().then(async () => {
+        await client?.close({ reason, throwOnTransportError: true });
+        if (this.client === client) this.client = null;
+        // start() 的同步 transport 回调可能在 ensureStarted 赋值前触发关闭。
+        this.startPromise = null;
+        // 只在关闭成功后开放重启；失败保留 barrier，避免新旧 writer 并存。
+        this.shutdownPromise = null;
+        this.shuttingDown = false;
+      }).catch((error) => {
+        // 本次结果可以重查，但 client 与 shuttingDown 保留到真实关闭成功。
+        if (this.shutdownPromise === shutdownPromise) this.shutdownPromise = null;
+        throw error;
+      });
+      this.shutdownPromise = shutdownPromise;
+      this.startPromise = null;
+      // MCP readiness belongs to the concrete app-server process.
+      this.mcpToolAvailability.clear();
+      this.subscribers.clear();
+      this.lineageRoots.clear();
+      this.pendingLineage.clear();
+      this.buffered.clear();
+      for (const threadId of this.threadHandlerWaiters.keys()) {
+        this.notifyThreadHandlerWaiters(threadId);
+      }
     }
-    const c = this.client;
-    this.client = null;
-    this.startPromise = null;
     try {
-      if (c) await c.close({ reason });
-    } finally {
-      // 重置, 允许之后的 ensureStarted 重新 spawn (transport error 恢复路径)
-      this.shuttingDown = false;
+      await this.shutdownPromise;
+    } catch (error) {
+      if (opts?.throwOnTransportError) throw error;
     }
   }
 
@@ -823,9 +930,32 @@ export class AppServerHost {
    * 终态关停。凭据/账号切换后旧 host 不能再被旧 session 闭包重新拉起；
    * transport error 自愈仍走普通 shutdown(),保留同对象重启能力。
    */
-  async retire(reason = 'AppServerHost.retire()'): Promise<void> {
+  async retire(
+    reason = 'AppServerHost.retire()',
+    opts?: { throwOnTransportError?: boolean },
+  ): Promise<void> {
     this.retired = true;
-    await this.shutdown(reason);
+    if (!this.retirementPromise) {
+      const retirementPromise = Promise.resolve().then(async () => {
+        await this.shutdown(reason, { throwOnTransportError: true });
+        await Promise.resolve()
+          .then(() => this.opts.onRetired?.())
+          .catch((error) => {
+            this.logger.warn('app-server Host retirement cleanup failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      }).catch((error) => {
+        if (this.retirementPromise === retirementPromise) this.retirementPromise = null;
+        throw error;
+      });
+      this.retirementPromise = retirementPromise;
+    }
+    try {
+      await this.retirementPromise;
+    } catch (error) {
+      if (opts?.throwOnTransportError) throw error;
+    }
   }
 
   /**
@@ -1484,6 +1614,11 @@ export class AppServerHost {
   /** 当前活跃 subscriber 数 — diagnostics, 不参与业务。 */
   get activeSubscriptions(): number {
     return this.subscribers.size;
+  }
+
+  /** Whether this process already owns the live state for a root thread. */
+  hasThreadSubscription(threadId: string): boolean {
+    return this.subscribers.has(threadId);
   }
 
   /** 是否已经 spawn 过子进程 (但可能已 close)。 */

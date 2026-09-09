@@ -644,6 +644,43 @@ describe('Pi package executable-code boundary', () => {
     }
   });
 
+  it('coalesces startup diagnostics and honors the existing short inspection cache', async () => {
+    const { root } = await createSkillOnlyPackage('npm:concurrent-startup-metadata');
+    const store = await import('../pi-package-store.js');
+    const results = await Promise.all([
+      store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' }),
+      store.resolveManagedPiPackageResources({ startupTraceId: 'fedcba9876543210' }),
+    ]);
+    expect(results[0].packageRoots).toEqual([await fs.realpath(root)]);
+    expect(results[1]).toEqual(results[0]);
+    expect(runtime.spawns.filter(({ args }) => args.includes('list'))).toHaveLength(1);
+    await store.resolveManagedPiPackageResources({ startupTraceId: '1111111111111111' });
+    expect(runtime.spawns.filter(({ args }) => args.includes('list'))).toHaveLength(1);
+  });
+
+  it.each([null, [null], [{ warning: 'bad-cache' }]])(
+    'keeps native loading and disable preferences when advisory cache is malformed: %j',
+    async (snapshotUnavailablePackages) => {
+      const { root, source } = await createSkillOnlyPackage('npm:cache-corruption');
+      const stateDir = path.join(runtime.userData, 'pi-package-home');
+      await fs.mkdir(stateDir, { recursive: true });
+      await fs.writeFile(path.join(stateDir, 'cindy-package-state.json'), JSON.stringify({
+        version: 3,
+        disabledSources: [],
+        approvedExtensionSources: [],
+        approvedExtensionFingerprints: {},
+        snapshotUnavailablePackages,
+      }));
+      const store = await import('../pi-package-store.js');
+      await expect(store.resolveManagedPiNativePackagePaths()).resolves.toEqual([root]);
+      await store.mutatePiPackage({ action: 'set-enabled', source, enabled: false });
+      await expect(store.resolveManagedPiNativePackagePaths()).resolves.toEqual([]);
+      const saved = JSON.parse(await fs.readFile(path.join(stateDir, 'cindy-package-state.json'), 'utf8'));
+      expect(saved.version).toBe(3);
+      expect(saved.disabledSources).toEqual([source]);
+    },
+  );
+
   it('fails explicitly instead of widening a filtered package when settings are invalid', async () => {
     const { root, source } = await createPackage({ source: 'npm:filtered-invalid' });
     runtime.listOutput = `User packages:\n  ${source} (filtered)\n    ${root}\n`;
@@ -2091,6 +2128,7 @@ describe('Pi package executable-code boundary', () => {
       snapshotUnavailablePackages: Array<{ retryAfterEpochMs?: number }>;
     };
     expect(state.snapshotUnavailablePackages).toHaveLength(1);
+    Object.assign(state, { version: 4 }); // Earlier PR builds wrote this version.
     delete state.snapshotUnavailablePackages[0]!.retryAfterEpochMs;
     await fs.writeFile(statePath, JSON.stringify(state));
 
@@ -2780,7 +2818,7 @@ describe('Pi package executable-code boundary', () => {
       snapshotUnavailablePackages: unknown[];
     };
     expect(migrated).toEqual({
-      version: 4,
+      version: 3,
       disabledSources: ['npm:keep-disabled'],
       approvedExtensionSources: [source],
       approvedExtensionFingerprints: {
@@ -2823,7 +2861,7 @@ describe('Pi package executable-code boundary', () => {
       disabledSources: string[];
       snapshotUnavailablePackages: unknown[];
     };
-    expect(migrated.version).toBe(4);
+    expect(migrated.version).toBe(3);
     expect(migrated.disabledSources).toEqual([source]);
     expect(migrated.snapshotUnavailablePackages).toEqual([]);
   });

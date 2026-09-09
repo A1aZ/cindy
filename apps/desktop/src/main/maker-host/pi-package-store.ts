@@ -84,7 +84,8 @@ const DEFAULT_SNAPSHOT_LIMITS: PiPackageSnapshotLimits = {
   maxBytes: 128 * 1024 * 1024,
   maxDurationMs: 15_000,
 };
-const STATE_VERSION = 4;
+// Analysis metadata is additive: older Cindy instances must still read user preferences.
+const STATE_VERSION = 3;
 const CHANGE_TOKEN_POLL_MS = 250;
 export type PiPackagesChangeOrigin = 'local' | 'external' | 'external-runtime';
 const changeListeners = new Set<(origin: PiPackagesChangeOrigin) => void>();
@@ -731,7 +732,9 @@ function parseSnapshotUnavailablePackages(
   if (
     entries.length > MAX_INSPECTED_PACKAGES
     || !entries.every((entry) => (
-      typeof entry.source === 'string'
+      entry !== null
+      && typeof entry === 'object'
+      && typeof entry.source === 'string'
       && entry.source.length > 0
       && entry.source.length <= MAX_SOURCE_LENGTH
       && typeof entry.installedRoot === 'string'
@@ -813,15 +816,15 @@ async function readState(): Promise<PiPackageStateReadResult> {
     const fingerprints = parseApprovedExtensionFingerprints(
       parsed.approvedExtensionFingerprints,
     );
-    const unavailablePackages = parseSnapshotUnavailablePackages(parsed.snapshotUnavailablePackages);
+    // A damaged advisory cache must not make the disable ledger unreadable.
+    const unavailablePackages = parseSnapshotUnavailablePackages(parsed.snapshotUnavailablePackages) ?? [];
     if (
-      parsed.version === STATE_VERSION
+      (parsed.version === STATE_VERSION || parsed.version === 4)
       && Array.isArray(parsed.disabledSources)
       && parsed.disabledSources.every((source) => typeof source === 'string')
       && Array.isArray(parsed.approvedExtensionSources)
       && parsed.approvedExtensionSources.every((source) => typeof source === 'string')
       && fingerprints
-      && unavailablePackages
     ) {
       const approvedExtensionSources = [...new Set(parsed.approvedExtensionSources)]
         .filter((source) => Object.hasOwn(fingerprints, source));
@@ -839,37 +842,14 @@ async function readState(): Promise<PiPackageStateReadResult> {
       };
     }
     if (
-      (parsed.version === 1 || parsed.version === 2 || parsed.version === 3)
+      (parsed.version === 1 || parsed.version === 2)
       && Array.isArray(parsed.disabledSources)
       && parsed.disabledSources.every((source) => typeof source === 'string')
     ) {
-      const legacyFingerprints =
-        parsed.version === 3
-          ? parseApprovedExtensionFingerprints(parsed.approvedExtensionFingerprints)
-          : undefined;
-      const legacyApprovedSources =
-        parsed.version === 3 &&
-        Array.isArray(parsed.approvedExtensionSources) &&
-        parsed.approvedExtensionSources.every((source) => typeof source === 'string') &&
-        legacyFingerprints
-          ? [...new Set(parsed.approvedExtensionSources)].filter((source) =>
-              Object.hasOwn(legacyFingerprints, source),
-            )
-          : [];
-      // v3 approvals already carry byte identity and remain valid. Its root-only
-      // negative cache cannot prove source/install identity, so migration drops it.
-      // v1/v2 approvals had no byte identity and stay fail closed as before.
+      // Pre-v3 approvals lacked byte identity; preserve explicit disable preferences.
       return {
         ok: true,
-        state: {
-          version: STATE_VERSION,
-          disabledSources: [...new Set(parsed.disabledSources)],
-          approvedExtensionSources: legacyApprovedSources,
-          approvedExtensionFingerprints: Object.fromEntries(
-            legacyApprovedSources.map((source) => [source, legacyFingerprints![source]!]),
-          ),
-          snapshotUnavailablePackages: [],
-        },
+        state: { ...emptyState(), disabledSources: [...new Set(parsed.disabledSources)] },
       };
     }
     throw new Error('Pi extension state has an invalid structure');
@@ -2058,7 +2038,6 @@ async function persistedSnapshotLimitProjection(
 
 async function inspectAllPackagesUncached(
   options: {
-    ignorePersistedSnapshotUnavailable?: boolean;
     startupTiming?: PiPackageStartupTiming;
   } = {},
 ): Promise<InspectedPackage[]> {
@@ -2101,7 +2080,7 @@ async function inspectAllPackagesUncached(
       continue;
     }
     const inspectedPackage =
-      stateResult.ok && options.ignorePersistedSnapshotUnavailable !== true
+      stateResult.ok
         ? ((await persistedSnapshotLimitProjection(pkg, state)) ??
           (await inspectPackage(
             pkg,
@@ -2158,11 +2137,11 @@ function invalidateInspectionCache(): void {
   inspectionPromise = undefined;
 }
 
-async function inspectAllPackages(): Promise<InspectedPackage[]> {
+async function inspectAllPackages(startupTiming?: PiPackageStartupTiming): Promise<InspectedPackage[]> {
   if (inspectionCache && inspectionCache.expiresAt > Date.now()) return inspectionCache.value;
   if (inspectionPromise) return inspectionPromise;
   const generation = inspectionGeneration;
-  const pending = inspectAllPackagesUncached().then((value) => {
+  const pending = inspectAllPackagesUncached({ startupTiming }).then((value) => {
     if (generation === inspectionGeneration) {
       inspectionCache = { expiresAt: Date.now() + INSPECTION_CACHE_MS, value };
     }
@@ -2176,7 +2155,6 @@ async function inspectAllPackages(): Promise<InspectedPackage[]> {
 
 async function inspectAllPackagesFreshUnderMutationLock(
   options: {
-    ignorePersistedSnapshotUnavailable?: boolean;
     startupTiming?: PiPackageStartupTiming;
   } = {},
 ): Promise<InspectedPackage[]> {
@@ -2187,9 +2165,7 @@ async function inspectAllPackagesFreshUnderMutationLock(
   const staleInspection = inspectionPromise;
   if (staleInspection) await staleInspection.catch(() => undefined);
   invalidateInspectionCache();
-  return options.ignorePersistedSnapshotUnavailable || options.startupTiming
-    ? inspectAllPackagesUncached(options)
-    : inspectAllPackages();
+  return inspectAllPackages(options.startupTiming);
 }
 
 async function projectNativePackageViews(
@@ -2407,7 +2383,7 @@ export async function resolveManagedPiPackageResources(
     const resolveResources = async (forceFresh = false): Promise<PiManagedPackageResources> => {
       const inspected = forceFresh
         ? await inspectAllPackagesFreshUnderMutationLock({ startupTiming })
-        : await inspectAllPackages();
+        : await inspectAllPackages(startupTiming);
       if (snapshotRoot) {
         const staleApprovals = inspected
           .filter((pkg) => pkg.staleApproval)
@@ -2424,6 +2400,7 @@ export async function resolveManagedPiPackageResources(
         packageRoots: [...new Set(inspected.flatMap((pkg) => pkg.launch.packageRoots))],
       };
       if (startupTiming) {
+        startupTiming.packageCount = inspected.length;
         startupTiming.resourceCount = resources.extensions.length
           + resources.skills.length
           + resources.promptTemplates.length;
@@ -2629,7 +2606,11 @@ export async function resolveManagedPiPackageResources(
         recordPiPackageStartupDuration(startupTiming, 'package-snapshot', snapshotStartedAt);
       }
     };
-    if (snapshotRoot || startupTiming) return await enqueueMutation(() => resolveResources(true));
+    if (snapshotRoot || startupTiming) {
+      // Only an explicitly requested snapshot needs fresh byte verification.
+      // Startup diagnostics share the existing short cache and in-flight inspection.
+      return await enqueueMutation(() => resolveResources(Boolean(snapshotRoot)));
+    }
     await mutationTail;
     return await resolveResources();
   } catch (error) {

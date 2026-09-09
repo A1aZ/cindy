@@ -521,6 +521,7 @@ describe('pi translator', () => {
         data: expect.objectContaining({
           reason: 'output-limit',
           isTerminal: true,
+          result: 'a long but incomplete answer',
         }),
       }),
     ]);

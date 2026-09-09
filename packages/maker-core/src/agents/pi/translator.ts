@@ -939,6 +939,8 @@ export function translatePiEvent(
         message: 'Pi reached the model output limit. The response may be incomplete.',
         sdkError: 'Pi response stopped at the model output limit',
         reason: 'output-limit',
+        // Consumers may settle on this error and ignore the paired done.
+        result: ctx.finalAssistantText,
       } : null);
       const outcome = terminalError
         ? 'failed'

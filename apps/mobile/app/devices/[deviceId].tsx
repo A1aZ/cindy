@@ -333,11 +333,14 @@ function DeviceDetailScreenContent() {
     if (screenFocused && appStateActive && scheduleEventSnapshot.sessionIndexVersion > 0) void loadSessions();
   }, [appStateActive, loadSessions, scheduleEventSnapshot.sessionIndexVersion, screenFocused]);
 
+  // Once sessions have loaded, visibility alone must resume a cancelled index
+  // even before the first schedule event. Keep the initial list-first ordering.
   // The event store invalidates once; all visible consumers share its next scan.
   useEffect(() => {
     if (!screenFocused || !appStateActive) return;
     if (
-      scheduleEventSnapshot.scheduleListVersion === 0
+      lastSyncedAt === null
+      && scheduleEventSnapshot.scheduleListVersion === 0
       && scheduleEventSnapshot.unreadClearVersion === 0
     ) return;
     const invalidationVersion = getScheduleIndexInvalidationVersion(deviceId);
@@ -354,6 +357,7 @@ function DeviceDetailScreenContent() {
     canLoadScheduleIndex,
     deviceId,
     maker,
+    lastSyncedAt,
     scheduleEventSnapshot.scheduleListVersion,
     scheduleEventSnapshot.unreadClearVersion,
     screenFocused,

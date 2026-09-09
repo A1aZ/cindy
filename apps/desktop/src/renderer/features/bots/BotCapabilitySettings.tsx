@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useBotTranslation } from './botPronounContext';
-import type { BotCapabilities, BotProfile } from './botStore';
+import {
+  getEffectiveBotModelChain,
+  subscribeBotGlobalModel,
+  type BotCapabilities,
+  type BotProfile,
+} from './botStore';
 import * as sessionService from '@/lib/sessionService';
 import { onPatch } from '@/lib/sessionsBus';
 import type { Session } from '@/lib/ccAgent.types';
@@ -35,7 +40,13 @@ export function BotCapabilitySettings({
   const [error, setError] = useState(false);
   const [query, setQuery] = useState('');
   const selected = { skill: skills, mcp: capabilities.mcpServers, toolset: capabilities.toolsets };
-  const modelChainKey = JSON.stringify(capabilities.modelChain);
+  // Followed defaults can change when providers / available harnesses change, even
+  // if the local profile still holds the previous modelChain snapshot.
+  useSyncExternalStore(subscribeBotGlobalModel, () => JSON.stringify(getEffectiveBotModelChain()));
+  const modelChain = capabilities.modelChainOverride === null
+    ? getEffectiveBotModelChain()
+    : capabilities.modelChain;
+  const modelChainKey = JSON.stringify(modelChain);
   const catalogKey = JSON.stringify([bot.id, bot.canonicalSessionId, modelChainKey, revision, open]);
   // Invalidate during render as well as effect cleanup: stale checkboxes must never stay selectable.
   const entries = catalog.key === catalogKey ? catalog.entries : {};

@@ -555,6 +555,9 @@ describe('Bot settings unified autosave', () => {
 
 
 describe('same-Bot capability updates while editing settings', () => {
+  beforeEach(() => {
+    mocks.defaultModelChain = capabilities().modelChain;
+  });
   async function openCapabilities() {
     const details = screen.getByText('bots.capabilities.title').parentElement as HTMLDetailsElement;
     await act(async () => {
@@ -668,18 +671,23 @@ describe('same-Bot capability updates while editing settings', () => {
     expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('codex', expect.anything());
   });
 
-  it('refreshes when an external model-chain update arrives without reopening the panel', async () => {
-    const view = renderSettings();
+  it('refreshes when the followed default model chain changes without reopening the panel', async () => {
+    renderSettings();
     await openCapabilities();
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({
+      modelChain: capabilities().modelChain,
+    }));
     const chain = [{ ...capabilities().modelChain[0]!, harness: 'pi' as const, model: 'pi-x' }];
-    await act(async () => { view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: capabilities({ harness: 'pi', modelChain: chain }) })} onBack={view.onBack} onOpenSession={view.onOpenSession} />); });
+    mocks.defaultModelChain = chain;
+    await act(async () => { mocks.modelListeners.forEach((listener) => listener()); });
     expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ modelChain: chain }));
     expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('pi', expect.anything());
   });
 
   it.each(['claude', 'codex', 'pi'] as const)('uses the %s runtime catalog and keeps unavailable MCP references removable', async (harness) => {
     vi.useFakeTimers();
-    const profile = capabilities({ harness, modelChain: [{ ...capabilities().modelChain[0]!, harness }], mcpMode: 'allowlist' });
+    const chain = [{ ...capabilities().modelChain[0]!, harness }];
+    const profile = capabilities({ harness, modelChain: chain, modelChainOverride: chain, mcpMode: 'allowlist' });
     const view = renderSettings({ capabilities: profile });
     await openCapabilities();
     expect(mocks.listCustomMcpServers).toHaveBeenCalledWith({ agentKind: 'claude-code', botSessionId: 'bot-1-chat', modelChain: profile.modelChain });

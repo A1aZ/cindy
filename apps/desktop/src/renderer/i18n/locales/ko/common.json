@@ -7307,6 +7307,16 @@
       "thisDevice": "이 컴퓨터",
       "offlineDescription": "{{name}} 님이 오프라인입니다. {{device}}에 다시 연결하면 계속할 수 있어요.",
       "preparing": "준비가 끝나기를 기다리고 있어요…"
+    },
+    "capabilities": {
+      "title": "기능",
+      "search": "기능 검색",
+      "loading": "불러오는 중…",
+      "skill": "스킬",
+      "mcp": "MCP",
+      "toolset": "기본 제공 도구",
+      "unavailable": "사용 불가",
+      "empty": "일치하는 기능이 없습니다"
     }
   },
   "common": {

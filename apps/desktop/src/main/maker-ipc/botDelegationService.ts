@@ -112,7 +112,7 @@ export interface BotDelegationServiceDeps {
     'model' | 'agentKind' | 'providerId' | 'fastMode'
   > & { effort?: (typeof sessions.$inferSelect)['effort'] }) | null;
   /** null means the live permission is changing or the caller is closing. */
-  readCallerPermission?: (sessionId: string) => string | null;
+  readCallerPermission?: (sessionId: string) => string | { mode: string; generation: number } | null;
   now?: () => number;
   createId?: () => string;
   maxActiveChildren?: number;
@@ -1126,12 +1126,12 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     return { ok: true };
   };
 
-  function scheduleDispatchRetry(delegationId: string, attempt: number): void {
+  function scheduleDispatchRetry(delegationId: string, attempt: number, isCreationPermissionCurrent?: () => boolean): void {
     clearRetryTimer(delegationId);
     const delay = Math.min(MAX_RETRY_DELAY_MS, 1_000 * 2 ** Math.min(attempt, 6));
     const timer = setTimeout(() => {
       retryTimers.delete(delegationId);
-      void attemptDispatch(delegationId, attempt + 1);
+      void attemptDispatch(delegationId, attempt + 1, isCreationPermissionCurrent);
     }, delay);
     timer.unref?.();
     retryTimers.set(delegationId, timer);
@@ -1163,6 +1163,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
   async function attemptDispatch(
     delegationId: string,
     attempt = 0,
+    isCreationPermissionCurrent?: () => boolean,
   ): Promise<{
     ok: boolean;
     status: 'queued' | 'running' | 'failed';
@@ -1185,6 +1186,11 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     const validation = await validateDispatchPlan(row);
     if (!validation.ok) {
       await failDelegationDispatch(row, `${validation.errorCode}: ${validation.message}`);
+      return { ok: false, status: 'failed' };
+    }
+    if (isCreationPermissionCurrent && !isCreationPermissionCurrent()) {
+      await db.update(sessions).set({ permissionMode: 'ask' }).where(eq(sessions.id, row.childSessionId));
+      await failDelegationDispatch(row, 'CALLER_PERMISSION_UNAVAILABLE: 伙伴权限已变更，任务未启动');
       return { ok: false, status: 'failed' };
     }
     const dispatched = await deps.dispatch({
@@ -1261,7 +1267,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
         childSessionId: retrying.childSessionId,
         status: 'queued',
       });
-      scheduleDispatchRetry(retrying.id, attempt);
+      scheduleDispatchRetry(retrying.id, attempt, isCreationPermissionCurrent);
     }
     return { ok: false, status: 'queued', error: dispatched };
   }
@@ -1532,7 +1538,15 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
     if (callerPermission === null) {
       return { ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE', message: '伙伴权限正在切换或任务正在关闭，请稍后重试' };
     }
-    const permissionMode = permissionModeOrAsk(callerPermission);
+    const permissionMode = permissionModeOrAsk(typeof callerPermission === 'string' ? callerPermission : callerPermission.mode);
+    const isCreationPermissionCurrent = (): boolean => {
+      if (!deps.readCallerPermission) return true;
+      const current = deps.readCallerPermission(input.callerSessionId);
+      if (current === null) return false;
+      if (typeof callerPermission === 'string') return current === callerPermission;
+      return typeof current !== 'string' && current.mode === callerPermission.mode
+        && current.generation === callerPermission.generation;
+    };
     const plan: BotDelegationPlanSnapshot = {
       ...input.plan,
       permission: {
@@ -1565,23 +1579,6 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       ),
       title: input.session.title,
       source: input.session.source,
-    };
-    const liveCallerPermission = (): string | null =>
-      deps.readCallerPermission
-        ? deps.readCallerPermission(input.callerSessionId)
-        : input.caller.permissionMode;
-    const rejectStaleCallerPermission = async () => {
-      await updateTerminal({
-        delegationId,
-        status: 'failed',
-        lastError: 'CALLER_PERMISSION_UNAVAILABLE: 伙伴权限已变更，任务未启动',
-        abortChild: true,
-      });
-      return {
-        ok: false as const,
-        errorCode: 'CALLER_PERMISSION_UNAVAILABLE',
-        message: '伙伴权限正在切换或任务正在关闭，请稍后重试',
-      };
     };
     try {
       await getDbClient().tx('bots.createDelegation', {
@@ -1619,10 +1616,14 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
           createdAt,
         },
       });
-      // Persistence itself is asynchronous (worker RPC). Recheck the live
-      // permission generation/mode before the child becomes visible or starts.
-      if (liveCallerPermission() !== callerPermission) {
-        return await rejectStaleCallerPermission();
+      // The worker transaction yields: a permission switch may complete while
+      // creation is pending. Never publish or start the stale Full Access child.
+      if (!isCreationPermissionCurrent()) {
+        await getDbClient().drizzle.update(sessions)
+          .set({ permissionMode: 'ask' }).where(eq(sessions.id, childSessionId));
+        await updateTerminal({ delegationId, status: 'failed',
+          lastError: 'CALLER_PERMISSION_UNAVAILABLE', abortChild: true });
+        return { ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE', message: '伙伴权限正在切换或任务正在关闭，请稍后重试' };
       }
       emitChanged({
         delegationId,
@@ -1676,10 +1677,7 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       };
     }
     scheduleTimeout(delegationId, plan.limits.deadlineAt);
-    if (liveCallerPermission() !== callerPermission) {
-      return await rejectStaleCallerPermission();
-    }
-    const dispatchResult = await attemptDispatch(delegationId);
+    const dispatchResult = await attemptDispatch(delegationId, 0, isCreationPermissionCurrent);
     return {
       ok: true,
       delegationId,

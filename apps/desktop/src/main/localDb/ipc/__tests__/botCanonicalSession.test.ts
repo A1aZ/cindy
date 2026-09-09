@@ -3465,6 +3465,71 @@ describe('Bot Session task end-to-end runtime', () => {
     }
   });
 
+  it.each(['ask', 'bypassPermissions', null])('revalidates permission generation after asynchronous child creation: %s', async (mode) => {
+    await seedPair();
+    let permission: { mode: string; generation: number } | null = { mode: 'bypassPermissions', generation: 1 };
+    const originalTx = h.tx!;
+    let persisted = false;
+    let release!: () => void;
+    const pendingReply = new Promise<void>((resolve) => { release = resolve; });
+    h.tx = async (name, args) => {
+      const result = await originalTx(name, args);
+      if (name === 'bots.createDelegation') {
+        persisted = true;
+        await pendingReply;
+      }
+      return result;
+    };
+    const runtime = createDelegationRuntime({ readCallerPermission: () => permission });
+    const starting = runtime.delegation.startSessionTask({ callerSessionId: 'session-1', objective: 'Do not retain stale Full Access.' });
+    try {
+      await vi.waitFor(() => expect(persisted).toBe(true));
+      permission = mode === null ? null : { mode, generation: 2 };
+      release();
+      expect(await starting).toMatchObject({ ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE' });
+      expect(runtime.started).toEqual([]);
+      expect(h.sqlite!.prepare('SELECT permission_mode FROM sessions WHERE parent_session_id = ?').pluck().get('session-1')).toBe('ask');
+      expect(h.sqlite!.prepare('SELECT status FROM bot_delegations').pluck().get()).toBe('failed');
+    } finally {
+      release();
+      await starting;
+      h.tx = originalTx;
+      runtime.dispose();
+    }
+  });
+
+  it('rechecks permission after the asynchronous dispatch-plan reads', async () => {
+    await seedPair();
+    let permission = { mode: 'bypassPermissions', generation: 1 };
+    const realSelect = h.db!.select.bind(h.db!);
+    let crossedDispatchBoundary = false;
+    const select = vi.spyOn(h.db!, 'select').mockImplementation((fields) => {
+      const query = realSelect(fields);
+      // Keep the real SQLite query, but model a user change while the worker
+      // replies to validateDispatchPlan's final child-status read.
+      if (fields?.status === sessions.status && fields?.source === sessions.source) {
+        crossedDispatchBoundary = true;
+        queueMicrotask(() => { permission = { mode: 'ask', generation: 2 }; });
+      }
+      return query;
+    });
+    const runtime = createDelegationRuntime({ readCallerPermission: () => permission });
+    try {
+      const result = await runtime.delegation.startSessionTask({
+        callerSessionId: 'session-1', objective: 'Run the requested checks.',
+      });
+      expect(crossedDispatchBoundary).toBe(true);
+      expect(result).toMatchObject({ status: 'failed' });
+      // Failure wakes the parent with the completion notice, never the child.
+      expect(runtime.started.map((turn) => turn.sessionId)).toEqual(['session-1']);
+      expect(h.sqlite!.prepare('SELECT permission_mode, status FROM sessions WHERE parent_session_id = ?')
+        .get('session-1')).toMatchObject({ permission_mode: 'ask', status: 'archived' });
+    } finally {
+      select.mockRestore();
+      runtime.dispose();
+    }
+  });
+
   it('does not start a child with stale permissions during a live permission change', async () => {
     await seedPair();
     const runtime = createDelegationRuntime({ readCallerPermission: () => null });

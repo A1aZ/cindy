@@ -9160,8 +9160,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
   botDelegationServiceHolder?.dispose();
   botDelegationServiceHolder = createBotDelegationService({
-    readCallerPermission: (sessionId) =>
-      maker.getSession(sessionId)?.stablePermissionModeState?.mode ?? null,
+    readCallerPermission: (sessionId) => {
+      const state = maker.getSession(sessionId)?.stablePermissionModeState;
+      return state?.mode ? { mode: state.mode, generation: state.generation } : null;
+    },
     readCallerRuntime: (sessionId) => {
       const session = maker.getSession(sessionId);
       return session ? {

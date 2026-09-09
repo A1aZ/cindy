@@ -38,7 +38,7 @@ const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
 
 /** Only the live owner may select capabilities; no caller-supplied Bot or connection config. */
-async function context(callerSessionId: string) {
+async function context(callerSessionId: string, opts?: { allowPaused?: boolean }) {
   const owner = activeOwnerScopeKey();
   const assertOwner = () => {
     if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== owner)
@@ -73,6 +73,9 @@ async function context(callerSessionId: string) {
     .where(eq(botSessionLinks.sessionId, callerSessionId))
     .limit(1);
   assertOwner();
+  const profileAllowed =
+    row?.profileStatus === 'active' ||
+    (opts?.allowPaused === true && row?.profileStatus === 'paused');
   if (
     !row ||
     row.source !== 'bot' ||
@@ -80,7 +83,7 @@ async function context(callerSessionId: string) {
     row.canonicalSessionId !== callerSessionId ||
     row.archivedAt !== null ||
     row.sessionStatus !== 'active' ||
-    row.profileStatus !== 'active'
+    !profileAllowed
   ) {
     throw new Error('只有当前伙伴主任务可以管理自己的能力');
   }
@@ -234,9 +237,10 @@ export function createBotCapabilityService(deps: BotCapabilityServiceDeps) {
       if (additions.length === 0) return;
       try {
         if (!update.canonicalSessionId) throw new Error('Missing canonical task');
-        const ctx = await context(update.canonicalSessionId);
+        // Settings remain editable while paused; model-initiated list/select stay active-only.
+        const ctx = await context(update.canonicalSessionId, { allowPaused: true });
         if (ctx.botId !== update.botId) throw new Error('Canonical task owner mismatch');
-        const modelChain = readEffectiveBotModelChain(update.next);
+        const modelChain = await readEffectiveBotModelChain(update.next);
         for (const { kind, ids } of additions) {
           const entries = await catalog({ callerSessionId: update.canonicalSessionId, kind }, ctx, deps,
             { modelChain, forceReload: true });

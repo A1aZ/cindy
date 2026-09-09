@@ -304,7 +304,8 @@ export function buildBotCapabilityContextPrompt(
   const helperAvailable = options.helperAvailable !== false;
   // cindy / ghost_* live on the local builtin gateway. SSH Claude/Codex only
   // inject collab, memory and helper (REMOTE_ALLOWED_SERVER_NAMES); advertising
-  // plugins there would tell the model to call tools it cannot reach.
+  // plugins there would tell the model to call tools it cannot reach. Remote Pi
+  // tunnels cindy, so keep plugin guidance there.
   const cindyAvailable = options.cindyAvailable !== false;
   const pluginGuidance = cindyAvailable
     ? ' Installed plugins are available on demand through `cindy` (`ghost_list`, `ghost_info`, `ghost_call`) under their existing permissions.'
@@ -807,8 +808,9 @@ export async function hydrateBotProfileRuntime(
   });
   const helperAvailable = !opts.remoteHostId || opts.agentKind === 'pi'
     || toolsetCatalog.some((item) => item.id === 'xdt_helper' && item.available !== false);
-  // Local sessions always mount the cindy gateway. Remote SSH never does.
-  const cindyAvailable = !opts.remoteHostId;
+  // Local sessions always mount the cindy gateway. Remote Claude/Codex do not
+  // (REMOTE_ALLOWED_SERVER_NAMES). Remote Pi tunnels cindy via the MCP bridge.
+  const cindyAvailable = !opts.remoteHostId || opts.agentKind === 'pi';
   // 三层装配(见 botSystemPrompt.ts):身份与「你会做什么」进稳定段,会话控制等
   // 进上下文段,技能索引与记忆快照进易变段并排在最后。能力说明按**这个伙伴
   // 实际挂载到的 toolset** 注入 —— 挂了 docs 才讲怎么做文件,没挂的一个字不提。

@@ -163,7 +163,10 @@ interface BotMessagingCallbacks {
 // ── Entry tool registration ──────────────────────────────────────────────────
 
 function cindyAvailableForSession(sessionCtx: XdtHelperMcpSessionCtx): boolean {
-  return !resolveLiziMcpSessionContext(sessionCtx).remoteHostId;
+  const ctx = resolveLiziMcpSessionContext(sessionCtx);
+  // Match helper / remoteBotOnly: cindy is missing only for remote Claude/Codex.
+  // Remote Pi tunnels the in-process cindy gateway over the MCP bridge.
+  return !ctx.remoteHostId || ctx.agentKind === 'pi';
 }
 
 function registerListToolsEntry(

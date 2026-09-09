@@ -680,7 +680,7 @@ describe("direct Bot MCP tools", () => {
     }
   });
 
-  it("omits ghost plugin guidance from Pi helper discovery on remote sessions", async () => {
+  it("keeps ghost plugin guidance in Pi helper discovery on remote sessions", async () => {
     const server = createXdtHelperMcpServer({
       resolveSurface: async () => "bot",
       botCapabilities: {
@@ -704,7 +704,8 @@ describe("direct Bot MCP tools", () => {
       })).tools as Array<{ name: string; description: string }>;
       const find = discovered.find((tool) => tool.name === "find_bot_capabilities");
       expect(find?.description).toContain("Skill");
-      expect(find?.description).not.toMatch(/ghost_list|ghost_info|ghost_call/);
+      expect(find?.description).toContain("ghost_list");
+      expect(find?.description).toContain("ghost_info");
     } finally {
       await client.close();
       await server.close();

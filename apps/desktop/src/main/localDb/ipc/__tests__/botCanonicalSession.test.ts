@@ -1366,6 +1366,35 @@ describe('Bot canonical Session lifecycle', () => {
     expect(opts.botProfileContextPrompt).not.toContain('ghost_call');
   });
 
+  it('keeps plugin discovery guidance for remote Pi because cindy is tunneled', async () => {
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1',
+      expectedCanonicalSessionId: null,
+      expectedProfileVersion: 1,
+    });
+    const opts: MakerSessionCreateOpts = {
+      id: created.session.id,
+      agentKind: 'pi',
+      workingDir: '/srv/cindy-bot',
+      remoteHostId: 'remote-host-1',
+      workspaceKind: 'project',
+      model: 'grok-4.5',
+      permissionMode: 'ask',
+    };
+
+    await hydrateBotProfileRuntime(opts, {
+      listSkills: async () => [],
+      listMcpServers: async () => [],
+      listToolsets: async () => [{
+        id: 'xdt_helper', name: 'Helper', essential: true, available: true,
+      }],
+    });
+
+    expect(opts.botProfileContextPrompt).toContain('`find_bot_capabilities`');
+    expect(opts.botProfileContextPrompt).toContain('ghost_list');
+    expect(opts.botProfileContextPrompt).toContain('ghost_call');
+  });
+
   it('keeps ambient catalogs only as explicit disabled rows under legacy inherit', async () => {
     const created = await invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-1',
@@ -2017,6 +2046,23 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(selectBotCapability({ callerSessionId: 'unknown', kind: 'mcp', id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: false });
     h.sqlite!.prepare("UPDATE bot_profiles SET status = 'paused' WHERE id = 'bot-1'").run();
     await expect(selectBotCapability({ callerSessionId: created.session.id, kind: 'mcp', id: 'shared-docs', joined: true })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('allows trusted settings to add capabilities while the Bot is paused', async () => {
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1,
+    });
+    const service = createBotCapabilityService(capabilityDeps);
+    h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+    h.sqlite!.prepare("UPDATE bot_profiles SET status = 'paused' WHERE id = 'bot-1'").run();
+    await expect(selectBotCapability({
+      callerSessionId: created.session.id, kind: 'mcp', id: 'shared-docs', joined: true,
+    })).resolves.toMatchObject({ ok: false });
+    await expect(findBotCapabilities({ callerSessionId: created.session.id, kind: 'mcp' }))
+      .resolves.toMatchObject({ ok: false });
+    await expect(invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] },
+    })).resolves.toMatchObject({ currentVersion: 2 });
   });
 
   it.each([['browser', 'cindy_browser'], ['scheduler', 'cindy_scheduler'], ['contacts', 'cindy_contacts']])('mounts the selected %s toolset into the actual MCP policy', async (toolset, server) => {

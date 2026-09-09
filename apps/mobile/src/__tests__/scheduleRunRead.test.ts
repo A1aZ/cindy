@@ -229,3 +229,20 @@ describe('unreadRunIdFromProjection', () => {
     expect(unreadRunIdFromProjection(failedEvent, 'session-1')).toBeNull();
   });
 });
+
+it('shares the cached index with the notice and ignores a late result after leaving', async () => {
+  resetScheduleIndexThrottleForTesting();
+  const markRunRead = vi.fn(async () => undefined);
+  const runs = [{ id: 'r', scheduleId: 'sched-1', sessionId: 'session-1', status: 'failed', firedAt: 1 }];
+  let finish!: (value: typeof runs) => void;
+  const rows = new Promise<typeof runs>((resolve) => { finish = resolve; });
+  const maker = makerWith([], markRunRead, () => rows);
+  const onIndex = vi.fn();
+  let active = true;
+  const pending = markSessionScheduleRunsRead(maker, 'session-1', 'notice-device', () => active, { onIndex });
+  active = false; finish(runs); await pending;
+  expect(onIndex).not.toHaveBeenCalled(); expect(markRunRead).not.toHaveBeenCalled();
+  await markSessionScheduleRunsRead(maker, 'session-1', 'notice-device', () => true, { onIndex });
+  expect(onIndex.mock.calls[0][0].get('session-1')).toMatchObject({ latestFailedRun: { runId: 'r', firedAt: 1 } });
+  expect(markRunRead).toHaveBeenCalledWith('r');
+});

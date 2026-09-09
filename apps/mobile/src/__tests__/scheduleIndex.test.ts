@@ -8,6 +8,7 @@ import {
   invalidateScheduleIndexForDevice,
   invalidateTransientScheduleIndexFailureFor,
   invalidateScheduleIndexesAfterLinkRecovery,
+  loadLightweightSessionScheduleIndex,
   loadSessionScheduleIndex,
   loadSharedSessionScheduleIndex,
   loadSessionScheduleIndexThrottled,
@@ -33,6 +34,34 @@ function makerWithSchedules(
 }
 
 describe('scheduleIndex', () => {
+  it.each([false, true])('shares complete schedule metadata and historical failures with legacy fallback=%s', async (legacy) => {
+    resetScheduleIndexThrottleForTesting();
+    const list = vi.fn(async () => [
+      { id: 'sched-1', name: 'run', status: 'active', targetSessionId: 'current' },
+      { id: 'zero', name: 'no runs', status: 'paused', targetSessionId: 'zero-task' },
+    ]);
+    const run = { runId: 'old-failure', scheduleId: 'sched-1', scheduleName: 'run', scheduleStatus: 'active',
+      sessionId: 'current', status: 'failed', firedAt: 1, readAt: 2 };
+    const listSidebarIndexRuns = vi.fn(async () => {
+      if (legacy) throw new Error('[CHANNEL_NOT_ALLOWED] unsupported');
+      return { runs: [run, { ...run, runId: 'old-binding', sessionId: 'previous' }] };
+    });
+    const listRuns = vi.fn(async (id: string) => id === 'zero' ? [] : [{ ...run, id: run.runId }]);
+    const maker = { schedule: { list, listRuns, listSidebarIndexRuns } } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+    const [home, task] = await Promise.all([
+      loadSharedSessionScheduleIndex('shared-lightweight', maker),
+      loadSharedSessionScheduleIndex('shared-lightweight', maker),
+    ]);
+    expect(home).toBe(task);
+    expect(home.get('current')?.latestFailedRun).toEqual({ runId: 'old-failure', firedAt: 1 });
+    expect(home.has('previous')).toBe(false);
+    expect(home.get('zero-task')?.allSchedulesStopped).toBe(true);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(listSidebarIndexRuns).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledTimes(legacy ? 2 : 0);
+    resetScheduleIndexThrottleForTesting();
+  });
+
   it('stops retries after blur without negative-caching cancellation for the next screen', async () => {
     vi.useFakeTimers();
     resetScheduleIndexThrottleForTesting();
@@ -683,4 +712,17 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     await loadSessionScheduleIndex(maker);
     expect(maxInFlight).toBe(1);
   });
+});
+
+it('a drawer status read never replaces the full home binding cache', async () => {
+  resetScheduleIndexThrottleForTesting();
+  const full = new Map<string, RemoteSessionScheduleInfo>([['bound-no-run', {
+    scheduleId: 'a', scheduleName: 'a', unreadRunIds: [], unreadCount: 0, running: false, latestRunAt: 0,
+  }]]);
+  await loadSessionScheduleIndexThrottled('device', async () => full);
+  const invoke = vi.fn().mockResolvedValue({ runs: [] });
+  expect((await loadLightweightSessionScheduleIndex('device', invoke)).size).toBe(0);
+  const reload = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
+  expect(await loadSessionScheduleIndexThrottled('device', reload)).toBe(full);
+  expect(reload).not.toHaveBeenCalled();
 });

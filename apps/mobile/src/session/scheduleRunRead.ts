@@ -1,3 +1,4 @@
+import type { RemoteSessionScheduleInfo } from '@/session/sessionList';
 import type { ScheduleEventProjection } from '@cindy/maker-shared/schedule-events';
 import { isTransientRemoteError } from '@/device-link/remoteRetry';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
@@ -25,16 +26,18 @@ export async function markSessionScheduleRunsRead(
   sessionId: string,
   deviceId: string,
   isActive: () => boolean = () => true,
+  options: { onIndex?: (index: Map<string, RemoteSessionScheduleInfo>) => void } = {},
 ): Promise<string[]> {
   if (!sessionId || !deviceId || !isActive()) return [];
   const index = await loadSharedSessionScheduleIndex(deviceId, maker, isActive);
   if (!isActive()) return [];
+  options.onIndex?.(index);
   const unreadRunIds = index.get(sessionId)?.unreadRunIds ?? [];
   if (unreadRunIds.length === 0) return [];
   // 单个永久失败不阻塞其它 run;瞬态失败需要抛出,让外层 retry 重新探测并补标。
   // allSettled 后按原 unreadRunIds 顺序收集成功项,返回值保序。
   const results = await Promise.allSettled(
-    unreadRunIds.map((runId) => maker.schedule.markRunRead(runId)),
+    unreadRunIds.map((runId) => !isActive() ? Promise.reject(new Error('READ_INACTIVE')) : maker.schedule.markRunRead(runId)),
   );
   const transientError = results.find(
     (result): result is PromiseRejectedResult => result.status === 'rejected' && isTransientRemoteError(result.reason),

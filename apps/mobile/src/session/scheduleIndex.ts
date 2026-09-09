@@ -1,4 +1,5 @@
 import { isDeviceUnresponsiveRemoteError } from '@cindy/maker-shared/device-link-contract';
+import { isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { createMobileMakerTransport, type MobileMakerTransport, type RemoteInvoke } from '@/device-link/mobileMakerTransport';
 import { unresponsiveDevicesStore } from '@/device-link/unresponsiveDevicesStore';
 import { isTransientRemoteError, withTransientRemoteRetry } from '@/device-link/remoteRetry';
@@ -23,6 +24,13 @@ export async function loadSessionScheduleIndex(
   options: LoadSessionScheduleIndexOptions = {},
 ): Promise<Map<string, RemoteSessionScheduleInfo>> {
   const schedules = normalizeScheduleList(await maker.schedule.list());
+  if (maker.schedule.listSidebarIndexRuns) {
+    try {
+      return buildLightweightSessionScheduleIndex(await maker.schedule.listSidebarIndexRuns(), schedules);
+    } catch (error) {
+      if (!isHistoryViewUnavailable(error)) throw error;
+    }
+  }
   // listRuns 逐个串行而非 Promise.all 全并发:device-link 是无优先级的单 WS 管道,
   // N 个背景 listRuns 一齐压上去会把会话打开的关键读(messages / getSession / projection)
   // 挤到队尾(2026-07 实测:并发轮次叠加时 list-runs 均值 8.8s、messages:list 被拖到 6s+)。
@@ -256,7 +264,7 @@ export function getScheduleIndexInvalidationVersion(deviceId: string): number {
 }
 
 /** Test-only: clear cache and invalidation generations. */
-export function resetScheduleIndexThrottleForTesting(): void {
+export function clearSessionScheduleIndexCache(): void {
   scheduleIndexThrottleEntries.clear();
   scheduleIndexInvalidationVersions.clear();
 }
@@ -339,6 +347,9 @@ function scheduleInfoEqual(a: RemoteSessionScheduleInfo, b: RemoteSessionSchedul
   return a.scheduleId === b.scheduleId
     && a.scheduleName === b.scheduleName
     && a.unreadCount === b.unreadCount
+    && !!a.hasUnreadFailedRun === !!b.hasUnreadFailedRun
+    && a.latestFailedRun?.runId === b.latestFailedRun?.runId
+    && a.latestFailedRun?.firedAt === b.latestFailedRun?.firedAt
     && a.running === b.running
     && a.latestRunAt === b.latestRunAt
     && a.scheduleStatus === b.scheduleStatus
@@ -350,4 +361,29 @@ function stringListsEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a === b) return true;
   if (a.length !== b.length) return false;
   return a.every((item, index) => item === b[index]);
+}
+
+export const resetScheduleIndexThrottleForTesting = clearSessionScheduleIndexCache;
+
+/** Existing lightweight host query; never starts the schedule list + per-run scan. */
+export async function loadLightweightSessionScheduleIndex(deviceId: string, invoke: RemoteInvoke): Promise<Map<string, RemoteSessionScheduleInfo>> {
+  const raw = await invoke<{ runs?: unknown[] }>(deviceId, 'maker:schedule:list-sidebar-index-runs', []);
+  return buildLightweightSessionScheduleIndex(raw);
+}
+
+function buildLightweightSessionScheduleIndex(raw: { runs?: unknown[] }, authoritativeSchedules?: ReturnType<typeof normalizeScheduleList>): Map<string, RemoteSessionScheduleInfo> {
+  if (!raw || !Array.isArray(raw.runs)) throw new Error('Invalid schedule index');
+  const schedules = new Map<string, import('@/scheduler/types').RemoteSchedule>();
+  const runs = new Map<string, RemoteScheduleRun[]>();
+  for (const value of raw.runs) {
+    if (!value || typeof value !== 'object') throw new Error('Invalid schedule index row');
+    const row = value as Record<string, unknown>;
+    if (typeof row.scheduleId !== 'string' || typeof row.runId !== 'string' || typeof row.scheduleName !== 'string') throw new Error('Invalid schedule index row');
+    const schedule = normalizeScheduleList([{ id: row.scheduleId, name: row.scheduleName, status: row.scheduleStatus }])[0];
+    const run = normalizeScheduleRuns([{ ...row, id: row.runId }])[0];
+    if (!schedule || !run) throw new Error('Invalid schedule index row');
+    schedules.set(schedule.id, schedule);
+    runs.set(schedule.id, [...(runs.get(schedule.id) ?? []), run]);
+  }
+  return buildSessionScheduleIndex(authoritativeSchedules ?? [...schedules.values()], runs);
 }

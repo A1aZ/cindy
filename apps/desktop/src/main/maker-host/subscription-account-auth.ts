@@ -16,6 +16,21 @@ import {
   resetGrokOAuthMemoryCache,
 } from './grok-oauth-login.js';
 import { outboundFetch } from './outbound-fetch.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('subscription-account-auth');
+let onInvalidated: (providerId: string) => void = () => {};
+export function setSubscriptionAccountInvalidatedHandler(handler: typeof onInvalidated): void {
+  onInvalidated = handler;
+}
+type AccountRefreshState = {
+  refresher: ReturnType<typeof createClaudeOAuthRefresher>;
+  invalidatedCredential?: string;
+};
+const refreshers = new Map<string, AccountRefreshState>();
+function credentialFingerprint(raw: string): string {
+  return createHash('sha256').update(raw).digest('hex');
+}
 
 export function subscriptionAccountKind(providerId?: string | null): 'claude' | 'xai' | null {
   const native = getActiveCatalog().providers.find((p) => p.id === providerId)?.auth.native;
@@ -32,25 +47,26 @@ export function readClaudeAccountOAuth(providerId = 'anthropic'): ClaudeAiOAuth 
   if (subscriptionAccountKind(providerId) !== 'claude' || isAppSessionBoundaryPending())
     return null;
   try {
-    const blob = JSON.parse(genericOAuthSecretIo.read(providerId) ?? 'null');
+    const raw = genericOAuthSecretIo.read(providerId) ?? 'null';
+    if (refreshers.get(`${activeOwnerScopeKey()}:${providerId}`)?.invalidatedCredential === credentialFingerprint(raw)) return null;
+    const blob = JSON.parse(raw);
     return typeof blob?.accessToken === 'string' && blob.accessToken ? blob : null;
   } catch {
     return null;
   }
 }
-const refreshers = new Map<string, ReturnType<typeof createClaudeOAuthRefresher>>();
 function claudeAccount(providerId: string) {
   const scope = activeOwnerScopeKey();
   const key = `${scope}:${providerId}`;
-  let refresher = refreshers.get(key);
-  if (!refresher) {
+  let account = refreshers.get(key);
+  if (!account) {
     const current = () => activeOwnerScopeKey() === scope && !isAppSessionBoundaryPending();
     const directory = path.join(
       app.getPath('userData'),
       'subscription-accounts',
       createHash('sha256').update(key).digest('hex'),
     );
-    refresher = createClaudeOAuthRefresher({
+    const refresher = createClaudeOAuthRefresher({
       readOAuth: () => (current() ? readClaudeAccountOAuth(providerId) : null),
       writeOAuth: (oauth) => {
         if (!current() || !genericOAuthSecretIo.write(providerId, JSON.stringify(oauth)))
@@ -60,20 +76,33 @@ function claudeAccount(providerId: string) {
       now: Date.now,
       lockDir: () => directory,
       onInvalidGrant: () => {
-        if (current()) genericOAuthSecretIo.remove(providerId);
+        if (!current()) return;
+        const raw = genericOAuthSecretIo.readStrict(providerId);
+        if (raw) account!.invalidatedCredential = credentialFingerprint(raw);
+        account!.refresher.invalidate();
+        if (!genericOAuthSecretIo.remove(providerId)) {
+          log.warn('revoked account credential could not be removed; suppressing retained credential', { providerId });
+        }
+        onInvalidated(providerId);
       },
     });
-    refreshers.set(key, refresher);
+    account = { refresher };
+    refreshers.set(key, account);
   }
-  return refresher;
+  return account.refresher;
 }
-export function getValidClaudeAccountOAuth(providerId: string, options?: GetValidOAuthOptions) {
-  return claudeAccount(providerId).getValidOAuth(options);
+export async function getValidClaudeAccountOAuth(providerId: string, options?: GetValidOAuthOptions) {
+  const scope = activeOwnerScopeKey();
+  const result = await claudeAccount(providerId).getValidOAuth(options);
+  // The native refresher may return its pre-refresh credential on a failed refresh.
+  // Re-read after invalidation/login so that captured revoked credentials cannot escape.
+  return result && activeOwnerScopeKey() === scope && !isAppSessionBoundaryPending()
+    ? readClaudeAccountOAuth(providerId) : null;
 }
 export async function prepareClaudeAccountUsage(providerId: string): Promise<ClaudeAiOAuth | null> {
   const scope = activeOwnerScopeKey();
   const refresher = claudeAccount(providerId);
-  const oauth = await refresher.getValidOAuth();
+  const oauth = await getValidClaudeAccountOAuth(providerId);
   if (!oauth || activeOwnerScopeKey() !== scope) return null;
   if (!oauth.subscriptionType) await refresher.backfillSubscriptionProfile(oauth.accessToken);
   return activeOwnerScopeKey() === scope ? readClaudeAccountOAuth(providerId) : null;
@@ -98,7 +127,7 @@ export function cancelSubscriptionAccountLogin(providerId: string): void {
 }
 export function resetSubscriptionAccountCaches(): void {
   for (const operation of logins.values()) operation.cancel();
-  for (const refresher of refreshers.values()) refresher.invalidate();
+  for (const account of refreshers.values()) account.refresher.invalidate();
   refreshers.clear();
 }
 export async function loginSubscriptionAccount(

@@ -393,7 +393,7 @@ const reviewAutoPermissionAction = createAutoPermissionReviewer({
 let _codexModelBackfill: CodexModelBackfillCoordinator | null = null;
 
 /** Refresh selectable model capabilities, then notify every local/remote renderer. */
-function refreshSelectableModelsAndBroadcast(payload: Record<string, unknown>): void {
+export function refreshSelectableModelsAndBroadcast(payload: Record<string, unknown>): void {
   if (_maker) refreshCatalogDerivedModels(_maker, getDesktopSelectableCatalog());
   try {
     providerAccessRuntimeRefreshListener?.();

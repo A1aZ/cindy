@@ -4,6 +4,9 @@ const state = vi.hoisted(() => ({
   pending: false,
   secrets: new Map<string, string>(),
   login: vi.fn(),
+  removeFails: false,
+  revokeDuringRefresh: false,
+  callbacks: [] as Array<() => void>,
 }));
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp/cindy-scoped-auth-test' } }));
 vi.mock('../../appSessionState.js', () => ({
@@ -24,6 +27,7 @@ vi.mock('../../secrets/providerSecretStore.js', () => ({
       return true;
     },
     remove: (id: string) => {
+      if (state.removeFails) return false;
       state.secrets.delete(`${state.scope}:${id}`);
       return true;
     },
@@ -33,11 +37,18 @@ vi.mock('../claude-credentials-store.js', () => ({
   readClaudeAiOAuth: () => ({ accessToken: 'fake-local-token' }),
 }));
 vi.mock('../claude-oauth-refresh.js', () => ({
-  createClaudeOAuthRefresher: (deps: { readOAuth: () => unknown }) => ({
-    getValidOAuth: async () => deps.readOAuth(),
+  createClaudeOAuthRefresher: (deps: { readOAuth: () => unknown; onInvalidGrant: () => void }) => {
+    state.callbacks.push(deps.onInvalidGrant);
+    return ({
+    getValidOAuth: async () => {
+      const captured = deps.readOAuth();
+      if (state.revokeDuringRefresh) deps.onInvalidGrant();
+      return captured;
+    },
     invalidate: vi.fn(),
     backfillSubscriptionProfile: vi.fn(),
-  }),
+    });
+  },
 }));
 vi.mock('../claude-oauth-login.js', () => ({
   runClaudeOAuthLogin: (...args: unknown[]) => state.login(...args),
@@ -58,6 +69,9 @@ import {
   cancelSubscriptionAccountLogin,
   removeSubscriptionAccountCredentialsReversibly,
   resetSubscriptionAccountCaches,
+  getValidClaudeAccountOAuth,
+  setSubscriptionAccountInvalidatedHandler,
+  subscriptionAccountState,
 } from '../subscription-account-auth.js';
 
 describe('independent Claude account credentials', () => {
@@ -78,6 +92,44 @@ describe('independent Claude account credentials', () => {
     state.pending = false;
     state.secrets.clear();
     state.login.mockReset();
+    state.callbacks = [];
+    state.removeFails = false;
+    state.revokeDuringRefresh = false;
+    setSubscriptionAccountInvalidatedHandler(() => {});
+  });
+  it.each([false, true])('invalid grant disconnects only the failed account even when removal fails=%s', async (removeFails) => {
+    state.secrets.set(`${state.scope}:claude-a`, JSON.stringify({ accessToken: 'fake-a' }));
+    state.secrets.set(`${state.scope}:claude-b`, JSON.stringify({ accessToken: 'fake-b' }));
+    await getValidClaudeAccountOAuth('claude-a');
+    const broadcast = vi.fn();
+    setSubscriptionAccountInvalidatedHandler(broadcast);
+    state.removeFails = removeFails;
+    state.callbacks[0]();
+    expect(broadcast).toHaveBeenCalledWith('claude-a');
+    expect(subscriptionAccountState('claude-a').authenticated).toBe(false);
+    expect(await getValidClaudeAccountOAuth('claude-a')).toBeNull();
+    expect(readClaudeAccountOAuth('claude-b')?.accessToken).toBe('fake-b');
+    expect(readClaudeAccountOAuth()?.accessToken).toBe('fake-local-token');
+    state.login.mockImplementation(async opts => { opts.persist({ accessToken: 'fake-new' }); return { ok: true }; });
+    await loginSubscriptionAccount('claude-a', () => true);
+    expect(readClaudeAccountOAuth('claude-a')?.accessToken).toBe('fake-new');
+  });
+  it('late invalid grant from an old owner cannot clear or broadcast the new owner', async () => {
+    await getValidClaudeAccountOAuth('claude-a');
+    const broadcast = vi.fn();
+    setSubscriptionAccountInvalidatedHandler(broadcast);
+    state.scope = 'owner-b:2';
+    state.secrets.set(`${state.scope}:claude-a`, JSON.stringify({ accessToken: 'fake-new-owner' }));
+    state.callbacks[0]();
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(readClaudeAccountOAuth('claude-a')?.accessToken).toBe('fake-new-owner');
+  });
+  it('does not return the refresher fallback credential on the invalid-grant request itself', async () => {
+    state.secrets.set(`${state.scope}:claude-a`, JSON.stringify({ accessToken: 'fake-revoked' }));
+    state.revokeDuringRefresh = true;
+    state.removeFails = true;
+    expect(await getValidClaudeAccountOAuth('claude-a')).toBeNull();
+    expect(readClaudeAccountOAuth('claude-a')).toBeNull();
   });
   it('commits each login to its provider, preserving the local account and supporting rollback', async () => {
     state.login.mockImplementation(async (opts) => {

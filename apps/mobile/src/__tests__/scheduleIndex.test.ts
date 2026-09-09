@@ -35,6 +35,42 @@ function makerWithSchedules(
 }
 
 describe('scheduleIndex', () => {
+  it.each([false, true])('restores older running ownership from the same snapshot (lightweight=%s)', async (lightweight) => {
+    const schedules = [{ id: 'sched', name: 'run', status: 'active', targetSessionId: 'task' }];
+    const row = { scheduleId: 'sched', scheduleName: 'run', scheduleStatus: 'active', readAt: 1 };
+    const snapshot = {
+      runs: [
+        { ...row, runId: 'new', sessionId: 'task', status: 'success', firedAt: 20 },
+        { ...row, runId: 'old', status: 'running', firedAt: 10 },
+        { ...row, runId: 'unbound', status: 'running', firedAt: 5 },
+        { ...row, runId: 'historical', status: 'failed', firedAt: 3 },
+      ],
+      inflightPolicies: [
+        { runId: 'old', sessionId: 'task', silenced: false },
+        { runId: 'historical', sessionId: 'must-not-restore', silenced: false },
+      ],
+    };
+    const listRuns = vi.fn();
+    const maker = { schedule: { list: async () => schedules, listSidebarIndexRuns: async () => snapshot, listRuns } } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+    const index = lightweight
+      ? await loadLightweightSessionScheduleIndex('device', vi.fn().mockResolvedValue(snapshot))
+      : await loadSessionScheduleIndex(maker);
+    expect(index.get('task')).toMatchObject({ running: true, latestRunAt: 20, unreadCount: 0 });
+    expect(index.has('must-not-restore')).toBe(false);
+    expect(index.size).toBe(1);
+    expect(listRuns).not.toHaveBeenCalled();
+    // A policy can disappear as a run settles; never invent a missing binding.
+    snapshot.inflightPolicies = [];
+    const withoutPolicies = await loadSessionScheduleIndex(maker);
+    expect(withoutPolicies.get('task')?.running).toBe(false);
+    // Explicit row ownership wins, even when policy metadata disagrees.
+    snapshot.runs[1] = { ...snapshot.runs[1], sessionId: 'task' };
+    snapshot.inflightPolicies = [{ runId: 'old', sessionId: 'other', silenced: false }];
+    expect((await loadSessionScheduleIndex(maker)).get('task')?.running).toBe(true);
+    // Rebinding remains authoritative over both stored and recovered ownership.
+    schedules[0].targetSessionId = 'rebound';
+    expect((await loadSessionScheduleIndex(maker)).has('task')).toBe(false);
+  });
   it.each([false, true])('lets joined visible consumers take over a blurred initiator (visible=%s)', async (visible) => {
     vi.useFakeTimers();
     resetScheduleIndexThrottleForTesting();

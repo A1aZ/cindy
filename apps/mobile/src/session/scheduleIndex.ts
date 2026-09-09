@@ -370,12 +370,22 @@ export const resetScheduleIndexThrottleForTesting = clearSessionScheduleIndexCac
 
 /** Existing lightweight host query; never starts the schedule list + per-run scan. */
 export async function loadLightweightSessionScheduleIndex(deviceId: string, invoke: RemoteInvoke): Promise<Map<string, RemoteSessionScheduleInfo>> {
-  const raw = await invoke<{ runs?: unknown[] }>(deviceId, 'maker:schedule:list-sidebar-index-runs', []);
+  const raw = await invoke<LightweightScheduleSnapshot>(deviceId, 'maker:schedule:list-sidebar-index-runs', []);
   return buildLightweightSessionScheduleIndex(raw);
 }
 
-function buildLightweightSessionScheduleIndex(raw: { runs?: unknown[] }, authoritativeSchedules?: ReturnType<typeof normalizeScheduleList>): Map<string, RemoteSessionScheduleInfo> {
+type LightweightScheduleSnapshot = { runs?: unknown[]; inflightPolicies?: unknown[] };
+
+function buildLightweightSessionScheduleIndex(raw: LightweightScheduleSnapshot, authoritativeSchedules?: ReturnType<typeof normalizeScheduleList>): Map<string, RemoteSessionScheduleInfo> {
   if (!raw || !Array.isArray(raw.runs)) throw new Error('Invalid schedule index');
+  const inflightSessions = new Map<string, string>();
+  for (const value of raw.inflightPolicies ?? []) {
+    if (!value || typeof value !== 'object') continue;
+    const policy = value as Record<string, unknown>;
+    if (typeof policy.runId === 'string' && typeof policy.sessionId === 'string') {
+      inflightSessions.set(policy.runId, policy.sessionId);
+    }
+  }
   const schedules = new Map<string, import('@/scheduler/types').RemoteSchedule>();
   const runs = new Map<string, RemoteScheduleRun[]>();
   for (const value of raw.runs) {
@@ -383,7 +393,10 @@ function buildLightweightSessionScheduleIndex(raw: { runs?: unknown[] }, authori
     const row = value as Record<string, unknown>;
     if (typeof row.scheduleId !== 'string' || typeof row.runId !== 'string' || typeof row.scheduleName !== 'string') throw new Error('Invalid schedule index row');
     const schedule = normalizeScheduleList([{ id: row.scheduleId, name: row.scheduleName, status: row.scheduleStatus }])[0];
-    const run = normalizeScheduleRuns([{ ...row, id: row.runId }])[0];
+    // The host omits older running rows' binding to preserve latest ownership.
+    // Restore only that missing input; the shared builder still owns binding and recency rules.
+    const sessionId = row.sessionId || (row.status === 'running' ? inflightSessions.get(row.runId) : undefined);
+    const run = normalizeScheduleRuns([{ ...row, id: row.runId, sessionId }])[0];
     if (!schedule || !run) throw new Error('Invalid schedule index row');
     schedules.set(schedule.id, schedule);
     runs.set(schedule.id, [...(runs.get(schedule.id) ?? []), run]);

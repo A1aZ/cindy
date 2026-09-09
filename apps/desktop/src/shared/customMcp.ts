@@ -34,8 +34,6 @@ export interface CustomMcpListContext {
   /** Preview a canonical Bot's next turn, optionally including an unsaved model chain. */
   botSessionId?: string;
   modelChain?: BotModelRoute[];
-  /** Trusted execution target; remote Claude/Codex do not forward custom MCPs. */
-  remoteHostId?: string;
 }
 
 export interface CustomMcpListEntry extends CustomMcpConfig {

@@ -5505,8 +5505,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // （下次新建会话生效）并广播 MCP_CHANGED 让设置页列表 live 刷新。
   registerMcpHandlers(createElectronIpcHandlerRegistry(), {
     listMcpServers: listBotRuntimeMcpServers,
-    resolveBotAgentKind: async (sessionId, chain) =>
-      (await reconcileBotModelRoute.preview(sessionId, chain))?.agentKind ?? null,
+    resolveBotContext: async (sessionId, chain) => {
+      const route = await reconcileBotModelRoute.preview(sessionId, chain);
+      if (!route) return null;
+      const meta = await maker.getSessionMeta(sessionId);
+      return meta ? { agentKind: route.agentKind, remoteHostId: meta.remoteHostId } : null;
+    },
     refreshProviders: () => refreshCustomMcpProviders(),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.MCP_CHANGED, {}),
     // 内置 server 名对自定义 MCP 是保留名：撞名会在装配层顶替内置 server 并继承
@@ -10626,54 +10630,52 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return { baseline, effective, control };
   };
 
-  const readBotModelRouteState = async (sessionId: string, opts?: { allowPaused?: boolean }) => {
-    const [row] = await getDbClient().drizzle.select({
-      capabilitiesJson: botProfileVersions.capabilitiesJson,
-      agentKind: sessions.agentKind,
-      model: sessions.model,
-      providerId: sessions.providerId,
-      effort: sessions.effort,
-      fastMode: sessions.fastMode,
-    }).from(botSessionLinks)
-      .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
-      .innerJoin(botProfileVersions, and(
-        eq(botProfileVersions.botId, botProfiles.id),
-        eq(botProfileVersions.version, botProfiles.currentVersion),
-      ))
-      .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
-      .where(and(
-        eq(botSessionLinks.sessionId, sessionId),
-        eq(botSessionLinks.role, 'canonical'),
-        isNull(botSessionLinks.archivedAt),
-        inArray(botProfiles.status, opts?.allowPaused ? ['active', 'paused'] : ['active']),
-        eq(sessions.source, 'bot'),
-        eq(sessions.status, 'active'),
-      )).limit(1);
-    if (!row) return null;
-    const chain = await readEffectiveBotModelChain(JSON.parse(row.capabilitiesJson));
-    const control = getSessionRuntimeControlSnapshot(sessionId);
-    const live = maker.getSession(sessionId);
-    return {
-      chain,
-      current: {
-        agentKind: live?.agentKind ?? dbToMakerAgentKind(row.agentKind),
-        model: live?.model ?? row.model ?? '',
-        providerId: live && hasSessionProvider(sessionId)
-          ? getSessionProvider(sessionId) ?? null : row.providerId,
-        effort: (live ? getSessionEffort(sessionId) : row.effort) ?? null,
-        fastMode: live ? getSessionFastMode(sessionId) : !!row.fastMode,
-      },
-      hasRuntimeOverride: control.effectiveOverride !== null || control.pending !== null,
-      next: control.pending?.profile ?? control.effectiveOverride ?? undefined,
-    };
-  };
-
   const reconcileBotModelRoute = createBotModelRouteReconciler({
     ownerEpoch: captureSessionRuntimeControlOwnerEpoch,
-    read: (sessionId) => readBotModelRouteState(sessionId),
-    // Settings catalogs and capability validation preview the next route while
-    // paused. Send-time apply stays active-only so a paused Bot cannot switch.
-    readPreview: (sessionId) => readBotModelRouteState(sessionId, { allowPaused: true }),
+    read: async (sessionId, purpose) => {
+      const [row] = await getDbClient().drizzle.select({
+        capabilitiesJson: botProfileVersions.capabilitiesJson,
+        agentKind: sessions.agentKind,
+        model: sessions.model,
+        providerId: sessions.providerId,
+        effort: sessions.effort,
+        fastMode: sessions.fastMode,
+      }).from(botSessionLinks)
+        .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
+        .innerJoin(botProfileVersions, and(
+          eq(botProfileVersions.botId, botProfiles.id),
+          eq(botProfileVersions.version, botProfiles.currentVersion),
+        ))
+        .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
+        .where(and(
+          eq(botSessionLinks.sessionId, sessionId),
+          eq(botSessionLinks.role, 'canonical'),
+          isNull(botSessionLinks.archivedAt),
+          // Paused settings may preview grants; sending still requires an active Bot.
+          purpose === 'preview'
+            ? inArray(botProfiles.status, ['active', 'paused'])
+            : eq(botProfiles.status, 'active'),
+          eq(sessions.source, 'bot'),
+          eq(sessions.status, 'active'),
+        )).limit(1);
+      if (!row) return null;
+      const chain = await readEffectiveBotModelChain(JSON.parse(row.capabilitiesJson));
+      const control = getSessionRuntimeControlSnapshot(sessionId);
+      const live = maker.getSession(sessionId);
+      return {
+        chain,
+        current: {
+          agentKind: live?.agentKind ?? dbToMakerAgentKind(row.agentKind),
+          model: live?.model ?? row.model ?? '',
+          providerId: live && hasSessionProvider(sessionId)
+            ? getSessionProvider(sessionId) ?? null : row.providerId,
+          effort: (live ? getSessionEffort(sessionId) : row.effort) ?? null,
+          fastMode: live ? getSessionFastMode(sessionId) : !!row.fastMode,
+        },
+        hasRuntimeOverride: control.effectiveOverride !== null || control.pending !== null,
+        next: control.pending?.profile ?? control.effectiveOverride ?? undefined,
+      };
+    },
     apply: async (sessionId, route, current) => {
       if (route.agentKind !== current.agentKind) {
         // Register the ordinary switch intent. Its existing send transaction

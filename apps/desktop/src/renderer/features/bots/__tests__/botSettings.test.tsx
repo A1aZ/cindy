@@ -575,6 +575,61 @@ describe('same-Bot capability updates while editing settings', () => {
     return { agentKind, servers: [{ id: 'events', name: 'SSE Events', transport: 'sse', url: 'https://example.com/mcp', headers: {}, available: agentKind !== 'codex' }] };
   }
 
+  it.each(['provider', 'runtime', 'global chain'] as const)(
+    'refreshes capability availability with the displayed default after %s changes', async (source) => {
+      mocks.listCustomMcpServers.mockImplementation(async (context) =>
+        sseCatalog(context?.modelChain?.[0]?.harness === 'codex' ? 'codex' : 'claude-code'));
+      const view = renderSettings();
+      await openCapabilities();
+      expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(false);
+      const publish = () => {
+        if (source === 'provider') {
+          commitProvidersSnapshot(beginProvidersRefresh(), {
+            dataOwnerId: null, ownerGeneration: 0, providers: [], providerOrder: [],
+          });
+        } else if (source === 'runtime') {
+          mocks.availableVendors = new Set(mocks.defaultModelChain.map((route) => route.harness === 'claude' ? 'cc' : route.harness));
+          for (const listener of mocks.runtimeListeners) listener();
+        } else {
+          for (const listener of mocks.modelListeners) listener();
+        }
+      };
+      const next = [{ ...capabilities().modelChain[0]!, harness: 'codex' as const, model: 'next-default' }];
+      await act(async () => { mocks.defaultModelChain = next; publish(); });
+      expect(screen.getByTestId('current-model').textContent).toBe('next-default');
+      expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ modelChain: next }));
+      expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('codex', expect.anything());
+      expect(mocks.listToolsets).toHaveBeenLastCalledWith('/bot/workspace', true, expect.objectContaining({ agentKind: 'codex' }));
+      expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+      await act(async () => { mocks.defaultModelChain = capabilities().modelChain; publish(); });
+      expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(false);
+      expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+      view.unmount();
+      expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a local model override and pending text when defaults change during catalog loading', async () => {
+    let finishOld!: (value: CustomMcpListResult) => void;
+    mocks.listCustomMcpServers.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue(sseCatalog('codex'));
+    mocks.updateBotProfile.mockImplementation(() => new Promise(() => {}));
+    renderSettings();
+    await openCapabilities();
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Pending name' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('codex-model-selector')); });
+    const calls = mocks.listCustomMcpServers.mock.calls.length;
+    await act(async () => {
+      mocks.defaultModelChain = [{ ...capabilities().modelChain[0]!, model: 'later-default' }];
+      for (const listener of mocks.modelListeners) listener();
+      finishOld(sseCatalog('claude-code'));
+    });
+    expect(mocks.listCustomMcpServers).toHaveBeenCalledTimes(calls);
+    expect(mocks.listCustomMcpServers).toHaveBeenLastCalledWith(expect.objectContaining({ modelChain: [expect.objectContaining({ harness: 'codex', model: 'custom-model' })] }));
+    expect((screen.getByRole('checkbox', { name: /SSE Events/ }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText('bots.nameLabel') as HTMLInputElement).value).toBe('Pending name');
+  });
+
   it('uses the effective canonical fallback for every catalog despite a Claude primary', async () => {
     mocks.getSession.mockResolvedValue({ agentKind: 'cc', workingDir: '/bot/workspace', runtimeEffective: { agentKind: 'codex', model: 'codex-x', providerId: null, effort: 'medium', fastMode: false } });
     mocks.listCustomMcpServers.mockResolvedValue(sseCatalog('codex'));

@@ -10,7 +10,7 @@ import type { McpProvider } from '@cindy/maker-core';
 import type { DbClient } from '../../localDb/client/DbClient.js';
 import { clearCurrentDbClient, setCurrentDbClient } from '../../localDb/client/current.js';
 import * as schema from '../../localDb/schema.js';
-import { listCustomMcpServers, listCustomMcpRuntimeGenerations } from '../../maker-host/custom-mcp-store.js';
+import { createCustomMcpServer, listCustomMcpServers, listCustomMcpRuntimeGenerations } from '../../maker-host/custom-mcp-store.js';
 import { buildBotMcpCatalog } from '../../maker-host/botMcpCatalog.js';
 import {
   getBuiltinMcpServerNames,
@@ -66,7 +66,7 @@ function mountDb(): void {
 function makeDeps(over: Partial<McpHandlerDeps> = {}): McpHandlerDeps {
   return {
     listMcpServers: vi.fn(async () => []),
-    resolveBotAgentKind: vi.fn(async () => 'claude-code' as const),
+    resolveBotContext: vi.fn(async () => ({ agentKind: 'claude-code' as const })),
     refreshProviders: vi.fn(async () => {}),
     broadcastChanged: vi.fn(() => {}),
     invalidateCodex: vi.fn(async () => {}),
@@ -127,46 +127,16 @@ describe('mcp:custom:* CRUD handlers', () => {
     },
   );
 
-  it.each(['codex', 'claude-code'] as const)(
-    'marks custom HTTP MCPs unavailable for remote %s settings catalogs',
-    async (agentKind) => {
-      mountDb();
-      raw!.prepare(`INSERT INTO custom_mcp_servers
-        (id, name, transport, url, headers, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)`)
-        .run(validConfig.id, validConfig.name, validConfig.transport, validConfig.url, '{}');
-      const providers: McpProvider[] = [{ name: 'cindy_helper' }];
-      registerCustomMcpArrays(providers);
-      await refreshCustomMcpProviders();
-      const deps = makeDeps({
-        listMcpServers: vi.fn(async (context) => buildBotMcpCatalog({
-          ...context, providers: [...providers, { name: validConfig.id }],
-          builtinNames: getBuiltinMcpServerNames(),
-          customServers: await listCustomMcpRuntimeGenerations(),
-        })),
-      });
-      const harness = new IpcHarness();
-      registerMcpHandlers(harness, deps);
-      const result = await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
-        agentKind, remoteHostId: 'ssh-host',
-      });
-      expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind, remoteHostId: 'ssh-host' });
-      expect(result).toEqual({
-        agentKind,
-        servers: [expect.objectContaining({ id: validConfig.id, available: false })],
-      });
-    },
-  );
-
   it('uses the canonical next-turn route instead of the renderer hint', async () => {
     mountDb();
     const harness = new IpcHarness();
     const chain = [{ harness: 'claude' as const, model: 'claude-x', providerId: null, effort: '', fastMode: false }];
-    const deps = makeDeps({ resolveBotAgentKind: vi.fn(async () => 'codex' as const) });
+    const deps = makeDeps({ resolveBotContext: vi.fn(async () => ({ agentKind: 'codex' as const })) });
     registerMcpHandlers(harness, deps);
     expect(await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
       agentKind: 'claude-code', botSessionId: 'canonical', modelChain: chain,
     })).toEqual({ agentKind: 'codex', servers: [] });
-    expect(deps.resolveBotAgentKind).toHaveBeenCalledWith('canonical', chain);
+    expect(deps.resolveBotContext).toHaveBeenCalledWith('canonical', chain);
     expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind: 'codex' });
     expect(deps.refreshProviders).not.toHaveBeenCalled();
   });
@@ -174,12 +144,34 @@ describe('mcp:custom:* CRUD handlers', () => {
   it('does not fall back to a renderer hint for a missing canonical task', async () => {
     mountDb();
     const harness = new IpcHarness();
-    const deps = makeDeps({ resolveBotAgentKind: vi.fn(async () => null) });
+    const deps = makeDeps({ resolveBotContext: vi.fn(async () => null) });
     registerMcpHandlers(harness, deps);
     await expect(harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
       agentKind: 'claude-code', botSessionId: 'other-task',
     })).rejects.toThrow(/NOT_FOUND/);
     expect(deps.listMcpServers).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude-code', 'codex', 'pi'] as const)('evaluates the trusted SSH target for %s capability settings', async (agentKind) => {
+    mountDb();
+    await createCustomMcpServer(validConfig);
+    const providers: McpProvider[] = [];
+    registerCustomMcpArrays(providers);
+    await refreshCustomMcpProviders();
+    const deps = makeDeps({
+      resolveBotContext: vi.fn(async () => ({ agentKind, remoteHostId: 'ssh-host' })),
+      listMcpServers: vi.fn(async (context) => buildBotMcpCatalog({
+        ...context, providers, builtinNames: getBuiltinMcpServerNames(),
+        customServers: await listCustomMcpRuntimeGenerations(),
+      })),
+    });
+    const harness = new IpcHarness();
+    registerMcpHandlers(harness, deps);
+    const result = await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
+      agentKind: 'claude-code', botSessionId: 'canonical',
+    });
+    expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind, remoteHostId: 'ssh-host' });
+    expect(result).toEqual({ agentKind, servers: [expect.objectContaining({ id: 'mytools', available: agentKind !== 'codex' })] });
   });
 
   it.each([null, {}, { agentKind: 'unknown' },

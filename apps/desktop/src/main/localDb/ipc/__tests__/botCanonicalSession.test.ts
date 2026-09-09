@@ -424,11 +424,10 @@ async function invoke(channel: string, body: unknown): Promise<any> {
 const capabilityDeps = {
   getMaker, getPluginRegistry, isBotToolsetAvailable,
   resolveBotAgentKind: async (): Promise<AgentKind | null> => 'pi',
-  listMcpServers: async ({ agentKind, remoteHostId }: { agentKind: AgentKind; remoteHostId?: string }) =>
-    buildBotMcpCatalog({
-      agentKind, remoteHostId, providers: h.mcpProviders, builtinNames: getBuiltinMcpServerNames(),
-      customServers: h.customMcpConfigs.map((config) => ({ ...config, updatedAt: 1 })),
-    }),
+  listMcpServers: async ({ agentKind, remoteHostId }: { agentKind: AgentKind; remoteHostId?: string }) => buildBotMcpCatalog({
+    agentKind, remoteHostId, providers: h.mcpProviders, builtinNames: getBuiltinMcpServerNames(),
+    customServers: h.customMcpConfigs.map((config) => ({ ...config, updatedAt: 1 })),
+  }),
 };
 const { list: findBotCapabilities, select: selectBotCapability } = createBotCapabilityService(capabilityDeps);
 
@@ -1998,93 +1997,39 @@ describe('Bot canonical Session lifecycle', () => {
     }
   });
 
-  it.each(['codex', 'claude-code'] as const)(
-    'marks custom HTTP MCPs unavailable for remote %s without inventing a forwarder',
-    async (agentKind) => {
-      const configs = [
-        { id: 'https', transport: 'http' as const, url: 'https://example.invalid/mcp' },
-      ].map((config) => ({ ...config, name: config.id, headers: { Authorization: 'FAKE_SECRET' }, updatedAt: 1 }));
-      const providers = [
-        { name: 'cindy_helper', toClaudeSdkConfig: () => ({ type: 'sdk' }) },
-        ...configs.map((config) => new CustomMcpProvider(config, () => 'FAKE_TOKEN')),
-      ];
-      await invoke('local-db:bots:update', {
-        id: 'bot-1', capabilities: { mcpServers: ['https'], mcpMode: 'allowlist' },
-      });
-      const created = await invoke('local-db:bots:create-canonical-session', {
-        botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
-      });
-      h.sqlite!.prepare('UPDATE sessions SET remote_host_id = ? WHERE id = ?').run('ssh-host', created.session.id);
-      const opts: MakerSessionCreateOpts = {
-        id: created.session.id, agentKind, workingDir: created.session.workingDir,
-        workspaceKind: 'dialogue', model: 'test-model', permissionMode: 'auto',
-        remoteHostId: 'ssh-host',
-      };
-      const snapshot = await hydrateBotProfileRuntime(opts, {
-        listMcpServers: async (input) => buildBotMcpCatalog({
-          agentKind: input.agentKind, remoteHostId: input.remoteHostId, providers,
-          builtinNames: ['cindy_helper'], customServers: configs,
-        }),
-      });
-      expect(snapshot).toMatchObject({
-        configuredMcpServers: ['https'],
-        resolvedMcpServers: [],
-        unavailableMcpServers: ['https'],
-      });
-      expect(opts.botRuntimeProfile?.mcpPolicy.catalog).toContainEqual(expect.objectContaining({
-        name: 'https', source: 'custom', available: false,
-      }));
-      expect(opts.botRuntimeProfile?.mcpPolicy.catalog).toContainEqual(expect.objectContaining({
-        name: 'cindy_helper', source: 'builtin', available: true,
-      }));
-      const list = createBotCapabilityService({
-        ...capabilityDeps,
-        resolveBotAgentKind: async () => agentKind,
-        listMcpServers: async (input) => buildBotMcpCatalog({
-          agentKind: input.agentKind, remoteHostId: input.remoteHostId, providers,
-          builtinNames: ['cindy_helper'], customServers: configs,
-        }),
-      }).list;
-      const discovered = await list({ callerSessionId: created.session.id, kind: 'mcp' });
-      expect(discovered).toMatchObject({
-        ok: true,
-        capabilities: expect.arrayContaining([
-          expect.objectContaining({ id: 'https', available: false, joined: true }),
-        ]),
-      });
-      expect(JSON.stringify(discovered)).not.toMatch(/FAKE_SECRET|FAKE_TOKEN|example.invalid|Authorization/);
-      await expect(selectBotCapability({
-        callerSessionId: created.session.id, kind: 'mcp', id: 'https', joined: false,
-      })).resolves.toMatchObject({ ok: true, joined: false });
-    },
-  );
-
-  it('keeps remote Pi custom HTTP MCPs on the existing URL gate', async () => {
-    const configs = [
-      { id: 'https', transport: 'http' as const, url: 'https://example.invalid/mcp' },
-      { id: 'sse', transport: 'sse' as const, url: 'https://example.invalid/sse' },
-    ].map((config) => ({ ...config, name: config.id, headers: {}, updatedAt: 1 }));
-    const providers = configs.map((config) => new CustomMcpProvider(config, () => 'FAKE_TOKEN'));
+  it('rejects unforwarded custom MCPs on SSH Codex while preserving saved references and supported routes', async () => {
     await invoke('local-db:bots:update', {
-      id: 'bot-1', capabilities: { mcpServers: configs.map((config) => config.id), mcpMode: 'allowlist' },
+      id: 'bot-1', capabilities: { mcpServers: ['shared-docs'], mcpMode: 'allowlist' },
     });
     const created = await invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
     });
-    const snapshot = await hydrateBotProfileRuntime({
-      id: created.session.id, agentKind: 'pi', workingDir: created.session.workingDir,
-      workspaceKind: 'dialogue', model: 'test-model', permissionMode: 'auto',
-      remoteHostId: 'ssh-host',
-    }, {
-      listMcpServers: async (input) => buildBotMcpCatalog({
-        agentKind: input.agentKind, remoteHostId: input.remoteHostId, providers,
-        builtinNames: [], customServers: configs,
-      }),
-    });
-    expect(snapshot).toMatchObject({
-      resolvedMcpServers: ['https'],
-      unavailableMcpServers: ['sse'],
-    });
+    h.sqlite!.prepare('UPDATE sessions SET remote_host_id = ? WHERE id = ?').run('ssh-host', created.session.id);
+    const input = { callerSessionId: created.session.id, kind: 'mcp' as const, id: 'shared-docs' };
+    for (const agentKind of ['codex', 'claude-code', 'pi'] as const) {
+      const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind: async () => agentKind });
+      await expect(service.list(input)).resolves.toMatchObject({
+        capabilities: [expect.objectContaining({ id: 'shared-docs', joined: true, available: agentKind !== 'codex' })],
+      });
+      const opts: MakerSessionCreateOpts = {
+        id: created.session.id, agentKind, workingDir: '/srv/bot', remoteHostId: 'ssh-host',
+        workspaceKind: 'project', model: 'test-model', permissionMode: 'auto',
+      };
+      const snapshot = await hydrateBotProfileRuntime(opts, { listMcpServers: capabilityDeps.listMcpServers });
+      expect(snapshot).toMatchObject({
+        configuredMcpServers: ['shared-docs'],
+        resolvedMcpServers: agentKind === 'codex' ? [] : ['shared-docs'],
+        unavailableMcpServers: agentKind === 'codex' ? ['shared-docs'] : [],
+      });
+    }
+    const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind: async () => 'codex' });
+    h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
+    await expect(service.select({ ...input, joined: false })).resolves.toMatchObject({ ok: true, joined: false });
+    await expect(service.select({ ...input, joined: true })).resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] } }))
+      .rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    h.sqlite!.prepare('UPDATE sessions SET remote_host_id = NULL WHERE id = ?').run(created.session.id);
+    await expect(service.select({ ...input, joined: true })).resolves.toMatchObject({ ok: true, joined: true });
   });
 
   it.each(['contacts', 'lsp'])('rejects gated %s despite registry enablement and keeps joined references removable', async (id) => {
@@ -2148,9 +2093,13 @@ describe('Bot canonical Session lifecycle', () => {
     const apply = vi.fn();
     const reconcile = createBotModelRouteReconciler({
       ownerEpoch: () => h.ownerScopeKey,
-      read: async () => profileStatus() === 'active' ? { chain, current, hasRuntimeOverride: false } : null,
-      readPreview: async () => ['active', 'paused'].includes(profileStatus())
-        ? { chain, current, hasRuntimeOverride: false } : null,
+      read: async (_id, purpose) => {
+        const status = profileStatus();
+        if (purpose === 'preview') {
+          return ['active', 'paused'].includes(status) ? { chain, current, hasRuntimeOverride: false } : null;
+        }
+        return status === 'active' ? { chain, current, hasRuntimeOverride: false } : null;
+      },
       apply,
     });
     const service = createBotCapabilityService({

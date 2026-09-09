@@ -20,6 +20,7 @@ describe('per-controller deferred history', () => {
     const other = subscriptions.prepareHistoryView('b', 's')!;
     old.setExpanded(['w']);
     expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+    expect(subscriptions.hasHistoryView('a', 's', true)).toBe(true);
     expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(false);
     old.update(['w']);
     old.setExpanded(['w']);
@@ -32,6 +33,7 @@ describe('per-controller deferred history', () => {
     old.update(['w']);
     old.setExpanded(['w']);
     expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+    expect(subscriptions.hasHistoryView('a', 's', true)).toBe(false);
     const current = subscriptions.prepareHistoryView('a', 's')!;
     current.update(['new']);
     old.update(['old']);
@@ -93,6 +95,7 @@ it('restores raw pushes only for the disabled view and rejects its late reads/in
   old.update(['work']);
   old.setExpanded(['work']);
   expect(subscriptions.hasHistoryView('a', 's')).toBe(false);
+  expect(subscriptions.hasHistoryView('a', 's', true)).toBe(false);
   expect(subscriptions.projectsHistoryDetails('a', 's')).toBe(false);
   expect(subscriptions.projectsHistoryDetails('b', 's')).toBe(true);
   subscriptions.prepareHistoryView('a', 's')!.update(['new']);

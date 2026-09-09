@@ -1697,7 +1697,9 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
   }
   for (const dst of liveTargets) {
     let targetPayload = payloadFor(dst);
-    if (deferred && historySessionId && subscriptions.hasHistoryView(dst, historySessionId)) {
+    // A pending read also needs notices: its sampled rows can precede this push.
+    // Filtering still requires ready in projectsHistoryDetails, so raw survives.
+    if (deferred && historySessionId && subscriptions.hasHistoryView(dst, historySessionId, true)) {
       const folded = subscriptions.projectsHistoryDetails(dst, historySessionId);
       const event = (remotePayload as { event?: { type?: string; data?: { stage?: string } } })?.event;
       // A folded duration ticks locally. Token deltas do not change its summary.

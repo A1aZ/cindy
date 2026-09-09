@@ -46,6 +46,7 @@ import { __testing, runInvoke, wireInboundDispatch } from '../dispatch';
 import { __testing as registry } from '../invoke-registry';
 import { setRemoteBotSessionLookup } from '../remoteBotSessionBoundary';
 import { getDeviceLinkInvokeContext } from '../invoke-context';
+import { HistoryViewController, type HistoryViewPage, type HistoryMessageSource } from '@cindy/maker-shared/message-window';
 import * as subscriptions from '../subscriptions';
 
 /** 最小 mock client:只实现被测路径用到的两个发送方法。 */
@@ -194,6 +195,48 @@ describe('history detail interest', () => {
     client.sendPush.mockClear();
     __testing.forwardPush('maker:event', payload);
     expect(client.sendPush.mock.calls.some(([peer]) => peer === 'changed')).toBe(false);
+  });
+  it.each([false, true])('invalidates a sampled pending view even when notice precedes its result: %s', async (finishBeforeNotice) => {
+    vi.useFakeTimers();
+    const page: HistoryViewPage<HistoryMessageSource> = { version: 1, items: [], hasMore: false, nextCursor: null };
+    let finish!: (value: typeof page) => void;
+    const read = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValue(page);
+    const view = new HistoryViewController<HistoryMessageSource>({ page: read,
+      details: async () => ({ version: 1, messages: [], hasMore: false, nextCursor: null }),
+      expanded: async () => undefined });
+    try {
+      const client = mkClient();
+      client.sendPush.mockImplementation((peer, channel) => {
+        if (peer === 'pending' && channel === 'maker:history-view-changed') view.invalidate();
+      });
+      __testing.setActiveClient(client as never);
+      for (const peer of ['pending', 'legacy']) subscriptions.subscribe(peer, ['session:s1']);
+      const captured = subscriptions.prepareHistoryView('pending', 's1')!;
+      const request = view.refresh();
+      const payload = { sessionId: 's1', event: { type: 'thinking', data: { stage: 'delta', blockId: 'b', text: 'new' } } };
+      for (let n = 0; n < 10; n++) __testing.forwardPush('maker:event', payload);
+      expect(client.sendPush.mock.calls.filter(([peer, channel]) => peer === 'pending' && channel === 'maker:event')).toHaveLength(10);
+      if (!finishBeforeNotice) {
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(read).toHaveBeenCalledTimes(1);
+      }
+      captured.update(['work']);
+      finish(page);
+      await request;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(client.sendPush.mock.calls.filter(([, channel]) => channel === 'maker:history-view-changed'))
+        .toEqual([['pending', 'maker:history-view-changed', { sessionId: 's1' }]]);
+      client.sendPush.mockClear();
+      __testing.forwardPush('maker:event', payload);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(client.sendPush.mock.calls).toEqual([['legacy', 'maker:event', payload]]);
+    } finally {
+      view.setActive(false);
+      __testing.reset();
+      vi.useRealTimers();
+    }
   });
   it.each(['first', 'second'])('sends full thinking to peers with %s streaming group expanded and coalesces folded summaries', async (expandedKey) => {
     vi.useFakeTimers();

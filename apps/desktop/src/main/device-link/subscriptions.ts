@@ -80,8 +80,9 @@ export function clearHistoryViews(deviceId: string): void {
   historyViewsByController.delete(deviceId);
 }
 
-export function hasHistoryView(deviceId: string, sessionId: string): boolean {
-  return historyViewsByController.get(deviceId)?.get(sessionId)?.ready === true;
+export function hasHistoryView(deviceId: string, sessionId: string, includePending = false): boolean {
+  const view = historyViewsByController.get(deviceId)?.get(sessionId);
+  return !!view && (includePending || view.ready);
 }
 
 export function projectsHistoryDetails(deviceId: string, sessionId: string): boolean {

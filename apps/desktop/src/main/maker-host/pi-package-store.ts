@@ -2234,10 +2234,6 @@ async function inspectAllPackagesUncached(
     // process. Yield between packages so a long roster cannot monopolize it.
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  if (inspected.some((pkg) => pkg.view.warning === 'inspection-failed'
-    || pkg.view.warning === 'inspection-limit' || Boolean(pkg.snapshotUnavailable))) {
-    options.startupTiming?.degradedStages.add('package-inspection');
-  }
   recordPiPackageStartupDuration(options.startupTiming, 'package-inspection', inspectionStartedAt);
   return inspected;
 }
@@ -2250,7 +2246,12 @@ function invalidateInspectionCache(): void {
 
 async function inspectAllPackages(startupTiming?: PiPackageStartupTiming): Promise<InspectedPackage[]> {
   if (inspectionCache && inspectionCache.expiresAt > Date.now()) return inspectionCache.value;
-  if (inspectionPromise) return inspectionPromise;
+  if (inspectionPromise) {
+    // Reusing in-flight work still blocks this startup. Attribute only its wait
+    // to inspection; completed-cache hits above remain skipped.
+    const pending = inspectionPromise;
+    return measurePiPackageStartupStage(startupTiming, 'package-inspection', () => pending);
+  }
   const generation = inspectionGeneration;
   const pending = inspectAllPackagesUncached({ startupTiming }).then((value) => {
     if (generation === inspectionGeneration) {
@@ -2520,6 +2521,10 @@ export async function resolveManagedPiPackageResources(
           || pkg.view.warning === 'inspection-limit'
           || Boolean(pkg.snapshotUnavailable)
         )).length;
+        if (startupTiming.skippedPackageCount > 0
+          && startupTiming.durationsMs['package-inspection'] !== undefined) {
+          startupTiming.degradedStages.add('package-inspection');
+        }
       }
       if (!snapshotRoot) {
         // Native Pi owns loading. Cache only advisory inspection limits here;

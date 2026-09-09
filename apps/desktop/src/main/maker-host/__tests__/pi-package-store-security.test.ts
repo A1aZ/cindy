@@ -705,6 +705,58 @@ describe('Pi package executable-code boundary', () => {
     expect(runtime.spawns.filter(({ args }) => args.includes('list'))).toHaveLength(1);
   });
 
+  it('records in-flight inspection wait separately for each startup and skips completed-cache hits', async () => {
+    const { root } = await createSkillOnlyPackage('npm:waiting-startup');
+    const manifest = path.join(await fs.realpath(root), 'package.json');
+    const store = await import('../pi-package-store.js');
+    const open = fs.open.bind(fs);
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (!entered && path.resolve(String(args[0])) === manifest) {
+        entered = true;
+        await gate;
+      }
+      return open(...args);
+    });
+    const first = store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' });
+    let second: ReturnType<typeof store.resolveManagedPiPackageResources> | undefined;
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      const now = Date.now();
+      clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      second = store.resolveManagedPiPackageResources({ startupTraceId: 'fedcba9876543210' });
+      clock.mockReturnValue(now + 125);
+      release();
+      const results = await Promise.all([first, second]);
+      expect(results[1]).toEqual(results[0]);
+      expect(results[1].skills).toHaveLength(1);
+      const eventsFor = (trace: string) => loggerRuntime.info.mock.calls
+        .filter(([message, fields]) => message === 'pi startup stage' && fields.startupTraceId === trace)
+        .map(([, fields]) => fields as Record<string, unknown>);
+      const waitingEvents = eventsFor('fedcba9876543210');
+      expect(waitingEvents).toHaveLength(5);
+      expect(waitingEvents.find((event) => event.stage === 'package-inspection')).toMatchObject({
+        status: 'ok', durationMs: 125,
+      });
+      for (const event of waitingEvents.filter((event) => event.stage !== 'package-inspection')) {
+        expect(event).toMatchObject({ status: 'skipped', durationMs: 0 });
+      }
+      await store.resolveManagedPiPackageResources({ startupTraceId: '1111111111111111' });
+      for (const event of eventsFor('1111111111111111')) {
+        expect(event).toMatchObject({ status: 'skipped', durationMs: 0 });
+      }
+      expect(runtime.spawns.filter(({ args }) => args.includes('list'))).toHaveLength(1);
+    } finally {
+      release();
+      await Promise.allSettled([first, ...(second ? [second] : [])]);
+      clock?.mockRestore();
+      openSpy.mockRestore();
+    }
+  });
+
   it.each([null, [null], [{ warning: 'bad-cache' }]])(
     'keeps native loading and disable preferences when advisory cache is malformed: %j',
     async (snapshotUnavailablePackages) => {

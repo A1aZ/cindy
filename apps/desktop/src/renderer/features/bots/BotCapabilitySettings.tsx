@@ -94,6 +94,7 @@ export function BotCapabilitySettings({
         if (!agentKind) throw new Error('Missing next-turn route');
         const results = await Promise.allSettled([
           api.listAgentSkills(agentKind, {
+            forceReload: true,
             workingDir: session.workingDir ?? undefined,
             remoteHostId: session.remoteHostId ?? undefined,
           }),

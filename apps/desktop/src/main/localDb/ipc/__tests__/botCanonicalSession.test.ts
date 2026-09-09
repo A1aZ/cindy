@@ -174,6 +174,7 @@ vi.mock('../../../appSessionState.js', async (importOriginal) => {
 import {
   createBotCanonicalSession,
   registerBotIpc,
+  updateBotProfile as updateStoredBotProfile,
   getBotRemoteResourceSource,
   listBotRemoteResourceSources,
 } from '../bots';
@@ -1781,7 +1782,7 @@ describe('Bot canonical Session lifecycle', () => {
       available = false;
       await expect(service.select({ callerSessionId: created.session.id, kind, id, joined: true }))
         .resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
-      await expect(invoke('local-db:bots:update', { id: 'bot-1', name: 'Unsaved name', ...patch([id]) }))
+      await expect(invoke('local-db:bots:update', { id: 'bot-1', name: 'Unsaved name', ...patch([id]), capabilityBaseline: { [field]: [] } }))
         .rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
       expect(h.sqlite!.prepare('SELECT current_version, display_name FROM bot_profiles WHERE id = ?').get('bot-1'))
         .toEqual({ current_version: 1, display_name: 'Release Bot' });
@@ -1796,6 +1797,46 @@ describe('Bot canonical Session lifecycle', () => {
       expect(resolveBotAgentKind).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['skills', 'mcpServers', 'toolsets'] as const)('merges stale settings %s without losing concurrent joins or restoring external removals', async (field) => {
+    const patch = (ids: string[]) => field === 'skills' ? { skills: ids } : { capabilities: { [field]: ids } };
+    const selected = (profile: { skills: string[]; capabilities: { mcpServers: string[]; toolsets: string[] } }): string[] =>
+      field === 'skills' ? profile.skills : profile.capabilities[field];
+    // Model-side writes use the same mutation with their captured version. The
+    // renderer has not received this new snapshot when its request reaches Main.
+    await updateStoredBotProfile({ id: 'bot-1', ...patch(['external']) }, 1);
+    const saved = await invoke('local-db:bots:update', {
+      id: 'bot-1', ...patch(['local']), capabilityBaseline: { [field]: [] },
+    });
+    expect(selected(saved)).toEqual(['external', 'local']);
+    expect(h.validateCapabilityAdditions).toHaveBeenLastCalledWith(expect.objectContaining({
+      next: expect.objectContaining({ [field]: ['external', 'local'] }),
+    }));
+    expect(saved).not.toHaveProperty('capabilityBaseline');
+    // A trailing save can run before the merged response is rendered. Its local
+    // baseline still lacks external; removing local must leave external alone.
+    const trailing = await invoke('local-db:bots:update', {
+      id: 'bot-1', ...patch([]), capabilityBaseline: { [field]: ['local'] },
+    });
+    expect(selected(trailing)).toEqual(['external']);
+    await updateStoredBotProfile({ id: 'bot-1', ...patch([]) }, trailing.currentVersion);
+    const afterRemoval = await invoke('local-db:bots:update', {
+      id: 'bot-1', ...patch(['external', 'new-local']), capabilityBaseline: { [field]: ['external'] },
+    });
+    expect(selected(afterRemoval)).toEqual(['new-local']);
+    // Repeating the same local delta is idempotent.
+    const repeated = await invoke('local-db:bots:update', {
+      id: 'bot-1', ...patch(['external', 'new-local']), capabilityBaseline: { [field]: ['external'] },
+    });
+    expect(selected(repeated)).toEqual(['new-local']);
+    expect(repeated.currentVersion).toBe(afterRemoval.currentVersion);
+  });
+
+  it.each([null, [], { skills: [42] }, { toolsets: [] }])('rejects malformed or unmatched capability baselines: %j', async (capabilityBaseline) => {
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', skills: ['new'], capabilityBaseline }))
+      .rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(h.sqlite!.prepare('SELECT current_version FROM bot_profiles WHERE id = ?').pluck().get('bot-1')).toBe(1);
+  });
 
   it('validates a settings grant against the model chain saved in the same update', async () => {
     h.customMcpConfigs.push({ id: 'events', name: 'Events', transport: 'sse', url: 'https://example.invalid/sse', headers: {} });
@@ -1831,7 +1872,7 @@ describe('Bot canonical Session lifecycle', () => {
       },
     });
     h.validateCapabilityAdditions.mockImplementation(service.validateAdditions);
-    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] } })).rejects.toBeTruthy();
+    await expect(invoke('local-db:bots:update', { id: 'bot-1', capabilities: { mcpServers: ['shared-docs'] }, capabilityBaseline: { mcpServers: [] } })).rejects.toBeTruthy();
     expect(h.sqlite!.prepare('SELECT COUNT(*) FROM bot_profile_versions WHERE bot_id = ?').pluck().get('bot-1')).toBe(1);
   });
 

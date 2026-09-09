@@ -265,7 +265,7 @@ describe('piEnvironment per-session identity', () => {
     config!.disposeSessionCtx!();
   });
 
-  it('gives a Bot only its frozen built-ins plus configured custom MCPs', async () => {
+  it.each([true, false])('keeps the plugin gateway with frozen Bot tools when memory is %s', async (memoryEnabled) => {
     const config = await getPiExtraSpawnConfig([
       makeProvider('cindy'),
       makeProvider('cindy_memory'),
@@ -277,7 +277,7 @@ describe('piEnvironment per-session identity', () => {
       sessionId: 'pi-bot-minimal-tools',
       workingDir: '/repo',
       memoryScopeKey: 'bot:bot-minimal-tools',
-      memoryEnabled: true,
+      memoryEnabled,
       vendorOptions: {
         [CODEX_ALLOWED_BUILTIN_PLUGIN_IDS_KEY]: ['memory', 'xdt_helper'],
       },
@@ -293,10 +293,29 @@ describe('piEnvironment per-session identity', () => {
     expect(config?.mcpBridge?.servers.map((server) => server.name).sort()).toEqual([
       'cindy',
       'cindy_helper',
-      'cindy_memory',
+      ...(memoryEnabled ? ['cindy_memory'] : []),
       'custom_probe',
     ]);
     expect(config?.mcpBridge?.botMemoryFacade).toBe(true);
+    const gateway = config!.mcpBridge!.servers.find((server) => server.name === 'cindy')!;
+    const headers = {
+      authorization: `Bearer ${config!.mcpBridge!.token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initialized = await fetch(gateway.url, { method: 'POST', headers, body: INIT_BODY(1) });
+    expect(initialized.status).toBe(200);
+    const mcpSessionId = initialized.headers.get('mcp-session-id')!;
+    await initialized.text();
+    const called = await fetch(gateway.url, {
+      method: 'POST', headers: { ...headers, 'mcp-session-id': mcpSessionId },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call',
+        params: { name: 'current_session', arguments: {} } }),
+    });
+    expect(called.status).toBe(200);
+    expect(await readRpcText(called)).toMatchObject({
+      result: { content: [{ type: 'text', text: 'pi-bot-minimal-tools' }] },
+    });
     config?.disposeSessionCtx?.();
   });
 

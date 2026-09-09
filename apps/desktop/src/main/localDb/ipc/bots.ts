@@ -1167,6 +1167,7 @@ export async function updateBotProfile(raw: unknown, expectedVersion?: number,
         : undefined,
     skills: body.skills,
     hasSkills: Object.prototype.hasOwnProperty.call(body, 'skills'),
+    capabilityBaseline: body.capabilityBaseline,
   });
   // Keep preparation checkpoints outside caller-editable capabilities.
   if (previous.invitation) nextConfig.invitation = previous.invitation;

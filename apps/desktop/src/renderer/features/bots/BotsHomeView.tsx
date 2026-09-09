@@ -110,7 +110,7 @@ export function BotSettings({
     async (payload: BotSettingsPayload) => {
       savingProfileRef.current = true;
       try {
-        await updateBotProfile(bot.id, botSettingsChanges(savedSettingsRef.current, payload));
+        await updateBotProfile(bot.id, botSettingsChanges(savedSettingsRef.current, payload, true));
         savedSettingsRef.current = payload;
       } finally {
         savingProfileRef.current = false;

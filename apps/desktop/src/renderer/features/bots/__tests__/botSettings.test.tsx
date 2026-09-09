@@ -566,9 +566,9 @@ describe('same-Bot capability updates while editing settings', () => {
     });
   }
   const cases = [
-    { name: 'release-check', selected: { skills: ['release-check'], capabilities: capabilities({ skillMode: 'allowlist' }) }, empty: { skills: [], capabilities: capabilities({ skillMode: 'allowlist' }) }, patch: { skills: [] }, addPatch: { skills: ['release-check'] } },
-    { name: 'Shared Docs', selected: { capabilities: capabilities({ mcpMode: 'allowlist', mcpServers: ['shared-docs'] }) }, empty: { capabilities: capabilities({ mcpMode: 'allowlist' }) }, patch: { capabilities: { mcpServers: [] } }, addPatch: { capabilities: { mcpServers: ['shared-docs'] } } },
-    { name: 'Documents', selected: { capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) }, empty: { capabilities: capabilities({ toolsetMode: 'allowlist' }) }, patch: { capabilities: { toolsets: [] } }, addPatch: { capabilities: { toolsets: ['docs'] } } },
+    { name: 'release-check', selected: { skills: ['release-check'], capabilities: capabilities({ skillMode: 'allowlist' }) }, empty: { skills: [], capabilities: capabilities({ skillMode: 'allowlist' }) }, patch: { skills: [], capabilityBaseline: { skills: ['release-check'] } }, addPatch: { skills: ['release-check'], capabilityBaseline: { skills: [] } } },
+    { name: 'Shared Docs', selected: { capabilities: capabilities({ mcpMode: 'allowlist', mcpServers: ['shared-docs'] }) }, empty: { capabilities: capabilities({ mcpMode: 'allowlist' }) }, patch: { capabilities: { mcpServers: [] }, capabilityBaseline: { mcpServers: ['shared-docs'] } }, addPatch: { capabilities: { mcpServers: ['shared-docs'] }, capabilityBaseline: { mcpServers: [] } } },
+    { name: 'Documents', selected: { capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['docs'] }) }, empty: { capabilities: capabilities({ toolsetMode: 'allowlist' }) }, patch: { capabilities: { toolsets: [] }, capabilityBaseline: { toolsets: ['docs'] } }, addPatch: { capabilities: { toolsets: ['docs'] }, capabilityBaseline: { toolsets: [] } } },
   ];
 
   function sseCatalog(agentKind: 'claude-code' | 'codex'): CustomMcpListResult {
@@ -681,12 +681,36 @@ describe('same-Bot capability updates while editing settings', () => {
     expect(checkbox.disabled).toBe(false);
     expect(mocks.updateBotProfile).not.toHaveBeenCalled();
     fireEvent.click(checkbox);
-    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] } }));
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] }, capabilityBaseline: { mcpServers: ['events'] } }));
     if (change === 'unavailable') expect(checkbox.disabled).toBe(true);
     else expect(screen.queryByRole('checkbox', { name: /events/ })).toBeNull();
     const details = screen.getByText('bots.capabilities.title').parentElement as HTMLDetailsElement;
     await act(async () => { details.open = false; fireEvent(details, new Event('toggle')); });
     expect(off).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, 'ssh-host'])('reloads installed and deleted Codex Skills on reopen for target %s', async (remoteHostId) => {
+    let disk = ['old-skill'];
+    let cached = [...disk];
+    mocks.getSession.mockResolvedValue({ agentKind: 'codex', workingDir: '/bot/workspace', remoteHostId });
+    mocks.listCustomMcpServers.mockResolvedValue({ agentKind: 'codex', servers: [] });
+    mocks.listAgentSkills.mockImplementation(async (_kind, options) => {
+      if (options?.forceReload) cached = [...disk];
+      return { success: true, skills: cached.map((name) => ({ name })) };
+    });
+    renderSettings();
+    await openCapabilities();
+    expect(screen.getByRole('checkbox', { name: 'old-skill' })).toBeTruthy();
+    const details = screen.getByText('bots.capabilities.title').parentElement as HTMLDetailsElement;
+    await act(async () => { details.open = false; fireEvent(details, new Event('toggle')); });
+    disk = ['new-skill'];
+    await openCapabilities();
+    expect(screen.queryByRole('checkbox', { name: 'old-skill' })).toBeNull();
+    expect(screen.getByRole('checkbox', { name: 'new-skill' })).toBeTruthy();
+    expect(mocks.listAgentSkills).toHaveBeenLastCalledWith('codex', {
+      forceReload: true, workingDir: '/bot/workspace', remoteHostId,
+    });
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
   });
 
   it('invalidates selectable MCPs immediately and ignores an outdated refresh after another change', async () => {
@@ -759,7 +783,7 @@ describe('same-Bot capability updates while editing settings', () => {
     expect(unavailable.checked).toBe(true);
     fireEvent.click(unavailable);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] } });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { mcpServers: [] }, capabilityBaseline: { mcpServers: ['bad-headers'] } });
     expect(unavailable.disabled).toBe(true);
   });
 
@@ -798,7 +822,7 @@ describe('same-Bot capability updates while editing settings', () => {
     expect((screen.getByRole('checkbox', { name: 'Documents' }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('checkbox', { name: 'Scheduler' }) as HTMLInputElement).checked).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { name: 'Local name', capabilities: { toolsets: ['docs', 'scheduler'] } });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { name: 'Local name', capabilities: { toolsets: ['docs', 'scheduler'] }, capabilityBaseline: { toolsets: ['docs'] } });
   });
 
   it('keeps edits made during a successful save and adopts concurrent capability updates', async () => {
@@ -842,6 +866,6 @@ describe('same-Bot capability updates while editing settings', () => {
     view.rerender(<BotSettings bot={bot({ currentVersion: 2, capabilities: capabilities({ toolsetMode: 'allowlist', toolsets: ['contacts'] }) })} onBack={view.onBack} onOpenSession={view.onOpenSession} />);
     expect((screen.getByRole('checkbox', { name: /Contacts/ }) as HTMLInputElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole('checkbox', { name: /Contacts/ }));
-    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { toolsets: [] } }));
+    await waitFor(() => expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { capabilities: { toolsets: [] }, capabilityBaseline: { toolsets: ['contacts'] } }));
   });
 });

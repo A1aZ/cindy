@@ -16,6 +16,7 @@ import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 import { readCodexContextWindowInfo } from '../maker-host/codex-context-window.js';
 import { prepareCodexCustomContextCatalog } from '../maker-host/codex-custom-context-catalog.js';
 import { inferProviderIdForModel } from '../maker-host/provider-route.js';
+import { resolveConfiguredContextWindow, resolveDesktopModelContextProviderId } from '../maker-host/model-context-settings.js';
 import { getCodexHome } from '../maker-host/auth-adapters.js';
 import { getCachedBinaryStatus } from '../agent-binaries/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -420,6 +421,7 @@ import {
   restartCodexAfterAuthModeChange,
   setBeforeLocalCodexSessionStartHook,
   setBotCapabilityAgentKindResolver,
+  setModelContextRuntimeRefreshListener,
 } from '../maker-host/index.js';
 import {
   readMemorySettingsState,
@@ -481,6 +483,7 @@ import {
 import { libraryExtraDirSyncTargets } from './libraryExtraDirSyncTargets.js';
 import {
   clearSessionPersistState,
+  clearSessionThinkingSnapshots,
   consumeLastAssistantPersistId,
   consumeLastTopLevelAssistantPersistId,
   drainPersistQueue,
@@ -500,6 +503,7 @@ import {
   markAutoResumeOutcome,
   onTurnErrorEvent,
   prepareSyntheticToolEventForBroadcast,
+  redactToolInputForUntrustedBoundary,
   resetTurnPersistState,
   saveTurnStartedAtForDeferred,
 } from '../messagePersistBroadcaster.js';
@@ -890,6 +894,7 @@ import {
 } from '../maker-host/codex-credential-switch.js';
 import {
   applyRuntimeSetModelChange,
+  refreshActiveModelContextSettings,
   closeRejectedRuntimeAndRestoreControlStores,
   isRemoteModelSwitchRouteChangeError,
 } from './runtimeSetModel.js';
@@ -3362,7 +3367,7 @@ export function cancelPendingAgentSwitchForSession(sessionId: string): void {
  */
 export async function registerPendingCredentialSwitchForSession(
   sessionId: string,
-  target: { model: string; providerId: string | null },
+  target: { model: string; providerId: string | null; forceSessionRebuild?: boolean },
 ): Promise<void> {
   const service = pendingCredentialSwitchHolder;
   if (!service) {
@@ -3434,9 +3439,10 @@ export function wakeSessionInputAfterCredentialSwitch(sessionId: string): void {
 
 export function getPendingCredentialSwitchTarget(
   sessionId: string,
-): { model: string; providerId: string | null } | undefined {
+): { model: string; providerId: string | null; forceSessionRebuild?: boolean } | undefined {
   const pending = pendingCredentialSwitchHolder?.get(sessionId);
-  return pending ? { model: pending.model, providerId: pending.providerId } : undefined;
+  return pending ? { model: pending.model, providerId: pending.providerId,
+    ...(pending.forceSessionRebuild ? { forceSessionRebuild: true } : {}) } : undefined;
 }
 
 // ── Scheduler 撞忙排队桥(scheduler-host runner 消费)────────────────────────
@@ -3924,11 +3930,21 @@ export function installDesktopInteractionListener(session: {
       },
     );
     return new Promise<InteractionDecision>((resolve) => {
+      const boundaryRequest: InteractionRequest =
+        req.kind === 'permission'
+          ? {
+              ...req,
+              input: redactToolInputForUntrustedBoundary(
+                req.toolName,
+                req.input,
+              ) as Record<string, unknown>,
+            }
+          : req;
       const entry: PendingInteractionEntry = {
         sessionId: session.id,
         kind: req.kind,
         resolve,
-        request: req,
+        request: boundaryRequest,
         persistId: interactionPersistId ?? undefined,
       };
       if (req.kind === 'permission') {
@@ -3945,12 +3961,12 @@ export function installDesktopInteractionListener(session: {
       pendingInteractionResolvers.set(req.requestId, entry);
       broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
         sessionId: session.id,
-        request: req,
+        request: boundaryRequest,
         persistId: interactionPersistId,
       });
       handleAgentIslandInteractionAfterBroadcast(
         session as { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
-        req,
+        boundaryRequest,
         agentIslandInteractionEpoch,
       );
     });
@@ -4562,6 +4578,40 @@ export function registerModelVisibilitySyncIpc(): void {
 }
 
 export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions): void {
+  // Catalog updates and explicit budget edits share one serial refresh boundary.
+  let contextRefresh = Promise.resolve();
+  const refreshContextSettings = (targets?: readonly { agent: AgentKind; providerId: string; modelId: string }[]) => {
+    const owner = getActiveAppSession();
+    const next = contextRefresh.then(() => refreshActiveModelContextSettings({
+      targets, inferProviderId: (model, agent) => resolveDesktopModelContextProviderId(getActiveCatalog(), agent, null, model),
+      withSessionLock: withSendToSessionLock,
+      hasPendingSelection: (sessionId) => {
+        const pending = getPendingSessionRuntimeMutation(sessionId);
+        return !!agentSwitchPending.get(sessionId) ||
+          (!!pending && isPendingSessionRuntimeRouteExplicit(sessionId, pending.generation));
+      },
+      assertCurrent: () => {
+        if (getActiveAppSession().generation !== owner.generation) throw new Error('Account changed during context configuration');
+      },
+      runtime: {
+        maker, isSessionInTurn,
+        registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
+        clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
+        wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
+        getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
+        codexAuthInjection: getCodexProxyAuthInjectionState(), logger: log,
+      },
+    }));
+    contextRefresh = next.catch(() => {});
+    return next;
+  };
+  setModelContextRuntimeRefreshListener(() => {
+    if (!getMakerIfReady()) return;
+    void refreshContextSettings().catch((error) => log.warn('model default context refresh failed', {
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  });
+
   setSessionTextSnapshotReader(getSessionTextSnapshot);
   log.info('registering maker:* IPC handlers');
   const broadcastSessionRuntimeProjection = async (
@@ -5370,30 +5420,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
     writeModelContextLimit: async (targets, limit) => {
-      const owner = getActiveAppSession();
-      await writeModelContextLimitsWithRefresh(targets, limit, async () => {
-        for (const active of maker.listActiveSessions()) {
-          if (getActiveAppSession().generation !== owner.generation) throw new Error('Account changed during context configuration');
-          const session = maker.getSession(active.id);
-          if (!session || session.agentKind !== 'codex' || session.remoteHostId) continue;
-          const source = getSessionProvider(active.id) ?? inferProviderIdForModel(session.model, 'codex');
-          if (!targets.some((t) => t.agent === 'codex' && t.providerId === source && t.modelId === session.model)) continue;
-          // An already pending model/provider switch will rebuild with the latest settings.
-          // Never replace that user intention with a same-model settings refresh.
-          if (getPendingCredentialSwitchTarget(active.id)) continue;
-          await applyRuntimeSetModelChange({
-            maker, sessionId: active.id, model: session.model,
-            providerId: getSessionProvider(active.id), forceSessionRebuild: true,
-            isSessionInTurn,
-            registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
-            clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
-            wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
-            getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
-            codexAuthInjection: getCodexProxyAuthInjectionState(), logger: log,
-          });
-        }
-        if (getActiveAppSession().generation !== owner.generation) throw new Error('Account changed during context configuration');
-      });
+      await writeModelContextLimitsWithRefresh(targets, limit,
+        () => refreshContextSettings(targets),
+        () => refreshContextSettings());
     },
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
@@ -7908,7 +7937,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     applyAgentSwitchToDb: async (sessionId, patch) => {
       const verifiedWindow = lookupVerifiedContextWindow(
         (agentKind, modelId, pid) =>
-          resolveVerifiedContextWindow(
+          resolveConfiguredContextWindow(
             getActiveCatalog(),
             dbToMakerAgentKind(agentKind || patch.agentKind),
             pid,
@@ -11861,7 +11890,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     resolveVerifiedWindow: (agentKind, modelId, providerId) => {
       const catalog = getActiveCatalog();
       const makerAgentKind = dbToMakerAgentKind(agentKind);
-      return resolveVerifiedContextWindow(catalog, makerAgentKind, providerId, modelId);
+      return resolveConfiguredContextWindow(catalog, makerAgentKind, providerId, modelId);
     },
     listMessages: (sessionId) => listMessagesForAgentHandoff(sessionId, 400),
     findLatestUser: findLatestUserMessageForRebuild,
@@ -13459,7 +13488,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (route.model && agentKind) {
         const verifiedWindow = lookupVerifiedContextWindow(
           (resolvedAgentKind, modelId, pid) =>
-            resolveVerifiedContextWindow(
+            resolveConfiguredContextWindow(
               getActiveCatalog(),
               dbToMakerAgentKind(resolvedAgentKind || agentKind),
               pid,
@@ -15228,6 +15257,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               },
               pendingPatch: pendingAxisPatch,
             });
+        // A later accepted route supersedes an earlier context-only rebuild.
+        if (routeExplicit && getPendingCredentialSwitchTarget(sessionId)?.forceSessionRebuild) {
+          clearPendingCredentialSwitchForSession(sessionId, { wake: false });
+        }
         await broadcastSessionRuntimeProjection(sessionId).catch((error) => {
           log.debug('deferred session runtime projection broadcast failed', {
             sessionId,
@@ -15352,7 +15385,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       let modelWindowRebuilt = false;
       if (runtimeAgentKind && (runtimeRouteChanged || confirmedContextWindow !== undefined)) {
         const resolveRouteWindow = (_agentKind: string, modelId: string, pid: string | null) =>
-          resolveVerifiedContextWindow(getActiveCatalog(), runtimeAgentKind, pid, modelId);
+          resolveConfiguredContextWindow(getActiveCatalog(), runtimeAgentKind, pid, modelId);
         const verifiedTargetWindow = lookupVerifiedContextWindow(
           resolveRouteWindow,
           model,
@@ -15740,14 +15773,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               'Pi target runtime could not be verified; runtime selection was not accepted',
             );
           }
-          const finalPiWindow = piSessionAfterRouteChange.getUsageSnapshot?.().contextWindow;
-          if (typeof finalPiWindow !== 'number' || finalPiWindow <= 0) {
+          const reportedPiWindow = piSessionAfterRouteChange.getUsageSnapshot?.().contextWindow;
+          if (typeof reportedPiWindow !== 'number' || !Number.isFinite(reportedPiWindow) || reportedPiWindow <= 0) {
             await closeRejectedPiRuntime('final context window was not verified');
             throwIpcError(
               localModelWindowSwitchErrorCode('MODEL_WINDOW_TARGET_CONTEXT_UNKNOWN'),
               'Pi did not expose its verified final context window; runtime selection was not accepted',
             );
           }
+          // Pi reports the configured native budget, which may exceed the route
+          // ceiling. Final verification must not undo the history safety cap.
+          const verifiedPiWindow = resolveConfiguredContextWindow(
+            getActiveCatalog(), 'pi', targetRouteProviderId, model,
+          );
+          const finalPiWindow = verifiedPiWindow === null
+            ? reportedPiWindow : Math.min(reportedPiWindow, verifiedPiWindow);
           targetContextWindow = finalPiWindow;
           if (
             modelWindowContextNeedsProtection &&
@@ -16005,7 +16045,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               dbToMakerAgentKind(getSessionDbAgentKind(sessionId));
             const verifiedWindow = lookupVerifiedContextWindow(
               (agentKind, modelId, pid) =>
-                resolveVerifiedContextWindow(
+                resolveConfiguredContextWindow(
                   getActiveCatalog(),
                   dbToMakerAgentKind(agentKind),
                   pid,
@@ -16544,6 +16584,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         return { result, hiddenClientIds, now };
       });
+      clearSessionThinkingSnapshots(sessionId);
       resetTurnPersistState(sessionId);
 
       // 多窗口与 device-link 控制端先清旧投影，再按 DB 真相补当前活动路径。
@@ -17493,6 +17534,16 @@ function redactEventForRenderer(event: AgentEvent): AgentEvent {
   const data = event.data as Record<string, unknown>;
   const safeData = { ...data };
   let changed = false;
+  if (
+    typeof safeData.toolName === 'string' &&
+    Object.prototype.hasOwnProperty.call(safeData, 'input')
+  ) {
+    const redactedInput = redactToolInputForUntrustedBoundary(safeData.toolName, safeData.input);
+    if (redactedInput !== safeData.input) {
+      safeData.input = redactedInput;
+      changed = true;
+    }
+  }
   // Main consumes this Cindy-owned durable projection marker before the event
   // crosses renderer/device-link boundaries. Live task-card payloads therefore
   // keep their existing wire shape and older mobile clients need no upgrade.

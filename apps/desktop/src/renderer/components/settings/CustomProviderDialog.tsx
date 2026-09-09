@@ -1037,6 +1037,9 @@ export function CustomProviderDialog({
                   id: m.id,
                   name: m.name,
                   discoveredMetadata: {},
+                  ...(m.mode ? { mode: m.mode } : {}),
+                  ...(m.modalities ? { modalities: { input: [...m.modalities.input], output: [...m.modalities.output] } } : {}),
+                  ...(m.officialDocs ? { officialDocs: m.officialDocs } : {}),
                   ...(m.piApi ? { piApi: m.piApi } : {}),
                   ...(m.route ? { route: m.route } : {}),
                 }))

@@ -1126,6 +1126,9 @@ export function AddProviderWizard({
               id: m.id,
               name: m.name,
               discoveredMetadata,
+              ...(presetModel?.mode ? { mode: presetModel.mode } : {}),
+              ...(presetModel?.modalities ? { modalities: { input: [...presetModel.modalities.input], output: [...presetModel.modalities.output] } } : {}),
+              ...(presetModel?.officialDocs ? { officialDocs: presetModel.officialDocs } : {}),
               ...(agent === 'pi' && presetModel?.piApi ? { piApi: presetModel.piApi } : {}),
               ...((presetModel?.route ?? m.routes?.[agent])
                 ? { route: presetModel?.route ?? m.routes?.[agent] }

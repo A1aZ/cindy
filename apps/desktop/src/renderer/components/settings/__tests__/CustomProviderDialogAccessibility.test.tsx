@@ -1582,3 +1582,26 @@ it.each(['1,', '-5'])('saves a media type while its hidden context draft is %s',
   await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
   expect(customProviderMocks.updateCustomProvider.mock.calls[0]?.[0].runtimes.codex.models[0].mode).toBe('image_generation');
 });
+
+
+it('preserves preset media metadata through probing and saving', async () => {
+  const media = { id: 'media-first', name: 'Media', mode: 'image_generation' as const,
+    modalities: { input: ['text'], output: ['image'] }, officialDocs: 'https://example.test/docs' };
+  window.electronAPI.maker.listProviderPresets = vi.fn(async () => ({ presets: [{
+    id: 'media-preset', name: 'Media Preset', runtimes: { codex: {
+      baseUrl: 'https://example.test/v1', wireProtocol: 'openai-chat' as const,
+      models: [media, { id: 'chat-second', name: 'Chat', mode: 'chat' as const }],
+    } },
+  }] }));
+  render(<CustomProviderDialog focusAgent="codex" onSaved={vi.fn()} onClose={vi.fn()} />);
+  await waitForInitialDialogFocus();
+  fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.presets.label' }));
+  fireEvent.click(await screen.findByRole('option', { name: 'Media Preset' }));
+  fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.test.button' }));
+  await waitFor(() => expect(window.electronAPI.maker.testProviderConnection).toHaveBeenCalledWith(
+    expect.objectContaining({ kind: 'adhoc', spec: expect.objectContaining({ modelId: 'chat-second' }) }),
+  ));
+  fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+  await waitFor(() => expect(customProviderMocks.createCustomProvider).toHaveBeenCalledOnce());
+  expect(customProviderMocks.createCustomProvider.mock.calls[0][0].runtimes.codex.models[0]).toMatchObject(media);
+});

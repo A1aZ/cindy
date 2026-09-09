@@ -10626,49 +10626,54 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return { baseline, effective, control };
   };
 
+  const readBotModelRouteState = async (sessionId: string, opts?: { allowPaused?: boolean }) => {
+    const [row] = await getDbClient().drizzle.select({
+      capabilitiesJson: botProfileVersions.capabilitiesJson,
+      agentKind: sessions.agentKind,
+      model: sessions.model,
+      providerId: sessions.providerId,
+      effort: sessions.effort,
+      fastMode: sessions.fastMode,
+    }).from(botSessionLinks)
+      .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
+      .innerJoin(botProfileVersions, and(
+        eq(botProfileVersions.botId, botProfiles.id),
+        eq(botProfileVersions.version, botProfiles.currentVersion),
+      ))
+      .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
+      .where(and(
+        eq(botSessionLinks.sessionId, sessionId),
+        eq(botSessionLinks.role, 'canonical'),
+        isNull(botSessionLinks.archivedAt),
+        inArray(botProfiles.status, opts?.allowPaused ? ['active', 'paused'] : ['active']),
+        eq(sessions.source, 'bot'),
+        eq(sessions.status, 'active'),
+      )).limit(1);
+    if (!row) return null;
+    const chain = await readEffectiveBotModelChain(JSON.parse(row.capabilitiesJson));
+    const control = getSessionRuntimeControlSnapshot(sessionId);
+    const live = maker.getSession(sessionId);
+    return {
+      chain,
+      current: {
+        agentKind: live?.agentKind ?? dbToMakerAgentKind(row.agentKind),
+        model: live?.model ?? row.model ?? '',
+        providerId: live && hasSessionProvider(sessionId)
+          ? getSessionProvider(sessionId) ?? null : row.providerId,
+        effort: (live ? getSessionEffort(sessionId) : row.effort) ?? null,
+        fastMode: live ? getSessionFastMode(sessionId) : !!row.fastMode,
+      },
+      hasRuntimeOverride: control.effectiveOverride !== null || control.pending !== null,
+      next: control.pending?.profile ?? control.effectiveOverride ?? undefined,
+    };
+  };
+
   const reconcileBotModelRoute = createBotModelRouteReconciler({
     ownerEpoch: captureSessionRuntimeControlOwnerEpoch,
-    read: async (sessionId) => {
-      const [row] = await getDbClient().drizzle.select({
-        capabilitiesJson: botProfileVersions.capabilitiesJson,
-        agentKind: sessions.agentKind,
-        model: sessions.model,
-        providerId: sessions.providerId,
-        effort: sessions.effort,
-        fastMode: sessions.fastMode,
-      }).from(botSessionLinks)
-        .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
-        .innerJoin(botProfileVersions, and(
-          eq(botProfileVersions.botId, botProfiles.id),
-          eq(botProfileVersions.version, botProfiles.currentVersion),
-        ))
-        .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
-        .where(and(
-          eq(botSessionLinks.sessionId, sessionId),
-          eq(botSessionLinks.role, 'canonical'),
-          isNull(botSessionLinks.archivedAt),
-          eq(botProfiles.status, 'active'),
-          eq(sessions.source, 'bot'),
-          eq(sessions.status, 'active'),
-        )).limit(1);
-      if (!row) return null;
-      const chain = await readEffectiveBotModelChain(JSON.parse(row.capabilitiesJson));
-      const control = getSessionRuntimeControlSnapshot(sessionId);
-      const live = maker.getSession(sessionId);
-      return {
-        chain,
-        current: {
-          agentKind: live?.agentKind ?? dbToMakerAgentKind(row.agentKind),
-          model: live?.model ?? row.model ?? '',
-          providerId: live && hasSessionProvider(sessionId)
-            ? getSessionProvider(sessionId) ?? null : row.providerId,
-          effort: (live ? getSessionEffort(sessionId) : row.effort) ?? null,
-          fastMode: live ? getSessionFastMode(sessionId) : !!row.fastMode,
-        },
-        hasRuntimeOverride: control.effectiveOverride !== null || control.pending !== null,
-        next: control.pending?.profile ?? control.effectiveOverride ?? undefined,
-      };
-    },
+    read: (sessionId) => readBotModelRouteState(sessionId),
+    // Settings catalogs and capability validation preview the next route while
+    // paused. Send-time apply stays active-only so a paused Bot cannot switch.
+    readPreview: (sessionId) => readBotModelRouteState(sessionId, { allowPaused: true }),
     apply: async (sessionId, route, current) => {
       if (route.agentKind !== current.agentKind) {
         // Register the ordinary switch intent. Its existing send transaction

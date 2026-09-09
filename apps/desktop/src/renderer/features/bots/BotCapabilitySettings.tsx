@@ -88,6 +88,7 @@ export function BotCapabilitySettings({
             ?? (session.agentKind === 'codex' || session.agentKind === 'pi' ? session.agentKind : 'claude-code'),
           botSessionId: bot.canonicalSessionId,
           modelChain: JSON.parse(modelChainKey),
+          ...(session.remoteHostId ? { remoteHostId: session.remoteHostId } : {}),
         });
         if (!isCurrent()) return;
         const agentKind = mcpResult.agentKind;

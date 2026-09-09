@@ -127,6 +127,36 @@ describe('mcp:custom:* CRUD handlers', () => {
     },
   );
 
+  it.each(['codex', 'claude-code'] as const)(
+    'marks custom HTTP MCPs unavailable for remote %s settings catalogs',
+    async (agentKind) => {
+      mountDb();
+      raw!.prepare(`INSERT INTO custom_mcp_servers
+        (id, name, transport, url, headers, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)`)
+        .run(validConfig.id, validConfig.name, validConfig.transport, validConfig.url, '{}');
+      const providers: McpProvider[] = [{ name: 'cindy_helper' }];
+      registerCustomMcpArrays(providers);
+      await refreshCustomMcpProviders();
+      const deps = makeDeps({
+        listMcpServers: vi.fn(async (context) => buildBotMcpCatalog({
+          ...context, providers: [...providers, { name: validConfig.id }],
+          builtinNames: getBuiltinMcpServerNames(),
+          customServers: await listCustomMcpRuntimeGenerations(),
+        })),
+      });
+      const harness = new IpcHarness();
+      registerMcpHandlers(harness, deps);
+      const result = await harness.invoke(MAKER_INVOKE.MCP_CUSTOM_LIST, {
+        agentKind, remoteHostId: 'ssh-host',
+      });
+      expect(deps.listMcpServers).toHaveBeenCalledWith({ agentKind, remoteHostId: 'ssh-host' });
+      expect(result).toEqual({
+        agentKind,
+        servers: [expect.objectContaining({ id: validConfig.id, available: false })],
+      });
+    },
+  );
+
   it('uses the canonical next-turn route instead of the renderer hint', async () => {
     mountDb();
     const harness = new IpcHarness();

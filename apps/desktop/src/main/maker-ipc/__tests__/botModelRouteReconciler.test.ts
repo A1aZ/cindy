@@ -83,6 +83,20 @@ describe('permanent Bot model selection', () => {
     await createBotModelRouteReconciler({ ownerEpoch: () => 'a', read: async () => null, apply })('other');
     expect(apply).not.toHaveBeenCalled();
   });
+  it('previews a paused Bot without applying the send-time route change', async () => {
+    const h = harness();
+    const readPreview = vi.fn(async () => h.state);
+    const reconcile = createBotModelRouteReconciler({
+      ownerEpoch: () => 'owner-a',
+      read: async () => null,
+      readPreview,
+      apply: h.apply,
+    });
+    expect(await reconcile.preview('canonical')).toEqual(expect.objectContaining({ agentKind: 'codex', model: 'luna' }));
+    expect(readPreview).toHaveBeenCalledWith('canonical');
+    await reconcile('canonical');
+    expect(h.apply).not.toHaveBeenCalled();
+  });
   it('coalesces simultaneous sends and retries a failed selection', async () => {
     const h = harness();
     h.apply.mockRejectedValueOnce(new Error('unavailable'));

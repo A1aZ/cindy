@@ -57,6 +57,7 @@ export interface McpHandlerDeps {
 const listContextSchema = z.object({
   agentKind: z.enum(['claude-code', 'codex', 'pi']),
   botSessionId: z.string().min(1).optional(),
+  remoteHostId: z.string().min(1).optional(),
   modelChain: z.array(z.object({
     harness: z.enum(['claude', 'codex', 'pi']),
     model: z.string().trim().min(1),
@@ -76,7 +77,10 @@ export function registerMcpHandlers(registry: IpcHandlerRegistry, deps: McpHandl
     if (input?.botSessionId && !agentKind) throwIpcError('NOT_FOUND', 'Canonical Bot task not found');
     const servers = await listCustomMcpServers();
     if (!agentKind) return { servers };
-    const catalog = await deps.listMcpServers({ agentKind });
+    const catalog = await deps.listMcpServers({
+      agentKind,
+      ...(input?.remoteHostId ? { remoteHostId: input.remoteHostId } : {}),
+    });
     const available = new Set(catalog
       .filter((entry) => entry.source === 'custom' && entry.available !== false)
       .map((entry) => entry.name));

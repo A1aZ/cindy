@@ -156,11 +156,11 @@ export function initializeBotAuthorizationHost(
             };
           },
           subscribe: (wake) => bus.subscribe('host:grok', wake),
-          async execute(_action, _sender, _value, onAuthorizationUrl, assertCurrent) {
+          async execute(_action, _sender, _value, onAuthorizationUrl, assertCurrent, beforeCommit) {
             await assertSession(sessionId);
             assertCurrent?.();
-            const result = await runGrokOAuthLogin({ onAuthorizationUrl, assertCurrent });
-            await assertSession(sessionId);
+            const result = await runGrokOAuthLogin({ onAuthorizationUrl, assertCurrent, beforeCommit });
+            assertCurrent?.();
             if (result.ok) {
               bus.emit('host:grok', { source: 'oauth' });
               return { ok: true as const };
@@ -225,7 +225,7 @@ export function initializeBotAuthorizationHost(
             if (event.source === 'oauth') reconnected = true;
             wake();
           }),
-        async execute(action, sender, value, onAuthorizationUrl, assertCurrent) {
+        async execute(action, sender, value, onAuthorizationUrl, assertCurrent, beforeCommit) {
           await validate();
           assertCurrent?.();
           const release = acquireGhostMutationLeaseForMcp(captureGhostMutationOwnerForMcp());
@@ -246,6 +246,7 @@ export function initializeBotAuthorizationHost(
               responseTarget: sender,
               onAuthorizationUrl,
               assertCurrent,
+              beforeCommit,
             });
             if (result.ok && action.kind === 'oauth_connect') reconnected = true;
             return result;

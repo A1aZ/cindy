@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BotAuthorizationService,
+  resolveBotAuthorizationDelivery,
   buildBotAuthorizationContinuation,
   commitBotAuthorizationInput,
   type BotAuthorizationAdapter,
@@ -676,4 +677,57 @@ it('reassesses after saving the subscribed card when readiness changed before su
   expect(h.deps.resume).toHaveBeenCalledTimes(1);
   expect(h.card().snapshot.terminal).toBe(true);
   await h.service.dispose();
+});
+
+it.each(['first-cancelled', 'all-cancelled', 'all-policy-revoked'] as const)(
+  'validates every shared OAuth participant at commit (%s)', async (scenario) => {
+    const h = harness();
+    let finish!: () => void;
+    const committed = vi.fn();
+    h.adapter.execute = vi.fn(async (_action, _sender, _value, _url, assertCurrent, beforeCommit) => {
+      await new Promise<void>((resolve) => { finish = resolve; });
+      await beforeCommit?.();
+      assertCurrent?.();
+      committed();
+      h.complete();
+      return { ok: true as const };
+    });
+    const a = await h.service.request('a', { kind: 'plugin', id: 'p' });
+    const b = await h.service.request('b', { kind: 'plugin', id: 'p' });
+    if (a.ok || b.ok) throw new Error('cards expected');
+    for (const requestId of [a.requestId, b.requestId]) {
+      await h.service.resolve(requestId, { kind: 'plugin_setup', action: 'run_action', actionId: 'connect',
+        expectedRevision: h.stored.get(requestId)!.snapshot.revision }, h.sender);
+      await flush();
+    }
+    expect(h.adapter.execute).toHaveBeenCalledTimes(1);
+    if (scenario === 'all-policy-revoked') {
+      h.deps.adapter.mockRejectedValue(new Error('teammate paused or plugin revoked'));
+    } else {
+      const ids = scenario === 'all-cancelled' ? [a.requestId, b.requestId] : [a.requestId];
+      for (const requestId of ids) await h.service.resolve(requestId, {
+        kind: 'plugin_setup', action: 'cancel', expectedRevision: h.stored.get(requestId)!.snapshot.revision,
+      });
+    }
+    finish();
+    await flush();
+    expect(committed).toHaveBeenCalledTimes(scenario === 'first-cancelled' ? 1 : 0);
+    if (scenario === 'first-cancelled') {
+      expect(h.deps.resume).toHaveBeenCalledTimes(1);
+      expect(h.deps.resume.mock.calls[0][0].sessionId).toBe('b');
+    }
+    await h.service.dispose();
+  },
+);
+
+it('retries hidden continuation rows with a stable unused id and only acknowledges visible rows', async () => {
+  const rows = new Map([
+    ['resume', { id: 'old', createdAt: 10, rewindAt: 20 as number | null, clearedAt: null as number | null }],
+  ]);
+  const read = async (id: string) => rows.get(id) ?? null;
+  expect(await resolveBotAuthorizationDelivery('resume', read)).toEqual({ clientId: 'resume:retry:old', delivered: false });
+  rows.set('resume:retry:old', { id: 'new', createdAt: 30, rewindAt: null, clearedAt: null });
+  expect(await resolveBotAuthorizationDelivery('resume', read)).toEqual({ clientId: 'resume:retry:old', delivered: true });
+  rows.get('resume:retry:old')!.clearedAt = 40;
+  expect(await resolveBotAuthorizationDelivery('resume', read)).toEqual({ clientId: 'resume:retry:new', delivered: false });
 });

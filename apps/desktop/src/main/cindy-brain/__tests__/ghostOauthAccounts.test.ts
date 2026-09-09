@@ -753,7 +753,7 @@ describe('missingAuthScopes(快照推断)', () => {
 });
 
 describe('connectAccount', () => {
-  it('does not commit OAuth tokens when the card is invalidated during identity lookup', async () => {
+  it.each(['boundary', 'policy'] as const)('does not commit OAuth tokens when %s becomes invalid during identity lookup', async (reason) => {
     const vault = memoryVault({ [`${KEY}-client-id`]: 'cid' });
     const before = new Map(vault.data);
     let current = true;
@@ -767,7 +767,8 @@ describe('connectAccount', () => {
       }) as typeof fetch,
     });
     await expect(mgr.connectAccount(GHOST, KEY, DECL, {
-      assertCurrent: () => { if (!current) throw new Error('card withdrawn'); },
+      assertCurrent: () => { if (reason === 'boundary' && !current) throw new Error('card withdrawn'); },
+      beforeCommit: async () => { if (reason === 'policy' && !current) throw new Error('card withdrawn'); },
     })).rejects.toThrow('card withdrawn');
     expect(vault.data).toEqual(before);
     expect(mgr.listAccounts(GHOST, KEY)).toHaveLength(0);

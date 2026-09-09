@@ -347,7 +347,7 @@ describe('recoverGrokAuthAfterRejection', () => {
   });
 });
 
-it('preserves credentials when the authorizing card is withdrawn during token exchange', async () => {
+it.each(['boundary', 'policy'] as const)('preserves credentials when %s becomes invalid during token exchange', async (reason) => {
   seedCredentials();
   const before = store.get(SECRET_ID);
   const generation = getGrokOAuthCredentialGeneration();
@@ -362,7 +362,8 @@ it('preserves credentials when the authorizing card is withdrawn during token ex
     return tokenResponse(200, {});
   }));
   const result = await runGrokOAuthLogin({
-    assertCurrent: () => { if (!current) throw new Error('card withdrawn'); },
+    assertCurrent: () => { if (reason === 'boundary' && !current) throw new Error('card withdrawn'); },
+    beforeCommit: async () => { if (reason === 'policy' && !current) throw new Error('card withdrawn'); },
   });
   expect(result).toMatchObject({ ok: false, reason: 'card withdrawn' });
   expect(store.get(SECRET_ID)).toBe(before);

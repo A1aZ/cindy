@@ -875,6 +875,7 @@ export class GhostOauthAccountManager {
       onAuthorizationUrl?: (url: string) => void;
       /** Main-only caller boundary, checked inside the credential mutation lock. */
       assertCurrent?: () => void;
+      beforeCommit?: () => Promise<void>;
     },
   ): Promise<GhostOauthConnectResult> {
     if (decl.tokenBroker !== undefined && !this.isTokenBrokerAuthorized(ghostId)) {
@@ -974,6 +975,7 @@ export class GhostOauthAccountManager {
     }
 
     return this.withMutationLock(ghostId, async () => {
+      await opts?.beforeCommit?.();
       opts?.assertCurrent?.();
       // Identity/avatar fetches are asynchronous as well. Recheck inside the
       // same strict mutation lock as the first vault read/write so a package

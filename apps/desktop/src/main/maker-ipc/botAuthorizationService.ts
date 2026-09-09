@@ -29,6 +29,22 @@ export function buildBotAuthorizationContinuation(card: BotAuthorizationCard) {
   };
 }
 
+/** Rewound/cleared deliveries do not acknowledge a still-visible card. A new
+ * deterministic id avoids both the message unique key and the queue's old id. */
+export async function resolveBotAuthorizationDelivery(
+  baseId: string,
+  read: (clientId: string) => Promise<{ id: string; createdAt: number; rewindAt: number | null; clearedAt: number | null } | null>,
+): Promise<{ clientId: string; delivered: boolean }> {
+  let clientId = baseId;
+  while (true) {
+    const row = await read(clientId);
+    if (!row) return { clientId, delivered: false };
+    if (row.rewindAt === null && (row.clearedAt === null || row.createdAt > row.clearedAt))
+      return { clientId, delivered: true };
+    clientId = `${baseId}:retry:${row.id}`;
+  }
+}
+
 export interface BotAuthorizationInputGuard {
   validate(): Promise<void>;
   assertCurrent(): void;
@@ -55,6 +71,7 @@ export interface BotAuthorizationAdapter {
     value?: string,
     onAuthorizationUrl?: (url: string) => void,
     assertCurrent?: () => void,
+    beforeCommit?: () => Promise<void>,
   ): Promise<GhostSetupActionResult>;
 }
 export interface BotAuthorizationDeps {
@@ -100,6 +117,7 @@ export class BotAuthorizationService {
       promise: Promise<GhostSetupActionResult>;
       url?: string;
       listeners: Set<(url: string) => void>;
+      participants: Map<(url: string) => void, { assertCurrent: () => void; validate: () => Promise<void> }>;
     }
   >();
   private restoring = new Map<string, Promise<Entry | null>>();
@@ -406,6 +424,14 @@ export class BotAuthorizationService {
   ): Promise<GhostSetupActionResult> {
     assertCurrent();
     if (action.kind !== 'oauth_connect') return entry.adapter.execute(action, sender, value, onUrl, assertCurrent);
+    const participant = {
+      assertCurrent,
+      validate: async () => {
+        await this.deps.adapter(entry.card.sessionId, entry.card.target);
+        if (!(await this.isVisible(entry))) throw new Error('Authorization card is no longer visible');
+        assertCurrent();
+      },
+    };
     const key = `${entry.card.target.kind}:${entry.card.target.id}:${action.id}`;
     let flight = this.oauthFlights.get(key);
     if (!flight) {
@@ -413,25 +439,43 @@ export class BotAuthorizationService {
       const next = {
         promise: Promise.resolve({ ok: true } as GhostSetupActionResult),
         listeners,
+        participants: new Map([[onUrl, participant]]),
         url: undefined as string | undefined,
       };
       // Install the flight before execute() can report its browser handoff.
       this.oauthFlights.set(key, next);
+      let validated: Set<typeof participant> | null = null;
+      const assertAnyCurrent = () => {
+        for (const candidate of validated ?? next.participants.values()) {
+          if (![...next.participants.values()].includes(candidate)) continue;
+          try { candidate.assertCurrent(); return; } catch { /* another card may still own the flow */ }
+        }
+        throw new Error('No active authorization card remains');
+      };
+      const beforeCommit = async () => {
+        validated = new Set();
+        for (const candidate of next.participants.values()) {
+          try { await candidate.validate(); validated.add(candidate); } catch { /* validate every remaining owner */ }
+        }
+        assertAnyCurrent();
+      };
       next.promise = entry.adapter
         .execute(action, sender, value, (url) => {
           next.url = url;
           for (const listener of next.listeners) listener(url);
-        }, assertCurrent)
+        }, assertAnyCurrent, beforeCommit)
         .finally(() => this.oauthFlights.delete(key));
       flight = next;
     } else {
       flight.listeners.add(onUrl);
+      flight.participants.set(onUrl, participant);
       if (flight.url) onUrl(flight.url);
     }
     try {
       return await flight.promise;
     } finally {
       flight.listeners.delete(onUrl);
+      flight.participants.delete(onUrl);
     }
   }
 

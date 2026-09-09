@@ -566,6 +566,7 @@ import {
 
 import { requireEnum, requireObject, throwIpcError } from '../utils/ipcValidate.js';
 import { isIpcError, type IpcErrorCode } from '../../shared/ipc-errors.js';
+import { piPackageCommandDiagnostic } from '../maker-host/pi-package-diagnostic.js';
 import {
   runPiPackageListIpcBoundary,
   runPiPackageMutationIpcBoundary,
@@ -5897,6 +5898,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         log.warn('Pi extension mutation failed', {
           action: request.action,
           failureCategory: piPackageMutationFailureCategory(error),
+          diagnostic: piPackageCommandDiagnostic(error),
           mayHaveChangedState: piPackageMutationMayHaveChangedState(error),
         });
       },

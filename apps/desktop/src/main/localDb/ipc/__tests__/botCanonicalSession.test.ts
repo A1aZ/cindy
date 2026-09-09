@@ -2073,6 +2073,42 @@ describe('Bot canonical Session lifecycle', () => {
     await expect(service.select({ ...input, joined: true })).resolves.toMatchObject({ ok: true, joined: true });
   });
 
+  it('rejects desktop-loopback custom MCPs on SSH Pi while keeping public HTTPS', async () => {
+    h.customMcpConfigs.push({
+      id: 'local-http', name: 'Local HTTP', transport: 'http',
+      url: 'http://127.0.0.1:4321/mcp', headers: {},
+    });
+    h.mcpProviders.push(new CustomMcpProvider(h.customMcpConfigs[1]!, () => null));
+    await invoke('local-db:bots:update', {
+      id: 'bot-1', capabilities: { mcpServers: ['shared-docs', 'local-http'], mcpMode: 'allowlist' },
+    });
+    const created = await invoke('local-db:bots:create-canonical-session', {
+      botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 2,
+    });
+    h.sqlite!.prepare('UPDATE sessions SET remote_host_id = ? WHERE id = ?').run('ssh-host', created.session.id);
+    const service = createBotCapabilityService({ ...capabilityDeps, resolveBotAgentKind: async () => 'pi' });
+    const input = { callerSessionId: created.session.id, kind: 'mcp' as const };
+    await expect(service.list(input)).resolves.toMatchObject({
+      capabilities: expect.arrayContaining([
+        expect.objectContaining({ id: 'shared-docs', joined: true, available: true }),
+        expect.objectContaining({ id: 'local-http', joined: true, available: false }),
+      ]),
+    });
+    const snapshot = await hydrateBotProfileRuntime({
+      id: created.session.id, agentKind: 'pi', workingDir: '/srv/bot', remoteHostId: 'ssh-host',
+      workspaceKind: 'project', model: 'test-model', permissionMode: 'auto',
+    }, { listMcpServers: capabilityDeps.listMcpServers });
+    expect(snapshot).toMatchObject({
+      configuredMcpServers: ['shared-docs', 'local-http'],
+      resolvedMcpServers: ['shared-docs'],
+      unavailableMcpServers: ['local-http'],
+    });
+    await expect(service.select({ ...input, id: 'local-http', joined: true }))
+      .resolves.toMatchObject({ ok: false, errorCode: 'CAPABILITY_UNAVAILABLE' });
+    await expect(service.select({ ...input, id: 'local-http', joined: false }))
+      .resolves.toMatchObject({ ok: true, joined: false });
+  });
+
   it.each(['contacts', 'lsp'])('rejects gated %s despite registry enablement and keeps joined references removable', async (id) => {
     const created = await invoke('local-db:bots:create-canonical-session', { botId: 'bot-1', expectedCanonicalSessionId: null, expectedProfileVersion: 1 });
     const input = { callerSessionId: created.session.id, kind: 'toolset' as const, id };
@@ -3390,6 +3426,41 @@ describe('Bot Session task end-to-end runtime', () => {
     } finally {
       finishPreparation();
       await starting;
+      runtime.dispose();
+    }
+  });
+
+  it.each(['ask', 'auto', null])('aborts a child whose caller permission changed during persistence: %s', async (settledMode) => {
+    await seedPair();
+    let permission: string | null = 'bypassPermissions';
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const atBoundary = new Promise<void>((resolve) => { entered = resolve; });
+    const realTx = h.tx!;
+    h.tx = async (name, args) => {
+      if (name === 'bots.createDelegation') {
+        entered();
+        await barrier;
+      }
+      return realTx(name, args);
+    };
+    const runtime = createDelegationRuntime({ readCallerPermission: () => permission });
+    const starting = runtime.delegation.startSessionTask({
+      callerSessionId: 'session-1', objective: 'Run the requested checks.',
+    });
+    try {
+      await atBoundary;
+      permission = settledMode;
+      release();
+      const result = await starting;
+      expect(result).toMatchObject({ ok: false, errorCode: 'CALLER_PERMISSION_UNAVAILABLE' });
+      expect(runtime.started).toEqual([]);
+      expect(h.sqlite!.prepare('SELECT status FROM bot_delegations').pluck().get()).toBe('failed');
+    } finally {
+      release();
+      await starting.catch(() => undefined);
+      h.tx = realTx;
       runtime.dispose();
     }
   });

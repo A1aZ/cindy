@@ -788,6 +788,35 @@ describe('piEnvironment per-session identity', () => {
     }
   });
 
+  it('does not advertise desktop-loopback custom MCPs to SSH Pi', async () => {
+    const configs = [
+      { id: 'https', transport: 'http' as const, url: 'https://example.test/mcp' },
+      { id: 'local-http', transport: 'http' as const, url: 'http://localhost:4321/mcp' },
+      { id: 'ipv4', transport: 'http' as const, url: 'http://127.0.0.1:4321/mcp' },
+      { id: 'ipv6', transport: 'http' as const, url: 'http://[::1]:4321/mcp' },
+    ].map((config) => ({ ...config, name: config.id, headers: {}, updatedAt: 1 }));
+    const builtin = makeProvider('cindy_memory');
+    const providers = [builtin, ...configs.map((config) => new CustomMcpProvider(config, () => 'TOKEN_CANARY'))];
+    const catalog = buildBotMcpCatalog({
+      agentKind: 'pi', remoteHostId: 'ssh-host', providers,
+      builtinNames: ['cindy_memory'], customServers: configs,
+    });
+    expect(catalog.filter((entry) => entry.available).map((entry) => entry.name))
+      .toEqual(['cindy_memory', 'https']);
+    expect(JSON.stringify(catalog)).not.toMatch(/TOKEN_CANARY|example.test|localhost|127\.0\.0\.1/);
+
+    const config = await getPiExtraSpawnConfig(providers, noopLogger(), {
+      workingDir: '', memoryEnabled: true, remoteHostId: 'ssh-host',
+    });
+    try {
+      expect(config?.mcpBridge?.servers.map((server) => server.name)).toEqual(['cindy_memory', 'https']);
+      expect(config?.mcpBridge?.servers.some((server) => server.remote && /localhost|127\.0\.0\.1|::1/.test(server.url)))
+        .toBe(false);
+    } finally {
+      config?.disposeSessionCtx?.();
+    }
+  });
+
   it('snapshots remote MCP lifecycle changes for new sessions while old leases keep their startup config', async () => {
     let enabled = true;
     let url = 'https://old.example.test/mcp';

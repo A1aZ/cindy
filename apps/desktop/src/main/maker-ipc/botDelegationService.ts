@@ -1566,6 +1566,23 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       title: input.session.title,
       source: input.session.source,
     };
+    const liveCallerPermission = (): string | null =>
+      deps.readCallerPermission
+        ? deps.readCallerPermission(input.callerSessionId)
+        : input.caller.permissionMode;
+    const rejectStaleCallerPermission = async () => {
+      await updateTerminal({
+        delegationId,
+        status: 'failed',
+        lastError: 'CALLER_PERMISSION_UNAVAILABLE: 伙伴权限已变更，任务未启动',
+        abortChild: true,
+      });
+      return {
+        ok: false as const,
+        errorCode: 'CALLER_PERMISSION_UNAVAILABLE',
+        message: '伙伴权限正在切换或任务正在关闭，请稍后重试',
+      };
+    };
     try {
       await getDbClient().tx('bots.createDelegation', {
         maxActiveChildren,
@@ -1602,6 +1619,11 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
           createdAt,
         },
       });
+      // Persistence itself is asynchronous (worker RPC). Recheck the live
+      // permission generation/mode before the child becomes visible or starts.
+      if (liveCallerPermission() !== callerPermission) {
+        return await rejectStaleCallerPermission();
+      }
       emitChanged({
         delegationId,
         parentSessionId: input.callerSessionId,
@@ -1654,6 +1676,9 @@ export function createBotDelegationService(deps: BotDelegationServiceDeps) {
       };
     }
     scheduleTimeout(delegationId, plan.limits.deadlineAt);
+    if (liveCallerPermission() !== callerPermission) {
+      return await rejectStaleCallerPermission();
+    }
     const dispatchResult = await attemptDispatch(delegationId);
     return {
       ok: true,

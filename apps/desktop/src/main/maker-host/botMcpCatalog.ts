@@ -9,13 +9,13 @@ function isCustomMcpAvailable(input: {
   custom?: { transport: McpTransport };
 }): boolean {
   // SSH Codex receives only REMOTE_ALLOWED_SERVER_NAMES; user configs are not
-  // written into its daemon. Remote Claude serializes http/sse into startParams,
-  // and remote Pi tunnels custom servers through the existing URL gate.
+  // written into its daemon. Remote Claude serializes http/sse into startParams.
+  // Remote Pi connects to custom HTTP MCPs directly (`s.remote` is not tunneled).
   if (input.agentKind === 'codex') {
     return !input.remoteHostId && input.custom?.transport !== 'sse';
   }
   if (input.agentKind === 'pi' && input.custom) {
-    return isPiCustomMcpProviderAvailable(input.provider);
+    return isPiCustomMcpProviderAvailable(input.provider, { remoteHostId: input.remoteHostId });
   }
   return true;
 }

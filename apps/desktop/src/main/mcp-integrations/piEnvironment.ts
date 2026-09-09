@@ -57,7 +57,7 @@ import { pluginIdForKnownProviderName } from '../maker-host/plugins/builtin-plug
 // 直接取 plugins 模块的 registry 单例,不经 maker-host/index.ts —— 后者 import pi-host,
 // 从 mcp-integrations 反向 import 会成环。
 import { createPluginRegistry } from '../maker-host/plugins/index.js';
-import { isAllowedRemoteMcpUrl } from './piMcpTransport.js';
+import { isAllowedRemoteMcpUrl, isDesktopLoopbackMcpUrl } from './piMcpTransport.js';
 
 interface StartedPiBridge {
   bridge: CodexHttpBridge | null;
@@ -191,6 +191,15 @@ export async function getPiExtraSpawnConfig(
       if (server.name === 'cindy_memory' && sessionCtx?.memoryEnabled !== true) return false;
       if (!isBotMcpServerAllowed(sessionCtx?.botMcpPolicy, server.name)) return false;
       if (!collabEnabled && REMOTE_COLLAB_SERVER_NAMES.has(server.name)) return false;
+      // Custom HTTP MCPs are `s.remote` and skip the SSH URL rewriter. Desktop
+      // loopback would hit the remote machine itself, not the desktop service.
+      if (sessionCtx?.remoteHostId && server.remote) {
+        try {
+          if (isDesktopLoopbackMcpUrl(new URL(server.url))) return false;
+        } catch {
+          return false;
+        }
+      }
       const pluginId = pluginIdForKnownProviderName(server.name);
       if (pluginId) {
         return !disabledPluginIds.includes(pluginId)

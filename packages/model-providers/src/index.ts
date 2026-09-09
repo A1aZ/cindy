@@ -289,3 +289,5 @@ export { mergeDiscoveredRuntimeModels } from "./modelMetadataLayers.js";
 export type { DiscoveredModel } from "./modelMetadataLayers.js";
 
 export { runtimeUserModelMetadata } from "./modelMetadataLayers.js";
+
+export { PROVIDER_MEDIA_FIELDS, providerMediaField, projectProviderMediaModels } from "./providerMediaModels.js";

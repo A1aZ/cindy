@@ -33,7 +33,7 @@ describe('codexImageClient', () => {
         .mockResolvedValueOnce({ accessToken: 'new', accountId: 'account-b' }),
       fetchImplementation: doFetch,
     });
-    await expect(channel.generateImage({ model: 'openai-account-a/gpt-image-2', prompt: 'p' })).rejects.toThrow();
+    await expect(channel.generateImage({ model: 'openai-account-a/gpt-image-2', prompt: 'p' })).rejects.toThrow('Codex image account changed before dispatch');
     expect(doFetch).not.toHaveBeenCalled();
   });
 
@@ -46,6 +46,7 @@ describe('codexImageClient', () => {
       fetchImplementation: doFetch,
     });
     await channel.generateImage({ model: 'openai-account-a/gpt-image-2', prompt: 'p' });
+    expect(JSON.parse(String(doFetch.mock.calls[0]?.[1]?.body)).tools[0].model).toBe('gpt-image-2');
     expect(doFetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer account-a-token', 'ChatGPT-Account-Id': 'account-a' });
     await expect(channel.generateImage({ model: 'openai/gpt-image-2', prompt: 'p' })).rejects.toThrow();
     expect(doFetch).toHaveBeenCalledTimes(1);
@@ -97,9 +98,17 @@ describe('codexImageClient', () => {
     expect(body.tools[0]).not.toHaveProperty('size');
 
     await expect(
-      channel.generateImage({ model: 'openai/future-image', prompt: 'p' }),
+      channel.generateImage({ model: 'another/future-image', prompt: 'p' }),
     ).rejects.toThrow('不支持模型');
     expect(doFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('目录新增的同协议型号原样发送，不固定旧图像模型', async () => {
+    const doFetch = vi.fn<typeof fetch>(async () => sseResponse([{ type: 'image_generation_call', result: 'aW1hZ2U=' }]));
+    const beforeDispatch = vi.fn();
+    await makeChannel(doFetch, beforeDispatch).generateImage({ model: 'openai/future-image', prompt: 'p' });
+    expect(JSON.parse(String(doFetch.mock.calls[0]?.[1]?.body)).tools[0].model).toBe('future-image');
+    expect(beforeDispatch).toHaveBeenCalledWith('openai/future-image');
   });
 
   it('保留流中最新 partial image;派发前重查可阻止出网', async () => {

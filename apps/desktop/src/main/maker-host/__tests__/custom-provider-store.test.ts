@@ -1579,6 +1579,8 @@ describe('supplier metadata persistence', () => {
             {
               id: 'model',
               name: 'My label',
+              mode: 'audio_speech',
+              modalities: { input: ['text'], output: ['audio'] },
               nameExplicit: true,
               contextWindow: 2000,
               supportsImageInput: false,
@@ -1590,6 +1592,8 @@ describe('supplier metadata persistence', () => {
     });
     const saved = await getCustomProvider(valid.id);
     expect(saved?.runtimes.codex?.models[0]).toMatchObject({
+      mode: 'audio_speech',
+      modalities: { input: ['text'], output: ['audio'] },
       nameExplicit: true,
       contextWindow: 2000,
       supportsImageInput: false,

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import type { ProviderView } from '@cindy/model-providers';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -70,6 +71,7 @@ const h = await vi.hoisted(async () => {
   toolsetsAvailable: false,
   customMcpConfigs: [] as CustomMcpConfig[],
   mcpProviders: [] as McpProvider[],
+  providers: [] as ProviderView[],
   ownerScopeKey: 'owner-a:1',
   ownerBoundaryPending: false,
 });
@@ -112,6 +114,9 @@ vi.mock('../../../maker-host/custom-mcp-store.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../maker-host/custom-mcp-store.js')>(),
   listCustomMcpServers: async () => h.customMcpConfigs,
 }));
+vi.mock('../../../maker-host/createDesktopProviderService.js', () => ({
+  getDesktopProviderService: () => ({ listProviders: async () => h.providers }),
+}));
 vi.mock('../../../maker-host/index.js', () => ({
   validateBotCapabilityAdditions: h.validateCapabilityAdditions,
   getMaker: () => ({ getSession: h.getSession, listAgentSkills: async () => ({ skills: [{ name: 'release-check', description: 'Release checklist', enabled: true }] }) }),
@@ -121,6 +126,7 @@ vi.mock('../../../maker-host/index.js', () => ({
   }),
   isBotToolsetAvailable: () => h.toolsetsAvailable,
   getMakerIfReady: () => ({
+    listAvailableAgents: () => ['claude-code', 'codex', 'pi'],
     isSessionAlive: h.isSessionAlive,
     closeSession: h.closeSession,
     getSession: h.getSession,
@@ -438,6 +444,11 @@ beforeEach(async () => {
   vi.clearAllMocks();
   h.handlers.clear();
   h.nextSession = 0;
+  h.providers = [{
+    id: 'xd', connected: true, source: 'builtin', agents: ['pi'], access: { kind: 'managed' },
+    models: { pi: [{ id: 'z-ai/glm-5.3-flash', efforts: ['high'], defaultEffort: 'high',
+      newSessionDefault: ['pi'], supportsImageInput: true }] },
+  }] as ProviderView[];
   h.worktrees = [];
   h.isSessionAlive.mockReturnValue(false);
   h.ensureGit.mockResolvedValue(undefined);
@@ -552,6 +563,23 @@ describe('Bot canonical Session lifecycle', () => {
     expect((await listBotRemoteResourceSources()).map((row) => row.id)).toContain(created.id);
     h.sqlite!.prepare('UPDATE bot_profiles SET hidden_at = 1 WHERE id = ?').run(created.id);
     expect((await listBotRemoteResourceSources()).map((row) => row.id)).not.toContain(created.id);
+  });
+
+  it('creates the first canonical task on Codex when only its subscription is connected', async () => {
+    h.providers = [{
+      id: 'openai', source: 'builtin', connected: true, agents: ['codex'],
+      access: { kind: 'subscription', product: 'ChatGPT' },
+      routing: { codex: { upstream: 'https://example.invalid', authStrategy: 'oauth-passthrough' } },
+      models: { codex: [{ id: 'gpt-5.6-sol', mode: 'chat', status: 'active', efforts: ['medium'], defaultEffort: 'medium' }] },
+    }] as ProviderView[];
+    const created = await invoke('local-db:bots:create', { id: 'codex-only', name: 'Codex Bot' });
+    const canonical = await invoke('local-db:bots:create-canonical-session', {
+      botId: created.id, expectedCanonicalSessionId: created.canonicalSessionId ?? null,
+      expectedProfileVersion: 1,
+    });
+    const row = h.sqlite!.prepare('SELECT agent_kind, model, provider_id, effort FROM sessions WHERE id = ?')
+      .get(canonical.session.id);
+    expect(row).toMatchObject({ agent_kind: 'codex', model: 'gpt-5.6-sol', provider_id: 'openai', effort: 'medium' });
   });
 
   it('uses the official Bot defaults when created without renderer capabilities', async () => {
@@ -901,7 +929,7 @@ describe('Bot canonical Session lifecycle', () => {
     expect(reopened.session.permissionMode).toBe('ask');
   });
 
-  it('preserves an explicitly empty model when a Pi Bot has no selectable model', async () => {
+  it('keeps an unconfigured profile but rejects a model-less canonical task', async () => {
     await invoke('local-db:bots:create', {
       id: 'bot-pi-default',
       name: 'Pi Default Bot',
@@ -914,17 +942,11 @@ describe('Bot canonical Session lifecycle', () => {
       },
     });
 
-    const created = await invoke('local-db:bots:create-canonical-session', {
+    await expect(invoke('local-db:bots:create-canonical-session', {
       botId: 'bot-pi-default',
       expectedCanonicalSessionId: null,
       expectedProfileVersion: 1,
-    });
-
-    expect(created.session).toMatchObject({
-      agentKind: 'pi',
-      providerId: null,
-      model: '',
-    });
+    })).rejects.toThrow('请先连接模型供应商或选择伙伴模型');
   });
 
   it('repairs a physically missing canonical task using the persisted pointer as its CAS', async () => {

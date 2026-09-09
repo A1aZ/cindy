@@ -31,6 +31,7 @@ import { sessionActivityMs } from '../../lib/dateSessionGrouping';
 import { SectionCollapse } from '../SectionCollapse';
 import { getDialogueCollapseLimit } from '../../lib/sidebarCollapseConfig';
 import type { FilterStatus } from '../../hooks/useSidebarFilter';
+import { DIALOGUE_STATUS_OPTIONS } from './DialogueStatusMenu';
 import { SessionEntryList } from '../SessionEntryList';
 import type { SessionClickHandler } from '../SessionItem';
 import type {
@@ -57,16 +58,6 @@ const DIALOGUE_SORT_OPTIONS: ReadonlyArray<{
   { value: 'recency', labelKey: 'ccAgent.sidebar.dialogueSort.recency' },
   { value: 'time', labelKey: 'ccAgent.sidebar.dialogueSort.time' },
   { value: 'title', labelKey: 'ccAgent.sidebar.dialogueSort.title' },
-];
-
-/** 状态筛选选项复用 SidebarFilterPopover 的全局 Status 语义（active/archived/all）。 */
-const DIALOGUE_STATUS_OPTIONS: ReadonlyArray<{
-  value: FilterStatus;
-  labelKey: string;
-}> = [
-  { value: 'active', labelKey: 'ccAgent.sidebar.filterStatus.active' },
-  { value: 'archived', labelKey: 'ccAgent.sidebar.filterStatus.archived' },
-  { value: 'all', labelKey: 'ccAgent.sidebar.filterStatus.all' },
 ];
 
 const HEADER_HOVER_ACTION_CLASS = cn(

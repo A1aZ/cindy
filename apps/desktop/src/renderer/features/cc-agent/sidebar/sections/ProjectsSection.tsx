@@ -89,6 +89,7 @@ import {
 import { absorbSessionStarting } from '@/lib/sessionStartingStore';
 import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
 import { MainListScopeHeader } from '../MainListScopeHeader';
+import { DialogueStatusMenu } from './DialogueStatusMenu';
 import { SectionCollapse } from '../SectionCollapse';
 import { SessionEntryList, SessionEntryRows } from '../SessionEntryList';
 import { useCollapsibleShowAll } from '../hooks/useCollapsibleShowAll';
@@ -962,6 +963,8 @@ export function ProjectsSection({
           projectOptions={projectOptions}
           onScheduleAction={onScheduleAction}
           sessionVariant={mainSessionVariant}
+          status={filter.status}
+          onStatusChange={filter.setStatus}
         />
       );
     }
@@ -1208,6 +1211,8 @@ function SessionGroupNode({
   projectOptions,
   onScheduleAction,
   sessionVariant,
+  status,
+  onStatusChange,
 }: {
   sessions: Session[];
   collapsed: boolean;
@@ -1246,6 +1251,9 @@ function SessionGroupNode({
   projectOptions?: readonly FolderPickerOption[];
   onScheduleAction: (group: AutomationSessionGroup, action: AutomationScheduleAction) => void;
   sessionVariant: 'text' | 'list';
+  /** 仅对话组传入:把活跃/已归档/全部入口放到组头,与全局 filter.status 同步。 */
+  status?: UseSidebarFilterReturn['status'];
+  onStatusChange?: UseSidebarFilterReturn['setStatus'];
 }) {
   const { t } = useTranslation();
   // 与 ProjectNode 同款:标题右侧 hover 渐显的展开/收起指示箭头。
@@ -1291,13 +1299,23 @@ function SessionGroupNode({
           />
         </div>
         {/* 悬浮工具组:与 ProjectNode Header 同款——常态隐藏,hover 整行淡入。
-            对话组没有项目那套 More 菜单,只保留新建(SquarePen,与项目行等位)。 */}
+            对话组没有项目那套 More 菜单;状态筛选(活跃/已归档/全部)只挂在默认对话组,
+            伙伴组不传 status。新建 SquarePen 与项目行等位。 */}
         <div
           className={cn(
             'flex shrink-0 items-center gap-0.5',
             'opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
           )}
         >
+          {status && onStatusChange ? (
+            <DialogueStatusMenu
+              status={status}
+              onStatusChange={onStatusChange}
+              buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground focus:outline-none"
+              iconSize={14}
+              stopRowToggle
+            />
+          ) : null}
           <Tip text={createDisabledReason ?? createLabel ?? t('ccAgent.sidebar.newDialogue')}>
             <button
               type="button"

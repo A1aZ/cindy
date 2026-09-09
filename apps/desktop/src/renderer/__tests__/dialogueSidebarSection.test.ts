@@ -27,8 +27,8 @@ const projectsSectionSource = readFileSync(
   'utf8',
 );
 
-const dialogueSectionSource = readFileSync(
-  resolve(__dirname, '..', 'features', 'cc-agent', 'sidebar', 'sections', 'DialogueSection.tsx'),
+const dialogueStatusMenuSource = readFileSync(
+  resolve(__dirname, '..', 'features', 'cc-agent', 'sidebar', 'sections', 'DialogueStatusMenu.tsx'),
   'utf8',
 );
 
@@ -60,16 +60,21 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     expect(projectsSectionSource).toContain('buildMainListEntries');
   });
 
-  it('exposes a Dialogue-owned status filter that reuses the shared sidebar status keys', () => {
-    // 展开态主列表已混排,不再挂 <DialogueSection>;全局 Status 入口在
-    // SidebarFilterPopover。本组件仍保留受控 status/onStatusChange 与同款文案,
-    // 供 rail 面板体系复用,避免再造一套归档视图。
-    expect(dialogueSectionSource).toContain('DIALOGUE_STATUS_OPTIONS');
-    expect(dialogueSectionSource).toContain('onStatusChange');
-    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.filterStatusHeading'");
-    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.filterStatus.active'");
-    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.filterStatus.archived'");
-    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.filterStatus.all'");
+  it('exposes a Dialogue-owned status filter on live dialogue surfaces, not only DialogueSection', () => {
+    // 展开态主列表已混排,不再挂 <DialogueSection>;全局 Status 仍在 SidebarFilterPopover。
+    // #1875 需要对话区可见入口:混排「对话」组头 + 折叠 rail 对话面板复用同一份 filter.status。
+    expect(dialogueStatusMenuSource).toContain('DIALOGUE_STATUS_OPTIONS');
+    expect(dialogueStatusMenuSource).toContain('onStatusChange');
+    expect(dialogueStatusMenuSource).toContain("'ccAgent.sidebar.filterStatusHeading'");
+    expect(dialogueStatusMenuSource).toContain("'ccAgent.sidebar.filterStatus.active'");
+    expect(dialogueStatusMenuSource).toContain("'ccAgent.sidebar.filterStatus.archived'");
+    expect(dialogueStatusMenuSource).toContain("'ccAgent.sidebar.filterStatus.all'");
+    expect(projectsSectionSource).toContain('<DialogueStatusMenu');
+    expect(projectsSectionSource).toContain('status={filter.status}');
+    expect(projectsSectionSource).toContain('onStatusChange={filter.setStatus}');
+    expect(sidebarSource).toContain('<DialogueStatusMenu');
+    expect(sidebarSource).toContain('status={filter.status}');
+    expect(sidebarSource).toContain('onStatusChange={filter.setStatus}');
   });
 
   it('drops the removed date-grouped section entirely', () => {

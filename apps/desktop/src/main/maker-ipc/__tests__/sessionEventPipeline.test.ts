@@ -910,6 +910,32 @@ describe('usage through the production event pipeline', () => {
     },
   );
 
+  it.each([
+    ['codex', 'anthropic', 'claude'],
+    ['codex', 'claude-account', 'claude'],
+    ['pi', 'claude-account', 'claude'],
+    ['pi', 'xai-account', 'xai'],
+  ] as const)('records %s subscription usage for %s without actual charges', async (source, providerId, native) => {
+    const h = harness();
+    pricing(true);
+    effects.fn('getSessionProvider').mockReturnValue(providerId);
+    effects.fn('isUserProviderSession').mockReturnValue(providerId !== 'anthropic');
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: providerId,
+      auth: { method: 'oauth', native }, access: { kind: 'subscription' } }] });
+    h.emit(event('done', { usage: usage(source) }, { source }));
+    await microtasks();
+    expect(effects.fn('recordModelTurnUsage')).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.stringContaining('#billing=subscription'),
+      inputTokensDelta: 100, outputTokensDelta: 20, cacheReadTokensDelta: 10,
+      money: expect.objectContaining({ kind: 'value-estimate' }),
+    }));
+    expect(effects.fn(native === 'claude' ? 'triggerClaudeSubscriptionUsageRefresh' : 'triggerXaiSubscriptionUsageRefresh'))
+      .toHaveBeenCalledWith(providerId);
+    expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
+    expect(effects.fn('recordSessionTurnSpend')).not.toHaveBeenCalled();
+    await h.dispose();
+  });
+
   it('keeps independent OpenAI Pi turns as subscription value and uses their own price override', async () => {
     const h = harness();
     pricing(true);
@@ -1028,7 +1054,7 @@ describe('usage through the production event pipeline', () => {
     effects.fn('getSessionProvider').mockReturnValue('custom-api');
     effects
       .fn('getActiveCatalog')
-      .mockReturnValue({ providers: [{ id: 'custom-api', access: { kind: 'api' } }] });
+      .mockReturnValue({ providers: [{ id: 'custom-api', auth: { method: 'api_key' }, access: { kind: 'api' } }] });
     effects.fn('getGatewayAccountCurrency').mockResolvedValue('USD');
     effects.fn('consumeLastAssistantPersistId').mockReturnValue('assistant-row');
     h.emit(
@@ -1054,6 +1080,31 @@ describe('usage through the production event pipeline', () => {
     expect(effects.fn('recordSchedulerTurnCost')).toHaveBeenCalledWith(
       expect.objectContaining({ money: expect.objectContaining({ amount: 2 }) }),
     );
+    await h.dispose();
+  });
+
+  it.each([false, true])('keeps independent Claude subscription accounting out of actual spend (fallback=%s)', async (fallback) => {
+    const h = harness();
+    pricing(true);
+    effects.fn('getSessionProvider').mockReturnValue('claude-account');
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'claude-account', auth: { method: 'oauth', native: 'claude' }, access: { kind: 'subscription' } }] });
+    h.deps.lastReportedCostUsdBySession.set('task', 10);
+    h.emit(event('done', {
+      total_cost_usd: 12,
+      usage: { input_tokens: 100, output_tokens: 20 },
+      ...(fallback ? {} : {
+        modelUsageCumulativeStartsAtZero: true,
+        modelUsage: { 'claude-sonnet-4-6': { inputTokens: 100, outputTokens: 20, costUSD: 2 } },
+      }),
+    }, { source: 'claude-code' }));
+    await microtasks();
+    expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
+    expect(effects.fn('recordSessionTurnSpend')).not.toHaveBeenCalled();
+    if (!fallback) expect(effects.fn('recordModelTurnUsage')).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.stringContaining('#billing=subscription'),
+      inputTokensDelta: 100, outputTokensDelta: 20,
+      money: expect.objectContaining({ kind: 'value-estimate' }),
+    }));
     await h.dispose();
   });
 });

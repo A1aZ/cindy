@@ -116,11 +116,6 @@ export function recordSessionCodexTurnUsage(
           isExclusiveXaiModelId(pricingModel);
         const isCodexOpenAiProviderRoute = sessionProvider == null || sessionProvider === 'openai';
         const hasGatewayKey = Boolean(readClaudeApiKey());
-        const quotaProvider = getSessionProvider(session.id) ?? undefined;
-        if (!isRemoteCodexSession && isClaudeSubscriptionProviderId(quotaProvider)) {
-          triggerClaudeSubscriptionUsageRefresh(quotaProvider);
-          return;
-        }
         const hasEffectiveGatewayRoute =
           !isRemoteCodexSession &&
           !isCustomProviderRoute &&
@@ -267,8 +262,12 @@ export function recordSessionCodexTurnUsage(
     void modelPromise
       .then((model) => {
         const hasGatewayKey = Boolean(readClaudeApiKey());
+        if (!isRemoteCodexSession && isClaudeSubscriptionProviderId(sessionProvider)) {
+          triggerClaudeSubscriptionUsageRefresh(sessionProvider ?? undefined);
+          return;
+        }
         if (!isRemoteCodexSession && isExclusiveXaiModelId(model)) {
-          triggerXaiSubscriptionUsageRefresh(getSessionProvider(session.id) ?? undefined);
+          triggerXaiSubscriptionUsageRefresh(sessionProvider ?? undefined);
           return;
         }
         if (

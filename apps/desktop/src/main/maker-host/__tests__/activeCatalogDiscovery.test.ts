@@ -25,6 +25,7 @@ import {
   setDiscoveredCodexModels,
   setXaiDiscoveredModels,
   setDiscoveredProviderMediaModels,
+  clearDiscoveredProviderModels,
 } from '../active-catalog.js';
 
 function openaiIds(agent: 'claude-code' | 'codex' | 'pi'): string[] {
@@ -88,6 +89,23 @@ function legacyCatalog(): Catalog {
 }
 
 describe('active-catalog discovered augment', () => {
+  it('clears only the selected Grok account until the owner boundary is cleared', () => {
+    const account = buildUserProvider({
+      id: 'grok-second', name: 'Second Grok', auth: { method: 'oauth', native: 'xai' },
+      runtimes: {},
+    });
+    setActiveCatalog({ ...BUNDLED_CATALOG, providers: [...BUNDLED_CATALOG.providers, account] });
+    const ids = () => getActiveCatalog().providers.find(p => p.id === account.id)?.models.codex?.map(m => m.id);
+    setXaiDiscoveredModels([{ id: 'xai/grok-account-only' }], account.id);
+    expect(ids()).toContain('xai/grok-account-only');
+    setXaiDiscoveredModels(null);
+    expect(ids()).toContain('xai/grok-account-only');
+    setXaiDiscoveredModels(null, account.id);
+    expect(ids()).not.toContain('xai/grok-account-only');
+    setXaiDiscoveredModels([{ id: 'xai/grok-account-only' }], account.id);
+    clearDiscoveredProviderModels();
+    expect(ids()).not.toContain('xai/grok-account-only');
+  });
   it('shares OpenAI protocol and Pi metadata with an independent account without sharing identity', () => {
     const account = buildUserProvider({
       id: 'openai-parity', name: 'Separate account', auth: { method: 'oauth', native: 'codex' },
@@ -115,6 +133,7 @@ describe('active-catalog discovered augment', () => {
   afterEach(() => {
     // 复位全局状态,避免测试间串扰
     setActiveCatalog(BUNDLED_CATALOG);
+    clearDiscoveredProviderModels();
     setDiscoveredCodexModels([]);
     setXaiDiscoveredModels(null);
     setDiscoveredProviderMediaModels('xai', null);

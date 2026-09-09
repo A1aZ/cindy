@@ -129,9 +129,9 @@ export function recordSessionPiTurnUsage(
               ? 'xai'
               : null);
         const isSubscriptionValue =
-          effectiveProvider && isOpenAiSubscriptionProviderId(effectiveProvider) ||
-          effectiveProvider === 'anthropic' ||
-          effectiveProvider === 'xai' ||
+          isOpenAiSubscriptionProviderId(effectiveProvider) ||
+          isClaudeSubscriptionProviderId(effectiveProvider) ||
+          isXaiSubscriptionProviderId(effectiveProvider) ||
           (!isCustomProviderRoute && isSubscriptionDirectRoute(pricingModel));
         const billingRoute: BillingRoute = isCustomProviderRoute && !isSubscriptionValue
           ? 'provider-api'

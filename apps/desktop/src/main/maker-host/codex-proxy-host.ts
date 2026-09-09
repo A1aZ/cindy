@@ -3417,7 +3417,10 @@ function createCodexProxyHandle(
         resolveUserProviderName: (providerId) =>
           getActiveCatalog().providers.find((provider) => provider.id === providerId)?.name ?? null,
       }),
-      createXaiProxyAuthInvalidationObserver(),
+      createXaiProxyAuthInvalidationObserver((ctx) => {
+        const sessionId = sessionIdFromHeaders(ctx.requestHeaders);
+        return sessionId ? getSessionProvider(sessionId) : null;
+      }),
     ),
     maxRequestBodyBytes: CODEX_PROXY_MAX_REQUEST_BODY_BYTES,
     debugDumpRequestBody: process.env.XDT_PROXY_DUMP_REQUEST_BODY === '1',

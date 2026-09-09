@@ -1895,6 +1895,7 @@ export function setDiscoveredCodexModels(
  */
 export function clearDiscoveredProviderModels(): void {
   discoveredByProvider.clear();
+  xaiAccountModels.clear();
   markChanged();
 }
 
@@ -1916,7 +1917,6 @@ export function setXaiDiscoveredModels(models: readonly XaiDiscoveredModel[] | n
     else xaiAccountModels.set(providerId, models.map(model => ({ ...model })));
   } else {
     xaiDiscoveredModels = models === null ? null : models.map((model) => ({ ...model }));
-    if (models === null) xaiAccountModels.clear();
   }
   markChanged();
 }

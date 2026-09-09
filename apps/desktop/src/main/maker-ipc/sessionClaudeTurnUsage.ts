@@ -6,6 +6,7 @@ import { readClaudeApiKey } from '../maker-host/auth-adapters.js';
 import { recordSessionTurnSpend } from '../sessionSpendBroadcaster.js';
 import { recordSchedulerTurnCost, recordTurnUsageOnMessage } from '../turnCostBroadcaster.js';
 import { recordModelMismatchOnMessage } from '../modelMismatchBroadcaster.js';
+import { isClaudeSubscriptionProviderId } from '../maker-host/subscription-account-auth.js';
 import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
 import {
@@ -236,7 +237,7 @@ export function recordSessionClaudeTurnUsage(
         );
         const isClaudeSubscriptionSession =
           !session.remoteHostId &&
-          (sessionProviderForBilling === 'anthropic' ||
+          (isClaudeSubscriptionProviderId(sessionProviderForBilling) ||
             (sessionProviderForBilling == null &&
               (observedClaudeRoute != null
                 ? observedClaudeRoute === 'subscription'
@@ -442,7 +443,7 @@ export function recordSessionClaudeTurnUsage(
         );
         const route: BillingRoute = session.remoteHostId
           ? 'unknown'
-          : providerId === 'anthropic' || observedRoute === 'subscription'
+          : isClaudeSubscriptionProviderId(providerId) || observedRoute === 'subscription'
             ? 'subscription'
             : (explicitProviderRoute ?? (observedRoute === 'gateway' ? 'xd-gateway' : 'unknown'));
         // 订阅直连轮(chatgpt/ / xai/)走窄兜底时: 真实计费恒 0, 不写 daily_spend /

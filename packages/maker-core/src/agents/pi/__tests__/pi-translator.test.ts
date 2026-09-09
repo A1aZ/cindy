@@ -522,6 +522,7 @@ describe('pi translator', () => {
           reason: 'output-limit',
           isTerminal: true,
           result: 'a long but incomplete answer',
+          usage: expect.objectContaining({ inputTokens: 100, outputTokens: 16_000 }),
         }),
       }),
     ]);
@@ -533,6 +534,8 @@ describe('pi translator', () => {
       status: 'failed',
       usage: { inputTokens: 100, outputTokens: 16_000 },
     });
+    expect((events.find((event) => event.type === 'error')?.data as { usage: unknown }).usage)
+      .toEqual((events.find((event) => event.type === 'done')?.data as { usage: unknown }).usage);
   });
 
   it.each([['empty', ''], ['logs', '2026-09-09 INFO health check succeeded\n'.repeat(1_000)], ['JSON', JSON.stringify(Array(20_000).fill(0))]])(

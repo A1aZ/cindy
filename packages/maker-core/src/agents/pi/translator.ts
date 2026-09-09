@@ -935,12 +935,30 @@ export function translatePiEvent(
       const outputLimited = !hostAbortRequested
         && !ctx.terminalAssistantErrorEmitted
         && ctx.finalAssistantStopReason === 'length';
+      const usage = {
+        inputTokens: ctx.turnInput,
+        outputTokens: ctx.turnOutput,
+        cacheReadTokens: ctx.turnCacheRead,
+        cacheCreationTokens: ctx.turnCacheWrite,
+        segments: ctx.turnUsageSegments.map((segment) => ({ ...segment })),
+        segmentsComplete: ctx.turnUsageSegmentsComplete,
+        // durationMs is deliberately generation-only. If Pi does not report a
+        // per-assistant generation duration, omit it instead of charging tool
+        // execution / user waits to TPS.
+        ...(ctx.generationTimingReliable && ctx.generationDurationMs > 0
+          ? { durationMs: ctx.generationDurationMs }
+          : {}),
+        ...(ctx.turnWallClockStartedAt > 0
+          ? { turnDurationMs: Math.max(0, Date.now() - ctx.turnWallClockStartedAt) }
+          : {}),
+      };
       const terminalError = pendingAssistantError ?? (outputLimited ? {
         message: 'Pi reached the model output limit. The response may be incomplete.',
         sdkError: 'Pi response stopped at the model output limit',
         reason: 'output-limit',
         // Consumers may settle on this error and ignore the paired done.
         result: ctx.finalAssistantText,
+        usage,
       } : null);
       const outcome = terminalError
         ? 'failed'
@@ -986,23 +1004,7 @@ export function translatePiEvent(
           ...(silentStop ? { silentStop: true } : {}),
           // ghost 订阅 did-turn-end 的 usage 上报(subscriptionGateway.normalizeTurnUsage
           // 认 camelCase);与 CC/Codex 的 done.usage 对齐,让插件能显示 pi turn 的用量。
-          usage: {
-            inputTokens: ctx.turnInput,
-            outputTokens: ctx.turnOutput,
-            cacheReadTokens: ctx.turnCacheRead,
-            cacheCreationTokens: ctx.turnCacheWrite,
-            segments: ctx.turnUsageSegments.map((segment) => ({ ...segment })),
-            segmentsComplete: ctx.turnUsageSegmentsComplete,
-            // durationMs is deliberately generation-only. If Pi does not report a
-            // per-assistant generation duration, omit it instead of charging tool
-            // execution / user waits to TPS.
-            ...(ctx.generationTimingReliable && ctx.generationDurationMs > 0
-              ? { durationMs: ctx.generationDurationMs }
-              : {}),
-            ...(ctx.turnWallClockStartedAt > 0
-              ? { turnDurationMs: Math.max(0, Date.now() - ctx.turnWallClockStartedAt) }
-              : {}),
-          },
+          usage,
         },
         source: 'pi',
       });

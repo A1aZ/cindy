@@ -5153,7 +5153,40 @@ describe('Pi package executable-code boundary', () => {
     }
   });
 
-  it('marks startup timing degraded when snapshot limits quarantine a package', async () => {
+  it('keeps completed list and compatibility stages ok when manifest entries exceed the limit', async () => {
+    await createPackage({ oversizedManifest: true });
+    const store = await import('../pi-package-store.js');
+    await store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' });
+    await store.listPiPackages(); // Drain optional cache persistence before cleanup.
+    const events = loggerRuntime.info.mock.calls
+      .filter(([message]) => message === 'pi startup stage')
+      .map(([, fields]) => fields as Record<string, unknown>);
+    expect(runtime.spawns.some(({ args }) => args.includes('--version'))).toBe(true);
+    expect(events.map(({ stage, status }) => ({ stage, status }))).toEqual([
+      { stage: 'package-list', status: 'ok' },
+      { stage: 'package-inspection', status: 'degraded' },
+      { stage: 'package-compatibility', status: 'ok' },
+      { stage: 'package-fingerprint', status: 'skipped' },
+      { stage: 'package-snapshot', status: 'skipped' },
+    ]);
+  });
+
+  it('marks only the list stage degraded when package listing fails before inspection', async () => {
+    runtime.exitCode = 1;
+    runtime.stderr = 'package listing failed';
+    const store = await import('../pi-package-store.js');
+    await store.resolveManagedPiPackageResources({ startupTraceId: '0123456789abcdef' });
+    const events = loggerRuntime.info.mock.calls
+      .filter(([message]) => message === 'pi startup stage')
+      .map(([, fields]) => fields as Record<string, unknown>);
+    expect(events).toHaveLength(5);
+    expect(events.find((event) => event.stage === 'package-list')?.status).toBe('degraded');
+    for (const event of events.filter((event) => event.stage !== 'package-list')) {
+      expect(event.status).toBe('skipped');
+    }
+  });
+
+  it('marks only snapshot timing degraded when snapshot limits quarantine a package', async () => {
     await createSkillOnlyPackage('npm:startup-timing-limited');
     const store = await import('../pi-package-store.js');
 
@@ -5163,10 +5196,14 @@ describe('Pi package executable-code boundary', () => {
       startupTraceId: 'fedcba9876543210',
     });
 
-    const snapshotEvent = loggerRuntime.info.mock.calls
+    const events = loggerRuntime.info.mock.calls
       .filter(([message]) => message === 'pi startup stage')
-      .map(([, fields]) => fields as Record<string, unknown>)
-      .find((fields) => fields.stage === 'package-snapshot');
+      .map(([, fields]) => fields as Record<string, unknown>);
+    expect(events).toHaveLength(5);
+    for (const event of events.filter((fields) => fields.stage !== 'package-snapshot')) {
+      expect(event.status).toBe('ok');
+    }
+    const snapshotEvent = events.find((fields) => fields.stage === 'package-snapshot');
     expect(snapshotEvent).toMatchObject({
       startupTraceId: 'fedcba9876543210',
       status: 'degraded',

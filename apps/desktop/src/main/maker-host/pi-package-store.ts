@@ -441,7 +441,7 @@ interface PiPackageStartupTiming {
   packageCount: number;
   resourceCount: number;
   skippedPackageCount: number;
-  degraded: boolean;
+  degradedStages: Set<PiPackageStartupStage>;
 }
 
 function createPiPackageStartupTiming(startupTraceId: string | undefined): PiPackageStartupTiming | undefined {
@@ -452,7 +452,7 @@ function createPiPackageStartupTiming(startupTraceId: string | undefined): PiPac
     packageCount: 0,
     resourceCount: 0,
     skippedPackageCount: 0,
-    degraded: false,
+    degradedStages: new Set(),
   };
 }
 
@@ -473,6 +473,9 @@ async function measurePiPackageStartupStage<T>(
   const startedAt = Date.now();
   try {
     return await operation();
+  } catch (error) {
+    timing?.degradedStages.add(stage);
+    throw error;
   } finally {
     recordPiPackageStartupDuration(timing, stage, startedAt);
   }
@@ -486,7 +489,7 @@ function emitPiPackageStartupTiming(timing: PiPackageStartupTiming | undefined):
       startupTraceId: timing.startupTraceId,
       stage,
       durationMs: durationMs ?? 0,
-      status: durationMs === undefined ? 'skipped' : timing.degraded ? 'degraded' : 'ok',
+      status: durationMs === undefined ? 'skipped' : timing.degradedStages.has(stage) ? 'degraded' : 'ok',
       packageCount: timing.packageCount,
       resourceCount: timing.resourceCount,
       skippedPackageCount: timing.skippedPackageCount,
@@ -1736,6 +1739,7 @@ async function extensionResourceView(
       ...(analysis.detectedApis.length > 0 ? { detectedApis: analysis.detectedApis } : {}),
     };
   } catch {
+    startupTiming?.degradedStages.add('package-compatibility');
     return unknownExtensionResourceView(file);
   } finally {
     recordPiPackageStartupDuration(startupTiming, 'package-compatibility', startedAt);
@@ -1939,6 +1943,9 @@ async function inspectPackage(
           ? { currentVersion: truncateDisplayField(requirement.currentVersion, MAX_DISPLAY_VERSION_BYTES) }
           : {}),
       }));
+    } catch (error) {
+      startupTiming?.degradedStages.add('package-compatibility');
+      throw error;
     } finally {
       recordPiPackageStartupDuration(startupTiming, 'package-compatibility', compatibilityStartedAt);
     }
@@ -1971,6 +1978,9 @@ async function inspectPackage(
       extensionResources.push(Date.now() < compatibilityDeadline
         ? await extensionResourceView(root, file, startupTiming)
         : unknownExtensionResourceView(file));
+    }
+    if (extensionResources.some((resource) => resource.compatibility === 'unknown')) {
+      startupTiming?.degradedStages.add('package-compatibility');
     }
     const resources: PiPackageResourceView[] = [
       ...extensionResources,
@@ -2223,6 +2233,10 @@ async function inspectAllPackagesUncached(
     // Package inspection includes synchronous parser work in Electron's main
     // process. Yield between packages so a long roster cannot monopolize it.
     await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  if (inspected.some((pkg) => pkg.view.warning === 'inspection-failed'
+    || pkg.view.warning === 'inspection-limit' || Boolean(pkg.snapshotUnavailable))) {
+    options.startupTiming?.degradedStages.add('package-inspection');
   }
   recordPiPackageStartupDuration(options.startupTiming, 'package-inspection', inspectionStartedAt);
   return inspected;
@@ -2506,7 +2520,6 @@ export async function resolveManagedPiPackageResources(
           || pkg.view.warning === 'inspection-limit'
           || Boolean(pkg.snapshotUnavailable)
         )).length;
-        startupTiming.degraded = startupTiming.skippedPackageCount > 0;
       }
       if (!snapshotRoot) {
         // Native Pi owns loading. Cache only advisory inspection limits here;
@@ -2599,7 +2612,7 @@ export async function resolveManagedPiPackageResources(
         }
         if (changedSources.size > 0) {
           if (startupTiming) {
-            startupTiming.degraded = true;
+            startupTiming.degradedStages.add('package-snapshot');
             startupTiming.skippedPackageCount = Math.max(
               startupTiming.skippedPackageCount,
               changedSources.size,
@@ -2682,7 +2695,7 @@ export async function resolveManagedPiPackageResources(
             startupTiming.skippedPackageCount,
             skippedThisStart.size,
           );
-          startupTiming.degraded ||= skippedThisStart.size > 0;
+          if (skippedThisStart.size > 0) startupTiming.degradedStages.add('package-snapshot');
         }
         const snapshotProjectionChanged = await persistSnapshotUnavailableProjection(
           unavailableRoots,
@@ -2693,6 +2706,7 @@ export async function resolveManagedPiPackageResources(
         }
         return staged;
       } catch (error) {
+        startupTiming?.degradedStages.add('package-snapshot');
         await fs.rm(snapshotRoot, { recursive: true, force: true }).catch(() => undefined);
         const warning = error instanceof PiPackageSnapshotLimitError
           ? 'inspection-limit'
@@ -2721,7 +2735,6 @@ export async function resolveManagedPiPackageResources(
     if (!startupTiming) await mutationTail;
     return await resolveResources();
   } catch (error) {
-    if (startupTiming) startupTiming.degraded = true;
     log.warn('Pi package resources unavailable; starting without user packages', {
       message: error instanceof Error ? error.message : String(error),
     });

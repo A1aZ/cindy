@@ -936,16 +936,15 @@ describe('usage through the production event pipeline', () => {
     await h.dispose();
   });
 
-  it('keeps independent OpenAI Pi turns as subscription value and uses their own price override', async () => {
+  it.each([['openai-account', 'codex', 'chatgpt/gpt-5.6-luna'], ['claude-account', 'claude', 'claude-sonnet-4-6'], ['xai-account', 'xai', 'xai/grok-4.6']])('uses the %s Pi subscription price override', async (providerId, native, model) => {
     const h = harness();
     pricing(true);
-    effects.fn('getSessionProvider').mockReturnValue('openai-account');
+    effects.fn('getSessionProvider').mockReturnValue(providerId);
     effects.fn('isUserProviderSession').mockReturnValue(true);
-    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'openai-account', source: 'user', auth: { method: 'oauth', native: 'codex' }, access: { kind: 'subscription' } }] });
-    const model = 'chatgpt/gpt-5.6-luna';
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: providerId, source: 'user', auth: { method: 'oauth', native }, access: { kind: 'subscription' } }] });
     h.emit(event('done', { usage: { ...tokens, segments: [{ ...segment, model }], segmentsComplete: true } }, { source: 'pi' }));
     await microtasks();
-    expect(effects.fn('getCodexProviderSubscriptionValuePrice')).toHaveBeenCalledWith('openai-account', model, expect.anything(), undefined, undefined, 'pi');
+    expect(effects.fn('getCodexProviderSubscriptionValuePrice')).toHaveBeenCalledWith(providerId, model, expect.anything(), undefined, undefined, 'pi');
     expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
     expect(effects.fn('recordSchedulerTurnCost')).toHaveBeenCalledWith(expect.objectContaining({ money: expect.objectContaining({ kind: 'value-estimate' }) }));
     await h.dispose();
@@ -1100,6 +1099,7 @@ describe('usage through the production event pipeline', () => {
     await microtasks();
     expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
     expect(effects.fn('recordSessionTurnSpend')).not.toHaveBeenCalled();
+    if (!fallback) expect(effects.fn('getCodexProviderSubscriptionValuePrice')).toHaveBeenCalledWith('claude-account', 'claude-sonnet-4-6', expect.anything(), undefined, undefined, 'claude-code');
     if (!fallback) expect(effects.fn('recordModelTurnUsage')).toHaveBeenCalledWith(expect.objectContaining({
       model: expect.stringContaining('#billing=subscription'),
       inputTokensDelta: 100, outputTokensDelta: 20,

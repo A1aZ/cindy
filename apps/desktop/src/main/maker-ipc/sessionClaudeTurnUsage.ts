@@ -284,9 +284,9 @@ export function recordSessionClaudeTurnUsage(
             isClaudeSubscriptionValueRow || isBridgeSubscriptionRow
               ? computePriceQuoteTurnMoney(
                   m.deltas,
-                  sessionProviderForBilling && isOpenAiSubscriptionProviderId(sessionProviderForBilling) && m.model.startsWith(CHATGPT_MODEL_PREFIX)
+                  (sessionProviderForBilling
                     ? getCodexProviderSubscriptionValuePrice(sessionProviderForBilling, m.model, pricing, undefined, undefined, 'claude-code')
-                    : getSubscriptionValuePriceFor('claude-code', m.model, pricing),
+                    : undefined) ?? getSubscriptionValuePriceFor('claude-code', m.model, pricing),
                   currentLedgerCurrency(),
                   m.segments,
                 )

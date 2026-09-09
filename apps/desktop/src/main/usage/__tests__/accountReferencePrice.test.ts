@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BUNDLED_CATALOG, buildUserProvider } from '@cindy/model-providers';
-import { providerReferencePriceQuote, getModelPriceQuote } from '../../../shared/modelPriceQuote.js';
+import { providerReferencePriceQuote, getModelPriceQuote, modelPricingKey } from '../../../shared/modelPriceQuote.js';
 
 vi.mock('../../maker-host/active-catalog.js', () => ({
   getActiveCatalog: () => ({ ...BUNDLED_CATALOG, providers: [buildUserProvider({
@@ -56,4 +56,23 @@ describe('independent subscription account reference prices', () => {
       });
     }
   });
+});
+
+it.each(['pi', 'claude-code'] as const)('uses account overrides before public prices for %s', (agent) => {
+  for (const [native, publicId, model] of [
+    ['claude', 'anthropic', 'claude-sonnet-4-6'], ['xai', 'xai', 'xai/grok-4.6'],
+  ]) {
+    const providerId = `${native}-account`;
+    const key = modelPricingKey(model, agent);
+    const own = { providerId, modelId: model, currency: 'USD' as const,
+      source: 'user-override' as const, approximate: false, inputPerMtok: 123, outputPerMtok: 456 };
+    expect(getCodexProviderSubscriptionValuePrice(providerId, model, {
+      [providerId]: { [key]: own },
+      [publicId]: { [key]: { ...own, providerId: publicId, inputPerMtok: 999 } },
+    }, undefined, undefined, agent)).toEqual(own);
+    const base = providerReferencePriceQuote(publicId, model, BUNDLED_CATALOG.modelRegistry, { agent });
+    expect(base).toBeDefined();
+    expect(getCodexProviderSubscriptionValuePrice(providerId, model, {}, undefined, undefined, agent))
+      .toEqual({ ...base, providerId, modelId: model });
+  }
 });

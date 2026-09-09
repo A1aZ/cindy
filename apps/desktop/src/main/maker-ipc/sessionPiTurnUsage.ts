@@ -202,9 +202,9 @@ export function recordSessionPiTurnUsage(
             const pricingSegments = piSegmentsReliable ? group.segments : [];
             let money: RegionalMoney | null = null;
             if (billingRoute === 'subscription') {
-              const quote = effectiveProvider && isOpenAiSubscriptionProviderId(effectiveProvider) && model.startsWith(CHATGPT_MODEL_PREFIX)
+              const quote = (effectiveProvider
                 ? getCodexProviderSubscriptionValuePrice(effectiveProvider, model, pricing, undefined, undefined, 'pi')
-                : getSubscriptionValuePriceFor('pi', model, pricing);
+                : undefined) ?? getSubscriptionValuePriceFor('pi', model, pricing);
               money = computePriceQuoteTurnMoney(
                 group.tokens,
                 quote ?? undefined,

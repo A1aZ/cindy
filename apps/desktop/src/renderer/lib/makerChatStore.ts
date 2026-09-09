@@ -3921,9 +3921,11 @@ function enterView(sessionId: string): () => void {
   _lastViewedAt.delete(sessionId);
   _ensureDemoteTimer();
   if (resumingHistory) {
-    void view.refresh().then(() => {
+    // A repair push may have arrived after leaveView, when refresh is inactive.
+    // Reuse the normal resume read to hand off unchanged streaming rows too.
+    void reconcileRemoteMessages(sessionId, { repair: true }).then(() => {
       if (!view.getSnapshot().error) scheduleIdlePlanDiscoveryIfNeeded(sessionId);
-    });
+    }).catch(() => undefined);
   } else scheduleIdlePlanDiscoveryIfNeeded(sessionId);
   return () => leaveView(sessionId);
 }
@@ -11609,7 +11611,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean; fr
   const view = getRemoteHistoryView(sessionId);
   const repairRows = opts?.repair && view
     ? new Map(sessions.get(sessionId)?.messages.map((row) => [row.clientId, row])) : undefined;
-  if (view && (view.getSnapshot().ready || opts?.freshHistory)) return Promise.all([view.refresh(false, opts?.freshHistory), reconcilePendingInteractions(sessionId)]).then(() => {
+  if (view && (view.getSnapshot().ready || opts?.freshHistory || opts?.repair)) return Promise.all([view.refresh(false, opts?.freshHistory), reconcilePendingInteractions(sessionId)]).then(() => {
     if (getRemoteHistoryView(sessionId) !== view || !view.isActive()) return false;
     if (isHistoryViewUnavailable(view.getSnapshot().error)) {
       releaseRemoteHistoryView(sessionId, view);

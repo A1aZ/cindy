@@ -924,3 +924,22 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(screen.queryByText('settings.providers.wizard.nameLabel')).toBeNull();
   });
 });
+
+it.each(['audioModels', 'embeddingModels'] as const)('opens key setup for a disconnected media-only builtin with %s', async (field) => {
+  const mediaProvider = {
+    ...anthropicProvider, id: 'gemini', name: 'Media Only', agents: [], models: {},
+    auth: { method: 'apiKey' as const }, [field]: [{ id: 'media', name: 'Media' }],
+  } as ProviderView;
+  const store = vi.fn(async () => undefined);
+  window.electronAPI.builtinApiKeyStore = store;
+  const onDone = vi.fn();
+  const view = render(<AddProviderWizard providers={[mediaProvider]} onOpenCustomForm={vi.fn()} onClose={vi.fn()} onDone={onDone} />);
+  fireEvent.click(await screen.findByText('Media Only'));
+  expect(await screen.findByText('settings.providers.wizard.builtinApiKey.subtitle')).toBeTruthy();
+  const keyInput = view.container.querySelector('input[type="password"]');
+  expect(keyInput).not.toBeNull();
+  fireEvent.change(keyInput!, { target: { value: 'test-media-key' } });
+  fireEvent.click(screen.getByRole('button', { name: 'settings.providers.wizard.finish' }));
+  await waitFor(() => expect(store).toHaveBeenCalledWith('gemini', 'test-media-key'));
+  expect(onDone).toHaveBeenCalledWith('gemini');
+});

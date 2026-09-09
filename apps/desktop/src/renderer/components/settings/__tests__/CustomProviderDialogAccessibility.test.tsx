@@ -214,7 +214,7 @@ async function renderNewImageGenerationReloadConfirmation(onSaved = vi.fn(), onC
 }
 
 describe('CustomProviderDialog accessibility', () => {
-  it('opens the requested runtime and focuses the model context-window field', async () => {
+  it.each(['target-model', 'flux-image-x'])('opens and focuses the custom chat window field for %s', async (modelId) => {
     const initial: CustomProviderConfig = {
       id: 'deep-link-provider',
       name: 'Deep Link Provider',
@@ -226,7 +226,7 @@ describe('CustomProviderDialog accessibility', () => {
         },
         codex: {
           baseUrl: 'https://codex.example.test',
-          models: [{ id: 'target-model', name: 'Target Model' }],
+          models: [{ id: modelId, name: 'Target Model' }],
         },
       },
     };
@@ -236,7 +236,7 @@ describe('CustomProviderDialog accessibility', () => {
       <CustomProviderDialog
         initial={initial}
         focusAgent="codex"
-        focusModelId="target-model"
+        focusModelId={modelId}
         onSaved={vi.fn()}
         onClose={vi.fn()}
       />,

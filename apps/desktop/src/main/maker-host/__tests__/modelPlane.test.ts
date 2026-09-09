@@ -31,7 +31,7 @@ import {
   sanitizeModelCatalogOverrides,
   type ModelCatalogOverrides,
 } from '../model-plane/localCatalogOverrides.js';
-import { isRegistryTombstoneForConsumer } from '../model-plane/modelPlanePolicy.js';
+import { isRegistryTombstoneForConsumer, planRegistryRoots } from '../model-plane/modelPlanePolicy.js';
 
 type RegistryEntries = NonNullable<Catalog['modelRegistry']>['models'];
 
@@ -1116,4 +1116,16 @@ it('honors local working defaults and separate maximums in all three GPT harness
       contextWindowMax: 1_000_000,
     });
   }
+});
+
+it('keeps V4 media routes out of chat root warnings without hiding invalid chat routes', () => {
+  const plan = planRegistryRoots({ schemaVersion: 4, updatedAt: '2026-09-09T00:00:00.000Z', models: [
+    ...['image_generation', 'video_generation', 'audio_generation', 'audio_speech', 'audio_transcription', 'realtime', 'embedding'].map((mode) => ({
+      id: `openai/${mode}`, name: mode, mode, status: 'active' as const,
+      routes: [{ providerId: 'openai', modelId: mode, agents: [] }],
+    })),
+    { id: 'openai/broken-chat', name: 'Broken Chat', mode: 'chat', status: 'active', routes: [{ providerId: 'openai', modelId: 'broken-chat', agents: [] }] },
+  ] });
+  expect(plan.roots.size).toBe(0);
+  expect(plan.warnings).toEqual([expect.objectContaining({ modelId: 'broken-chat', reason: 'route has no canonical root agent membership' })]);
 });

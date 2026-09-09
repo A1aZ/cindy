@@ -1,4 +1,4 @@
-import { classifyModel, isChatEligible } from '@cindy/model-providers';
+import { classifyModel, isChatEligible, isAgentSelectableModel } from '@cindy/model-providers';
 import { CATEGORY_LABEL_KEY } from '@/components/new-chat/sourceSwitch';
 /**
  * CustomProviderDialog —— 自定义供应商「新建 / 编辑」表单弹窗（按 .pen pQrpu/Fxstc 还原）。
@@ -2794,7 +2794,10 @@ export function CustomProviderDialog({
                       <div
                         className="w-28 shrink-0"
                         hidden={
-                          !isChatEligible({ id: m.id, mode: m.mode ?? m.discoveredMetadata?.mode })
+                          !isAgentSelectableModel(
+                            { id: m.id, group: 'custom', mode: m.mode ?? m.discoveredMetadata?.mode },
+                            { userProvider: true },
+                          )
                         }
                         title={t('settings.providers.custom.fields.modelContextWindowTitle')}
                       >

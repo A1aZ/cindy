@@ -1,3 +1,4 @@
+import { MANAGEMENT_KIND_ORDER, groupModelsForManagement } from '@/components/settings/modelManagementPresentation';
 // @vitest-environment jsdom
 
 /**
@@ -9,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   buildUnionRows,
+  managementKindOfRow,
   hasPaymentRequiredDisabledRow,
   isCapabilityRow,
   isRowDisabled,
@@ -309,4 +311,15 @@ it('ordinary toggles preserve opt-in compatibility and can still enable hidden n
   expect(modelVisibilityTargets({ ...provider, id: 'openai' }, mutableRow, true)).toEqual([
     { agent: 'codex', modelId: 'gpt-6' },
   ]);
+});
+
+it('keeps generic audio in its own management category and filter order', () => {
+  const audioProvider = {
+    ...provider, models: {}, audioModels: [{ id: 'sound', name: 'Sound', mode: 'audio_generation' }],
+  } as ProviderView;
+  const rows = buildUnionRows(audioProvider);
+  expect(rows).toHaveLength(1);
+  expect(managementKindOfRow(rows[0]!, true)).toBe('audio');
+  expect(MANAGEMENT_KIND_ORDER.filter((kind) => kind === managementKindOfRow(rows[0]!, true))).toEqual(['audio']);
+  expect(groupModelsForManagement(rows, 'model', (row) => managementKindOfRow(row, true)).map((group) => group.key)).toEqual(['audio']);
 });

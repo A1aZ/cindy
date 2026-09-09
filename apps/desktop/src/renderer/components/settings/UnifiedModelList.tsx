@@ -109,6 +109,7 @@ const HIDDEN_GROUP_KEY = '__hidden';
 const CAPABILITY_CATEGORIES = new Set<ModelCategory>([
   'image',
   'video',
+  'audio',
   'tts',
   'stt',
   'realtime',
@@ -350,6 +351,12 @@ function rowModelIds(row: UnionModelRow): string[] {
 function rowCategory(row: UnionModelRow): ModelCategory {
   const rep = row.byAgent[row.avail[0]];
   return rep ? classifyModel(rep) : 'ungrouped';
+}
+
+export function managementKindOfRow(row: UnionModelRow, userProvider: boolean): ManagementKind {
+  if (!isCapabilityRow(row, userProvider)) return 'chat';
+  const category = rowCategory(row);
+  return CAPABILITY_CATEGORIES.has(category) ? (category as ManagementKind) : 'other';
 }
 
 export function UnifiedModelList({
@@ -642,9 +649,7 @@ export function UnifiedModelList({
    */
   const kindOf = useCallback(
     (row: UnionModelRow): ManagementKind => {
-      if (!isCapabilityRow(row, provider.source === 'user')) return 'chat';
-      const category = rowCategory(row);
-      return CAPABILITY_CATEGORIES.has(category) ? (category as ManagementKind) : 'other';
+      return managementKindOfRow(row, provider.source === 'user');
     },
     [provider.source],
   );

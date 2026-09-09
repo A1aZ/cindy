@@ -560,6 +560,10 @@ function modelEntryError(
     schemaVersion === MODEL_ACCESS_CATALOG_SCHEMA_VERSION &&
     (value.mode === "image_generation" ||
       value.mode === "video_generation" ||
+      value.mode === "audio_generation" ||
+      value.mode === "audio_speech" ||
+      value.mode === "audio_transcription" ||
+      value.mode === "realtime" ||
       value.mode === "embedding");
   if (isV4StandaloneModel && supportedAgents.length > 0) {
     return `${path}.agents must be empty for a v4 Gateway standalone capability mode`;

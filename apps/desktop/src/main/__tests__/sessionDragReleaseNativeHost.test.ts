@@ -135,6 +135,20 @@ describe('SessionDragReleaseNativeHost', () => {
     expect(forgeSource).toContain('buildMacSessionDragReleaseHelper(platform, arch);');
     expect(forgeSource).toContain("'xdt-macos-session-drag-release-helper'");
   });
+
+  it('uses a complete macOS target triple for the remote desktop input helper', () => {
+    const forgeSource = fs.readFileSync(
+      path.resolve(__dirname, '..', '..', '..', 'forge.config.ts'),
+      'utf8',
+    );
+    expect(forgeSource).toContain(
+      "const MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET = 'macos10.15';",
+    );
+    expect(forgeSource).toContain(
+      "MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET,\n      [],\n      'remote desktop input'",
+    );
+    expect(forgeSource).not.toContain("dest, arch, '10.15', [], 'remote desktop input'");
+  });
 });
 
 function createFakeChild(): FakeNativeProcess {

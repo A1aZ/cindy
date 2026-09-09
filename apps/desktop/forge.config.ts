@@ -911,6 +911,7 @@ const MACOS_AGENT_ISLAND_HELPER_DEPLOYMENT_TARGET = 'macos14.0';
 const MACOS_COMPUTER_PERMISSION_GUIDE_HELPER_DEPLOYMENT_TARGET = 'macos13.0';
 const MACOS_SESSION_DRAG_RELEASE_HELPER_DEPLOYMENT_TARGET = 'macos10.15';
 const MACOS_XBOX_GAMEPAD_HELPER_DEPLOYMENT_TARGET = 'macos11.0';
+const MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET = 'macos10.15';
 
 function swiftTargetTriple(cpuArch: 'arm64' | 'x86_64', deploymentTarget: string): string {
   return `${cpuArch}-apple-${deploymentTarget}`;
@@ -1033,7 +1034,14 @@ function buildRemoteDesktopInput(platform: ForgePlatform, arch: ForgeArch): void
   fs.mkdirSync(destDir, { recursive: true });
   if (process.platform === 'darwin' && isMacForgePlatform(platform)) {
     const dest = path.join(destDir, 'cindy-macos-desktop-input');
-    buildSwiftHelperForForgeArch(path.join(__dirname, 'native', 'remote-desktop', 'macos-input.swift'), dest, arch, '10.15', [], 'remote desktop input');
+    buildSwiftHelperForForgeArch(
+      path.join(__dirname, 'native', 'remote-desktop', 'macos-input.swift'),
+      dest,
+      arch,
+      MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET,
+      [],
+      'remote desktop input',
+    );
     fs.chmodSync(dest, 0o755);
     const capture = path.join(destDir, 'cindy-macos-desktop-capture');
     const captureArch = arch === 'universal' ? ['-arch', 'arm64', '-arch', 'x86_64'] : ['-arch', arch === 'arm64' ? 'arm64' : 'x86_64'];

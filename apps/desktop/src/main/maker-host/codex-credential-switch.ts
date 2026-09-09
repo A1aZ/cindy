@@ -308,8 +308,8 @@ export function shouldCloseSessionForCredentialSwitch(
   // provider-oauth 凭证家族可复用，也必须重建本会话，不能把旧 flag 热切到新来源。
   if (
     input.agentKind === 'claude-code' &&
-    claudeToolSearchMode(currentProviderId, currentMode) !==
-      claudeToolSearchMode(nextProviderId, nextMode)
+    claudeToolSearchMode(currentProviderId, currentMode, getActiveCatalog().providers.find(p => p.id === currentProviderId)?.auth.native) !==
+      claudeToolSearchMode(nextProviderId, nextMode, getActiveCatalog().providers.find(p => p.id === nextProviderId)?.auth.native)
   ) {
     return true;
   }

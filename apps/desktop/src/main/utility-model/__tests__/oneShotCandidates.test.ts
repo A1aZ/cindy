@@ -1,3 +1,5 @@
+import { getValidClaudeAccountOAuth } from '../../maker-host/subscription-account-auth.js';
+vi.mock('../../maker-host/subscription-account-auth.js', () => ({ getValidClaudeAccountOAuth: vi.fn() }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -147,6 +149,7 @@ function makerMock(authenticated: boolean): Maker {
 
 describe('utility one-shot candidates', () => {
   beforeEach(() => {
+    vi.mocked(getValidClaudeAccountOAuth).mockReset();
     vi.clearAllMocks();
     fetchMock.mockReset();
     chainState.source = 'auto';
@@ -2414,6 +2417,48 @@ describe('utility one-shot candidates', () => {
     resolveOAuth?.({ accessToken: 'late-token' });
 
     await expect(pending).resolves.toMatchObject({ ok: false, reason: 'timeout' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude', 'xai'] as const)('dispatches only the selected independent %s account and rejects changed credentials', async (native) => {
+    const providerId = `${native}-work`;
+    const agentKind = native === 'claude' ? 'claude-code' : 'codex';
+    const model = native === 'claude' ? 'claude-haiku-4-5' : 'xai/grok-4.3';
+    activeCatalog.mockReturnValue({ providers: [{ id: providerId, name: 'Work', source: 'user',
+      agents: [agentKind], auth: { method: 'oauth', native },
+      routing: { [agentKind]: { upstream: 'https://account.example/v1', authStrategy: 'provider-oauth-header' } },
+      models: { [agentKind]: [{ id: model, name: model, contextWindow: 200_000 }] },
+    }] } as never);
+    vi.mocked(getValidClaudeAccountOAuth).mockResolvedValue({ accessToken: 'selected-token' } as never);
+    readGrokToken.mockImplementation(async (id) => {
+      if (id !== providerId) throw new Error('wrong account');
+      return 'selected-token';
+    });
+    readClaudeOAuth.mockResolvedValue({ accessToken: 'other-token' } as never);
+    fetchMock.mockResolvedValue({ ok: true, text: async () => native === 'claude'
+      ? JSON.stringify({ content: [{ type: 'text', text: 'answer' }] })
+      : JSON.stringify({ output_text: 'answer' }) } as never);
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId, agentKind, model, beforeDispatch: async () => true,
+    });
+    expect(result).toMatchObject({ ok: true, providerId, model });
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer selected-token' });
+    if (native === 'claude') {
+      expect(getValidClaudeAccountOAuth).toHaveBeenCalledWith(providerId);
+      expect(readClaudeOAuth).not.toHaveBeenCalled();
+    } else expect(readGrokToken).toHaveBeenCalledWith(providerId);
+    fetchMock.mockClear();
+    const changed = await requestUtilityText(makerMock(false), 'generate', {
+      providerId, agentKind, model, beforeDispatch: async () => {
+        vi.mocked(getValidClaudeAccountOAuth).mockResolvedValue(null);
+        readGrokToken.mockRejectedValue(new Error('logged out'));
+        return true;
+      },
+    });
+    expect(changed.ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const missing = await requestUtilityText(makerMock(false), 'generate', { providerId, agentKind, model });
+    expect(missing.ok).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

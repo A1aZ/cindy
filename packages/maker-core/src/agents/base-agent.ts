@@ -625,6 +625,8 @@ export interface AgentDeps {
    * 其它 agent 不消费此字段。
    */
   resolvePiAgentHome?: (remoteHostId?: string | null) => string | undefined;
+  /** Native user context root, separate from Cindy's models/auth runtime home. */
+  resolvePiGlobalContextHome?: (remoteHostId?: string | null) => string | undefined;
 
   /**
    * Pi-only: advisory metadata for Cindy UI/command projection. This resolver
@@ -964,6 +966,11 @@ export interface AgentDeps {
    */
   reviewAutoPermissionAction?: AutoReviewDelegate;
 
+  /** Scope tools/list during native startup, before a real thread id exists. Never authorizes tools/call. */
+  withCodexMcpDiscoveryContext?: <T>(
+    args: Pick<CodexMcpThreadContextArgs, 'sessionId' | 'sessionInstanceId' | 'workingDir' | 'vendorOptions' | 'remoteHostId'>,
+    run: () => Promise<T>,
+  ) => Promise<T>;
   /**
    * Codex-only: bind app-server thread ids back to xdt-maker session context
    * for host-owned HTTP MCP bridges. Missing hooks keep the old no-session
@@ -1292,6 +1299,8 @@ export interface AgentDeps {
    */
   remoteCcQueryFactory?: (opts: {
     remoteHostId: string;
+    /** Inject the narrow helper transport for a Bot runtime. */
+    botSession?: boolean;
     sessionId: string;
     /** 当前 Maker Session 实例代号；只在宿主 MCP 身份上下文中流转。 */
     sessionInstanceId?: string;
@@ -1469,6 +1478,28 @@ export class AgentNotAuthenticatedError extends Error {
   constructor(public readonly agentKind: string, msg?: string) {
     super(msg ?? `agent-not-authenticated:${agentKind}`);
     this.name = 'AgentNotAuthenticatedError';
+  }
+}
+
+/**
+ * An adapter failed before returning a handle and has confirmed its process stopped.
+ * Maker unwraps the cause after releasing only this startup's host resources.
+ */
+export class AgentStartupStoppedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'AgentStartupStoppedError';
+  }
+}
+
+/** An adapter failed before returning a handle, but its process has not confirmed exit. */
+export class AgentStartupCleanupPendingError extends Error {
+  readonly whenStopped: Promise<void>;
+
+  constructor(message: string, options: { cause: unknown; whenStopped: Promise<void> }) {
+    super(message, { cause: options.cause });
+    this.name = 'AgentStartupCleanupPendingError';
+    this.whenStopped = options.whenStopped;
   }
 }
 

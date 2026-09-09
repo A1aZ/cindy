@@ -31,6 +31,7 @@ import {
   CodexResumePreparationBlockedError,
   OneShotError,
   AgentNotAuthenticatedError,
+  AgentStartupStoppedError,
   TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
   type AgentDeps,
@@ -4336,9 +4337,15 @@ export class CodexAgent extends BaseAgent {
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
     let mutableWritableDirs = [...(opts.writableDirs ?? [])];
     let autoReviewDirectoryGeneration = 0;
-    const reviewReadGrants = reviewMode
-      ? await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? [])
-      : [];
+    let reviewReadGrants: Awaited<ReturnType<typeof buildReviewReadGrants>> = [];
+    if (reviewMode) {
+      try {
+        reviewReadGrants = await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? []);
+      } catch (error) {
+        // Codex app-server has not been contacted before review grants are validated.
+        throw new AgentStartupStoppedError(error);
+      }
+    }
     const reviewReadPaths = reviewReadGrants.map((grant) => grant.realPath);
     const reviewReadDirectories = new Set(
       reviewReadGrants.filter((grant) => grant.directory).map((grant) => grant.realPath),
@@ -4793,6 +4800,14 @@ export class CodexAgent extends BaseAgent {
         );
       }
     }
+    const readSessionMcpConfig = (): Record<string, unknown> => {
+      const config = host.getSessionMcpConfig(opts.sessionInstanceId);
+      if (opts.remoteHostId && opts.botRuntimeProfile?.mcpPolicy
+        && typeof config['mcp_servers.cindy_helper.url'] !== 'string') {
+        throw new Error('Remote Codex Bot tools are not ready. Retry after the active remote task finishes.');
+      }
+      return config;
+    };
     let botMcpConfig: Record<string, unknown> = {};
     if (!reviewMode && opts.botRuntimeProfile?.mcpPolicy) {
       try {
@@ -4803,11 +4818,15 @@ export class CodexAgent extends BaseAgent {
         assertCurrentHost('Bot MCP configuration');
         const transports = new Set(Object.entries(asRecord(asRecord(response.config).mcp_servers))
           .filter(([, value]) => hasCodexMcpTransport(value)).map(([name]) => name));
-        for (const [key, value] of Object.entries(host.getSessionMcpConfig(opts.sessionInstanceId))) {
+        for (const [key, value] of Object.entries(readSessionMcpConfig())) {
           const match = /^mcp_servers\.([A-Za-z0-9_-]+)\.(?:url|command)$/.exec(key);
           if (match && typeof value === 'string' && value.trim()) transports.add(match[1]);
         }
         botMcpConfig = buildCodexBotMcpConfigOverrides(opts.botRuntimeProfile.mcpPolicy, transports);
+        // Remote daemons keep this shared transport disabled for ordinary tasks.
+        if (opts.remoteHostId && transports.has('cindy_helper')) {
+          botMcpConfig['mcp_servers.cindy_helper.enabled'] = true;
+        }
         if (!makerMemoryEnabled && transports.has('cindy_memory')) {
           botMcpConfig['mcp_servers.cindy_memory.enabled'] = false;
         }
@@ -5610,8 +5629,19 @@ export class CodexAgent extends BaseAgent {
       const { approvalPolicy, approvalsReviewer, sandbox } = currentApprovalConfig();
       const threadContextWindow = effectiveThreadContextWindow(contextLimit);
       const config = {
+        // Apply transport defaults before the per-session Bot capability policy.
+        ...(reviewMode ? {} : readSessionMcpConfig()),
         ...capabilityRoutingConfig,
         ...customProviderThreadConfig,
+        // Bot memory and delegation belong to its Cindy Profile and Session
+        // tasks, not the shared native home or hidden harness child threads.
+        ...(opts.botRuntimeProfile ? {
+          'features.multi_agent': false,
+          'features.multi_agent_v2': false,
+          'agents.enabled': false,
+          'memories.generate_memories': false,
+          'memories.use_memories': false,
+        } : {}),
         ...(readonlyReferenceDirsSupported ? readonlyReferencesConfig() : {}),
         ...(reviewMode ? reviewPermissionsConfig : {}),
         ...(reviewMode
@@ -5624,7 +5654,6 @@ export class CodexAgent extends BaseAgent {
               'features.remote_plugin': false,
             }
           : {}),
-        ...(reviewMode ? {} : host.getSessionMcpConfig(opts.sessionInstanceId)),
         ...(!makerMemoryEnabled && !opts.botRuntimeProfile
           ? { 'mcp_servers.cindy_memory.enabled': false }
           : {}),
@@ -5972,6 +6001,15 @@ export class CodexAgent extends BaseAgent {
     let codexThreadModelProviderId: string | undefined;
     let codexProductPromptDelivery: AgentSessionHandle['codexProductPromptDelivery'];
 
+    const withMcpDiscoveryContext = <T>(run: () => Promise<T>): Promise<T> => {
+      if (reviewMode || !sid || !opts.sessionInstanceId || !this.deps.withCodexMcpDiscoveryContext) return run();
+      return this.deps.withCodexMcpDiscoveryContext({
+        sessionId: sid, sessionInstanceId: opts.sessionInstanceId,
+        workingDir: opts.workingDir, vendorOptions: vo,
+        ...(opts.remoteHostId ? { remoteHostId: opts.remoteHostId } : {}),
+      }, run);
+    };
+
     /**
      * Start a replacement thread after the exact provider proof that the
      * persisted thread has no rollout. This is intentionally narrower than a
@@ -5990,9 +6028,9 @@ export class CodexAgent extends BaseAgent {
       };
       acquireHostBindingLeaseIfNeeded();
       assertCurrentHost('thread/start');
-      const resp = await host.request<ThreadStartResponse>(Method.ThreadStart, params, {
+      const resp = await withMcpDiscoveryContext(() => host.request<ThreadStartResponse>(Method.ThreadStart, params, {
         timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
-      });
+      }));
       assertCurrentHost('thread/start');
       if (Object.hasOwn(resp, 'serviceTier')) {
         mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
@@ -6104,9 +6142,9 @@ export class CodexAgent extends BaseAgent {
       try {
         acquireHostBindingLeaseIfNeeded();
         assertCurrentHost('thread/resume');
-        const resp = await host.request<ThreadResumeResponse>(Method.ThreadResume, params, {
+        const resp = await withMcpDiscoveryContext(() => host.request<ThreadResumeResponse>(Method.ThreadResume, params, {
           timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
-        });
+        }));
         assertCurrentHost('thread/resume');
         if (Object.hasOwn(resp, 'serviceTier')) {
           mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
@@ -6546,6 +6584,7 @@ export class CodexAgent extends BaseAgent {
       forcePrompt?: boolean;
       /** Auto 审阅故障降级来的确认:系统收口不能当成用户点了拒绝。 */
       unavailableHandoff?: boolean;
+      onSystemDenied?: (reason: string) => void;
     }
     const pendingApprovals = new Map<string, PendingEntry>();
     const seenGuardianReviewIds = new Set<string>();
@@ -6792,6 +6831,29 @@ export class CodexAgent extends BaseAgent {
     ): Promise<ApprovalDecision> {
       const timingPauseId = `approval:${kind}:${requestId}`;
       return withCodexGenerationPaused(requestThreadId, turnId, timingPauseId, async () => {
+        // Native Codex currently flattens MCP declines to "user rejected" and
+        // discards response content/_meta on that path. Preserve the cause in
+        // Cindy's diagnostic/UI channel; this notice is NOT model context.
+        const reportMcpDenial = (source: 'auto-review' | 'system' | 'user', reason?: string, visible = true) => {
+          if (kind !== 'mcpServerElicitation') return;
+          const timedOut = source === 'system' && isSystemPermissionDenialReason(reason) &&
+            (reason === 'timeout' || reason?.endsWith('_timeout'));
+          const code = source === 'auto-review' ? 'MCP_APPROVAL_AUTO_BLOCKED'
+            : timedOut ? 'MCP_APPROVAL_CONFIRMATION_TIMEOUT' : 'MCP_APPROVAL_CONFIRMATION_UNAVAILABLE';
+          // IDs and a closed set of causes only: no arguments, credentials, or
+          // free-text reviewer output may enter the diagnostic log.
+          log.info('MCP approval denied', {
+            threadId: requestThreadId, turnId, requestId, itemId: opts?.itemId,
+            source, cause: source === 'user' ? 'user-denied' : code,
+          });
+          if (source === 'user' || !visible) return;
+          const text = source === 'auto-review'
+            ? 'Automatic approval review blocked this tool call. No user rejection was received.'
+            : timedOut
+              ? 'The permission request timed out without a confirmed decision. This does not establish whether the user clicked a button.'
+              : 'The permission confirmation could not be completed. No user rejection was received.';
+          emitAutoReviewRuntimeNotice(`[${code}] ${text}`);
+        };
         let forcePrompt =
           opts?.forcePrompt === true ||
           (req.kind === 'permission' &&
@@ -6861,8 +6923,8 @@ export class CodexAgent extends BaseAgent {
           } else if (decision.verdict === 'allow') {
             return 'accept';
           } else if (decision.verdict === 'block') {
-            // 模型判定动作有更安全的做法 —— 按 Auto 本意保持静默。
-            // (审阅器故障已在 resolveAutoReviewDecision 降级成 ask,不会走到这里。)
+            // Keep the denial, but distinguish it from a user decision in Cindy.
+            reportMcpDenial('auto-review');
             return 'decline';
           } else {
             // AI ask decisions reach the user and cannot be remembered.
@@ -6891,6 +6953,7 @@ export class CodexAgent extends BaseAgent {
             ...(opts?.itemId ? { itemId: opts.itemId } : {}),
             forcePrompt,
             ...(unavailableHandoff ? { unavailableHandoff: true } : {}),
+            onSystemDenied: (reason) => reportMcpDenial('system', reason, false),
           };
           pendingApprovals.set(requestId, entry);
           const finalize = (d: ApprovalDecision) => {
@@ -6903,14 +6966,20 @@ export class CodexAgent extends BaseAgent {
           };
           dispatchInteraction(routedRequest)
             .then((decision) => {
+              if (entry.settled) return;
               if (decision.kind !== 'permission') {
                 log.warn('unexpected non-permission decision → decline', { kind: decision.kind });
-                if (unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
+                reportMcpDenial('system');
+                if (unavailableHandoff && kind !== 'mcpServerElicitation') autoReviewConfirmUndeliveredNotice.notify();
                 finalize('decline');
                 return;
               }
+              if (decision.behavior === 'deny') {
+                reportMcpDenial(isSystemPermissionDenialReason(decision.reason) ? 'system' : 'user', decision.reason);
+              }
               if (
                 unavailableHandoff
+                && kind !== 'mcpServerElicitation'
                 && decision.behavior === 'deny'
                 && isSystemPermissionDenialReason(decision.reason)
               ) {
@@ -6919,8 +6988,10 @@ export class CodexAgent extends BaseAgent {
               finalize(mapPermissionDecisionToApproval(decision));
             })
             .catch((e) => {
+              if (entry.settled) return;
               log.error('dispatchInteraction threw → decline', { requestId, message: (e as Error).message });
-              if (unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
+              reportMcpDenial('system');
+              if (unavailableHandoff && kind !== 'mcpServerElicitation') autoReviewConfirmUndeliveredNotice.notify();
               finalize('decline');
             });
         });
@@ -6945,7 +7016,8 @@ export class CodexAgent extends BaseAgent {
         // 里宽松模式仍强制弹 UI 的语义一致。
         const effectiveResolveAs: 'allow' | 'deny' =
           resolveAs === 'allow' && entry.forcePrompt === true ? 'deny' : resolveAs;
-        if (effectiveResolveAs === 'deny' && entry.unavailableHandoff) {
+        if (effectiveResolveAs === 'deny') entry.onSystemDenied?.(reason);
+        if (effectiveResolveAs === 'deny' && entry.unavailableHandoff && entry.kind !== 'mcpServerElicitation') {
           autoReviewConfirmUndeliveredNotice.notify();
         }
         entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline');
@@ -7975,34 +8047,34 @@ export class CodexAgent extends BaseAgent {
     function mcpElicitationPermissionInput(params: McpServerElicitationRequestParams): Record<string, unknown> {
       const meta = mcpElicitationMeta(params);
       const input: Record<string, unknown> = {
-        serverName: params.serverName,
+        ...mcpToolApprovalContext(params),
         message: params.message,
       };
-      const toolName = stringFromMeta(meta, 'tool_name');
       const toolTitle = stringFromMeta(meta, 'tool_title');
       const toolDescription = stringFromMeta(meta, 'tool_description');
-      if (toolName) input.toolName = toolName;
       if (toolTitle) input.toolTitle = toolTitle;
       if (toolDescription) input.toolDescription = toolDescription;
       if (meta?.tool_params_display != null) input.toolParamsDisplay = meta.tool_params_display;
-      if (meta?.tool_params != null) input.toolParams = meta.tool_params;
-      else {
-        const matches = matchingActiveMcpTools(params);
-        if (matches.length === 1) {
-          input.toolName ??= matches[0].context.tool;
-          if (matches[0].context.arguments !== undefined) input.toolParams = matches[0].context.arguments;
-        }
-      }
       return input;
     }
 
     function mcpToolApprovalContext(params: McpServerElicitationRequestParams) {
       const meta = mcpElicitationMeta(params);
-      const toolName = stringFromMeta(meta, 'tool_name');
+      let toolName = stringFromMeta(meta, 'tool_name');
+      let toolParams = meta?.tool_params;
+      // Older app-servers omit either field. Policy and presentation must use
+      // the same evidence; never guess across concurrent tools or turns.
+      if (!toolName || toolParams == null) {
+        const matches = matchingActiveMcpTools(params);
+        if (matches.length === 1) {
+          toolName ??= matches[0].context.tool ?? undefined;
+          toolParams ??= matches[0].context.arguments;
+        }
+      }
       return {
         serverName: params.serverName,
         ...(toolName ? { toolName } : {}),
-        ...(meta?.tool_params != null ? { toolParams: meta.tool_params } : {}),
+        ...(toolParams != null ? { toolParams } : {}),
       };
     }
 
@@ -8189,7 +8261,7 @@ export class CodexAgent extends BaseAgent {
         log.debug('mcp elicitation auto-approved by host policy', {
           serverName: params.serverName,
           mode: params.mode,
-          toolName: stringFromMeta(mcpElicitationMeta(params), 'tool_name'),
+          toolName: policyPermissionInput.toolName,
           innerToolName: mcpInnerToolName(params),
         });
         return { action: 'accept', content: null, _meta: null };
@@ -13511,84 +13583,6 @@ export class CodexAgent extends BaseAgent {
     return bestPath;
   }
 
-  private async tryForkSdkSessionAtNativeTurn(
-    opts: ForkSdkSessionOptions,
-    lastTurnId: string,
-    credentialMode: AgentCredentialMode | undefined,
-  ): Promise<ForkSdkSessionResult | null> {
-    const log = this.deps.logger.child('codex/fork');
-    const sharedHostKey = hostKey();
-    let releaseHostBindingLease: (() => void) | null = null;
-    let nativeForkRequestStarted = false;
-    const startedAt = Date.now();
-    try {
-      await this.waitForHostCredentialModeSwitch(sharedHostKey);
-      releaseHostBindingLease = this.acquireHostSessionBindingLease(sharedHostKey);
-      const hostStartedAt = Date.now();
-      const sharedHost = await this.getHost(undefined, credentialMode, {
-        ignoreBindingLeases: 1,
-      });
-      const initResp = await sharedHost.ensureStarted();
-      const hostReadyMs = Date.now() - hostStartedAt;
-      if (!supportsCodexNativeTurnFork(initResp.userAgent)) {
-        log.info('native-turn fork unavailable; using legacy isolated fallback', {
-          userAgent: initResp.userAgent ?? null,
-        });
-        return null;
-      }
-
-      if (initResp.codexHome) this.codexHome = initResp.codexHome;
-      const prepareStartedAt = Date.now();
-      if (!sharedHost.hasThreadSubscription(opts.sourceSdkSessionId)) {
-        await this.deps.prepareCodexResumeSession?.(opts.sourceSdkSessionId);
-      }
-      const prepareMs = Date.now() - prepareStartedAt;
-      const forkStartedAt = Date.now();
-      nativeForkRequestStarted = true;
-      const resp = await sharedHost.request<ThreadForkResponse>(Method.ThreadFork, {
-        threadId: opts.sourceSdkSessionId,
-        lastTurnId,
-        excludeTurns: true,
-        ...(opts.workingDir ? { cwd: opts.workingDir } : {}),
-      } satisfies ThreadForkParams);
-      const threadForkMs = Date.now() - forkStartedAt;
-      const newSdkSessionId = resp.thread.id;
-      const cleanupStartedAt = Date.now();
-      try {
-        await sharedHost.unsubscribeThread(newSdkSessionId);
-      } catch (error) {
-        log.warn('precise fork child cleanup failed', {
-          threadId: newSdkSessionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      }
-      const cleanupMs = Date.now() - cleanupStartedAt;
-      log.info('forkSdkSession ◀', {
-        newSdkSessionId,
-        mode: 'native-turn',
-        hostReadyMs,
-        prepareMs,
-        threadForkMs,
-        cleanupMs,
-        totalMs: Date.now() - startedAt,
-      });
-      return {
-        newSdkSessionId,
-        uuidMap: new Map(),
-        usedNativeForkAnchor: true,
-      };
-    } catch (error) {
-      if (nativeForkRequestStarted) throw error;
-      log.warn('shared host unavailable before precise fork; using legacy isolated fallback', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    } finally {
-      releaseHostBindingLease?.();
-    }
-  }
-
   async forkSdkSession(opts: ForkSdkSessionOptions): Promise<ForkSdkSessionResult> {
     const log = this.deps.logger.child('codex/fork');
     const tailTurnsToDrop = normalizeTailTurnsToDrop(opts.tailTurnsToDrop);
@@ -13599,18 +13593,10 @@ export class CodexAgent extends BaseAgent {
       model: opts.model,
     });
 
-    // Keep exact native-turn forks on the regular host so an active source
-    // thread is already hydrated. The helper holds a binding lease across the
-    // control-plane request and returns null only before a fork is attempted.
-    if (lastTurnId && !opts.stripEncryptedReasoning) {
-      const nativeForkResult = await this.tryForkSdkSessionAtNativeTurn(
-        opts,
-        lastTurnId,
-        forkCredentialMode,
-      );
-      if (nativeForkResult) return nativeForkResult;
-    }
-
+    // Codex 0.153 keeps unsubscribed threads loaded for 30 minutes. Even an
+    // exact native-turn fork must own a one-shot host: returning its child ID
+    // before that process exits leaves a writer that blocks a different host
+    // from resuming the child. Never retire the shared host to release it.
     // 故障半径隔离(2026-08-08 实排):thread/fork 的响应体与源 thread 历史成正比、
     // 无上界 —— 47MB rollout 实测产出 31MiB 单行 NDJSON,超过 client 16MiB
     // maxLineBytes 守卫后整条连接被熔断,当时共享 utility host 上挂着的 5 个活跃
@@ -13627,12 +13613,10 @@ export class CodexAgent extends BaseAgent {
       if (!forkHost || createdThreadIds.size === 0) return;
       for (const threadId of createdThreadIds) {
         try {
-          // Codex 0.145 keeps a forked child loaded in the app-server. Unload
-          // it before the new Cindy Session resumes with its own MCP instance
-          // URL; otherwise thread/resume.config is ignored and the child
-          // remains bound to this host's spawn-level URL. The ephemeral host
-          // is retired right after, but graceful unload also flushes the
-          // child's state before the process dies.
+          // Request graceful cleanup before retiring the one-shot host.
+          // Since 0.153 this only schedules unload, so the process shutdown
+          // below is the barrier that releases the writer and allows the new
+          // session to resume with its own MCP instance configuration.
           await forkHost.unsubscribeThread(threadId);
         } catch (error) {
           log.warn('fork child cleanup failed; ephemeral fork host will be retired', {
@@ -13706,9 +13690,13 @@ export class CodexAgent extends BaseAgent {
         // Cindy's handoff recovery, never a file rewrite that invalidates Codex's DB.
         await assertCodexRolloutRewriteSupported(preparedSourcePath || await this.findRolloutPath(opts.sourceSdkSessionId));
       }
+      const usedNativeForkAnchor = Boolean(
+        lastTurnId && !opts.stripEncryptedReasoning && supportsCodexNativeTurnFork(initResp.userAgent),
+      );
       const params: ThreadForkParams = {
         threadId: opts.sourceSdkSessionId,
-        persistExtendedHistory: true,
+        ...(!usedNativeForkAnchor ? { persistExtendedHistory: true } : {}),
+        ...(usedNativeForkAnchor ? { lastTurnId } : {}),
         // 响应体瘦身:fork 后 Cindy 自己的会话数据负责历史展示,thread.turns 全量
         // 回传只会撑爆单行上限。老 daemon 不认识该字段则保持 legacy 行为 —— 此时
         // 一次性 host 的隔离仍兜住故障半径。
@@ -13720,7 +13708,7 @@ export class CodexAgent extends BaseAgent {
       const resp = await host.request<ThreadForkResponse>(Method.ThreadFork, params);
       let newSdkSessionId = resp.thread.id;
       createdThreadIds.add(newSdkSessionId);
-      if (tailTurnsToDrop > 0) {
+      if (!usedNativeForkAnchor && tailTurnsToDrop > 0) {
         const rollbackParams: ThreadRollbackParams = {
           threadId: newSdkSessionId,
           numTurns: tailTurnsToDrop,
@@ -13755,7 +13743,11 @@ export class CodexAgent extends BaseAgent {
         });
       }
       log.info('forkSdkSession ◀', { newSdkSessionId, tailTurnsToDrop });
-      return { newSdkSessionId, uuidMap: new Map() };
+      return {
+        newSdkSessionId,
+        uuidMap: new Map(),
+        ...(usedNativeForkAnchor ? { usedNativeForkAnchor: true } : {}),
+      };
     } catch (error) {
       operationFailed = true;
       // Recovery and authentication are control signals consumed by callers.
@@ -13772,13 +13764,20 @@ export class CodexAgent extends BaseAgent {
         await cleanupCreatedThreads();
       } catch (error) {
         // A cleanup failure must never replace the primary failure.
-        if (!operationFailed) throw new CodexForkError('child-cleanup', error);
+        if (!operationFailed) {
+          operationFailed = true;
+          forkFailure = new CodexForkError('child-cleanup', error);
+          throw forkFailure;
+        }
         if (forkFailure) forkFailure.cleanupFailed = true;
       } finally {
         // 一次性 host 用完即收,无论成败。key 唯一、无 session 绑定,
         // retire 不会波及任何共享 host 或活跃会话。
         if (forkHost && !forkHostRetired) {
-          await retireForkHost(forkFailure !== undefined).catch((err) => {
+          // Unsubscribe is not a writer-release barrier. Never publish a
+          // successful fork unless physical shutdown has been confirmed.
+          await retireForkHost(true).catch((err) => {
+            if (!operationFailed) throw new CodexForkError('host-retire', err);
             if (forkFailure) forkFailure.cleanupFailed = true;
             log.warn('fork host retire failed', {
               forkHostKey,

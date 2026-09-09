@@ -904,14 +904,14 @@ export async function install(
         log.warn('[skillInstall] claude symlink failed (non-fatal):', claudeLink, err);
       }
     }
-    const projectWorkingDir = await reconcileProjectSkillLinksForPaths(logicalFinalDir, finalDir);
+    const projectWorkingDir = await releaseShared.run(() => reconcileProjectSkillLinksForPaths(logicalFinalDir, finalDir));
     try {
       const ownerId = getCurrentDataOwnerId();
       const linkResult = await withSharedGlobalSkillProjectionMutation(ownerId, () =>
-        prepareSharedGlobalSkillLinks({
+        releaseShared!.run(() => prepareSharedGlobalSkillLinks({
           assertOwnerStable: () =>
             assertGhostSkillProjectionBoundaryStableForOwner(ownerId),
-        }),
+        })),
       );
       for (const warning of linkResult.warnings) {
         log.warn('[skillInstall] shared global skill link warning:', warning);
@@ -1091,8 +1091,17 @@ async function uninstallLocked(
   const allowed = () => ownerId === getCurrentDataOwnerId() && canMutate();
   const recordIgnore = !!(registryMatch && await shouldRecordAutoSyncIgnore(skillName, registryMatch.entry, cloudUserId ?? undefined));
   const wasIgnored = recordIgnore && (await listIgnoredAutoSyncSkills(cloudUserId ?? undefined)).has(skillName);
+  const knownEntries = [...(target?.aliases ?? []), absolutePath, resolved,
+    ...(registryMatch ? [registryMatch.installPath] : [])];
+  // A repair can finish after the UI scan but before this lease. Include the
+  // sibling discovery entries for each known scope in the locked snapshot.
+  const compatibilityEntries = knownEntries.flatMap((entry) => {
+    if (!/\/\.(?:agents|claude|codex)\/skills\/[^/]+$/.test(entry.replace(/\\/g, '/'))) return [];
+    const base = path.dirname(path.dirname(path.dirname(entry)));
+    return ['.agents', '.claude', '.codex'].map((root) => path.join(base, root, 'skills', path.basename(entry)));
+  });
   const candidates = target?.linkOnly ? [...new Set([...target.aliases, target.operationPath])] : [...new Set([
-    ...(target?.aliases ?? []), absolutePath, ...(registryMatch ? [registryMatch.installPath] : []),
+    ...knownEntries, ...compatibilityEntries,
     path.join(os.homedir(), '.claude', 'skills', skillName),
     path.join(os.homedir(), '.codex', 'skills', skillName),
     path.join(os.homedir(), '.agents', 'skills', skillName),

@@ -197,6 +197,36 @@ describe('skillhub/installService', () => {
     expect(isCindySkillEnabled(source)).toBe(true);
   });
 
+  it('serializes an in-flight scanner repair before uninstall snapshots and removes its completed link', async () => {
+    const { source, target } = await localFixture('scanner-race');
+    const { registryService } = await import('../registry');
+    const { reconcileScannedInstall } = await import('../registryReconciliation');
+    const { uninstall } = await import('../installService');
+    const { shell } = await import('electron');
+    const entry = { version: '1.0.0', catalogScope: 'market' } as import('../registry').StoredInstall;
+    let entered!: () => void;
+    const checking = new Promise<void>((resolve) => { entered = resolve; });
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    vi.mocked(registryService.getInstall).mockImplementationOnce(async () => {
+      entered();
+      await waiting;
+      return entry;
+    });
+    const repair = reconcileScannedInstall({ skillName: 'scanner-race', installPath: source, entry }, false);
+    await checking;
+    try {
+      expect((await uninstall(source, target)).success).toBe(false);
+      expect(shell.trashItem).not.toHaveBeenCalled();
+    } finally { resume(); await repair; }
+    const link = path.join(TEST_ROOT, '.claude', 'skills', 'scanner-race');
+    expect(fs.existsSync(link)).toBe(true);
+    expect(await uninstall(source, target)).toEqual({ success: true });
+    expect(fs.existsSync(source)).toBe(false);
+    expect(() => fs.lstatSync(link)).toThrow();
+    expect(shell.trashItem).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves files, registry and disabled state when system trash fails', async () => {
     const { source, target } = await localFixture('trash-failure');
     const { shell } = await import('electron');

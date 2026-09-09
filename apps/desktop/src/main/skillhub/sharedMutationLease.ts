@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
@@ -9,6 +10,7 @@ import { atomicWriteFileSync, readAtomicFileSync } from '../utils/atomicWriteFil
 
 const log = createLogger('skillhub:shared-mutation');
 export type SkillMutationRelease = (() => Promise<void>) & {
+  run<T>(operation: () => Promise<T>): Promise<T>;
   /** Keep conflicting writers out after releasing the process lease. */
   retainUntilComplete(token: string): void;
   complete(token: string): void;
@@ -23,6 +25,28 @@ export function isSkillMutationToken(value: unknown): value is string {
 }
 
 interface PendingMutation { token: string; keys: string[] }
+interface MutationContext {
+  names: string[];
+  active(): boolean;
+  run<T>(operation: () => Promise<T>): Promise<T>;
+}
+const mutationContext = new AsyncLocalStorage<MutationContext[]>();
+
+/** Nested projections reuse only leases in their own async call chain. */
+export async function withSkillMutation<T>(names: readonly string[], operation: () => Promise<T>): Promise<T | undefined> {
+  const requested = skillMutationNames(names);
+  const held = (mutationContext.getStore() ?? []).filter((lease) => lease.active()
+    && requested.some((name) => lease.names.includes(name)));
+  const missing = requested.filter((name) => !held.some((lease) => lease.names.includes(name)));
+  // Borrowing pins the underlying lease until the child finishes, even if its
+  // caller starts releasing the lease without awaiting that child.
+  const run = held.reduceRight<() => Promise<T>>((next, lease) => () => lease.run(next), operation);
+  if (!missing.length) return run();
+  const lease = await acquireSharedSkillMutationLease(missing);
+  if (!lease) return undefined;
+  try { return await lease.run(run); }
+  finally { await lease(); }
+}
 
 function readPending(root: string, keys: string[]): PendingMutation[] {
   // Read only the held resource names: a damaged receipt must not block unrelated Skills.
@@ -81,10 +105,38 @@ export async function acquireSharedSkillMutationLease(
       if (readPending(root, keys).some((record) => record.keys.some((key) => keys.includes(key))
         && !(record.token === pendingToken && matchesKeys(record)))) return;
       let active = true;
-      const assertActive = (token: string) => {
-        if (!active || !isSkillMutationToken(token)) throw new Error('Skill mutation lease is no longer held');
+      let closing = false;
+      let borrowers = 0;
+      let drained: (() => void) | undefined;
+      const context: MutationContext = {
+        names: skillMutationNames(names),
+        active: () => active && !closing,
+        async run<T>(operation: () => Promise<T>): Promise<T> {
+          if (!context.active()) throw new Error('Skill mutation lease is no longer held');
+          borrowers++;
+          try {
+            const inherited = mutationContext.getStore() ?? [];
+            return await mutationContext.run(inherited.includes(context) ? inherited : [...inherited, context], operation);
+          } finally {
+            if (--borrowers === 0) drained?.();
+          }
+        },
       };
-      const leased = Object.assign(async () => { active = false; release(); await finished; }, {
+      const assertActive = (token: string) => {
+        if (!context.active() || !isSkillMutationToken(token)) throw new Error('Skill mutation lease is no longer held');
+      };
+      let releasePromise: Promise<void> | undefined;
+      const leased = Object.assign(() => {
+        if (!releasePromise) releasePromise = (async () => {
+          closing = true;
+          if (borrowers > 0) await new Promise<void>((resolve) => { drained = resolve; });
+          active = false;
+          release();
+          await finished;
+        })();
+        return releasePromise;
+      }, {
+        run: context.run,
         retainUntilComplete(token: string) {
           assertActive(token);
           const existing = readPending(root, keys).filter((record) => record.token === token);

@@ -558,14 +558,14 @@ export async function importLocalSkill(params: ImportLocalParams): Promise<Impor
       }
     }
 
-    const projectWorkingDir = await reconcileProjectLinks(finalDir);
+    const projectWorkingDir = await releaseShared.run(() => reconcileProjectLinks(finalDir));
     try {
       const ownerId = getCurrentDataOwnerId();
       const linkResult = await withSharedGlobalSkillProjectionMutation(ownerId, () =>
-        prepareSharedGlobalSkillLinks({
+        releaseShared!.run(() => prepareSharedGlobalSkillLinks({
           assertOwnerStable: () =>
             assertGhostSkillProjectionBoundaryStableForOwner(ownerId),
-        }),
+        })),
       );
       for (const warning of linkResult.warnings) {
         log.warn('[importLocal] shared global skill link warning:', warning);

@@ -25,6 +25,7 @@ import path from 'node:path';
 import matter from 'gray-matter';
 import type { AgentCustomization, Maker, PiRuntimeCapabilityStatus } from '@cindy/maker-core';
 import { registryService, type StoredInstall } from './registry';
+import { reconcileScannedInstall } from './registryReconciliation';
 import { isIgnoredSkillPackagePath } from './packageIgnore';
 
 import { createLogger } from '../logger';
@@ -392,60 +393,12 @@ export async function scanAllSkills(
     liveRealPaths.add(normPath);
   }
 
-  // ── orphan cleanup (fire-and-forget) ───────────────────────────────────────
-  // 只删除磁盘上目录已不存在的条目；未被当前 scan 覆盖但目录仍在的不算孤儿
-  // （可能只是该项目不在本次 workingDirs 里）。
-  const orphans = registryEntries.filter((r) => {
-    const installPathKey = path.normalize(r.installPath);
-    return !liveRealPaths.has(registryLiveKeys.get(installPathKey) ?? installPathKey);
-  });
-  if (orphans.length > 0) {
-    void Promise.all(
-      orphans.map(async (o) => {
-        try {
-          await fs.promises.access(o.installPath);
-        } catch {
-          await registryService.removeInstall(o.skillName, o.installPath).catch((err) =>
-            log.warn(`orphan cleanup failed for ${o.skillName}@${o.installPath}:`, err),
-          );
-        }
-      }),
-    );
-  }
-
-  // ── Claude symlink repair (fire-and-forget) ────────────────────────────────
-  // 存量安装可能缺少 .claude/skills/ symlink（Codex 原生扫 .agents/ 但 Claude 只扫 .claude/）。
-  // 每次 scan 时检测并补建，确保 Claude Code 能稳定发现。
-  void Promise.all(
-    registryEntries
-      .filter((r) => /[/\\]\.agents[/\\]skills[/\\]/.test(r.installPath))
-      .map(async (r) => {
-        try {
-          await fs.promises.access(r.installPath);
-        } catch { return; }
-        const agentsIdx = r.installPath.replace(/\\/g, '/').lastIndexOf('/.agents/skills/');
-        if (agentsIdx < 0) return;
-        const base = r.installPath.slice(0, agentsIdx);
-        const claudeLink = path.join(base || os.homedir(), '.claude', 'skills', r.skillName);
-        try {
-          const stat = await fs.promises.lstat(claudeLink);
-          if (stat.isSymbolicLink()) {
-            const target = path.resolve(path.dirname(claudeLink), await fs.promises.readlink(claudeLink));
-            if (path.normalize(target) === path.normalize(r.installPath)) return;
-            await fs.promises.unlink(claudeLink);
-          } else {
-            return;
-          }
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return;
-        }
-        await fs.promises.mkdir(path.dirname(claudeLink), { recursive: true });
-        await fs.promises.symlink(
-          r.installPath, claudeLink,
-          process.platform === 'win32' ? 'junction' : 'dir',
-        ).catch((e) => log.warn(`claude symlink repair failed for ${r.skillName}:`, e));
-      }),
-  );
+  // Maintenance uses the same mutation protocol as install/uninstall and
+  // revalidates each registry/source snapshot after acquiring the lease.
+  void Promise.all(registryEntries.map((record) => {
+    const key = path.normalize(record.installPath);
+    return reconcileScannedInstall(record, !liveRealPaths.has(registryLiveKeys.get(key) ?? key));
+  }));
 
   // ── sources[] 兼容 (renderer 只存不读) ─────────────────────────────────────
   const sources: SourceReport[] = listed.errors.map((e) => ({

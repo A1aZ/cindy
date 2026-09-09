@@ -10,10 +10,49 @@ vi.mock('electron', () => ({ app: { getPath: (name: string) => {
   return root;
 } } }));
 vi.mock('../../logger', () => ({ createLogger: () => ({ warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() }) }));
-import { acquireSharedSkillMutationLease } from '../sharedMutationLease';
+import { acquireSharedSkillMutationLease, withSkillMutation } from '../sharedMutationLease';
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe('shared Skill mutation lease', () => {
+  it('borrows only the current call chain and keeps an unawaited child locked until it finishes', async () => {
+    const lease = (await acquireSharedSkillMutationLease(['parent']))!;
+    let finishChild!: () => void;
+    const waiting = new Promise<void>((resolve) => { finishChild = resolve; });
+    let child!: Promise<unknown>;
+    await lease.run(async () => {
+      expect(await withSkillMutation(['PARENT', 'extra'], async () => 'nested')).toBe('nested');
+      child = withSkillMutation(['parent'], () => waiting);
+    });
+    expect(await withSkillMutation(['parent'], async () => 'independent')).toBeUndefined();
+    let released = false;
+    const releasing = lease().then(() => { released = true; });
+    try {
+      expect(await acquireSharedSkillMutationLease(['parent'])).toBeNull();
+      expect(released).toBe(false);
+    } finally {
+      finishChild();
+      await child;
+      await releasing;
+    }
+    expect(await withSkillMutation(['parent'], async () => 'next')).toBe('next');
+  });
+
+  it('does not borrow an expired async context after its lease has been released', async () => {
+    const lease = (await acquireSharedSkillMutationLease(['expired']))!;
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    let delayed!: Promise<unknown>;
+    await lease.run(async () => {
+      delayed = waiting.then(() => withSkillMutation(['expired'], async () => 'stale'));
+    });
+    await lease();
+    const successor = (await acquireSharedSkillMutationLease(['expired']))!;
+    try {
+      resume();
+      expect(await delayed).toBeUndefined();
+    } finally { await successor(); }
+  });
+
   it('contains a damaged durable barrier to its own resource name', async () => {
     const token = randomUUID();
     const key = createHash('sha256').update('damaged-receipt').digest('hex');

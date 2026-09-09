@@ -6,6 +6,7 @@ import os from 'node:os';
 vi.mock('../registry', () => ({
   registryService: {
     listAllInstalls: vi.fn(async () => []),
+    getInstall: vi.fn(async () => null),
     removeInstall: vi.fn(async () => undefined),
   },
 }));

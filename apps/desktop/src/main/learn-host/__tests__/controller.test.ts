@@ -14,7 +14,9 @@ import type { ScanStagingResult } from '../staging';
 import { computeProposalFingerprint } from '../stagingValidation.pure';
 import { tryAcquireSkillInstallLock } from '../../skillhub/installLock';
 vi.mock('../../skillhub/sharedMutationLease', () => ({
-  acquireSharedSkillMutationLease: vi.fn(async () => async () => {}),
+  acquireSharedSkillMutationLease: vi.fn(async () => Object.assign(async () => {}, {
+    run: <T>(operation: () => Promise<T>) => operation(),
+  })),
 }));
 
 vi.mock('../../logger', () => ({

@@ -975,13 +975,14 @@ export class LearnController {
         runId: run.runId,
       };
       this.assertNotDisposedForReview(runId);
-      const result = await this.deps.applyProposal({
-        proposalDir: frozenDir,
+      const proposalDir = frozenDir;
+      const result = await releaseShared.run(() => this.deps.applyProposal({
+        proposalDir,
         // 用重校验后的 verdict 名(string 且为冻结副本的真实值;run.skillName 经
         // update 重赋值后类型收窄丢失,语义上两者已一致)
         skillName: verdict.skillName,
         provenance,
-      });
+      }));
       applied = true;
       this.detachWatcher(runId);
       await this.deps.staging.cleanup(runId);

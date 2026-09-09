@@ -1,3 +1,5 @@
+import { getBotAuthorizationService } from '../maker-ipc/botAuthorizationService.js';
+import { isBotAuthorizationSession } from '../maker-ipc/botAuthorizationHost.js';
 /**
  * ghost.ts — cindy-tools ghost 总机的 host 侧接线(docs/dev-rules/plugin-security-and-authoring.md)。
  * ---------------------------------------------------------------------------
@@ -104,7 +106,10 @@ import { resolveGhostAttachmentUrl } from './ghostAttachmentResolve.js';
 import { ghostSetupInteractionSessionId } from './ghostSetupInteractionSurface.js';
 import { createForgeIconConverter } from './forgeIconConversion.js';
 import { forkForgeIconConversionHost } from './forgeIconConversionHost.js';
-import { readAllowedBuiltinPluginIds } from './codexBuiltinToolPolicy.js';
+import {
+  isFrozenBuiltinPluginAllowed,
+  readAllowedBuiltinPluginIds,
+} from './codexBuiltinToolPolicy.js';
 import { t } from '../i18n.js';
 import { createLogger } from '../logger.js';
 import { isIpcError } from '../../shared/ipc-errors.js';
@@ -1350,7 +1355,24 @@ export function getCindyGhostsMcpDeps(
 ): CindyGhostsMcpDeps {
   const resolveSessionContext = (): LiziMcpSessionContext | undefined =>
     getLiziMcpSessionContext() ?? sessionCtx;
+  const isGhostAllowedByFrozenProfile = (ghostId: string): boolean =>
+    isFrozenBuiltinPluginAllowed(resolveSessionContext()?.vendorOptions, ghostId);
+  const frozenProfileDenied = () => ({
+    ok: false as const,
+    errorCode: 'GHOST_DISABLED_IN_WORKDIR' as const,
+    message: '当前伙伴配置未启用该插件；不要重试，改用已授权能力，或让用户更新伙伴配置后再试。',
+  });
   return {
+    connectAccount: async (target) => {
+      if (target.kind === 'plugin' && !isGhostAllowedByFrozenProfile(target.id))
+        return frozenProfileDenied();
+      const context = resolveSessionContext();
+      const sessionId = ghostSetupInteractionSessionId(context);
+      if (!sessionId) return { ok: false, errorCode: 'NO_SESSION_CONTEXT' };
+      const service = getBotAuthorizationService();
+      if (!service) return { ok: false, errorCode: 'HOST_NOT_READY' };
+      return service.request(sessionId, target);
+    },
     callMedia: async (request) => {
       const sessionContext = resolveSessionContext();
       const sessionId = sessionContext?.sessionId;
@@ -1413,6 +1435,11 @@ export function getCindyGhostsMcpDeps(
     // 兜底;若没有解析到 workingDir(包括 Codex/Pi bridge 建线期空值),花名册
     // 宁缺勿全,不注入工具描述;Codex 正常 startSession 的 developerInstructions
     // 会在拿到真实 workdir 后单独装配 system 段。
+    //
+    // 伙伴冻结 Toolset 只清空本花名册快照（不把全量插件写进工具描述）；
+    // ghost_list / ghost_info / ghost_call 仍按实时可见性发现已装插件，
+    // 内置工具冻结名单不套到插件 ID。connect_account 对 plugin 目标另走
+    // 冻结门禁，避免未授权插件直接发卡。
     getRosterItems() {
       const context = resolveSessionContext();
       const workdir = context?.workingDir;
@@ -1529,6 +1556,13 @@ export function getCindyGhostsMcpDeps(
           errorCode: 'INTERNAL',
           message: '插件设置通道尚未就绪，本次调用未执行。',
         };
+      }
+      const authorizationSessionId = ghostSetupInteractionSessionId(sessionContext);
+      const authorizationService = getBotAuthorizationService();
+      if (authorizationService && authorizationSessionId && await isBotAuthorizationSession(authorizationSessionId)) {
+        const service = authorizationService;
+        const card = await service.request(authorizationSessionId, { kind: 'plugin', id: ghostId, ...(setupPlan && getGhostSetupAssessment(ghostId).reauthSuggest ? { reauthorize: true } : {}) }, setupPlan);
+        if (!card.ok) return card;
       }
       const setup = await setupCoordinator.ensureReady({
         sessionId: ghostSetupInteractionSessionId(sessionContext),

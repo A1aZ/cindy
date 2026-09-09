@@ -1,3 +1,4 @@
+import { readBotAuthorizationCard } from '../../shared/botAuthorization';
 /**
  * makerChatStore — Module-level store for Maker chat (Claude / Codex), sharded by sessionId.
  * ---------------------------------------------------------------------------
@@ -518,6 +519,7 @@ export interface ChatMessage {
      * 它不进入左栏，也不与后台任务卡混用。
      */
     | 'bot-direct-message'
+    | 'bot-authorization'
     | 'context-rebuild';
   systemCardData?: Record<string, unknown>;
   /** FP-3: plan_review message fields */
@@ -713,6 +715,7 @@ export type PluginSetupAction = GhostSetupAllowedAction;
 type PluginSetupInlineFormAction = Extract<GhostSetupAllowedAction, { kind: 'inline_form' }>;
 
 export interface PendingPluginSetup {
+  reopenActionId?: string;
   requestId: string;
   revision: number;
   /** Settled but retained briefly so the card can show terminal feedback. */
@@ -17025,6 +17028,11 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         },
       };
     }
+    const authorization = readBotAuthorizationCard(m.agentMeta?.botAuthorization);
+    if (m.role === 'assistant' && authorization) return {
+      clientId: m.clientId, role: m.role, content: '', isStreaming: false,
+      systemCardType: 'bot-authorization' as const, systemCardData: { ...authorization },
+    };
     const directMessage = readBotDirectMessageMeta(m.agentMeta?.botDirectMessage);
     if (m.role === 'assistant' && directMessage) {
       return {

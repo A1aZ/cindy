@@ -7499,6 +7499,7 @@
       "stop": "生成を停止"
     },
     "pluginSetup": {
+      "reopen": "もう一度開く",
       "title": "{{name}} の設定",
       "assessmentReadFailed": "プラグインの設定状態を読み取れませんでした。",
       "setupIncomplete": "プラグインの設定が完了していません。",

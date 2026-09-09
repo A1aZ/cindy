@@ -1,4 +1,6 @@
 import { registerPluginListHandler } from './pluginListHandler.js';
+import { initializeBotAuthorizationHost } from './botAuthorizationHost.js';
+import { resolveBotAuthorizationDelivery, buildBotAuthorizationContinuation, commitBotAuthorizationInput, type BotAuthorizationInputGuard, getBotAuthorizationService } from './botAuthorizationService.js';
 import { registerSessionSetModelHandler } from './sessionSetModelHandler.js';
 import { projectRemoteBotDelegations } from './remoteBotDelegations.js';
 /**
@@ -70,6 +72,7 @@ import {
   DL_SESSION_REFERENCE_CAPABILITY_CHANNEL,
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { applyScheduledModelSelection, ScheduledModelSelectionBusyError, type ScheduledModelSelection, type ScheduledModelSelectionLease } from './scheduledModelSelection';
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
 import {
   activeOwnerScopeKey,
@@ -870,6 +873,7 @@ import {
 import {
   pinExclusiveSessionProvider,
   resolveLenientSessionRoute,
+  resolveScheduledModelSelectionLive,
   shouldApplyExclusiveProviderRerouteLive,
   verdictForModelRoute,
 } from '../maker-host/model-route-guard-live.js';
@@ -3161,7 +3165,7 @@ function settlePendingCredentialSwitch(sessionId: string, source: string): void 
 let refreshRemoteCodexMcpOnTurnSettledHolder: ((sessionId: string) => void) | null = null;
 let deferredCodexRestartHolder: DeferredCodexRestartService | null = null;
 let pendingAgentSwitchApplyHolder:
-  ((sessionId: string, signal?: AbortSignal) => Promise<() => void>) | null = null;
+  ((sessionId: string, signal?: AbortSignal, selection?: ScheduledModelSelection) => Promise<{ release: () => void; selection?: ScheduledModelSelection }>) | null = null;
 let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
@@ -3341,11 +3345,25 @@ export function clearWorkingDirectoryRecoveryForOwnerBoundary(): void {
  * 并完成 send 后才 release。启动期 holder 尚未就绪时不可能已有进程内 pending
  * intent,返回 no-op release 即可。
  */
+export function acquirePendingAgentSwitchForDirectSend(
+  sessionId: string, signal?: AbortSignal,
+): Promise<() => void>;
+export function acquirePendingAgentSwitchForDirectSend(
+  sessionId: string, signal: AbortSignal | undefined, selection: ScheduledModelSelection,
+): Promise<ScheduledModelSelectionLease>;
 export async function acquirePendingAgentSwitchForDirectSend(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<() => void> {
-  return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
+  selection?: ScheduledModelSelection,
+): Promise<(() => void) | ScheduledModelSelectionLease> {
+  if (selection && !pendingAgentSwitchApplyHolder) throw new Error('Scheduled model selection is not initialized');
+  const lease = await pendingAgentSwitchApplyHolder?.(sessionId, signal, selection);
+  if (!selection) return lease?.release ?? (() => {});
+  if (!lease?.selection) {
+    lease?.release();
+    throw new Error('Scheduled model selection was not resolved');
+  }
+  return { release: lease.release, selection: lease.selection };
 }
 
 /** 直发路径在 createSession / 重读 live session 之前关掉不健康原生会话。 */
@@ -5112,6 +5130,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 已设间隔算出 now+null 立即触发,mobile 必须据此回退旧 wire 形态(省略
       // key,由旧引擎的隐式清空承担等价语义)。
       supportsScheduleIntervalNullClear: true,
+      // Full scheduled model selection, including bound Harness changes and template overrides.
+      supportsScheduleModelSelection: true,
     };
   });
 
@@ -8071,15 +8091,48 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     withCloseSuppressed: withRehydrateCloseSuppressed,
     log,
   });
-  pendingAgentSwitchApplyHolder = async (sessionId, signal) => {
+  pendingAgentSwitchApplyHolder = async (sessionId, signal, selection) => {
     const release = await acquireSendToSessionLock(sessionId);
     try {
       await applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
         bootstrapAfterSwitch: true,
         signal,
       });
+      let resolvedSelection: ScheduledModelSelection | undefined;
+      if (selection) {
+        resolvedSelection = await applyScheduledModelSelection(selection, {
+          getTarget: async () => {
+            const row = await agentSwitchDeps.getSessionRow(sessionId);
+            return row ? { agentKind: dbToMakerAgentKind(row.agentKind), status: row.status,
+              remoteHostId: row.remoteHostId, orcaRole: row.orcaRole } : null;
+          },
+          isBusy: () => isSessionInTurn(sessionId) || !!maker.getSession(sessionId)?.isTurnRunning(),
+          resolveSelection: async (route) => {
+            const reroute = await assertModelRouteUsable(route.agentKind, route.model, route.providerId);
+            return resolveScheduledModelSelectionLive({ ...route,
+              providerId: reroute && shouldApplyExclusiveProviderRerouteLive(route.providerId)
+                ? reroute : route.providerId,
+            });
+          },
+          switchHarness: (route) => performSessionAgentSwitch(agentSwitchDeps, {
+            sessionId, targetAgentKind: route.agentKind, model: route.model,
+            providerId: route.providerId, effort: route.effort, fastMode: route.fastMode,
+            applyNow: true, signal,
+          }),
+          applyModel: async (route) => {
+            if (signal?.aborted) throw new Error('Scheduled model selection aborted');
+            const result = await applySessionRuntimeSelection(sessionId, route.model, route.providerId,
+              { effort: route.effort, fastMode: route.fastMode },
+              { source: 'user', sessionLockHeld: true, applyingUserSelectionOnSend: true });
+            if (result.deferred) throw new ScheduledModelSelectionBusyError('Scheduled model selection deferred');
+            if (result.superseded || runtimeSelectionRequiresModelWindowConfirmation(result)) {
+              throw new Error('Scheduled model selection could not be applied');
+            }
+          },
+        });
+      }
       await contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId);
-      return release;
+      return { release, selection: resolvedSelection };
     } catch (err) {
       release();
       throw err;
@@ -8246,6 +8299,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    authorizationGuard?: BotAuthorizationInputGuard;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -8597,9 +8651,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 失败时 shouldQueueNewTurn 仍返回 true(未恢复即入队),消息不丢。
       lockStage = 'queue-restore';
       await inputCoordinator.ensureQueueRestored(targetSessionId).catch(() => undefined);
-      // Private messages always use the durable coordinator, including an idle
+      // Private messages and authorization continuations use the durable coordinator, including an idle
       // recipient. This preserves input provenance and one recovery/dispatch path.
-      if (explicitClientId?.startsWith('bot-dm:') || inputCoordinator.shouldQueueNewTurn(targetSessionId)) {
+      if (explicitClientId?.startsWith('bot-dm:') || explicitClientId?.startsWith('bot-authorization-resume:') || inputCoordinator.shouldQueueNewTurn(targetSessionId)) {
         lockStage = 'enqueue-queued-message';
         const qClientId = explicitClientId ?? createId();
         await enqueueSendToSessionMessage({
@@ -8613,6 +8667,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           onAcceptedRollback,
           onAcceptedCommit,
           origin: queuedOrigin,
+          authorizationGuard: params.authorizationGuard,
         });
         return {
           ok: true as const,
@@ -8942,6 +8997,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   const dispatchBotSessionMessage = async (params: {
     targetSessionId: string;
+    authorizationGuard?: BotAuthorizationInputGuard;
     message: string;
     persistedContent?: string;
     clientId?: string;
@@ -8949,7 +9005,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAccepted?: () => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
   }) => {
-    if (params.clientId) {
+    if (params.clientId && params.authorizationGuard) {
+      const delivery = await resolveBotAuthorizationDelivery(params.clientId, async (clientId) => {
+        const [row] = await getDbClient().drizzle
+          .select({ id: messages.id, createdAt: messages.createdAt, rewindAt: messages.rewindAt, clearedAt: sessions.clearedAt })
+          .from(messages).innerJoin(sessions, eq(sessions.id, messages.sessionId))
+          .where(and(eq(messages.sessionId, params.targetSessionId), eq(messages.clientId, clientId)))
+          .limit(1);
+        return row ?? null;
+      });
+      params = { ...params, clientId: delivery.clientId };
+      if (delivery.delivered) {
+        await params.authorizationGuard!.validate();
+        params.authorizationGuard!.assertCurrent();
+        await params.onAccepted?.();
+        return { ok: true as const, targetSessionId: params.targetSessionId, wakeKind: 'already-active' as const };
+      }
+    } else if (params.clientId) {
       const [persisted] = await getDbClient()
         .drizzle.select({ id: messages.id })
         .from(messages)
@@ -9011,6 +9083,32 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     return sendToSessionInternal(params);
   };
+
+  initializeBotAuthorizationHost(async (card, validate, assertAuthorizationCurrent) => {
+    await inputCoordinator.ensureQueueRestored(card.sessionId);
+    const generation = inputCoordinator.getGeneration(card.sessionId);
+    const authorizationGuard: BotAuthorizationInputGuard = {
+      validate,
+      assertCurrent: () => {
+        assertAuthorizationCurrent();
+        assertRemoteInputClearNotInFlight(card.sessionId, true);
+        if (rewindInputSessions.has(card.sessionId) || !inputCoordinator.isGenerationCurrent(card.sessionId, generation)) {
+          throw new Error('Authorization input boundary changed');
+        }
+      },
+    };
+    authorizationGuard.assertCurrent();
+    const result = await dispatchBotSessionMessage({ ...buildBotAuthorizationContinuation(card), authorizationGuard });
+    if (!result.ok) throw new Error('Authorization continuation not accepted');
+    await awaitAgentInputQueueSnapshotPersistence(card.sessionId);
+  }, (sessionId) => {
+    const generation = inputCoordinator.getGeneration(sessionId);
+    return () => {
+      assertRemoteInputClearNotInFlight(sessionId, true);
+      if (!inputCoordinator.isGenerationCurrent(sessionId, generation))
+        throw new Error('Authorization request input boundary changed');
+    };
+  });
 
   botDirectMessageServiceHolder = createBotDirectMessageService({
     hasQueuedDelivery: async (sessionId, clientId) => {
@@ -9489,6 +9587,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    authorizationGuard?: BotAuthorizationInputGuard;
   }): Promise<void> {
     const queued = await buildSessionControlInputItem(params);
     if (params.onAccepted) {
@@ -9505,7 +9604,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 崩溃恢复排序:确保先读回持久化队列再追加本条(见 ensureQueueRestored)。
     // 失败时 enqueue 照常入队(shouldQueueNewTurn 已守住不会直发)。
     await inputCoordinator.ensureQueueRestored(params.targetSessionId).catch(() => undefined);
-    inputCoordinator.enqueue(params.targetSessionId, queued);
+    if (params.authorizationGuard) {
+      await commitBotAuthorizationInput(params.authorizationGuard, () => {
+        inputCoordinator.enqueue(params.targetSessionId, queued);
+      });
+    } else {
+      inputCoordinator.enqueue(params.targetSessionId, queued);
+    }
     log.info('send_to_session queued while target busy', {
       targetSessionId: params.targetSessionId,
       clientId: params.clientId,
@@ -14846,7 +14951,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   ipcMain.handle(
     MAKER_INVOKE.RESOLVE_INTERACTION,
-    (event, requestId: unknown, decision: unknown) => {
+    async (event, requestId: unknown, decision: unknown) => {
       if (typeof requestId !== 'string') throwIpcError('INVALID_PARAMS', 'requestId required');
       if (
         isPluginSetupInteractionDecision(decision) &&
@@ -14890,6 +14995,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (ghostSetupInteractionBridge.resolve(requestId, decision, pluginSetupResponseTarget)) {
         return { accepted: true };
       }
+      if (await getBotAuthorizationService()?.resolve(requestId, decision, pluginSetupResponseTarget)) return { accepted: true };
       log.warn('resolve-interaction: no pending resolver (likely already dismissed/timed out)', {
         requestId,
       });
@@ -14897,12 +15003,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
-  ipcMain.handle(MAKER_INVOKE.PLUGIN_SETUP_SUBMIT_INLINE, (event, raw: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.PLUGIN_SETUP_SUBMIT_INLINE, async (event, raw: unknown) => {
     assertTrustedAppRendererEvent(event);
     const request = parseGhostSetupInlineSubmitRequest(raw);
     if (!request) throwIpcError('INVALID_PARAMS', 'invalid plugin setup submission');
     const { requestId, ...submit } = request;
-    if (!ghostSetupInteractionBridge.submitInline(requestId, submit)) {
+    if (!ghostSetupInteractionBridge.submitInline(requestId, submit) && !(await getBotAuthorizationService()?.submit(requestId, submit))) {
       throwIpcError('INVALID_PARAMS', 'plugin setup interaction is not pending');
     }
   });

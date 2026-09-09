@@ -22608,6 +22608,34 @@ describe('CodexAgent native fork anchor events', () => {
 });
 
 describe('CodexAgent.forkSdkSession', () => {
+  it('reads cross-account fork boundaries and records the child in the source index', async () => {
+    const recordCodexThreadLocation = vi.fn(async () => {});
+    const agent = new CodexAgent(createDeps({}, {
+      isCodexAccountProvider: (id) => id === 'account-b',
+      resolveCodexThreadStorageHome: async () => '/account-a',
+      prepareCodexResumeSession: async () => '/account-a/sessions/source.jsonl',
+      recordCodexThreadLocation,
+    }));
+    const host = installFakeHost(agent, method => {
+      if (method === Method.ThreadTurnsList) {
+        expect(host.getHost).toHaveBeenCalledWith(undefined, 'oauth-bearer',
+          expect.objectContaining({ providerId: 'account-b', sqliteHome: '/account-a' }));
+        return { data: [{ id: 'boundary', status: 'completed', startedAt: 100 }], nextCursor: null };
+      }
+      if (method === Method.ThreadFork) return {
+        thread: { id: 'child', path: '/account-b/sessions/child.jsonl' },
+      };
+    }, { userAgent: 'mock-codex/0.153.4', codexHome: '/account-b' });
+    await expect(agent.forkSdkSession({
+      sourceSdkSessionId: 'source', upToMessageId: undefined,
+      providerId: 'account-b', tailTurnsToDrop: 1, forkAtTimestampMs: 110_123,
+    })).resolves.toMatchObject({ newSdkSessionId: 'child', usedNativeForkAnchor: true });
+    expect(host.request).toHaveBeenCalledWith(Method.ThreadFork, expect.objectContaining({
+      path: '/account-a/sessions/source.jsonl', lastTurnId: 'boundary',
+    }));
+    expect(recordCodexThreadLocation).toHaveBeenCalledWith('child', '/account-a', '/account-b/sessions/child.jsonl');
+  });
+
   it('forks failed paginated history without rollback when no UI anchor was saved', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent, method => {

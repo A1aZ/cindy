@@ -13782,10 +13782,14 @@ export class CodexAgent extends BaseAgent {
         await assertCodexRolloutRewriteSupported(preparedSourcePath || await this.findRolloutPath(opts.sourceSdkSessionId));
         historyChecked = true;
       }
+      // ID-only turn queries must use the source thread's index even when the
+      // account supplying credentials has changed. Keep the child in that index.
+      const forkSqliteHome = await this.deps.resolveCodexThreadStorageHome?.(opts.sourceSdkSessionId);
       stage = 'host-create';
       const host = await this.getHost(undefined, forkCredentialMode, {
         keyOverride: forkHostKey,
         ...(forkAccountId ? { providerId: forkAccountId } : {}),
+        ...(forkSqliteHome ? { sqliteHome: forkSqliteHome } : {}),
         hostPurpose: 'control-plane',
       }).catch((error) => {
         // This is the outgoing source's offline fork host, not a target send.
@@ -13846,7 +13850,7 @@ export class CodexAgent extends BaseAgent {
       const resp = await host.request<ThreadForkResponse>(Method.ThreadFork, params);
       let newSdkSessionId = resp.thread.id;
       if (forkCodexHome && typeof resp.thread.path === 'string') {
-        await this.deps.recordCodexThreadLocation?.(newSdkSessionId, forkCodexHome, resp.thread.path);
+        await this.deps.recordCodexThreadLocation?.(newSdkSessionId, forkSqliteHome ?? forkCodexHome, resp.thread.path);
       }
       createdThreadIds.add(newSdkSessionId);
       if (!usedNativeForkAnchor && tailTurnsToDrop > 0) {
@@ -13865,7 +13869,7 @@ export class CodexAgent extends BaseAgent {
         createdThreadIds.add(rollbackThreadId);
         newSdkSessionId = rollbackThreadId;
         if (forkCodexHome && typeof rollbackResp.thread.path === 'string') {
-          await this.deps.recordCodexThreadLocation?.(newSdkSessionId, forkCodexHome, rollbackResp.thread.path);
+          await this.deps.recordCodexThreadLocation?.(newSdkSessionId, forkSqliteHome ?? forkCodexHome, rollbackResp.thread.path);
         }
       }
       if (opts.stripEncryptedReasoning) {

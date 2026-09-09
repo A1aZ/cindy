@@ -121,7 +121,8 @@ beforeEach(() => {
 describe('scheduler model popover overlay behavior', () => {
   it('pins an explicitly selected native default instead of storing automatic selection', () => {
     const onChangeProviderId = vi.fn();
-    render(<ModelEffortChip agentKind="codex" modelValue="gpt-5.5"
+    render(<ModelEffortChip onSelect={vi.fn()} onFollowSession={vi.fn()}
+      agentKind="codex" modelValue="gpt-5.5"
       onChangeModel={vi.fn()} effortValue="" onChangeEffort={vi.fn()}
       providerId="" onChangeProviderId={onChangeProviderId} />);
     fireEvent.click(screen.getByTestId('model-selector-content'));

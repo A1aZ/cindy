@@ -354,7 +354,7 @@ describe('mobile home desktop-first surface', () => {
     const localSmokeSource = readSource('scripts/local-device-link-smoke.mjs');
     const deviceDetailFlow = readSource('e2e/maestro/session_list_controls.yaml');
 
-    expect(source).toContain('item.deviceId !== null && item.available');
+    expect(source).toContain('item.deviceId !== null && canBrowseMobileHomeDevice(item)');
     expect(source).toContain('`home.deviceChip.${sanitizeDeviceChipTestId(item.deviceId)}`');
     expect(source).toContain('function sanitizeDeviceChipTestId');
     expect(source).toContain("return value.replace(/[^A-Za-z0-9_-]/g, '_');");
@@ -390,7 +390,7 @@ describe('mobile home desktop-first surface', () => {
     expect(source).toContain("updateDeviceConnectionState(device.deviceId, 'failed');");
     expect(source).toContain("updateDeviceConnectionState(device.deviceId, 'idle');");
     expect(source).toContain(
-      "const showConnectionRow = !!connectionError || status !== 'online' || connectionIssue?.kind === 'unstable';",
+      "const showConnectionRow = selectedDeviceDisconnected || !!connectionError || status !== 'online' || connectionIssue?.kind === 'unstable';",
     );
     expect(source).toContain("connectionStates={deviceConnectionStates}");
     expect(source).toContain('function DeviceMenuItem');
@@ -561,7 +561,8 @@ describe('mobile home desktop-first surface', () => {
 
     // Home remains mounted across saved-account activation, so clearing the shared DeviceLink
     // stores is insufficient: page-local refs/state must disappear before the next paint too.
-    expect(source).toContain('const { accountGeneration, apiFetch, deviceId: selfDeviceId, user } = auth;');
+    expect(source).toContain('const { accountGeneration, deviceId: selfDeviceId, user } = auth;');
+    expect(source).toContain('return readDeviceList();');
     expect(source).toContain('const homeAccountGenerationRef = useRef(accountGeneration);');
     expect(source).toContain('useLayoutEffect(() => {');
     expect(source).toContain('syncInFlightRef.current = null;');

@@ -17,7 +17,7 @@ vi.mock('@/lib/logger', () => ({
 }));
 vi.mock('@/lib/makerTransport', () => ({ isSessionTurnRunningFor: async () => true }));
 vi.mock('@/features/device-link/remoteProjectsStore', () => ({
-  remoteProjectsStore: { getDeviceIds: () => ['host'] },
+  remoteProjectsStore: { getDeviceIds: () => ['host', 'neighbor'], subscribe: () => () => {} },
 }));
 vi.mock('@/features/device-link/refreshRemoteSessions', () => ({
   refreshRemoteDeviceSessions: vi.fn(),

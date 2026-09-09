@@ -1012,8 +1012,9 @@ export default function SessionScreen() {
   const revokedDevices = useRevokedDevices();
   const unresponsiveDevices = useUnresponsiveDevices();
   const maker = useMobileMakerTransport(deviceId);
+  const remoteHistoryAvailable = status === 'online' && getPresenceAvailability(deviceId) === true;
   const historyView = useRemoteHistoryView(deviceId, sessionId, maker,
-    () => messageScreenFocusedRef.current && messageAppActiveRef.current);
+    () => messageScreenFocusedRef.current && messageAppActiveRef.current, remoteHistoryAvailable);
   useEffect(() => {
     if (messageScreenFocusedRef.current && messageAppActiveRef.current) historyView.view.setActive(true);
   }, [connectionEpoch, messageReloadRevision, historyView.view]);
@@ -3204,6 +3205,7 @@ export default function SessionScreen() {
     const snapshotStartedAt = Date.now();
     const options = { replaceMessages: syncRun.replaceMessages };
     if (!deviceId || !sessionId || syncRun.isStale()) return;
+    if (!remoteHistoryAvailable) { setLoading(false); return; }
     const messageAuthority = remoteSessionStore.captureSessionMessageAuthority(sessionId);
     const messageAuthorityCurrent = () =>
       remoteSessionStore.isSessionMessageAuthorityCurrent(messageAuthority);
@@ -3452,7 +3454,7 @@ export default function SessionScreen() {
     } finally {
       if (!syncRun.isStale() && messageAuthorityCurrent()) setLoading(false);
     }
-  }, [deviceId, deviceName, getSubscriptionIdentity, latchOutboxTransportHold, maker, notificationResponse, openLink, reopenLink, sessionId, setError, subscribe]);
+  }, [deviceId, deviceName, getSubscriptionIdentity, latchOutboxTransportHold, maker, notificationResponse, openLink, reopenLink, remoteHistoryAvailable, sessionId, setError, subscribe]);
   // 任一连接恢复身份变化都会让旧读取失去提交资格。否则断线前启动的同步可能在
   // 新 hold 锁存后迟到，并从成功尾误清恢复屏障。
   const remoteSyncContextKey = JSON.stringify([
@@ -4495,6 +4497,7 @@ export default function SessionScreen() {
 
   const loadEarlierMessages = useCallback(async () => {
     if (isScheduleDetail) return;
+    if (!remoteHistoryAvailable) return;
     if (historyView.snapshot.ready) {
       await historyView.view.refresh(true);
       if (!historyView.view.isActive() || findRemoteHistoryView(deviceId, sessionId) !== historyView.view) return;
@@ -4549,7 +4552,7 @@ export default function SessionScreen() {
         setLoadingEarlier(false);
       }
     }
-  }, [historyView.snapshot.ready, historyView.view, requestSync, abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
+  }, [remoteHistoryAvailable, historyView.snapshot.ready, historyView.view, requestSync, abandonInFlightBackfill, deviceId, hasOlderMessages, isScheduleDetail, loadingEarlier, maker, oldestLoadedMessageCursor, sessionId]);
 
   const loadToolInput = useCallback(async (
     ref: MobileToolInputProjection,
@@ -8817,9 +8820,10 @@ export default function SessionScreen() {
                   || (connectionError ? t('session.screen.sessionNotSynced') : (deviceName || t('session.screen.conversationFallback')))}
             />
 
-            {showConnectionBanner ? (
+            {showConnectionBanner || !remoteHistoryAvailable ? (
               <ConnectionBanner
                 density="compact"
+                cachedOnly={!remoteHistoryAvailable}
                 deviceUnresponsive={isDeviceUnresponsive}
                 error={bannerError}
                 requestErrorAutoRecovering={bannerRetriesHistory ? false : undefined}

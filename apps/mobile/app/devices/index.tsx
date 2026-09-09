@@ -1,4 +1,5 @@
 import { cacheRemoteResourceHome, readRemoteResourceSnapshot } from '@/device-link/remoteResourceCache';
+import { canBrowseMobileHomeDevice } from '@/session/mobileHome';
 import { useFocusEffect, useIsFocused } from 'expo-router';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import {
@@ -51,7 +52,6 @@ import type { TFunction } from 'i18next';
 import { useAuth } from '@/auth/AuthContext';
 import { configureCollapseAnimation } from '@/utils/collapseAnimation';
 import { useGuardedPush } from '@/utils/useGuardedPush';
-import { DEVICE_LINK_API_BASE_URL } from '@/config/env';
 import { MobileVendorIcon } from '@/components/MobileVendorIcon';
 import {
   MainWindowActionGroup,
@@ -242,7 +242,6 @@ import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { fontWeight, iconSize, iconStroke, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
 
 const LIST_LIMIT = 200;
-const DEVICE_LIST_TIMEOUT_MS = 12_000;
 const HOME_LIST_SUBSCRIPTION_OWNER = 'device-list';
 // Keep the device-link channel responsive while All Sessions hydrates several
 // computers. This does not change the 200-row server limit; it only bounds the
@@ -361,7 +360,7 @@ function HomeScreenContent() {
   const guardedPush = useGuardedPush();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const auth = useAuth();
-  const { accountGeneration, apiFetch, deviceId: selfDeviceId, user } = auth;
+  const { accountGeneration, deviceId: selfDeviceId, user } = auth;
   // 首页列表持久缓存按账号键控(401 掉线换号不串数据);首页仅登录后可达,user 理应非空。
   const homeCacheUserId = user?.id ?? '';
   const {
@@ -369,6 +368,7 @@ function HomeScreenContent() {
     connectionIssue,
     invoke,
     lastPresenceSnapshot,
+    readDeviceList,
     status,
     subscribe,
     unsubscribe,
@@ -927,10 +927,7 @@ function HomeScreenContent() {
           if (homeAccountGenerationRef.current !== accountGenerationAtStart) {
             throw new Error('Home account generation superseded');
           }
-          return apiFetch<{ devices: DeviceView[] }>('/api/device-link/devices', {
-            baseUrl: DEVICE_LINK_API_BASE_URL,
-            timeoutMs: DEVICE_LIST_TIMEOUT_MS,
-          });
+          return readDeviceList();
         },
         { maxAttempts: 3 },
       );
@@ -1039,7 +1036,7 @@ function HomeScreenContent() {
     return task.finally(() => {
       if (visible && homeAccountGenerationRef.current === accountGenerationAtStart) setRefreshing(false);
     });
-  }, [accountGeneration, apiFetch, deviceIdentityCacheReady, homeCacheUserId, hydrateDeviceSessions, reconcileDeviceViews, reconcileHomeDeviceSyncScope, revokedDevices, softInvalidateDeviceMirror]);
+  }, [accountGeneration, readDeviceList, deviceIdentityCacheReady, homeCacheUserId, hydrateDeviceSessions, reconcileDeviceViews, reconcileHomeDeviceSyncScope, revokedDevices, softInvalidateDeviceMirror]);
   loadHomeRef.current = loadHome;
 
   // 冷启动先画缓存:上次 loadHome 成功的设备+会话快照种入 store,先把列表画出来(消除首屏强制
@@ -1067,7 +1064,6 @@ function HomeScreenContent() {
       ) return;
       for (const device of snapshot) {
         remoteSessionStore.hydrateDeviceSessionsIfEmpty(device.deviceId, device.deviceName, device.sessions);
-        updateDeviceConnectionState(device.deviceId, 'syncing');
       }
     };
     void read.initial
@@ -1828,7 +1824,7 @@ function HomeScreenContent() {
     let restoredUnavailable = false;
     if (!missing && restoredSelectionUnvalidatedRef.current) {
       const filter = home.deviceFilters.find((item) => item.deviceId === selectedDeviceId);
-      restoredUnavailable = !!filter && !filter.available;
+      restoredUnavailable = !!filter && !canBrowseMobileHomeDevice(filter);
       restoredSelectionUnvalidatedRef.current = false;
     }
     if (!missing && !restoredUnavailable) return;
@@ -1838,16 +1834,20 @@ function HomeScreenContent() {
   }, [home.deviceFilters, home.selectedDeviceId, initialHomeSettled, selectedDeviceId]);
   // 连接层失败原因比请求级 error 更根因:unstable 在 online 时也需保持可见。
   const activeConnectionIssue = status !== 'online' || connectionIssue?.kind === 'unstable' ? connectionIssue : null;
-  const showConnectionRow = !!connectionError || status !== 'online' || connectionIssue?.kind === 'unstable';
+  const selectedDeviceDisconnected = home.deviceFilters.some((item) => item.deviceId !== null
+    && (!selectedDeviceId || item.deviceId === selectedDeviceId) && item.sessionCount > 0)
+    && !home.deviceFilters.some((item) => item.deviceId !== null
+      && (!selectedDeviceId || item.deviceId === selectedDeviceId) && item.available);
+  const showConnectionRow = selectedDeviceDisconnected || !!connectionError || status !== 'online' || connectionIssue?.kind === 'unstable';
   const connectionTone = activeConnectionIssue
     ? 'off'
-    : connectionError ? 'muted' : status === 'online' ? 'ready' : status === 'connecting' ? 'busy' : 'off';
+    : selectedDeviceDisconnected ? 'off' : connectionError ? 'muted' : status === 'online' ? 'ready' : status === 'connecting' ? 'busy' : 'off';
   const connectionTitle = activeConnectionIssue
     ? connectionIssueTitle(activeConnectionIssue.kind)
-    : connectionError ? t('devices.list.syncFailed') : homeConnectionTitle(status, t);
+    : selectedDeviceDisconnected ? t('deviceLink.cachedHistory.title') : connectionError ? t('devices.list.syncFailed') : homeConnectionTitle(status, t);
   const connectionCopy = activeConnectionIssue
     ? connectionIssueHint(activeConnectionIssue.kind)
-    : connectionError;
+    : selectedDeviceDisconnected ? t('deviceLink.cachedHistory.hint') : connectionError;
   const emptyStateTitle = initialHomeError ? t('devices.list.syncFailed') : home.emptyTitle;
   const emptyStateCopy = initialHomeError ? (connectionError ?? t('devices.list.requestFailed')) : home.emptyCopy;
   // 无可控制电脑的引导态(landing)可见性,与 ListEmptyComponent 的分支同口径。
@@ -2895,9 +2895,8 @@ function DeviceMenuModal({
     onClosed,
   });
   const allFilter = filters.find((item) => item.deviceId === null) ?? null;
-  // 范围菜单只列当前能打开的电脑,对齐桌面机器切换器:离线 / 关远控 / 撤权的设备
-  // 不占菜单(灰行点不进去只会吵);空态引导另走 RemoteAccessGuide。
-  const deviceFilters = filters.filter((item) => item.deviceId !== null && item.available);
+  // 离线电脑保留缓存入口；关远控和撤权不由缓存恢复访问权限。
+  const deviceFilters = filters.filter((item) => item.deviceId !== null && canBrowseMobileHomeDevice(item));
   return (
     <HomeMenuScrim
       backdropTestID="home.deviceMenu.backdrop"
@@ -2935,7 +2934,7 @@ function DeviceMenuModal({
             {deviceFilters.map((item) => (
               <DeviceMenuItem
                 connectionState={item.deviceId ? connectionStates[item.deviceId] ?? 'idle' : 'idle'}
-                dimmed={!item.available && item.state !== 'access_revoked'}
+                dimmed={!canBrowseMobileHomeDevice(item)}
                 key={item.id}
                 label={item.label}
                 onPress={() => onSelect(item)}

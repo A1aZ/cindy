@@ -41,8 +41,11 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   };
   private listeners = new Set<() => void>();
   private generation = 0;
+  // Transport changes invalidate remote reads, not local disk restoration.
+  private cacheGeneration = 0;
   private detailRuns = new Map<string, object>();
   private active = true;
+  private networkAvailable = true;
   private pagePromise: Promise<void> | null = null;
   private pageOlder = false;
   private pageGeneration = 0;
@@ -54,7 +57,19 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     // for the old source's page/detail requests.
     private readonly intentQueue = { tail: Promise.resolve() as Promise<void> },
   ) {}
-  isActive = (): boolean => this.active;
+  isActive = (): boolean => this.active && this.networkAvailable;
+  /** Offline reading retains the view, but never sends page/detail/interest requests. */
+  setNetworkAvailable(available: boolean): void {
+    if (this.networkAvailable === available) return;
+    this.networkAvailable = available;
+    this.generation++;
+    this.detailRuns.clear();
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+    this.publish({ loading: false, details: new Map([...this.state.details].map(([key, detail]) =>
+      [key, detail.loading ? { ...detail, loading: false } : detail])) });
+    if (available && this.active) void this.refresh();
+  }
   getSnapshot = (): HistoryViewSnapshot<T> => this.state;
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -68,9 +83,9 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   /** Optimistic local display only. A fresh response or reset always wins over disk IO. */
   async restoreCachedView(read: () => Promise<HistoryViewSnapshot<T> | null>): Promise<void> {
     if (this.state.ready || isHistoryViewUnavailable(this.state.error)) return;
-    const generation = this.generation;
+    const generation = this.cacheGeneration;
     const cached = await read().catch(() => null);
-    if (!cached || this.state.ready || isHistoryViewUnavailable(this.state.error) || generation !== this.generation) return;
+    if (!cached || this.state.ready || isHistoryViewUnavailable(this.state.error) || generation !== this.cacheGeneration) return;
     this.publish({ ...cached, loading: this.state.loading, error: this.state.error });
   }
 
@@ -86,7 +101,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
       if (!fresh && older === this.pageOlder && this.pageGeneration === this.generation) return this.pagePromise;
       const generation = this.generation;
       return this.pagePromise.then(() => {
-        if (this.active && generation === this.generation && (fresh || !this.state.error)) return this.refresh(older);
+        if (this.isActive() && generation === this.generation && (fresh || !this.state.error)) return this.refresh(older);
       });
     }
     this.pageOlder = older;
@@ -99,7 +114,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
 
   /** Coalesce activity notices; full assistant streaming continues on its existing path. */
   invalidate(): void {
-    if (!this.active || this.refreshTimer) return;
+    if (!this.isActive() || this.refreshTimer) return;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
       if (this.pagePromise) {
@@ -109,7 +124,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   private async readPage(older: boolean): Promise<void> {
-    if (!this.active || this.state.loading || (older && !this.state.hasMore)) return;
+    if (!this.isActive() || this.state.loading || (older && !this.state.hasMore)) return;
     const generation = this.generation;
     const before = older ? this.state.nextCursor ?? undefined : undefined;
     this.publish({ loading: true, error: null });
@@ -156,6 +171,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
           // A downgraded Host must not leave a ready projection masking the raw
           // fallback. Invalidate in-flight details and every cached source row.
           this.generation++;
+          this.cacheGeneration++;
           this.detailRuns.clear();
           if (this.refreshTimer) clearTimeout(this.refreshTimer);
           this.refreshTimer = null;
@@ -178,10 +194,11 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   private sendIntent(): void {
+    if (!this.networkAvailable) return;
     // Serialize replacement intents: a late expand ACK can never win over collapse.
     const generation = this.generation;
     this.intentQueue.tail = this.intentQueue.tail.catch(() => undefined).then(async () => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || !this.networkAvailable) return;
       // Empty replacement intents must release old interest even before a reset view is ready.
       const summaries = this.active ? historyWorkSummaries(this.state.items).filter((item) => this.state.expanded.has(item.key)) : [];
       await this.transport.expanded(summaries);
@@ -192,7 +209,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
 
   async loadDetails(summary: HistoryWorkSummary): Promise<void> {
-    if (!this.active || !this.state.expanded.has(summary.key) || this.detailRuns.has(summary.key)) return;
+    if (!this.isActive() || !this.state.expanded.has(summary.key) || this.detailRuns.has(summary.key)) return;
     const existing = this.state.details.get(summary.key);
     if (existing?.complete && existing.revision === summary.revision) return;
     const token = {};
@@ -253,7 +270,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
               && value.firstMessageId === summary.firstMessageId && value.lastMessageId === summary.lastMessageId);
           const cached = this.state.details.get(item.key);
           let messages = cached?.complete && cached.revision === summary.revision ? [...cached.messages] : [];
-          if (!messages.length) {
+          if (!messages.length && this.networkAvailable) {
             // Search reads the bounded range without changing user expansion memory
             // or subscribing to hidden activity. Mount/collapse cannot cancel it.
             try {
@@ -277,7 +294,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
           if (found) return found;
         }
       }
-      if (!this.state.hasMore) return null;
+      if (!this.networkAvailable || !this.state.hasMore) return null;
       await this.refresh(true);
       if (this.state.error) throw this.state.error;
     }
@@ -291,6 +308,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
     this.refreshTimer = null;
     this.active = active;
     this.generation++;
+    this.cacheGeneration++;
     this.detailRuns.clear();
     this.publish({ loading: false });
     this.sendIntent();
@@ -298,6 +316,7 @@ export class HistoryViewController<T extends HistoryMessageSource> {
   }
   reset(): void {
     this.generation++;
+    this.cacheGeneration++;
     this.detailRuns.clear();
     this.publish({ items: [], details: new Map(), expanded: new Set(), ready: false,
       nextCursor: null, hasMore: false, loading: false, error: null });

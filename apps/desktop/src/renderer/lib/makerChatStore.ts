@@ -115,6 +115,7 @@ import {
 } from '@/lib/makerTransport';
 import {
   remoteProjectsStore,
+  isRemoteDeviceMarkedDisconnected,
   requestRemoteReseed,
 } from '@/features/device-link/remoteProjectsStore';
 import { getStickySessionDeviceId } from '@/features/device-link/stickySessionOrigin';
@@ -3906,6 +3907,8 @@ function resolveGatewayRecoveryProviderId(
 
 function enterView(sessionId: string): () => void {
   const view = getRemoteHistoryView(sessionId);
+  const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+  if (deviceId) view?.setNetworkAvailable(!isRemoteDeviceMarkedDisconnected(deviceId));
   const resumingHistory = view && !view.isActive();
   view?.setActive(true);
   _activeViewSessions.set(sessionId, (_activeViewSessions.get(sessionId) ?? 0) + 1);
@@ -8615,6 +8618,10 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
   // 纯来源漂移驱动,正常 patched 推送(current===loaded)不误重载。teardown 时随其它监听一并清。
   {
     const unsub = remoteProjectsStore.subscribe(() => {
+      for (const [sessionId, entry] of remoteHistoryViews) {
+        const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+        if (deviceId) entry.view?.setNetworkAvailable(!isRemoteDeviceMarkedDisconnected(deviceId));
+      }
       // Snapshot/reseed can be the first clear signal (the projection or patch
       // may have been dropped). Reconcile boundaries before any subscriber or
       // outbox pump can observe the new shard.
@@ -10720,6 +10727,7 @@ function createRemoteHistoryView(sessionId: string) {
   entry.view = view;
   entry.isCurrent = isCurrent;
   remoteHistoryViews.set(sessionId, entry);
+  view.setNetworkAvailable(!isRemoteDeviceMarkedDisconnected(deviceId));
   view.subscribe(() => {
     if (!isCurrent() || !sessions.has(sessionId)) return;
     const snapshot = view.getSnapshot();
@@ -10743,6 +10751,13 @@ function createRemoteHistoryView(sessionId: string) {
 
 function ensureInitialMessages(sessionId: string): void {
   const state = getOrCreateState(sessionId);
+  const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+  if (deviceId && isRemoteDeviceMarkedDisconnected(deviceId)) {
+    _historyLoadOrigin.set(sessionId, deviceId);
+    noteInputProjectionOrigin(sessionId, deviceId);
+    hydrateRemoteMessagesFromCache(sessionId);
+    return;
+  }
   requestInputProjection(sessionId);
   // Prefetch and other non-mounted callers still create a cache entry. Give
   // that entry the same bounded lifetime as a viewed session so a cancelled
@@ -11494,7 +11509,12 @@ function reconcileOpenSessionOrigins(): void {
     }
     if (current === undefined) continue;
     const loaded = _historyLoadOrigin.get(sessionId);
-    if (current === loaded && !originChange.changed) continue;
+    if (current === loaded && !originChange.changed) {
+      if (_activeViewSessions.has(sessionId) && !sessions.get(sessionId)?.historyLoaded && !isRemoteDeviceMarkedDisconnected(current)) {
+        ensureInitialMessages(sessionId);
+      }
+      continue;
+    }
     // undefined → deviceId 是启动竞速的**首次解析**(上一次首拉命中的是本机空库),
     // 缓存并未因此过期 → 放开 hydrate,让被控端离线时也能看到上次的最近一页。
     // 设备之间真的换了 origin(string → 另一个 string)时不放开:那是另一台机器的历史。
@@ -11543,6 +11563,8 @@ const _remoteReconcileInFlight = new Map<
 >();
 
 function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean; freshHistory?: boolean }): Promise<boolean> {
+  const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+  if (deviceId && isRemoteDeviceMarkedDisconnected(deviceId)) return Promise.resolve(false);
   const view = getRemoteHistoryView(sessionId);
   if (view && (view.getSnapshot().ready || opts?.freshHistory)) return Promise.all([view.refresh(false, opts?.freshHistory), reconcilePendingInteractions(sessionId)]).then(() => {
     if (getRemoteHistoryView(sessionId) !== view || !view.isActive()) return false;
@@ -11865,6 +11887,8 @@ function loadOlderMessages(
   automatic = false,
   maxPages = MAX_LOAD_OLDER_PAGES,
 ): Promise<boolean> {
+  const deviceId = remoteProjectsStore.getSessionDeviceId(sessionId);
+  if (deviceId && isRemoteDeviceMarkedDisconnected(deviceId)) return Promise.resolve(false);
   const view = getRemoteHistoryView(sessionId);
   if (view?.getSnapshot().ready) {
     const before = view.getSnapshot().nextCursor;

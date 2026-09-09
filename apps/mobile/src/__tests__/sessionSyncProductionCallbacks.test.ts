@@ -40,7 +40,7 @@ const tick = () => new Promise((done) => setTimeout(done, 0));
 const session = { id: 's1', updatedAt: '2026-09-06T00:00:00Z', _count: { messages: 100 } };
 const page = { messages: [{ id: 'm1' }], limit: 1, reducedByPayloadTooLarge: false };
 
-function fixture(reopen = false) {
+function fixture(reopen = false, remoteHistoryAvailable = true) {
   const state = {
     rows: reopen ? [{ id: 'cached', clientId: 'cached' }] : [] as { id: string; clientId?: string }[],
     older: false, loading: false, historyLoading: false,
@@ -79,6 +79,7 @@ function fixture(reopen = false) {
     listActiveSessions: vi.fn(async () => []),
   };
   const bindings = {
+    remoteHistoryAvailable,
     deviceId: 'd1', deviceName: 'test', sessionId: 's1',
     historyView: { snapshot: { ready: false }, view: { refresh: async (): Promise<void> => undefined, getSnapshot: (): { ready: boolean; error: unknown } => ({ ready: false, error: new Error('[CHANNEL_NOT_ALLOWED] legacy host') }) } },
     remoteSessionStore: store, maker, isHistoryViewUnavailable, shouldBlockSessionSync: () => false,
@@ -126,6 +127,18 @@ function fixture(reopen = false) {
 }
 
 describe('production session recovery callbacks', () => {
+  it('keeps cached rows offline without fetching metadata, projection, history or earlier pages', async () => {
+    const f = fixture(true, false);
+    const rows = f.state.rows;
+    await f.sync();
+    await f.earlier();
+    expect(f.state.rows).toBe(rows);
+    expect(f.state.loading).toBe(false);
+    expect(f.maker.getSession).not.toHaveBeenCalled();
+    expect(f.maker.listMessages).not.toHaveBeenCalled();
+    expect(f.maker.input.getProjection).not.toHaveBeenCalled();
+    expect(f.state.readAck).toBeNull();
+  });
   it('reads after ACK when restored history is ready but the captured snapshot is not', async () => {
     const f = fixture(true);
     f.store.isSessionMessageWindowSynced.mockReturnValue(true);

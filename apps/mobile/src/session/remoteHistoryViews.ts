@@ -1,7 +1,7 @@
-import { HistoryViewController } from '@cindy/maker-shared/message-window';
+import { HistoryViewController, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import type { RemoteMessage } from './types';
-import { historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from './remoteHistoryDiskCache';
+import { clearHistoryDisk, historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from './remoteHistoryDiskCache';
 import { historyValueBytes } from './historyDiskStore';
 
 // Retain only recently visited views in memory. The existing account/device and
@@ -37,9 +37,7 @@ export function mountRemoteHistoryView(entry: Entry, reader: Reader, active: boo
   views.set(keyFor(entry.deviceId, entry.sessionId), entry);
   entry.reader = reader;
   entry.consumers++;
-  entry.view.setActive(active);
   const authority = historyDiskAuthority(entry.deviceId, entry.sessionId);
-  void entry.view.restoreCachedView(() => readHistoryDisk(authority));
   let writeAuthority = authority;
   let pendingSnapshot = entry.view.getSnapshot();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -48,18 +46,28 @@ export function mountRemoteHistoryView(entry: Entry, reader: Reader, active: boo
     timer = undefined;
     void writeHistoryDisk(writeAuthority, pendingSnapshot);
   };
-  const unsubscribe = entry.view.subscribe(() => {
+  const onSnapshot = () => {
     if (timer) clearTimeout(timer);
     const snapshot = entry.view.getSnapshot();
     if (!snapshot.ready) pendingSnapshot = snapshot;
-    if (!authority.ownerCurrent() || !snapshot.ready || snapshot.loading || snapshot.error) return;
+    if (!authority.ownerCurrent()) return;
+    if (isHistoryViewUnavailable(snapshot.error)) {
+      void clearHistoryDisk(entry.deviceId, entry.sessionId);
+      return;
+    }
+    if (!snapshot.ready || snapshot.loading || snapshot.error) return;
     pendingSnapshot = snapshot;
     // A new authoritative snapshot after rewind gets new write authority. Old timers/unmounts
     // keep their old authority and cannot repopulate a cleared snapshot.
     writeAuthority = historyDiskAuthority(entry.deviceId, entry.sessionId);
     if (!entry.view.isActive()) { persist(); return; }
     timer = setTimeout(persist, 1200);
-  });
+  };
+  const unsubscribe = entry.view.subscribe(onSnapshot);
+  // Retire an existing downgrade before activation can clear its error for a retry.
+  onSnapshot();
+  entry.view.setActive(active);
+  void entry.view.restoreCachedView(() => readHistoryDisk(authority));
   return () => {
     unsubscribe();
     persist();

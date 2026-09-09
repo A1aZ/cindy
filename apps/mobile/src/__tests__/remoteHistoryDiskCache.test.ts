@@ -3,6 +3,8 @@ import { HistoryViewController, projectHistoryView, type HistoryViewSnapshot, ty
 import { setMobileAuthOwner } from '@/auth/authOwnerGeneration';
 import { clearHistoryDisk, historyDiskAuthority, readHistoryDisk, writeHistoryDisk } from '@/session/remoteHistoryDiskCache';
 import type { RemoteMessage } from '@/session/types';
+import { clearRemoteHistoryViews, findRemoteHistoryView, getRemoteHistoryView,
+  mountRemoteHistoryView, MAX_INACTIVE_HISTORY_VIEWS } from '@/session/remoteHistoryViews';
 
 const files = vi.hoisted(() => new Map<string, string>());
 vi.mock('@/session/historyDiskStoreExpo', () => ({ createHistoryDiskIO: () => ({
@@ -18,8 +20,90 @@ const snapshot = (text: string): HistoryViewSnapshot<RemoteMessage> => ({
   details: new Map(), expanded: new Set(), hasMore: true, nextCursor: 'older', ready: true,
   loading: false, error: null,
 });
-afterEach(async () => { await clearHistoryDisk(); setMobileAuthOwner(null); });
+const releases: Array<() => void> = [];
+function mount(entry: ReturnType<typeof getRemoteHistoryView>, source: ReturnType<typeof transport>) {
+  const release = mountRemoteHistoryView(entry, source, true);
+  releases.push(release);
+  return () => { releases.splice(releases.indexOf(release), 1); release(); };
+}
+function transport() {
+  return {
+    readHistoryView: vi.fn(async () => ({ version: 1 as const, items: [...snapshot('network').items], hasMore: false, nextCursor: null })),
+    readWorkDetails: vi.fn(async () => ({ version: 1 as const, messages: [], hasMore: false, nextCursor: null })),
+    setHistoryExpanded: vi.fn(async () => {}),
+  };
+}
+afterEach(async () => { releases.splice(0).forEach(release => release()); clearRemoteHistoryViews(); await clearHistoryDisk(); setMobileAuthOwner(null); });
 describe('persistent history integration', () => {
+  it.each(['UNSUPPORTED_CAPABILITY', 'CHANNEL_NOT_ALLOWED'])('removes %s disk projection before LRU recreation and fences old writes', async (code) => {
+    setMobileAuthOwner('a');
+    const old = historyDiskAuthority('d', 's');
+    const other = historyDiskAuthority('other', 's');
+    await writeHistoryDisk(old, snapshot('stale disk'));
+    await writeHistoryDisk(other, snapshot('other device'));
+    const source = transport();
+    const entry = getRemoteHistoryView('d', 's', source);
+    const release = mount(entry, source);
+    await entry.view.refresh();
+    source.readHistoryView.mockRejectedValue(new Error(`[${code}] unavailable`));
+    await entry.view.refresh();
+    expect(entry.view.getSnapshot().ready).toBe(false);
+    expect(old.current()).toBe(false);
+    release();
+    await writeHistoryDisk(old, snapshot('late old write'));
+    for (let n = 0; n < MAX_INACTIVE_HISTORY_VIEWS; n++) {
+      const nextSource = transport();
+      const next = getRemoteHistoryView('d', `other-${n}`, nextSource);
+      const leave = mount(next, nextSource);
+      await next.view.refresh(); leave();
+    }
+    expect(findRemoteHistoryView('d', 's')).toBeUndefined();
+    expect(await readHistoryDisk(historyDiskAuthority('d', 's'))).toBeNull();
+    expect(await readHistoryDisk(other)).not.toBeNull();
+    source.readHistoryView.mockRejectedValue(new Error('offline'));
+    const reopened = getRemoteHistoryView('d', 's', source);
+    const leave = mount(reopened, source);
+    await reopened.view.refresh();
+    await vi.waitFor(() => expect(reopened.view.getSnapshot().loading).toBe(false));
+    expect(reopened.view).not.toBe(entry.view);
+    expect(reopened.view.getSnapshot()).toMatchObject({ ready: false, items: [] });
+    source.readHistoryView.mockResolvedValue({ version: 1, items: [...snapshot('fresh').items], hasMore: false, nextCursor: null });
+    reopened.view.reset();
+    await reopened.view.refresh();
+    leave();
+    expect(JSON.stringify(await readHistoryDisk(historyDiskAuthority('d', 's')))).toContain('fresh');
+  });
+  it.each(['UNSUPPORTED_CAPABILITY', 'CHANNEL_NOT_ALLOWED'])('clears an existing %s before activation retries, preserving transient-error caches', async (code) => {
+    setMobileAuthOwner('a');
+    const source = transport();
+    source.readHistoryView.mockRejectedValue(new Error(`[${code}] unavailable`));
+    const entry = getRemoteHistoryView('d', 's', source);
+    await entry.view.refresh();
+    await writeHistoryDisk(historyDiskAuthority('d', 's'), snapshot('stale'));
+    source.readHistoryView.mockRejectedValue(new Error('now offline'));
+    mount(entry, source);
+    expect(await readHistoryDisk(historyDiskAuthority('d', 's'))).toBeNull();
+    const transient = transport();
+    transient.readHistoryView.mockRejectedValue(new Error('timeout'));
+    const auth = historyDiskAuthority('other', 's');
+    await writeHistoryDisk(auth, snapshot('offline cache'));
+    const offline = getRemoteHistoryView('other', 's', transient);
+    mount(offline, transient); await offline.view.refresh();
+    expect(await readHistoryDisk(auth)).not.toBeNull();
+  });
+  it('does not let an old owner downgrade delete the new owner cache', async () => {
+    setMobileAuthOwner('old');
+    const source = transport();
+    const entry = getRemoteHistoryView('d', 's', source);
+    mount(entry, source); await entry.view.refresh();
+    setMobileAuthOwner('new');
+    const auth = historyDiskAuthority('d', 's');
+    await writeHistoryDisk(auth, snapshot('new owner'));
+    source.readHistoryView.mockRejectedValue(new Error('[UNSUPPORTED_CAPABILITY] unavailable'));
+    await entry.view.refresh();
+    expect(auth.current()).toBe(true);
+    expect(JSON.stringify(await readHistoryDisk(auth))).toContain('new owner');
+  });
   it('skips oversized snapshots before serializing complete details', async () => {
     setMobileAuthOwner('a');
     const auth = historyDiskAuthority('d', 's');

@@ -39,6 +39,10 @@ describe('native subscription instances', () => {
     expect(a.models).toEqual(b.models);
     for (const agent of a.agents) expect(a.routing[agent]?.authStrategy).toBe('provider-oauth-header');
     expect(a.auth.native).toBe(native);
+    expect(a.imageModels).toBeUndefined();
+    expect(a.imageDefaults).toBeUndefined();
+    expect(a.videoModels).toBeUndefined();
+    expect(a.videoDefaults).toBeUndefined();
   });
 });
 

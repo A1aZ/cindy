@@ -509,6 +509,9 @@ export function buildUserProvider(
       ])),
       // Media remains explicitly bound to the original provider until it supports account selection.
       imageModels: undefined,
+      imageDefaults: undefined,
+      videoModels: undefined,
+      videoDefaults: undefined,
     };
   }
   if (nativeCodex) {

@@ -6,6 +6,13 @@ vi.mock('../../maker-host/active-catalog.js', () => ({
   getActiveCatalog: () => ({ ...BUNDLED_CATALOG, providers: [buildUserProvider({
     id: 'openai-account', name: 'Account', auth: { method: 'oauth', native: 'codex' },
     runtimes: { codex: { baseUrl: 'https://chatgpt.com/backend-api/codex', models: [{ id: 'gpt-5.6-luna', name: 'Luna' }] } },
+  }), ...(['claude', 'xai'] as const).map(native => {
+    const provider = buildUserProvider({
+      id: `${native}-account`, name: 'Account', auth: { method: 'oauth', native }, runtimes: {},
+    });
+    // The active catalog fills Claude membership from account discovery.
+    if (native === 'claude') provider.models.codex = [{ id: 'claude-sonnet-4-6', name: 'Sonnet', contextWindow: 200000, efforts: [], defaultEffort: null }];
+    return provider;
   })] }),
 }));
 vi.mock('../modelPriceOverrideStore.js', () => ({
@@ -17,7 +24,21 @@ vi.mock('../modelPriceOverrideStore.js', () => ({
 import { accountReferencePriceQuote } from '../accountReferencePrice.js';
 import { getReferenceModelPricing, getCodexProviderSubscriptionValuePrice } from '../referenceModelPricing.js';
 
-describe('independent OpenAI account reference prices', () => {
+describe('independent subscription account reference prices', () => {
+  it.each([
+    ['claude', 'anthropic', 'claude-sonnet-4-6'],
+    ['xai', 'xai', 'xai/grok-4.6'],
+  ])('shares %s public tariffs without changing account attribution', (native, publicId, modelId) => {
+    const options = { agent: 'codex' as const, at: '2026-09-09' };
+    const base = providerReferencePriceQuote(publicId, modelId, BUNDLED_CATALOG.modelRegistry, options);
+    expect(base).toBeDefined();
+    const actual = accountReferencePriceQuote(`${native}-account`, modelId, BUNDLED_CATALOG.modelRegistry, options);
+    expect(actual).toEqual({ ...base, providerId: `${native}-account`, modelId });
+    expect(getCodexProviderSubscriptionValuePrice(`${native}-account`, modelId, {}, options.at)).toEqual(actual);
+    expect(getModelPriceQuote(getReferenceModelPricing(), `${native}-account`, modelId, 'codex')).toMatchObject({
+      providerId: `${native}-account`, modelId, source: 'provider-reference',
+    });
+  });
   it('shares historical public tariffs without changing account attribution', () => {
     const options = { agent: 'codex' as const, at: '2026-09-09' };
     const base = providerReferencePriceQuote('openai', 'gpt-5.6-luna', BUNDLED_CATALOG.modelRegistry, options);

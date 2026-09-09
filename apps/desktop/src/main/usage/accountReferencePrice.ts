@@ -1,15 +1,15 @@
+import { providerCatalogId } from '@cindy/model-providers';
 import { providerReferencePriceQuote } from '../../shared/modelPriceQuote.js';
 import { getActiveCatalog } from '../maker-host/active-catalog.js';
 
-/** Share public OpenAI tariffs while keeping each account's overrides and attribution separate. */
+/** Share public tariffs while keeping each account's overrides and attribution separate. */
 export const accountReferencePriceQuote: typeof providerReferencePriceQuote = (
   providerId, modelId, registry, options,
 ) => {
-  const independent = getActiveCatalog().providers.some(
-    provider => provider.id === providerId && provider.auth?.native === 'codex',
-  );
+  const provider = getActiveCatalog().providers.find(provider => provider.id === providerId);
+  const catalogId = provider ? providerCatalogId(provider) : providerId;
   const quote = providerReferencePriceQuote(
-    independent ? 'openai' : providerId, modelId, registry, options,
+    catalogId, modelId, registry, options,
   );
-  return quote && independent ? { ...quote, providerId, modelId } : quote;
+  return quote && catalogId !== providerId ? { ...quote, providerId, modelId } : quote;
 };

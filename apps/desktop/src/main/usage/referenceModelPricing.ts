@@ -34,7 +34,7 @@ export function getReferenceModelPricing(): ModelPricingCatalog {
   const registry = catalog.modelRegistry;
   const pricing = registryPricingCatalog(registry);
   for (const provider of catalog.providers) {
-    if (provider.auth?.native !== 'codex') continue;
+    if (provider.auth?.method !== 'oauth' || !provider.auth.native) continue;
     for (const [agent, models] of Object.entries(provider.models)) {
       for (const model of models ?? []) {
         const quote = providerReferencePriceQuote(provider.id, model.id, registry, { agent: agent as AgentKind });

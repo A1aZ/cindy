@@ -299,14 +299,21 @@ export function buildBotProfileContextPrompt(displayName: string): string {
  * 文本是常量,不含会话变量,因此 prompt 前缀保持稳定,不影响缓存率。
  */
 export function buildBotCapabilityContextPrompt(
-  options: { helperAvailable?: boolean } = {},
+  options: { helperAvailable?: boolean; cindyAvailable?: boolean } = {},
 ): string {
   const helperAvailable = options.helperAvailable !== false;
+  // cindy / ghost_* live on the local builtin gateway. SSH Claude/Codex only
+  // inject collab, memory and helper (REMOTE_ALLOWED_SERVER_NAMES); advertising
+  // plugins there would tell the model to call tools it cannot reach.
+  const cindyAvailable = options.cindyAvailable !== false;
+  const pluginGuidance = cindyAvailable
+    ? ' Installed plugins are available on demand through `cindy` (`ghost_list`, `ghost_info`, `ghost_call`) under their existing permissions.'
+    : '';
   return [
     '## Cindy Bot Runtime',
     'You are running as a Cindy Bot with a durable Profile. This task is one active runtime of that Bot, not an ordinary standalone task.',
     ...(helperAvailable ? [
-      'Use direct Bot tools for your own memory, Skills and teammates. When work needs another capability, use `find_bot_capabilities` in the helper bots category to search existing Skills, MCP connections or built-in tools, then `set_bot_capability` to join it. References reuse Cindy installations and authorization; do not copy credentials or edit shared sources. New mounts take effect next turn in this same task. Installed plugins are available on demand through `cindy` (`ghost_list`, `ghost_info`, `ghost_call`) under their existing permissions. Discover only what the work needs; do not repeatedly list the whole tool surface.',
+      `Use direct Bot tools for your own memory, Skills and teammates. When work needs another capability, use \`find_bot_capabilities\` in the helper bots category to search existing Skills, MCP connections or built-in tools, then \`set_bot_capability\` to join it. References reuse Cindy installations and authorization; do not copy credentials or edit shared sources. New mounts take effect next turn in this same task.${pluginGuidance} Discover only what the work needs; do not repeatedly list the whole tool surface.`,
           "A real Cindy background task is a standalone Session in the user's task list. Follow the workload split in the `start_session_task` guidance: handle short simple work yourself and proactively start independent tasks for coding and medium or large work. Do not wait for the user to ask for delegation. Use `check_session_task`, `message_session_task`, and `stop_session_task` to control that same task when needed. Completion returns automatically; you remain responsible for reviewing and presenting the result.",
           'Use `send_to_agent` only to send one bounded asynchronous message to a named teammate. It is not a task and has no progress or cancellation. Never use a teammate named Cindy as a substitute for `start_session_task`.',
           "A teammate message does not rewrite another Bot's identity or make that Bot obey. If the user asks for obedience or control, explain this boundary and offer either a message or a tracked Session task, whichever matches the work.",
@@ -800,6 +807,8 @@ export async function hydrateBotProfileRuntime(
   });
   const helperAvailable = !opts.remoteHostId || opts.agentKind === 'pi'
     || toolsetCatalog.some((item) => item.id === 'xdt_helper' && item.available !== false);
+  // Local sessions always mount the cindy gateway. Remote SSH never does.
+  const cindyAvailable = !opts.remoteHostId;
   // 三层装配(见 botSystemPrompt.ts):身份与「你会做什么」进稳定段,会话控制等
   // 进上下文段,技能索引与记忆快照进易变段并排在最后。能力说明按**这个伙伴
   // 实际挂载到的 toolset** 注入 —— 挂了 docs 才讲怎么做文件,没挂的一个字不提。
@@ -871,7 +880,7 @@ export async function hydrateBotProfileRuntime(
       // Delegation children keep Cindy's normal Session prompt plus their
       // narrow task context.
       ...(row.role === 'canonical'
-        ? [buildBotCapabilityContextPrompt({ helperAvailable })]
+        ? [buildBotCapabilityContextPrompt({ helperAvailable, cindyAvailable })]
         : []),
     ],
   };

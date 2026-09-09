@@ -1338,6 +1338,10 @@ describe('Bot canonical Session lifecycle', () => {
     const allowed = resolveBotAllowedBuiltinPluginIds(policy.catalog, policy.configured);
     expect(allowed.includes('xdt_helper')).toBe(helperEnabled);
     expect(opts.botProfileContextPrompt?.includes('`start_session_task`')).toBe(helperEnabled);
+    expect(opts.botProfileContextPrompt?.includes('`find_bot_capabilities`')).toBe(helperEnabled);
+    // Remote Claude/Codex mount helper but not the cindy plugin gateway.
+    expect(opts.botProfileContextPrompt).not.toContain('ghost_list');
+    expect(opts.botProfileContextPrompt).not.toContain('ghost_call');
   });
 
   it('keeps ambient catalogs only as explicit disabled rows under legacy inherit', async () => {

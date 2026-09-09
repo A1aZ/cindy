@@ -80,6 +80,46 @@ describe('useCodexRateLimits', () => {
     expect(second.result.current.snapshot).toBeNull();
   });
 
+  it('refreshes scoped usage pushes without looping on read-generated pushes', async () => {
+    const callbacks = new Map<string, (payload: unknown) => void>();
+    const b = { ...result, providerId: 'openai-b' };
+    const next = { ...b, rateLimitResetCredits: { availableCount: 1, credits: [] } };
+    let resolveNext!: (value: MobileCodexRateLimitsResult) => void;
+    const reader = vi.fn().mockImplementationOnce(async () => {
+      callbacks.get('openai-b')?.({});
+      return b;
+    }).mockImplementationOnce(() => {
+      callbacks.get('openai-b')?.({});
+      return new Promise(resolve => { resolveNext = resolve; });
+    }).mockResolvedValue(next);
+    vi.stubGlobal('electronAPI', { maker: { usage: {
+      getCodexRateLimits: reader,
+      onCodexAccountChanged: (callback: (payload: unknown) => void, id: string) => {
+        callbacks.set(id, callback);
+        return () => callbacks.delete(id);
+      },
+    } } });
+    const hook = renderHook(() => useCodexRateLimits(true, 'openai-b'));
+    await waitFor(() => expect(hook.result.current.snapshot).toBe(b));
+    expect(reader).toHaveBeenCalledTimes(1);
+    act(() => callbacks.get('openai')?.({}));
+    expect(reader).toHaveBeenCalledTimes(1);
+    act(() => callbacks.get('openai-b')?.({}));
+    expect(hook.result.current.snapshot).toBe(b);
+    act(() => callbacks.get('openai-b')?.({}));
+    expect(reader).toHaveBeenCalledTimes(2);
+    await act(async () => resolveNext(next));
+    expect(hook.result.current.snapshot).toBe(next);
+    expect(reader).toHaveBeenCalledTimes(2);
+    hook.unmount();
+    act(() => callbacks.get('openai-b')?.({}));
+    expect(reader).toHaveBeenCalledTimes(2);
+    const mounted = renderHook(() => useCodexRateLimits(true, 'openai-b'));
+    expect(mounted.result.current.snapshot).toBe(next);
+    await act(async () => {});
+    expect(reader).toHaveBeenCalledTimes(3);
+  });
+
   it('does not clear independent account quota for a catalog update', async () => {
     const b = { ...result, providerId: 'openai-b' };
     let changed: (() => void) | undefined;

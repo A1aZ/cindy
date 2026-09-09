@@ -58,6 +58,7 @@ export interface CodexRateLimitsState {
 interface CachedRateLimits {
   snapshot: MobileCodexRateLimitsResult | null;
   version: number;
+  pendingReads: number;
   listeners: Set<() => void>;
   unsubscribe: Array<() => void>;
   providerId: string;
@@ -73,11 +74,12 @@ function publish(entry: CachedRateLimits, value: MobileCodexRateLimitsResult | n
 
 function refreshEntry(entry: CachedRateLimits): void {
   const version = ++entry.version;
+  entry.pendingReads++;
   void readCodexRateLimitsSafely(readCodexRateLimitsReader(), entry.providerId).then(next => {
     if (entry.version !== version || !isDataOwnerGenerationCurrent(entry.owner)) return;
     // An unavailable read is not a logout. Explicit identity clears come by push.
     if (next !== null) publish(entry, next);
-  });
+  }).finally(() => { entry.pendingReads--; });
 }
 
 function cachedRateLimits(providerId: string): CachedRateLimits {
@@ -93,7 +95,7 @@ function cachedRateLimits(providerId: string): CachedRateLimits {
   const cached = snapshots.get(providerId);
   if (cached) return cached;
   const entry: CachedRateLimits = {
-    providerId, owner, snapshot: null, version: 0, listeners: new Set(), unsubscribe: [],
+    providerId, owner, snapshot: null, version: 0, pendingReads: 0, listeners: new Set(), unsubscribe: [],
   };
   snapshots.set(providerId, entry);
   const clear = () => {
@@ -104,6 +106,10 @@ function cachedRateLimits(providerId: string): CachedRateLimits {
   // seed the next panel with the previous identity's cached quota.
   const usageUnsubscribe = window.electronAPI?.maker?.usage?.onCodexAccountChanged?.(payload => {
     if (payload === null) clear();
+    // The authoritative read itself emits a usage push. Suppress those echoes
+    // while any read is pending rather than scheduling a recursive refresh.
+    else if (entry.listeners.size > 0 && entry.pendingReads === 0
+      && isDataOwnerGenerationCurrent(entry.owner)) refreshEntry(entry);
   }, providerId);
   if (usageUnsubscribe) entry.unsubscribe.push(usageUnsubscribe);
   if (providerId === 'openai') {

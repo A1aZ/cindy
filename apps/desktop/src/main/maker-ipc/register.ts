@@ -859,6 +859,7 @@ import { readSessionRuntimeFallbackSettings } from '../maker-host/session-runtim
 import {
   getModelVisibilityMirrorSnapshot,
   syncModelVisibilityMirrorForOwner,
+  waitForModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import {
   clearProviderDisableOverrides,
@@ -4583,7 +4584,7 @@ let disposePiPackagesChangedBroadcast: (() => void) | null = null;
 export function registerModelVisibilitySyncIpc(): void {
   ipcMain.handle(
     MAKER_INVOKE.MODEL_VISIBILITY_SYNC,
-    async (event, dataOwnerId: unknown, ownerGeneration: unknown, map: unknown) => {
+    async (event, dataOwnerId: unknown, ownerGeneration: unknown, map: unknown, policy?: unknown) => {
       assertTrustedAppRendererEvent(event);
       syncModelVisibilityMirrorForOwner(
         map,
@@ -4593,6 +4594,7 @@ export function registerModelVisibilitySyncIpc(): void {
         () => {
           broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
         },
+        policy,
       );
     },
   );
@@ -5332,7 +5334,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   registerProviderHandlers(createElectronIpcHandlerRegistry(), {
     listProviders: (opts) => getDesktopProviderService().listProviders(opts),
-    getModelVisibilityOverrides: () => getModelVisibilityMirrorSnapshot(),
+    getModelVisibilityOverrides: async (providers, trusted) => {
+      if (!trusted) await waitForModelVisibilityMirror();
+      return getModelVisibilityMirrorSnapshot(providers, trusted);
+    },
     refreshCatalog: () => refreshCustomProvidersIntoCatalog(),
     codexCustomProviderConfigSignature,
     hasAppliedCodexCustomProviderImageGeneration: (providerId) =>

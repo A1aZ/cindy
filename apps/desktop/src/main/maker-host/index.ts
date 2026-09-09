@@ -106,7 +106,7 @@ import {
 import { createToolResultImageDescriptor } from '../vision-bridge/tool-result-image-descriptor.js';
 import * as blobStore from '../cindy-media/blobStore.js';
 import { buildPiVisionBridgeEnv } from '../vision-bridge/pi-vision-bridge-env.js';
-import { inferProviderIdForModel, resolveVisionBackendRoute, setVisionGatewayKeyReader } from './provider-route.js';
+import { resolveVisionBackendRoute, setVisionGatewayKeyReader } from './provider-route.js';
 import { resolveSessionCcDebugFile } from '../logger.js';
 import { resetProviderModelAutoRefreshCooldowns } from './provider-model-auto-refresh.js';
 import { getThinkingEnabledFromMemory } from './newMakerDefaultsCache.js';
@@ -143,6 +143,7 @@ import {
   resolveModelDefaultContextWindow,
 } from './catalog-to-descriptors.js';
 import { readModelContextLimit } from './model-context-limit-store.js';
+import { resolveDesktopModelContextProviderId } from './model-context-settings.js';
 import {
   prepareCodexCustomContextCatalog,
 } from './codex-custom-context-catalog.js';
@@ -347,6 +348,12 @@ let _registerPiAgent: (() => boolean) | null = null;
 let _visionBridgeInstance: ReturnType<typeof createVisionBridge> | null = null;
 
 let providerAccessRuntimeRefreshListener: (() => void) | null = null;
+let modelContextRuntimeRefreshListener: (() => void) | null = null;
+
+/** Reconcile active tasks after a catalog working-default update. */
+export function setModelContextRuntimeRefreshListener(listener: (() => void) | null): void {
+  modelContextRuntimeRefreshListener = listener;
+}
 
 /** Register the bootstrap-owned runtime reconciliation that follows provider access changes. */
 export function setProviderAccessRuntimeRefreshListener(listener: (() => void) | null): void {
@@ -399,6 +406,7 @@ function refreshSelectableModelsAndBroadcast(payload: Record<string, unknown>): 
 setActiveCatalogChangedListener((revision) => {
   try {
     refreshSelectableModelsAndBroadcast({ revision });
+    modelContextRuntimeRefreshListener?.();
   } catch (error) {
     desktopMakerLogger.warn('active catalog capabilities refresh failed', {
       revision,
@@ -1060,10 +1068,15 @@ export function getMaker(): Maker {
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'claude-code'),
       },
-      resolveModelContextLimit: (providerId, modelId) =>
-        providerId ? readModelContextLimit('claude-code', providerId, modelId) : null,
+      resolveModelContextLimit: (providerId, modelId) => {
+        const catalog = getDesktopSelectableCatalog();
+        const source = resolveDesktopModelContextProviderId(catalog, 'claude-code', providerId, modelId);
+        return source ? readModelContextLimit('claude-code', source, modelId)
+          ?? resolveModelDefaultContextWindow(catalog, 'claude-code', source, modelId) : null;
+      },
       resolveVerifiedContextWindow: (providerId, modelId) =>
-        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'claude-code', providerId, modelId),
+        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'claude-code',
+          resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'claude-code', providerId, modelId), modelId),
       // SDK PreToolUse / PostToolUse 等 in-process hook 注入点。host 自己定义 hook
       // 实现 (./claude-hooks/*.ts), maker-core 不感知具体逻辑。
       //
@@ -1398,15 +1411,16 @@ export function getMaker(): Maker {
       // Resolve settings by the actual provider route. Model specifications never
       // overwrite a native usage report; explicit settings configure the CLI itself.
       resolveModelContextLimit: (providerId, modelId) => {
-        const source = providerId ?? inferProviderIdForModel(modelId, 'codex');
+        const source = resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId);
         return source ? readModelContextLimit('codex', source, modelId) : null;
       },
       resolveVerifiedContextWindow: (providerId, modelId) =>
-        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'codex', providerId, modelId),
+        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'codex',
+          resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId), modelId),
       resolveCodexContextWindowInfo: (modelId, config, reportedUsableWindow) =>
         readCodexContextWindowInfo({ codexHome: getCodexHome(), binaryPath: codexPath, modelId, config, reportedUsableWindow }),
       resolveCodexThreadContextWindow: (providerId, modelId) => {
-        const source = providerId ?? inferProviderIdForModel(modelId, 'codex');
+        const source = resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId);
         const override = source ? readModelContextLimit('codex', source, modelId) : null;
         return override ?? resolveModelDefaultContextWindow(
           getDesktopSelectableCatalog(), 'codex', source, modelId,

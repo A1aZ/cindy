@@ -10628,7 +10628,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   const reconcileBotModelRoute = createBotModelRouteReconciler({
     ownerEpoch: captureSessionRuntimeControlOwnerEpoch,
-    read: async (sessionId) => {
+    read: async (sessionId, purpose) => {
       const [row] = await getDbClient().drizzle.select({
         capabilitiesJson: botProfileVersions.capabilitiesJson,
         agentKind: sessions.agentKind,
@@ -10647,7 +10647,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           eq(botSessionLinks.sessionId, sessionId),
           eq(botSessionLinks.role, 'canonical'),
           isNull(botSessionLinks.archivedAt),
-          eq(botProfiles.status, 'active'),
+          // Paused settings may preview grants; sending still requires an active Bot.
+          purpose === 'preview'
+            ? inArray(botProfiles.status, ['active', 'paused'])
+            : eq(botProfiles.status, 'active'),
           eq(sessions.source, 'bot'),
           eq(sessions.status, 'active'),
         )).limit(1);

@@ -17,6 +17,22 @@ function harness() {
 }
 
 describe('permanent Bot model selection', () => {
+  it('reads paused profiles only for previews and does not consume their pending model edits', async () => {
+    const h = harness();
+    let paused = true;
+    const read = vi.fn(async (_id: string, purpose: 'apply' | 'preview') =>
+      paused && purpose !== 'preview' ? null : h.state);
+    const reconcile = createBotModelRouteReconciler({ ownerEpoch: () => 'owner', read, apply: h.apply });
+    await expect(reconcile.preview('canonical')).resolves.toMatchObject({ agentKind: 'codex' });
+    const draft: BotModelRoute[] = [{ ...h.state.chain[0]!, harness: 'claude' }];
+    await expect(reconcile.preview('canonical', draft)).resolves.toMatchObject({ agentKind: 'claude-code' });
+    await reconcile('canonical');
+    expect(h.apply).not.toHaveBeenCalled();
+    paused = false;
+    h.state.chain = draft;
+    await reconcile('canonical');
+    expect(h.apply).toHaveBeenCalledWith('canonical', expect.objectContaining({ agentKind: 'claude-code' }), h.state.current);
+  });
   it('previews the preserved effective or pending fallback without changing the runtime', async () => {
     const h = harness();
     h.state.hasRuntimeOverride = true;

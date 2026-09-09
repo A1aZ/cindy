@@ -35,7 +35,7 @@ function configuredRoute(state: BotRouteState, previous: string | undefined, cha
  */
 export function createBotModelRouteReconciler(deps: {
   ownerEpoch(): string;
-  read(sessionId: string): Promise<BotRouteState | null>;
+  read(sessionId: string, purpose: 'apply' | 'preview'): Promise<BotRouteState | null>;
   apply(sessionId: string, route: RuntimeRoute, current: RuntimeRoute): Promise<void>;
 }) {
   let owner: string | undefined;
@@ -55,7 +55,7 @@ export function createBotModelRouteReconciler(deps: {
     const existing = inFlight.get(sessionId);
     if (existing) return existing;
     const operation = (async () => {
-      const state = await deps.read(sessionId);
+      const state = await deps.read(sessionId, 'apply');
       if (deps.ownerEpoch() !== epoch) throw new Error('Bot model route owner changed');
       if (!state?.chain.length) {
         configured.delete(sessionId);
@@ -86,7 +86,7 @@ export function createBotModelRouteReconciler(deps: {
     async preview(sessionId: string, draftChain?: BotModelRoute[]): Promise<RuntimeRoute | null> {
       const epoch = syncOwner();
       await inFlight.get(sessionId);
-      const state = await deps.read(sessionId);
+      const state = await deps.read(sessionId, 'preview');
       if (deps.ownerEpoch() !== epoch) throw new Error('Bot model route owner changed');
       if (!state?.chain.length) return null;
       return configuredRoute(state, configured.get(sessionId), draftChain ? normalizeBotModelChain(draftChain) : undefined)

@@ -28,7 +28,9 @@ export async function loadSessionScheduleIndex(
     try {
       return buildLightweightSessionScheduleIndex(await maker.schedule.listSidebarIndexRuns(), schedules);
     } catch (error) {
-      if (!isHistoryViewUnavailable(error)) throw error;
+      if (!hasRemoteErrorMarker(error, 'CHANNEL_NOT_ALLOWED')
+        && !hasRemoteErrorMarker(error, 'UNSUPPORTED_CAPABILITY')
+        && !isHistoryViewUnavailable(error)) throw error;
     }
   }
   // listRuns 逐个串行而非 Promise.all 全并发:device-link 是无优先级的单 WS 管道,

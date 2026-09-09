@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { DeviceLinkError } from '@cindy/device-link';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { unresponsiveDevicesStore } from '@/device-link/unresponsiveDevicesStore';
 import {
@@ -107,7 +108,7 @@ describe('scheduleIndex', () => {
       vi.useRealTimers();
     }
   });
-  it.each([false, true])('shares complete schedule metadata and historical failures with legacy fallback=%s', async (legacy) => {
+  it.each([false, true, 'structured', 'capability'])('shares complete schedule metadata and historical failures with legacy fallback=%s', async (legacy) => {
     resetScheduleIndexThrottleForTesting();
     const list = vi.fn(async () => [
       { id: 'sched-1', name: 'run', status: 'active', targetSessionId: 'current' },
@@ -116,6 +117,8 @@ describe('scheduleIndex', () => {
     const run = { runId: 'old-failure', scheduleId: 'sched-1', scheduleName: 'run', scheduleStatus: 'active',
       sessionId: 'current', status: 'failed', firedAt: 1, readAt: 2 };
     const listSidebarIndexRuns = vi.fn(async () => {
+      if (legacy === 'structured') throw new DeviceLinkError('CHANNEL_NOT_ALLOWED', "channel 'maker:schedule:list-sidebar-index-runs' not allowed remotely");
+      if (legacy === 'capability') throw Object.assign(new Error('Unsupported endpoint'), { code: 'UNSUPPORTED_CAPABILITY' });
       if (legacy) throw new Error('[CHANNEL_NOT_ALLOWED] unsupported');
       return { runs: [run, { ...run, runId: 'old-binding', sessionId: 'previous' }] };
     });
@@ -133,6 +136,18 @@ describe('scheduleIndex', () => {
     expect(listSidebarIndexRuns).toHaveBeenCalledTimes(1);
     expect(listRuns).toHaveBeenCalledTimes(legacy ? 2 : 0);
     resetScheduleIndexThrottleForTesting();
+  });
+
+  it.each(['ACCESS_REVOKED', 'INVOKE_TIMEOUT'])('does not turn %s into a legacy scan', async (code) => {
+    const error = Object.assign(new Error('Request failed'), { code });
+    const listRuns = vi.fn();
+    const maker = { schedule: {
+      list: async () => [{ id: 'schedule', name: 'run', status: 'active' }],
+      listSidebarIndexRuns: async () => { throw error; },
+      listRuns,
+    } } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+    await expect(loadSessionScheduleIndex(maker)).rejects.toBe(error);
+    expect(listRuns).not.toHaveBeenCalled();
   });
 
   it('stops retries after blur without negative-caching cancellation for the next screen', async () => {

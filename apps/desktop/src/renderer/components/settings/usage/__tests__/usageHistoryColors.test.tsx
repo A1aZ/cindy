@@ -26,6 +26,11 @@ describe('Usage History model colors', () => {
   });
 
   it('matches all three Agent marks and keeps identity colors when rankings reverse', () => {
+    expect(
+      ['claude-code', 'codex', 'pi'].map((kind) =>
+        usageHistoryAgentColor(kind as 'claude-code' | 'codex' | 'pi'),
+      ),
+    ).toEqual(['var(--engine-badge-cc)', 'var(--engine-badge-codex)', 'var(--engine-badge-pi)']);
     const rows = (['claude-code', 'codex', 'pi'] as const).map((agentKind, i) => ({
       agentKind,
       tokens: (3 - i) * 100,

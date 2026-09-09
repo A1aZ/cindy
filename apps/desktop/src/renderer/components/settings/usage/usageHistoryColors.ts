@@ -24,12 +24,12 @@ export function usageHistoryModelColor(rank: number, colorCount: number): string
   return `oklch(from ${base} l c calc(h + ${hueRotation.toFixed(3)}))`;
 }
 
-/** Harness identity never follows its usage rank. */
+/** Reuse the app's engine identity colors; never follow usage rank. */
 export function usageHistoryAgentColor(agentKind: UsageAgentKind): string {
   const colors: Record<UsageAgentKind, string> = {
-    'claude-code': MODEL_COLORS[0],
-    codex: MODEL_COLORS[3],
-    pi: MODEL_COLORS[4],
+    'claude-code': 'var(--engine-badge-cc)',
+    codex: 'var(--engine-badge-codex)',
+    pi: 'var(--engine-badge-pi)',
   };
   return colors[agentKind];
 }

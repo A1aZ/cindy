@@ -1,5 +1,13 @@
 # 用量历史分类配色
 
+## 当前：harness 身份色调整
+
+同日按所有者反馈，harness 的三处标记改为已有引擎身份色；下文初版青绿 / 靛蓝 / 琥珀记录仅保留作历史对照。真实 Electron 再次检查 Default Light 与 Default Dark：三种颜色分别为 `rgb(217, 119, 87)`（Claude 陶土橙）、`rgb(122, 157, 255)`（Codex 蓝）、`rgb(167, 139, 250)`（pi 紫）。两种模式同值符合这些身份 Token 的既有合同，模型颜色与日期筛选检查继续通过。
+
+同一忽略目录中 `brand-light.png`、`brand-dark.png`、`brand-light.json`、`brand-dark.json` 与 `brand-manifest.json` 对应当前实现；数据与平台条件同下。静态单测与 Desktop typecheck 重新执行。新增 Token 消费后先重新生成 design inventory，再通过相关测试门禁。未新增 Token 或修改种子值；视觉批准仍待设计师完成。
+
+## 初版证据
+
 - 日期：2026-09-09；平台：macOS Desktop / Electron；主题：Default Light、Default Dark。
 - 分支：`fix/usage-category-colors`；基于 `ebcb181a5b61f8c27984190f76de687e576b1686`，证据对应本次未提交源码，相关生产文件的 Git blob 记录在本地 manifest。提交后以文件 blob 核对，不把启动脚本打印的基线 SHA 当作改后源码 SHA。
 - 实例：独立 `usage-colors-20260909` 沙箱，CDP 9246；1280×800 CSS px，DPR 2。启动结果 `DESKTOP_DEV_VERDICT=ready`。

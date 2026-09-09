@@ -22,11 +22,11 @@ beforeEach(() => {
   root = createRoot(document.createElement('div'));
 });
 afterEach(() => { act(() => root.unmount()); vi.useRealTimers(); });
-function Probe({ status, recovery, error, unresponsive }: {
+function Probe({ status, error, unresponsive }: {
   status: DeviceLinkStatus; recovery?: 'syncing' | 'recovered'; error?: string; unresponsive?: boolean;
 }) {
   const active = useShowConnectionBanner(status, error ?? null, null, unresponsive);
-  visible = useDelayedConnectionNotice(active, recovery === 'recovered', recovery === 'syncing');
+  visible = useDelayedConnectionNotice(active);
   return null;
 }
 function render(status: DeviceLinkStatus, recovery?: 'syncing' | 'recovered', error?: string, unresponsive?: boolean) {
@@ -40,22 +40,23 @@ it('keeps repeated online task loads quiet, even when content takes several seco
     render('online', 'recovered'); advance(500); expect(visible).toBe(false);
   }
 });
-it('keeps a real outage visible through content repair, then clears the recovered tail', () => {
-  render('connecting', 'syncing'); advance(999); expect(visible).toBe(false);
+it('clears a real outage when online without showing a content repair or completion banner', () => {
+  render('stopped', 'syncing'); advance(2_999); expect(visible).toBe(false);
   advance(1); expect(visible).toBe(true);
-  render('online', 'syncing'); advance(5_000); expect(visible).toBe(true);
-  render('online', 'recovered'); advance(1_999); expect(visible).toBe(true);
-  advance(1); expect(visible).toBe(false);
+  render('online', 'syncing'); expect(visible).toBe(false);
+  advance(5_000); expect(visible).toBe(false);
+  render('online', 'recovered'); expect(visible).toBe(false);
   render('online', 'syncing'); advance(5_000); expect(visible).toBe(false);
 });
 it('does not promote a brief connection blip into a long content recovery banner', () => {
   render('connecting', 'syncing'); advance(300);
   render('online', 'syncing'); advance(5_000); expect(visible).toBe(false);
 });
-it('shows real errors after the shared delay and retains their recovery tail', () => {
+it('shows real errors after the shared delay and clears immediately on recovery', () => {
   render('online', 'syncing', 'INVOKE_TIMEOUT'); expect(visible).toBe(false);
-  advance(1_000); expect(visible).toBe(true);
+  advance(2_999); expect(visible).toBe(false);
+  advance(1); expect(visible).toBe(true);
   render('online', 'syncing', undefined, true); expect(visible).toBe(true);
-  render('online', 'recovered'); expect(visible).toBe(true);
+  render('online', 'recovered'); expect(visible).toBe(false);
   advance(2_000); expect(visible).toBe(false);
 });

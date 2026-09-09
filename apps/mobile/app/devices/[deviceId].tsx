@@ -678,6 +678,7 @@ function DeviceDetailScreenContent() {
     return (
       <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
         <SimpleStackHeader
+          syncing={!showConnectionBanner && (loading || status === 'connecting')}
           backTestID="deviceDetail.backButton"
           eyebrow={t('devices.detail.automationScope.eyebrow')}
           onBack={() => goBackGuarded(router)}
@@ -742,6 +743,7 @@ function DeviceDetailScreenContent() {
     return (
       <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
         <SimpleStackHeader
+          syncing={!showConnectionBanner && (loading || status === 'connecting')}
           action={{
             label: t('devices.common.create'),
             // 在这个项目里建新对话:预填 workingDir。
@@ -864,6 +866,7 @@ function DeviceDetailScreenContent() {
   return (
     <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
       <SimpleStackHeader
+        syncing={!showConnectionBanner && (loading || status === 'connecting')}
         action={{
           label: t('devices.common.create'),
           onPress: () => guardedPush({

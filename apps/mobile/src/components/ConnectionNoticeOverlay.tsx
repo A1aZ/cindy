@@ -5,14 +5,12 @@ import { spacing } from '@/theme/tokens';
 import { updateConnectionNoticeVisibility } from './connectionNoticeDelay';
 
 /** Each continuous incident gets one delay; clearing it cancels pending display. */
-export function useDelayedConnectionNotice(active: boolean, completed = false, retainVisible = false): boolean {
+export function useDelayedConnectionNotice(active: boolean, immediate = false): boolean {
   const [ready, setReady] = useState(false);
-  // Content repair can retain an already visible incident, but cannot start one.
-  const effectiveActive = active || (retainVisible && ready);
   useEffect(() => {
-    return updateConnectionNoticeVisibility(effectiveActive, completed, ready, setReady);
-  }, [effectiveActive, completed, ready]);
-  return (effectiveActive || completed) && ready;
+    return updateConnectionNoticeVisibility(active, ready, setReady, immediate);
+  }, [active, ready, immediate]);
+  return active && (immediate || ready);
 }
 
 type Notice = { top: number; children: ReactNode };

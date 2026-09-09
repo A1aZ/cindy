@@ -200,6 +200,7 @@ beforeEach(() => {
           version: 1,
           trickleIce: fixture.trickleIce,
           automaticReconnect: true,
+          backgroundViewing: true,
           enabled: true,
           canControl: fixture.canControl,
           systemAudio: fixture.systemAudio,
@@ -964,6 +965,24 @@ describe("remote desktop controls", () => {
       fixture.appState!("active");
     });
     expect(requests().filter((r) => r.op === "start")).toHaveLength(starts);
+  });
+  it("retires an uncertain PiP transition instead of leaving a controlling UI with disabled input", async () => {
+    await connect();
+    act(() => fixture.message!({ nativeEvent: { data: JSON.stringify({ type: "pipCapability", epoch: "lease", supported: true }) } }));
+    let reject!: (cause: unknown) => void;
+    const invoke = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((device, channel, args) => args[0].op === "presentation"
+      ? new Promise((_resolve, fail) => { reject = fail; })
+      : invoke(device, channel, args));
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    expect(sent().filter((m) => m.type === "control").at(-1)).toMatchObject({ enabled: true });
+    await act(async () => reject({ code: "INVOKE_TIMEOUT" }));
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+    expect(fixture.playback).toHaveBeenLastCalledWith(false);
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(requests().filter((r) => r.op === "start")).toHaveLength(2);
+    expect(sent().filter((m) => m.type === "control").at(-1)).toMatchObject({ enabled: true });
   });
   it.each(["active", "background"])("handles failed PiP in %s without keeping a hidden stream alive", async (state) => {
     fixture.systemAudio = true;

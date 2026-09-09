@@ -340,7 +340,7 @@ let changingResolution = false;
 export async function setDesktopDisplayMode(
   displayId: string,
   modeId: string,
-  isCurrent: () => boolean,
+  beforeChange: () => void,
 ): Promise<void> {
   if (changingResolution) throw new Error('DESKTOP_DISPLAY_BUSY');
   changingResolution = true;
@@ -349,7 +349,7 @@ export async function setDesktopDisplayMode(
     if (!modes.some((mode) => mode.id === modeId)) throw new Error('DESKTOP_DISPLAY_MODE_MISSING');
     const binary = await resolveBinary();
     // Build/enumeration can finish after disconnect, revocation or view-only.
-    if (!isCurrent()) throw new Error('DESKTOP_LEASE_EXPIRED');
+    beforeChange();
     await exec(binary, ['--display-mode', displayId, modeId], { timeout: 5000, maxBuffer: 1024 });
   } finally {
     changingResolution = false;

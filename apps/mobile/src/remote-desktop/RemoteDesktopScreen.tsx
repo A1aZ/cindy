@@ -1067,13 +1067,18 @@ export default function RemoteDesktopScreen() {
     try {
       await remotePresentation.playback(true);
       if (active.current !== current) return;
-      send({ type: "control", enabled: false });
       await request({
         op: "presentation",
         lease: current.lease,
         enabled: true,
+      }).catch((cause) => {
+        // A lost reply leaves the host transition uncertain. Retire only this
+        // lease and use normal recovery instead of guessing its control state.
+        if (active.current === current) pause();
+        throw cause;
       });
       if (active.current !== current) return;
+      send({ type: "control", enabled: false });
       current.controlling = false;
       wantsControl.current = false;
       heldKeys.current.clear();
@@ -1099,6 +1104,7 @@ export default function RemoteDesktopScreen() {
         if (AppState.currentState === "background") pause();
       }, 4000);
     } catch {
+      if (active.current !== current) return;
       presentation.current = false;
       if (!videoSettingsRef.current.audio)
         void remotePresentation?.playback(false).catch(() => {});

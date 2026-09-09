@@ -96,6 +96,28 @@ describe('remote desktop authority and lifecycle', () => {
     expect(h.controller.hasLease(next.lease)).toBe(true);
     expect(h.deps.stopVideo).toHaveBeenCalledTimes(stopped);
   });
+  it.each(['success', 'failure'] as const)('releases old geometry before the native write and preserves replacements on %s', async (outcome) => {
+    const h = harness(), first = await h.start();
+    await h.controller.request('phone', { op: 'control', lease: first.lease, enabled: true });
+    let finish!: () => void;
+    h.deps.resolution = async (_display, _mode, beforeChange) => {
+      beforeChange();
+      expect(h.controller.displayId).toBeNull();
+      expect(h.controller.hasLease(first.lease)).toBe(false);
+      // The real display listener matches displayId, now null, before helper exit.
+      if (h.controller.displayId === '1') h.controller.stop();
+      await new Promise<void>(resolve => { finish = resolve; });
+      if (outcome === 'failure') throw new Error('native failed');
+    };
+    const pending = h.controller.request('phone', { op: 'resolution', lease: first.lease, modeId: '1' });
+    const next = await h.controller.request('other', { op: 'start', displayId: '1' }) as RemoteDesktopLease;
+    const stops = vi.mocked(h.deps.stopVideo).mock.calls.length;
+    finish();
+    if (outcome === 'success') await expect(pending).resolves.toEqual({ ok: true });
+    else await expect(pending).rejects.toThrow('native failed');
+    expect(h.controller.hasLease(next.lease)).toBe(true);
+    expect(h.deps.stopVideo).toHaveBeenCalledTimes(stops);
+  });
   it.each(['release', 'takeover', 'revoke'] as const)(
     'invalidates pending resolution after %s without stopping replacement control',
     async (action) => {
@@ -103,15 +125,13 @@ describe('remote desktop authority and lifecycle', () => {
       const { lease } = await h.start();
       await h.controller.request('phone', { op: 'control', lease, enabled: true });
       let finish!: () => void;
-      let isCurrent!: () => boolean;
-      h.deps.resolution = vi.fn((_display, _mode, current) => {
-        isCurrent = current;
-        return new Promise<void>((resolve) => {
+      h.deps.resolution = vi.fn(async (_display, _mode, beforeChange) => {
+        await new Promise<void>((resolve) => {
           finish = resolve;
         });
+        beforeChange();
       });
       const pending = h.controller.request('phone', { op: 'resolution', lease, modeId: '1' });
-      expect(isCurrent()).toBe(true);
       let currentLease = lease;
       if (action === 'release') {
         await h.controller.request('phone', { op: 'control', lease, enabled: false });
@@ -127,7 +147,6 @@ describe('remote desktop authority and lifecycle', () => {
       } else {
         h.revoke();
       }
-      expect(isCurrent()).toBe(false);
       finish();
       await expect(pending).rejects.toThrow('DESKTOP_LEASE_EXPIRED');
       if (action !== 'revoke') {

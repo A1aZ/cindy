@@ -35,7 +35,7 @@ export interface DesktopControllerDeps {
   ): Promise<string>;
   ice?(request: RemoteDesktopIceRequest): Promise<RemoteDesktopIceReply>;
   displayModes?(displayId: string): Promise<RemoteDesktopDisplayMode[]>;
-  resolution?(displayId: string, modeId: string, isCurrent: () => boolean): Promise<void>;
+  resolution?(displayId: string, modeId: string, beforeChange: () => void): Promise<void>;
   clipboard?(
     action: 'copy' | 'paste',
     text: string | undefined,
@@ -298,15 +298,15 @@ export class RemoteDesktopController {
         if (!active.controlling) throw new Error('DESKTOP_VIEW_ONLY');
         if (!this.deps.resolution) throw new Error('DESKTOP_DISPLAY_MODES_UNAVAILABLE');
         const generation = this.controlGeneration;
-        const isCurrent = () => {
+        const beforeChange = () => {
           this.tick();
-          return this.active === active && active.controlling && generation === this.controlGeneration;
+          if (this.active !== active || !active.controlling || generation !== this.controlGeneration)
+            throw new Error('DESKTOP_LEASE_EXPIRED');
+          // Release old geometry before the native write can emit display events.
+          // Completion must not inspect or stop a replacement lease.
+          this.stop(peer);
         };
-        await this.deps.resolution(active.display.id, request.modeId, isCurrent);
-        if (!isCurrent()) throw new Error('DESKTOP_LEASE_EXPIRED');
-        // The OS geometry change ends capture/input; the viewer reconnects using
-        // fresh capabilities. This never tears down the shared device link.
-        this.stop(peer);
+        await this.deps.resolution(active.display.id, request.modeId, beforeChange);
         return { ok: true };
       }
       case 'offer': {

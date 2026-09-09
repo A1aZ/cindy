@@ -81,6 +81,7 @@ import {
   canSendHydratedApiKey,
   connectionTestCanUseSaved,
   modelFetchCanReuseSavedCredentials,
+  firstProviderChatModel,
   providerConnectionTestRequestSignature,
   providerModelFetchRequestSignature,
   resolveProviderConnectionProbeRoute,
@@ -950,9 +951,9 @@ export function CustomProviderDialog({
         authMode: savedAuthMode,
         apiKey: loadedKeyRef.current[agent] ?? '',
         ...(agent === 'pi'
-          ? { modelPiApi: rc.models.find((model) => model.id.trim().length > 0)?.piApi }
+          ? { modelPiApi: firstProviderChatModel(rc.models)?.piApi }
           : {}),
-        modelRoute: rc.models.find((model) => model.id.trim().length > 0)?.route,
+        modelRoute: firstProviderChatModel(rc.models)?.route,
         headers:
           rc.headers && Object.keys(rc.headers).length > 0
             ? Object.entries(rc.headers).map(([n, v]) => ({ name: n, value: v }))
@@ -1389,7 +1390,7 @@ export function CustomProviderDialog({
     const rf = rt[agent];
     const probeFields = agent === 'pi' ? { ...rf, requestPath: '' } : rf;
     const defaultBaseUrl = rf.baseUrl.trim();
-    const firstModelConfig = rf.models.find((model) => model.id.trim().length > 0);
+    const firstModelConfig = firstProviderChatModel(rf.models);
     const firstModel = firstModelConfig?.id.trim();
     if (!defaultBaseUrl || !firstModel) {
       toast.error(t('settings.providers.custom.test.needFields'));

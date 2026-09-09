@@ -274,9 +274,9 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
 }
 
 /** 该行在指定 agent 下的可见性(不可用 → null)。 */
-function rowEnabled(providerId: string, row: UnionModelRow, agent: AgentKind): boolean | null {
+function rowEnabled(providerId: string, row: UnionModelRow, agent: AgentKind, userProvider: boolean): boolean | null {
   const m = row.byAgent[agent];
-  return m ? isModelEnabled(agent, providerId, m) : null;
+  return m && isAgentSelectableModel(m, { userProvider }) ? isModelEnabled(agent, providerId, m) : null;
 }
 
 /** 该行是否被停用(准入轴;单一写入口把全部 avail 一起写,任一端带标志即视为停用)。 */
@@ -300,8 +300,10 @@ export function hasPaymentRequiredDisabledRow(
  *  `userProvider` = 行来自用户自定义供应商 —— 自定义对话模型的未知 group 不吃 id
  *  启发式(`gpt-4o-audio-preview` 是合法对话模型,见 isAgentSelectableModel 注释)。 */
 export function isCapabilityRow(row: UnionModelRow, userProvider: boolean): boolean {
-  const rep = row.byAgent[row.avail[0]];
-  return !!rep && !isAgentSelectableModel(rep, { userProvider });
+  return row.avail.length > 0 && row.avail.every((agent) => {
+    const model = row.byAgent[agent];
+    return !model || !isAgentSelectableModel(model, { userProvider });
+  });
 }
 
 /** A normal list toggle enables recommended engines; compatibility engines remain opt-in. */
@@ -313,7 +315,7 @@ export function modelVisibilityTargets(
   if (!enabled)
     return row.avail.flatMap((agent) => {
       const model = row.byAgent[agent];
-      return model ? [{ agent, modelId: model.id }] : [];
+      return model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) ? [{ agent, modelId: model.id }] : [];
     });
   // Choosing a model is not consent to enable every harness. Advanced per-engine choices
   // stay where the user made them; an ordinary enable only needs one usable recommended route.
@@ -321,6 +323,7 @@ export function modelVisibilityTargets(
     const model = row.byAgent[agent];
     return (
       model &&
+      isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
       !model.disabled &&
       model.status !== 'retired' &&
       model.availability !== 'requires_payment'
@@ -333,8 +336,8 @@ export function modelVisibilityTargets(
 }
 
 /** 普通模式的单开关显示值:任一可用 agent 开启即视为开(拨动才归一)。 */
-function rowAnyEnabled(providerId: string, row: UnionModelRow): boolean {
-  return row.avail.some((a) => rowEnabled(providerId, row, a) === true);
+function rowAnyEnabled(providerId: string, row: UnionModelRow, userProvider: boolean): boolean {
+  return row.avail.some((a) => rowEnabled(providerId, row, a, userProvider) === true);
 }
 
 /** 该行全部 avail agent 的真实目录 id(桥接投影两端 id 不同,写停用要两端一起写)。 */
@@ -353,10 +356,20 @@ function rowCategory(row: UnionModelRow): ModelCategory {
   return rep ? classifyModel(rep) : 'ungrouped';
 }
 
+export function managementKindsOfRow(row: UnionModelRow, userProvider: boolean): ManagementKind[] {
+  const kinds = new Set<ManagementKind>();
+  for (const agent of row.avail) {
+    const model = row.byAgent[agent];
+    if (!model) continue;
+    const category = classifyModel(model);
+    kinds.add(isAgentSelectableModel(model, { userProvider }) ? 'chat'
+      : CAPABILITY_CATEGORIES.has(category) ? category as ManagementKind : 'other');
+  }
+  return MANAGEMENT_KIND_ORDER.filter((kind) => kinds.has(kind));
+}
+
 export function managementKindOfRow(row: UnionModelRow, userProvider: boolean): ManagementKind {
-  if (!isCapabilityRow(row, userProvider)) return 'chat';
-  const category = rowCategory(row);
-  return CAPABILITY_CATEGORIES.has(category) ? (category as ManagementKind) : 'other';
+  return managementKindsOfRow(row, userProvider)[0] ?? 'other';
 }
 
 export function UnifiedModelList({
@@ -520,7 +533,7 @@ export function UnifiedModelList({
       modelManagementState(provider, {
         ids: rowModelIds(row),
         capability: isCapabilityRow(row, provider.source === 'user'),
-        savedSelected: rowAnyEnabled(provider.id, row),
+        savedSelected: rowAnyEnabled(provider.id, row, provider.source === 'user'),
         disabled: rowDisabledEffective(row),
         paymentRequired: isRowPaymentRequired(row),
       }),
@@ -657,10 +670,10 @@ export function UnifiedModelList({
     const present = new Set<ModelCategory | 'chat'>();
     for (const row of unionRows) {
       const rep = row.byAgent[row.avail[0]];
-      if (rep) present.add(kindOf(row));
+      if (rep) for (const kind of managementKindsOfRow(row, provider.source === 'user')) present.add(kind);
     }
     return MANAGEMENT_KIND_ORDER.filter((kind) => present.has(kind));
-  }, [kindOf, unionRows]);
+  }, [kindOf, unionRows, provider.source]);
   const showKindFilter = presentCategories.length > 1;
 
   // 分组(仅未停用的行)+「已停用」分区(停用的行,跨分组沉底)。搜索两边都过滤。
@@ -672,7 +685,7 @@ export function UnifiedModelList({
       : unionRows;
     const matched =
       showKindFilter && kindFilter !== 'all'
-        ? searched.filter((r) => kindOf(r) === kindFilter)
+        ? searched.filter((r) => managementKindsOfRow(r, provider.source === 'user').includes(kindFilter as ManagementKind))
         : searched;
     const active = matched.filter((r) => !rowDisabledEffective(r));
     const disabled = matched.filter((r) => rowDisabledEffective(r));
@@ -700,7 +713,7 @@ export function UnifiedModelList({
     }
     return {
       groups: groupModelsForManagement(reps, managementView, (model) =>
-        kindOf(repByRow.get(model.id)!),
+        showKindFilter && kindFilter !== 'all' ? kindFilter as ManagementKind : kindOf(repByRow.get(model.id)!),
       ).map((g) => ({
         key: g.key,
         kind: g.kind,
@@ -759,7 +772,7 @@ export function UnifiedModelList({
   const toggleRow = useCallback(
     async (row: UnionModelRow) => {
       if (!selectionAvailable) return;
-      const next = !rowAnyEnabled(provider.id, row);
+      const next = !rowAnyEnabled(provider.id, row, provider.source === 'user');
       const targets = modelVisibilityTargets(provider, row, next);
       if (await setModelVisibilities(provider.id, targets, next) === false) {
         showVisibilityWriteFailure();
@@ -774,7 +787,7 @@ export function UnifiedModelList({
     if (!selectionAvailable) return;
     const next = action === 'show';
     const rows = next
-      ? selectableRows.filter((row) => !rowAnyEnabled(provider.id, row))
+      ? selectableRows.filter((row) => !rowAnyEnabled(provider.id, row, provider.source === 'user'))
       : selectableRows;
     const targets = rows.flatMap((row) => modelVisibilityTargets(provider, row, next));
     const success =

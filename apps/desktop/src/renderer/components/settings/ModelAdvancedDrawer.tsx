@@ -215,16 +215,19 @@ export function ModelAdvancedDrawer({
    * 主展示引擎:该模型可用引擎里的第一个。只读事实(上下文、报价、能力)按它取 ——
    * 同一模型跨引擎的元数据可能不同,抽屉顶部标注了这一点,逐引擎差异在「引擎支持」段展开。
    */
+  const chatAgents = row?.avail.filter((agent) => {
+    const model = row.byAgent[agent];
+    return model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' });
+  });
+  const primaryCandidates = chatAgents?.length ? chatAgents : row?.avail;
   const primaryAgent =
-    row?.avail.find((agent) =>
+    primaryCandidates?.find((agent) =>
       provider.id === 'openai'
         ? agent === 'codex'
         : provider.id === 'anthropic'
           ? agent === 'claude-code'
           : agent === 'pi',
-    ) ??
-    row?.avail[0] ??
-    null;
+    ) ?? primaryCandidates?.[0] ?? null;
   const primaryModel = row && primaryAgent ? (row.byAgent[primaryAgent] ?? null) : null;
 
   const contextAgent = primaryAgent;
@@ -312,6 +315,7 @@ export function ModelAdvancedDrawer({
             const model = row.byAgent[agent];
             return (
               model &&
+              isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
               !model.disabled &&
               model.status !== 'retired' &&
               model.availability !== 'requires_payment'
@@ -321,7 +325,7 @@ export function ModelAdvancedDrawer({
       : null;
   const visibilityTargets = row.avail.flatMap((agent) => {
     const model = row.byAgent[agent];
-    return model ? [{ agent, modelId: model.id }] : [];
+    return model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) ? [{ agent, modelId: model.id }] : [];
   });
   const visibilityCustomized = visibilityTargets.some(({ agent, modelId }) =>
     isModelVisibilityCustomized(agent, provider.id, modelId),
@@ -453,7 +457,7 @@ export function ModelAdvancedDrawer({
                       </div>
                       {provider.agents.map((agent) => {
                         const model = row.byAgent[agent];
-                        const supported = Boolean(model);
+                        const supported = Boolean(model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }));
                         const protocol = protocols.forAgent(agent);
                         const compatibility = protocol?.mode === 'compatibility';
                         const protocolId = `model-protocol-${agent}`;

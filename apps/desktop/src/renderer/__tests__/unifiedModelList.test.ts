@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildUnionRows,
   managementKindOfRow,
+  managementKindsOfRow,
   hasPaymentRequiredDisabledRow,
   isCapabilityRow,
   isRowDisabled,
@@ -322,4 +323,16 @@ it('keeps generic audio in its own management category and filter order', () => 
   expect(managementKindOfRow(rows[0]!, true)).toBe('audio');
   expect(MANAGEMENT_KIND_ORDER.filter((kind) => kind === managementKindOfRow(rows[0]!, true))).toEqual(['audio']);
   expect(groupModelsForManagement(rows, 'model', (row) => managementKindOfRow(row, true)).map((group) => group.key)).toEqual(['audio']);
+});
+
+it.each([false, true])('aggregates mixed runtime types independent of order (%s)', (reverse) => {
+  const mixed = { ...provider, agents: reverse ? ['codex', 'claude-code'] : ['claude-code', 'codex'], models: {
+    'claude-code': [{ ...model('shared'), group: 'custom:p1', mode: 'chat' }],
+    codex: [{ ...model('shared'), group: 'custom:p1', mode: 'image_generation' }],
+  } } as ProviderView;
+  const [row] = buildUnionRows(mixed);
+  expect(managementKindsOfRow(row!, true)).toEqual(['chat', 'image']);
+  expect(isCapabilityRow(row!, true)).toBe(false);
+  expect(modelVisibilityTargets(mixed, row!, true)).toEqual([{ agent: 'claude-code', modelId: 'shared' }]);
+  expect(modelVisibilityTargets(mixed, row!, false)).toEqual([{ agent: 'claude-code', modelId: 'shared' }]);
 });

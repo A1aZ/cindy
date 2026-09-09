@@ -9,7 +9,7 @@
 本区块由 `scripts/design-inventory.mjs` 生成，请勿手改。
 重新生成：`pnpm design:inventory`；校验：`pnpm check:design-inventory`。
 
-计数快照日期：2026-09-08。生成命令：`pnpm design:inventory`。裸颜色匹配与 `scripts/hardcoded-color-audit.mjs` 共用 `scripts/shared/hardcoded-color-match.mjs`（HEX / rgb() / rgba() / hsl() / hsla()），台账统计层额外剔除 `var()` 包装与注释（TS/TSX 剥块注释与整行注释）——语义 token 消费与注释引用不是迁移债务；裸圆角为粗粒度（`rounded*` class、`border-radius:` 与 React style 对象的 `borderRadius:`）。Token 计数为样式源里 `var(--token)` / `hsl(var(--token)` 的去重 ID 数。
+计数快照日期：2026-09-09。生成命令：`pnpm design:inventory`。裸颜色匹配与 `scripts/hardcoded-color-audit.mjs` 共用 `scripts/shared/hardcoded-color-match.mjs`（HEX / rgb() / rgba() / hsl() / hsla()），台账统计层额外剔除 `var()` 包装与注释（TS/TSX 剥块注释与整行注释）——语义 token 消费与注释引用不是迁移债务；裸圆角为粗粒度（`rounded*` class、`border-radius:` 与 React style 对象的 `borderRadius:`）。Token 计数为样式源里 `var(--token)` / `hsl(var(--token)` 的去重 ID 数。
 
 登记 surface 数：35。平台本轮仅 Desktop。
 
@@ -150,3 +150,10 @@ Mobile 尚未展开顶层 screen，**待 DS-7 增量发现**；数值接管在 D
 | `desktop.window.sidebar` | unassigned | legacy | DESIGN.md §15 CINDY 皮肤族 | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.voice-dictionary-toast` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
 | `desktop.window.voice-overlay` | unassigned | legacy | — | DS-8 提供适用数值；DS-9 按入口核对标准组件与呈现继承 | DS-9 核对实际消费者、局部 alias 与跨入口影响；保留现有保护合同，残余项登记理由、实际负责人及复查日期 |
+
+### Usage History category colors (2026-09-09)
+
+- Surface: `desktop.settings`; owner: kirozeng.
+- All historical model identities share the category palette across table and daily bars; Agent/harness marks have fixed identity colors.
+- `usageHistoryColors.ts` derives OKLCH hues from existing `--usage-model-*` seeds at runtime (governance §3.4), outside static token migration.
+- Geometry, hit testing and filtering retain their existing contracts. Light/Dark evidence and designer acceptance are recorded separately.

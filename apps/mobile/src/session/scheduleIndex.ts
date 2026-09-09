@@ -139,11 +139,14 @@ export function loadSessionScheduleIndexThrottled(
   const existing = scheduleIndexThrottleEntries.get(key);
   if (existing?.pending) {
     if (options.force) existing.invalidated = true;
-    if (!existing.invalidated) return existing.promise;
-    // An authoritative change needs a post-event snapshot, but must not start
-    // another 1+N scan beside the old one. All waiters re-enter the same cache.
+    // Invalidation can happen after this caller joined (including a blurred
+    // initiator cancelling its retry). Recheck on settle so visible waiters
+    // re-enter the existing cache with their own load/canStart, still single-flight.
     const reload = () => loadSessionScheduleIndexThrottled(key, load, { ...options, force: false });
-    return existing.promise.then(reload, reload);
+    return existing.promise.then(
+      (value) => existing.invalidated ? reload() : value,
+      (error) => { if (existing.invalidated) return reload(); throw error; },
+    );
   }
   if (!options.force && existing) {
     // 熔断恢复旁路(review P1):DEVICE_UNRESPONSIVE 负缓存的存在意义是「open

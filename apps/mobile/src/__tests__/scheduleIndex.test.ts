@@ -18,6 +18,7 @@ import {
   SCHEDULE_INDEX_THROTTLE_TTL_MS,
 } from '@/session/scheduleIndex';
 import type { RemoteSessionScheduleInfo } from '@/session/sessionList';
+import { markSessionScheduleRunsRead } from '@/session/scheduleRunRead';
 
 function makerWithSchedules(
   listRuns: (scheduleId: string, limit?: number) => Promise<unknown>,
@@ -34,6 +35,42 @@ function makerWithSchedules(
 }
 
 describe('scheduleIndex', () => {
+  it.each([false, true])('lets joined visible consumers take over a blurred initiator (visible=%s)', async (visible) => {
+    vi.useFakeTimers();
+    resetScheduleIndexThrottleForTesting();
+    try {
+      let ownerActive = true;
+      let waitersActive = true;
+      let rejectFirst!: (error: Error) => void;
+      const list = vi.fn().mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+        .mockResolvedValue([{ id: 'sched-1', name: 'run', status: 'active', targetSessionId: 'task' }]);
+      const listRuns = vi.fn(async () => [{ id: 'run', sessionId: 'task', scheduleId: 'sched-1', status: 'failed', firedAt: 1 }]);
+      const markRunRead = vi.fn(async () => ({}));
+      const maker = { schedule: { list, listRuns, markRunRead } } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+      const first = loadSharedSessionScheduleIndex('handoff', maker, () => ownerActive);
+      const onIndex = vi.fn();
+      const task = markSessionScheduleRunsRead(maker, 'task', 'handoff', () => waitersActive, { onIndex });
+      const joined = loadSharedSessionScheduleIndex('handoff', maker, () => waitersActive);
+      const outcomes = Promise.allSettled([first, task, joined]);
+      ownerActive = false;
+      waitersActive = visible;
+      rejectFirst(new Error('[NOT_CONNECTED] offline'));
+      await vi.runAllTimersAsync();
+      const [ownerResult, taskResult, joinedResult] = await outcomes;
+      expect(ownerResult).toMatchObject({ status: 'rejected', reason: new Error('Schedule index consumer inactive') });
+      expect(taskResult.status).toBe(visible ? 'fulfilled' : 'rejected');
+      expect(joinedResult.status).toBe(visible ? 'fulfilled' : 'rejected');
+      if (taskResult.status === 'fulfilled') expect(taskResult.value).toEqual(['run']);
+      expect(list).toHaveBeenCalledTimes(visible ? 2 : 1);
+      expect(listRuns).toHaveBeenCalledTimes(visible ? 1 : 0);
+      expect(markRunRead).toHaveBeenCalledTimes(visible ? 1 : 0);
+      expect(onIndex).toHaveBeenCalledTimes(visible ? 1 : 0);
+      if (visible) expect(onIndex.mock.calls[0][0].get('task').latestFailedRun).toEqual({ runId: 'run', firedAt: 1 });
+    } finally {
+      resetScheduleIndexThrottleForTesting();
+      vi.useRealTimers();
+    }
+  });
   it.each([false, true])('shares complete schedule metadata and historical failures with legacy fallback=%s', async (legacy) => {
     resetScheduleIndexThrottleForTesting();
     const list = vi.fn(async () => [
@@ -364,14 +401,16 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     const options = { now: () => at };
     const first = loadSessionScheduleIndexThrottled('dev-1', load, options);
     at += SCHEDULE_INDEX_THROTTLE_TTL_MS * 2;
-    expect(loadSessionScheduleIndexThrottled('dev-1', load, options)).toBe(first);
+    const joined = loadSessionScheduleIndexThrottled('dev-1', load, options);
     expect(load).toHaveBeenCalledTimes(1);
     finish(new Map());
     await first;
+    expect(await joined).toBe(await first);
     expect(loadSessionScheduleIndexThrottled('dev-1', load, options)).toBe(first);
   });
 
-  it.each([[false, false], [true, false], [false, true], [true, true]])('coalesces invalidated scans after the old scan settles (rejected=%s, recovered=%s)', async (rejected, recovered) => {
+  it.each([[false, false], [true, false], [false, true], [true, true]].flatMap(([rejected, recovered]) =>
+    [false, true].map((early) => [rejected, recovered, early])))('coalesces invalidated scans after the old scan settles (rejected=%s, recovered=%s, joinedEarly=%s)', async (rejected, recovered, early) => {
     resetScheduleIndexThrottleForTesting();
     let finish!: (index: Map<string, RemoteSessionScheduleInfo>) => void;
     let fail!: (error: Error) => void;
@@ -380,6 +419,7 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
       .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
       .mockResolvedValue(fresh);
     const old = loadSessionScheduleIndexThrottled('dev-1', load).catch(() => undefined);
+    const earlyWaiter = early ? loadSessionScheduleIndexThrottled('dev-1', load) : undefined;
     if (recovered) invalidateScheduleIndexesAfterLinkRecovery();
     else invalidateScheduleIndexForDevice('dev-1');
     const home = loadSessionScheduleIndexThrottled('dev-1', load);
@@ -389,10 +429,11 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     await old;
     expect(await home).toBe(fresh);
     expect(await task).toBe(fresh);
+    if (earlyWaiter) expect(await earlyWaiter).toBe(fresh);
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it('TTL 内的重复触发复用同一在途/已完成 promise,不重复加载', async () => {
+  it('TTL 内的重复触发复用同一结果,不重复加载', async () => {
     resetScheduleIndexThrottleForTesting();
     const load = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
     let clock = 1000;
@@ -400,7 +441,7 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     const first = loadSessionScheduleIndexThrottled('dev-1', load, { now });
     clock += 5_000;
     const second = loadSessionScheduleIndexThrottled('dev-1', load, { now });
-    expect(second).toBe(first);
+    expect(await second).toBe(await first);
     expect(load).toHaveBeenCalledTimes(1);
     await first;
   });

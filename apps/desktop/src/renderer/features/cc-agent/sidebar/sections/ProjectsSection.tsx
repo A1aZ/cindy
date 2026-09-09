@@ -1214,6 +1214,7 @@ function SessionGroupNode({
   sessionVariant,
   status,
   onStatusChange,
+  sortByLabel,
 }: {
   sessions: Session[];
   collapsed: boolean;

@@ -2,9 +2,11 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { useDelayedConnectionNotice } from '@/components/ConnectionNoticeOverlay';
 import { useShowConnectionBanner } from '@/components/ConnectionBanner';
 import type { DeviceLinkStatus } from '@cindy/device-link';
 
+vi.mock('expo-router', () => ({ useFocusEffect: () => {} }));
 vi.mock('react-native', () => ({ ActivityIndicator: () => null, View: () => null, StyleSheet: { create: (s: unknown) => s } }));
 vi.mock('lucide-react-native', () => ({ LoaderCircle: () => null }));
 vi.mock('@/hooks/useReduceMotion', () => ({ useReduceMotionEnabled: () => true }));
@@ -23,7 +25,8 @@ afterEach(() => { act(() => root.unmount()); vi.useRealTimers(); });
 function Probe({ status, recovery, error, unresponsive }: {
   status: DeviceLinkStatus; recovery?: 'syncing' | 'recovered'; error?: string; unresponsive?: boolean;
 }) {
-  visible = useShowConnectionBanner(status, error ?? null, null, unresponsive, recovery);
+  const active = useShowConnectionBanner(status, error ?? null, null, unresponsive);
+  visible = useDelayedConnectionNotice(active, recovery === 'recovered', recovery === 'syncing');
   return null;
 }
 function render(status: DeviceLinkStatus, recovery?: 'syncing' | 'recovered', error?: string, unresponsive?: boolean) {
@@ -38,7 +41,7 @@ it('keeps repeated online task loads quiet, even when content takes several seco
   }
 });
 it('keeps a real outage visible through content repair, then clears the recovered tail', () => {
-  render('connecting', 'syncing'); advance(1_199); expect(visible).toBe(false);
+  render('connecting', 'syncing'); advance(999); expect(visible).toBe(false);
   advance(1); expect(visible).toBe(true);
   render('online', 'syncing'); advance(5_000); expect(visible).toBe(true);
   render('online', 'recovered'); advance(1_999); expect(visible).toBe(true);
@@ -49,8 +52,10 @@ it('does not promote a brief connection blip into a long content recovery banner
   render('connecting', 'syncing'); advance(300);
   render('online', 'syncing'); advance(5_000); expect(visible).toBe(false);
 });
-it('still shows actual request errors and an unresponsive computer immediately', () => {
-  render('online', 'syncing', 'INVOKE_TIMEOUT'); expect(visible).toBe(true);
+it('shows real errors after the shared delay and retains their recovery tail', () => {
+  render('online', 'syncing', 'INVOKE_TIMEOUT'); expect(visible).toBe(false);
+  advance(1_000); expect(visible).toBe(true);
   render('online', 'syncing', undefined, true); expect(visible).toBe(true);
-  render('online', 'recovered'); expect(visible).toBe(false);
+  render('online', 'recovered'); expect(visible).toBe(true);
+  advance(2_000); expect(visible).toBe(false);
 });

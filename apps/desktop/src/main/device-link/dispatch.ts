@@ -99,6 +99,7 @@ import { LEGACY_TOPIC, type ActiveController } from './subscriptions';
 import { MAKER_PUSH } from '../maker-ipc/channels.js';
 import { RECOVERY_CHECKPOINT_MARKER } from '../maker-ipc/recoveryCoordinator.js';
 import {
+  sanitizeBotAuthorizationMetaForRemote,
   projectInteractionDismissedForRemote,
   projectInteractionRequestForRemote,
 } from '../cindy-brain/ghostSetupInteractionBridge.js';
@@ -1649,7 +1650,7 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
   ) {
     const msg = (payload as { message: unknown }).message;
     if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
-      const sanitized = stripRecoveryCheckpointFromMessage(msg as Record<string, unknown>);
+      const sanitized = sanitizeRemoteMessage(msg as Record<string, unknown>);
       if (sanitized !== msg) {
         remotePayload = { ...payload, message: sanitized };
       }
@@ -2669,7 +2670,7 @@ function sanitizeMessageInvokeResult(
   if (result.ok && (channel === 'local-db:messages:view' || channel === 'local-db:messages:work-details')) {
     const page = result.result as { items?: Array<{ type: string; messages?: unknown[] }>; messages?: unknown[] };
     const sanitize = (message: unknown) => message && typeof message === 'object' && !Array.isArray(message)
-      ? stripRecoveryCheckpointFromMessage(message as Record<string, unknown>) : message;
+      ? sanitizeRemoteMessage(message as Record<string, unknown>) : message;
     return { ok: true, result: { ...page,
       ...(page.messages ? { messages: page.messages.map(sanitize) } : {}),
       ...(page.items ? { items: mapHistoryViewMessages(page.items as HistoryViewItem<HistoryMessageSource>[],
@@ -2681,7 +2682,7 @@ function sanitizeMessageInvokeResult(
   let changed = false;
   const sanitized = result.result.map((msg: unknown) => {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return msg;
-    const out = stripRecoveryCheckpointFromMessage(msg as Record<string, unknown>);
+    const out = sanitizeRemoteMessage(msg as Record<string, unknown>);
     if (out !== msg) changed = true;
     return out;
   });
@@ -3110,7 +3111,7 @@ function compactRemoteMessageForDeviceLink(message: unknown): unknown {
   if (record.role === 'tool_use') {
     const compactContent = compactRemoteToolUseContent(record.content, false);
     if (compactContent === record.content) {
-      return stripRecoveryCheckpointFromMessage(record);
+      return sanitizeRemoteMessage(record);
     }
     return {
       ...record,
@@ -3123,7 +3124,7 @@ function compactRemoteMessageForDeviceLink(message: unknown): unknown {
     : REMOTE_MESSAGE_CONTENT_LIMIT;
   const compactContent = compactRemoteMessageContent(record.content, contentLimit);
   if (compactContent === record.content) {
-    return stripRecoveryCheckpointFromMessage(record);
+    return sanitizeRemoteMessage(record);
   }
   return {
     ...record,
@@ -3156,23 +3157,24 @@ function mergeRemoteAgentMeta(agentMeta: unknown, patch: Record<string, unknown>
     return { ...patch };
   }
   const { recoveryCheckpoint: _, ...safe } = agentMeta as Record<string, unknown>;
-  return { ...safe, ...patch };
+  return { ...sanitizeBotAuthorizationMetaForRemote(safe), ...patch };
 }
 
-function stripRecoveryCheckpointFromMessage(record: Record<string, unknown>): Record<string, unknown> {
+function sanitizeRemoteMessage(record: Record<string, unknown>): Record<string, unknown> {
   const agentMeta = record.agentMeta;
-  const hasCheckpointInMeta = agentMeta && typeof agentMeta === 'object' && !Array.isArray(agentMeta) &&
-    'recoveryCheckpoint' in (agentMeta as Record<string, unknown>);
+  const hasPrivateMetadata = agentMeta && typeof agentMeta === 'object' && !Array.isArray(agentMeta) &&
+    ('recoveryCheckpoint' in (agentMeta as Record<string, unknown>) ||
+      'botAuthorization' in (agentMeta as Record<string, unknown>));
   const content = record.content;
   const checkpointIdx = typeof content === 'string'
     ? (content as string).indexOf(RECOVERY_CHECKPOINT_MARKER)
     : -1;
   const hasCheckpointInContent = checkpointIdx >= 0;
-  if (!hasCheckpointInMeta && !hasCheckpointInContent) return record;
+  if (!hasPrivateMetadata && !hasCheckpointInContent) return record;
   const result: Record<string, unknown> = { ...record };
-  if (hasCheckpointInMeta) {
+  if (hasPrivateMetadata) {
     const { recoveryCheckpoint: _, ...safeMeta } = agentMeta as Record<string, unknown>;
-    result.agentMeta = safeMeta;
+    result.agentMeta = sanitizeBotAuthorizationMetaForRemote(safeMeta);
   }
   if (hasCheckpointInContent) {
     result.content = (content as string).slice(0, checkpointIdx);

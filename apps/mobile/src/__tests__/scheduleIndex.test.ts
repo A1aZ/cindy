@@ -7,7 +7,6 @@ import {
   invalidateOfflineScheduleIndexFailureFor,
   invalidateRunningSessionScheduleEntries,
   invalidateScheduleIndexForDevice,
-  invalidateTransientScheduleIndexFailureFor,
   invalidateScheduleIndexesAfterLinkRecovery,
   loadLightweightSessionScheduleIndex,
   loadSessionScheduleIndex,
@@ -36,6 +35,23 @@ function makerWithSchedules(
 }
 
 describe('scheduleIndex', () => {
+  it.each([false, true])('peer recovery invalidates only its success or pending snapshot (pending=%s)', async (pending) => {
+    resetScheduleIndexThrottleForTesting();
+    let finish!: (value: Map<string, RemoteSessionScheduleInfo>) => void;
+    const fresh = new Map<string, RemoteSessionScheduleInfo>();
+    const loadA = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
+    const loadB = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue(fresh);
+    const a = await loadSessionScheduleIndexThrottled('a', loadA);
+    const old = loadSessionScheduleIndexThrottled('b', loadB);
+    if (!pending) { finish(new Map()); await old; }
+    invalidateScheduleIndexesAfterLinkRecovery('b');
+    const next = loadSessionScheduleIndexThrottled('b', loadB);
+    if (pending) { expect(loadB).toHaveBeenCalledTimes(1); finish(new Map()); await old; }
+    expect(await next).toBe(fresh);
+    expect(loadB).toHaveBeenCalledTimes(2);
+    expect(await loadSessionScheduleIndexThrottled('a', loadA)).toBe(a);
+    expect(loadA).toHaveBeenCalledTimes(1);
+  });
   it.each([false, true])('restores older running ownership from the same snapshot (lightweight=%s)', async (lightweight) => {
     const schedules = [{ id: 'sched', name: 'run', status: 'active', targetSessionId: 'task' }];
     const row = { scheduleId: 'sched', scheduleName: 'run', scheduleStatus: 'active', readAt: 1 };
@@ -624,7 +640,7 @@ describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
     });
     await Promise.resolve();
 
-    invalidateTransientScheduleIndexFailureFor('dev-b');
+    invalidateScheduleIndexesAfterLinkRecovery('dev-b');
     await expect(loadSessionScheduleIndexThrottled('dev-a', loadA, { now })).rejects.toMatchObject({
       code: 'NOT_CONNECTED',
     });

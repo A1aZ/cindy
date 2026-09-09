@@ -218,19 +218,13 @@ export function loadSessionScheduleIndexThrottled(
  * 由共享恢复入口统一失效,在途扫描仍先结束再合并重拉。普通本机断线负缓存
  * 同时清除;设备离线、熔断和请求超时的负缓存继续走各自的恢复旁路。
  */
-export function invalidateScheduleIndexesAfterLinkRecovery(): void {
-  for (const [key, entry] of scheduleIndexThrottleEntries) {
-    if (entry.failedAt === null || entry.failedTransient) {
+export function invalidateScheduleIndexesAfterLinkRecovery(deviceId?: string): void {
+  const keys = deviceId === undefined ? scheduleIndexThrottleEntries.keys() : [deviceId];
+  for (const key of keys) {
+    const entry = scheduleIndexThrottleEntries.get(key);
+    if (entry && (entry.failedAt === null || entry.failedTransient)) {
       invalidateScheduleIndexForDevice(key);
     }
-  }
-}
-
-/** Per-peer variant used by independent Mobile recovery lifecycles. */
-export function invalidateTransientScheduleIndexFailureFor(deviceId: string): void {
-  const entry = scheduleIndexThrottleEntries.get(deviceId);
-  if (entry?.failedAt !== null && entry?.failedTransient) {
-    scheduleIndexThrottleEntries.delete(deviceId);
   }
 }
 

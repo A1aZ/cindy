@@ -77,7 +77,6 @@ import {
   clearSessionScheduleIndexCache,
   invalidateOfflineScheduleIndexFailureFor,
   invalidateScheduleIndexForDevice,
-  invalidateTransientScheduleIndexFailureFor,
   invalidateScheduleIndexesAfterLinkRecovery,
 } from '@/session/scheduleIndex';
 import { isTransientRemoteError } from '@/device-link/remoteRetry';
@@ -588,8 +587,8 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     );
     if (!plan) return { retry: false };
 
-    // 只清当前 peer 在断线窗口留下的瞬时负缓存，避免 A 的恢复改变 B 的节流状态。
-    invalidateTransientScheduleIndexFailureFor(targetDeviceId);
+    // 只失效当前 peer 的旧成功快照和瞬时链路失败，避免 A 的恢复改变 B 的节流状态。
+    invalidateScheduleIndexesAfterLinkRecovery(targetDeviceId);
     const result = await rehydrateDeviceLinkPeer(plan, {
       isCancelled: () => (
         backgroundReleaseInFlightRef.current

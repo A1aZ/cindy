@@ -1315,7 +1315,7 @@ function SessionGroupNode({
               status={status}
               onStatusChange={onStatusChange}
               sortByLabel={sortByLabel}
-              buttonClassName="size-5 hover:bg-sidebar-item-hover hover:text-foreground"
+              buttonClassName="size-6 hover:bg-sidebar-item-hover hover:text-foreground"
               iconSize={14}
               stopRowToggle
             />

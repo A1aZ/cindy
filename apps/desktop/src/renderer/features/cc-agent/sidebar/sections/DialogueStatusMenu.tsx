@@ -2,8 +2,9 @@
  * DialogueStatusMenu — 对话区可见的状态筛选入口。
  *
  * 全局 Status 仍由 SidebarFilterPopover 持有;本组件复用同一份
- * filter.status / setStatus,把「活跃 / 已归档 / 全部」放到混排「对话」组头
- * 和折叠 rail 对话面板上,避免入口只活在未挂载的 DialogueSection 里。
+ * filter.status / setStatus,把「活跃 / 已归档 / 全部」放到恒在的范围标题
+ * (MainListScopeHeader,覆盖未分组与空列表)、混排「对话」组头和折叠 rail
+ * 对话面板上,避免入口只活在未挂载的 DialogueSection 里。
  *
  * 菜单本身只有状态选项。可访问名称仍走 `dialogueSettingsAria`,展开态与
  * 折叠 rail 各自传入真实 `sortByLabel`,避免状态文案填进 {{sortBy}}。
@@ -75,7 +76,7 @@ export function DialogueStatusMenu({
             onPointerDown={stop}
             onKeyDown={stop}
             className={cn(
-              'flex shrink-0 items-center justify-center rounded-md',
+              'flex shrink-0 items-center justify-center rounded-full',
               'text-[var(--sidebar-list-muted)]',
               'transition-colors hover:text-[var(--sidebar-nav-text)]',
               STATUS_BUTTON_FOCUS,

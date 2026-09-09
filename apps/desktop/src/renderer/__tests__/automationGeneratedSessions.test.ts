@@ -526,7 +526,8 @@ describe('automation-generated sessions', () => {
     );
 
     expect(sessionViewSource).toContain('<UnreadFailedScheduleBanner');
-    expect(sessionViewSource).toContain('scheduleSessionInfo?.hasFailedRun');
+    expect(sessionViewSource).toContain('scheduleSessionInfo.hasFailedRun');
+    expect(sessionViewSource).toContain('shouldShowFailedScheduleNotice({');
     expect(sessionViewSource).toContain('useAutomationScheduleSessionInfo(sessionId)');
     expect(sessionViewSource).not.toContain('useAutomationScheduleSessionIndex()');
     expect(sessionViewSource).toContain('latestUnreadFailedRunId');

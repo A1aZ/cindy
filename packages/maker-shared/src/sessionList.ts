@@ -4,7 +4,7 @@ import { presentationDate, presentationText, type PresentationLocalizer } from '
 import { isSyntheticTriggerText } from './syntheticTrigger.js';
 import { hasPendingSessionInterruption, type SessionInterruptionState } from './sessionActivity.js';
 import type { RemoteSchedule, RemoteScheduleRun } from './scheduleTypes.js';
-import { toMillis, isUnreadScheduleRun, isUnreadFailedScheduleRun } from './scheduleModel.js';
+import { toMillis, isUnreadScheduleRun, isUnreadFailedScheduleRun, isFailedScheduleRun, compareFailedScheduleRuns, type FailedScheduleRunSnapshot } from './scheduleModel.js';
 import { sessionCollaborationLabel, sessionWorktreeLabel } from './sessionIdentity.js';
 import { isDefaultDraftSessionTitle } from './sessionTitle.js';
 import { getSessionListCollapseView } from './sessionListCollapse.js';
@@ -114,6 +114,7 @@ export interface RemoteSessionScheduleInfo {
   allSchedulesStopped?: boolean;
   unreadRunIds: string[];
   hasUnreadFailedRun?: boolean;
+  latestFailedRun?: FailedScheduleRunSnapshot;
   unreadCount: number;
   running: boolean;
   latestRunAt: number;
@@ -640,6 +641,9 @@ export function buildSessionScheduleIndex(
       const existing = index.get(run.sessionId);
       const unreadRunIds = existing ? [...existing.unreadRunIds] : [];
       if (isUnreadScheduleRun(run)) unreadRunIds.push(run.id);
+      const candidate = isFailedScheduleRun(run) ? { runId: run.id, firedAt } : undefined;
+      const latestFailedRun = candidate && (!existing?.latestFailedRun || compareFailedScheduleRuns(candidate, existing.latestFailedRun) > 0)
+        ? candidate : existing?.latestFailedRun;
       const running = (existing?.running ?? false) || run.status === 'running';
       const isLatest = !existing || firedAt >= existing.latestRunAt;
       index.set(run.sessionId, {
@@ -649,6 +653,7 @@ export function buildSessionScheduleIndex(
         allSchedulesStopped: false,
         unreadRunIds,
         unreadCount: unreadRunIds.length,
+        latestFailedRun,
         hasUnreadFailedRun: existing?.hasUnreadFailedRun === true || isUnreadFailedScheduleRun(run),
         running,
         latestRunAt: Math.max(existing?.latestRunAt ?? 0, firedAt),

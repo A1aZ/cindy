@@ -596,3 +596,17 @@ function readString(value: Record<string, unknown>, key: string): string | null 
   const raw = value[key];
   return typeof raw === 'string' && raw.length > 0 ? raw : null;
 }
+
+/** Historical failure notices are independent of read receipts. */
+export interface FailedScheduleRunSnapshot { runId: string; firedAt: number }
+export function compareFailedScheduleRuns(a: FailedScheduleRunSnapshot, b: FailedScheduleRunSnapshot): number {
+  return a.firedAt - b.firedAt || (a.runId > b.runId ? 1 : a.runId < b.runId ? -1 : 0);
+}
+export function shouldShowFailedScheduleNotice(state: {
+  latestFailedRun?: FailedScheduleRunSnapshot | null;
+  readOnly: boolean; tailError: boolean; interrupted: boolean; continuationPending: boolean;
+  error: boolean; credentialWait: boolean; streaming: boolean; running: boolean;
+}): boolean {
+  return !!state.latestFailedRun && !state.readOnly && !state.tailError && !state.interrupted
+    && !state.continuationPending && !state.error && !state.credentialWait && !state.streaming && !state.running;
+}

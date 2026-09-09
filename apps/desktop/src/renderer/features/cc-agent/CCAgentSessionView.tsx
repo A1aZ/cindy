@@ -1,3 +1,4 @@
+import { shouldShowFailedScheduleNotice } from '@cindy/maker-shared/schedule-model';
 /**
  * CCAgentSessionView
  * ---------------------------------------------------------------------------
@@ -4878,17 +4879,12 @@ export function CCAgentSessionView({
                 />
               )}
 
-            {!readOnly &&
-              !errorTailMsg &&
-              !interruptedFromSession &&
-              scheduleSessionInfo?.hasFailedRun &&
-              scheduleSessionInfo.latestFailedRun &&
-              !syntheticContinuationPending &&
-              !error &&
-              !credentialSwitchWait &&
-              !isStreaming &&
-              !agentStatus.isRunning &&
-              sessionId && (
+            {sessionId && scheduleSessionInfo?.latestFailedRun && shouldShowFailedScheduleNotice({
+              latestFailedRun: scheduleSessionInfo.hasFailedRun ? scheduleSessionInfo.latestFailedRun : null,
+              readOnly, tailError: !!errorTailMsg, interrupted: !!interruptedFromSession,
+              continuationPending: !!syntheticContinuationPending, error: !!error,
+              credentialWait: !!credentialSwitchWait, streaming: isStreaming, running: agentStatus.isRunning,
+            }) && (
                 <UnreadFailedScheduleBanner
                   key={sessionId}
                   dataOwnerId={dataOwnerId}

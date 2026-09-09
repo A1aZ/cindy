@@ -1,3 +1,7 @@
+import { getActiveMobileSessionRealm } from '@/config/env';
+import { FailedScheduleNotice } from '@/session/FailedScheduleNotice';
+import { loadLightweightSessionScheduleIndex, loadSessionScheduleIndex } from '@/session/scheduleIndex';
+import { shouldShowFailedScheduleNotice, type FailedScheduleRunSnapshot } from '@cindy/maker-shared/schedule-model';
 import { useRemoteResourceSession } from '@/session/useRemoteResourceSession';
 import { mobileDebugLog } from '@/debug/mobileDebugLog';
 import { isInFlightDeviceLinkError } from '@cindy/device-link';
@@ -2077,26 +2081,9 @@ export default function SessionScreen() {
   // 把该会话名下未读 run 在被控端标已读;host 随之广播 read 事件,首页 / 设备列表红点自动清除。
   const scheduleEventSnapshot = useRemoteScheduleEventSnapshot(deviceId);
   const completedRunId = unreadRunIdFromProjection(scheduleEventSnapshot.lastProjection, sessionId);
-  // 开会话路径:延后一小段再拉 schedule index,把该会话未读 run 标已读。不限定 scheduler 生成的
-  // 会话——显式绑定普通会话(targetSessionId)的 run 同样会在列表挂未读徽标,冷启动后无事件投影可依,
-  // 只能靠 index 探测。无 schedule 的用户只多一次轻量 schedule.list;延后是避开首开关键读抢 WS 管道(#324)。
-  // 瞬态失败兜底:短暂抖动走 withTransientRemoteRetry 原地重试;冷启动首开时 device-link 可能尚未
-  // 就绪且失败被吞,依赖 connectionEpoch 在重连后重跑一次探测,用户停在会话里红点也能自愈。
-  // unreadVersion 依赖:store 只存最近一条事件投影,completed 被紧随的事件覆盖时下面的快路径会漏;
-  // 任何影响未读的事件都 bump unreadVersion(累计计数不丢),据此重跑延后探测兜底。标已读后广播回来的
-  // read 事件会再触发一轮探测,发现无未读即收敛;800ms defer + effect cleanup 会把连续事件合并成一次。
-  useEffect(() => {
-    if (!sessionId) return;
-    return deferScheduleIndexHydration(() => {
-      void withTransientRemoteRetry(() => markSessionScheduleRunsRead(maker, sessionId))
-        .catch(() => undefined);
-    });
-  }, [connectionEpoch, maker, scheduleEventSnapshot.unreadVersion, sessionId]);
-  // 会话开着时报告刚完成:事件投影直接给出绑定到本会话的 runId,单次标已读、免拉 index。
-  useEffect(() => {
-    if (!completedRunId) return;
-    void maker.schedule.markRunRead(completedRunId).catch(() => undefined);
-  }, [completedRunId, maker]);
+  // 同一轻量索引同时提供历史失败提示和未读记录；已读不会消除历史失败。
+  const scheduleNoticeSource = JSON.stringify([getActiveMobileSessionRealm(), auth.user?.id, deviceId, sessionId]);
+  const [scheduleFailure, setScheduleFailure] = useState<{ source: string; run?: FailedScheduleRunSnapshot } | null>(null);
   // —— 会话未读「真实展示即已读」回执 ——
   // 手机端打开会话且**本次连接代已完成整窗同步**后,驻留满 dwell 把被控端该会话的
   // 未读态(灵动岛 / Dock 角标 / 桌面侧栏红绿点)清掉;被控端清完经 sessions relay
@@ -2139,6 +2126,32 @@ export default function SessionScreen() {
     });
     return () => subscription.remove();
   }, []);
+  useFocusEffect(useCallback(() => {
+    if (!appStateActive || !deviceId || !sessionId || !remoteHistoryAvailable) return;
+    let active = true;
+    const isActive = () => active && messageScreenFocusedRef.current && messageAppActiveRef.current;
+    const cancel = deferScheduleIndexHydration(() => {
+      void withTransientRemoteRetry(() => markSessionScheduleRunsRead(maker, sessionId, {
+        isActive,
+        // The same read supplies the notice and existing read receipts. Old
+        // Hosts retain their original query; no second schedule scan is added.
+        loadIndex: async () => {
+          try { return await loadLightweightSessionScheduleIndex(deviceId, invoke); }
+          catch (error) {
+            if (!isHistoryViewUnavailable(error)) throw error;
+            if (!isActive()) return new Map();
+            return loadSessionScheduleIndex(maker, { throwOnTransientRunListError: true });
+          }
+        },
+        onIndex: (index) => setScheduleFailure({ source: scheduleNoticeSource, run: index.get(sessionId)?.latestFailedRun }),
+      })).catch(() => undefined);
+    });
+    return () => { active = false; cancel(); };
+  }, [appStateActive, connectionEpoch, deviceId, invoke, maker, remoteHistoryAvailable, scheduleEventSnapshot.sessionIndexVersion, scheduleNoticeSource, sessionId]));
+  useFocusEffect(useCallback(() => {
+    if (!appStateActive || !remoteHistoryAvailable || !completedRunId) return;
+    void maker.schedule.markRunRead(completedRunId).catch(() => undefined);
+  }, [appStateActive, completedRunId, maker, remoteHistoryAvailable]));
   useFocusEffect(
     useCallback(() => {
       if (!appStateActive || !deviceId || !sessionId || !hasRenderedMessages) return undefined;
@@ -9233,6 +9246,18 @@ export default function SessionScreen() {
                             readOnly={!!collaborationReadOnlyReason}
                             state={tailBannerState}
                           />
+                        ) : null}
+                        {shouldShowFailedScheduleNotice({
+                          latestFailedRun: scheduleFailure?.source === scheduleNoticeSource ? scheduleFailure.run : null,
+                          readOnly: !!collaborationReadOnlyReason,
+                          tailError: !!errorTailClientId || !!retryHiddenTailClientId,
+                          interrupted: tailBannerState?.kind === 'interrupted',
+                          continuationPending: tailContinuationInFlight,
+                          error: !!inputProjection.error, credentialWait: !!inputProjection.credentialSwitchWait,
+                          streaming: isSessionStreaming, running: remoteSessionRunning,
+                        }) && scheduleFailure?.run ? (
+                          <FailedScheduleNotice key={scheduleNoticeSource}
+                            source={scheduleNoticeSource} run={scheduleFailure.run} />
                         ) : null}
                         {/* 队列状态横幅(错误 / 凭证等待 / 停止确认 / 暂停)。待发送气泡
                             不在这里,它们是消息流里的 pending_send 项。 */}

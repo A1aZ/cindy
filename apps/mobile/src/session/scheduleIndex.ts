@@ -295,6 +295,8 @@ function scheduleInfoEqual(a: RemoteSessionScheduleInfo, b: RemoteSessionSchedul
     && a.scheduleName === b.scheduleName
     && a.unreadCount === b.unreadCount
     && !!a.hasUnreadFailedRun === !!b.hasUnreadFailedRun
+    && a.latestFailedRun?.runId === b.latestFailedRun?.runId
+    && a.latestFailedRun?.firedAt === b.latestFailedRun?.firedAt
     && a.running === b.running
     && a.latestRunAt === b.latestRunAt
     && a.scheduleStatus === b.scheduleStatus

@@ -171,8 +171,15 @@ describe('停用轴(isRowDisabled / isCapabilityRow)', () => {
         { id: 'shared', name: '与 agent 清单撞 id(应被去重)' },
       ],
       videoModels: [{ id: 'seedance-fast', name: 'Seedance 快速' }],
+      audioModels: [{ id: 'speech', name: 'Speech', mode: 'audio_speech', disabled: true }, { id: 'asr', name: 'ASR', mode: 'audio_transcription' }, { id: 'realtime', name: 'Realtime', mode: 'realtime' }],
     } as ProviderView;
     const rows = buildUnionRows(withMedia);
+    for (const [id, mode] of [['speech', 'audio_speech'], ['asr', 'audio_transcription'], ['realtime', 'realtime']]) {
+      const row = rows.find((r) => r.id === id)!;
+      expect(row.byAgent['claude-code']?.mode).toBe(mode);
+      expect(isCapabilityRow(row, false)).toBe(true);
+    }
+    expect(isRowDisabled(rows.find((r) => r.id === 'speech')!)).toBe(true);
     const image = rows.find((r) => r.id === 'gpt-image-2')!;
     expect(isCapabilityRow(image, false)).toBe(true);
     expect(image.byAgent['claude-code']?.mode).toBe('image_generation');

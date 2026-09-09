@@ -1,3 +1,4 @@
+import { providerMediaField } from "./providerMediaModels.js";
 import {
   expandedRegistryEntries,
   resolveModelMetadata,
@@ -491,7 +492,31 @@ export function buildUserProvider(
       };
     });
   }
+  const mediaLists: Partial<
+    Pick<
+      Provider,
+      "imageModels" | "videoModels" | "audioModels" | "embeddingModels"
+    >
+  > = {};
+  for (const list of Object.values(models)) {
+    for (const model of list ?? []) {
+      const field = providerMediaField(model.mode);
+      if (!field) continue;
+      const items = (mediaLists[field] ??= []);
+      if (!items.some((item) => item.id === model.id))
+        items.push({
+          ...pickModelMetadata(model),
+          id: model.id,
+          name: model.name,
+          mode: model.mode,
+          discoveredMetadata: model.discoveredMetadata,
+          ...(model.modalities ? { modalities: model.modalities } : {}),
+          ...(model.description ? { description: model.description } : {}),
+        });
+    }
+  }
   return {
+    ...mediaLists,
     id: runtimeProviderId,
     name: config.name,
     source: "user",

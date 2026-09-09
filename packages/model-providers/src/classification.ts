@@ -92,6 +92,7 @@ export type ModelCategory =
   | 'ungrouped'
   | 'image'
   | 'video'
+  | 'audio'
   | 'tts'
   | 'stt'
   | 'realtime'
@@ -110,6 +111,7 @@ export const CATEGORY_ORDER: ModelCategory[] = [
   'ungrouped',
   'image',
   'video',
+  'audio',
   'tts',
   'stt',
   'realtime',
@@ -155,6 +157,7 @@ const MODE_TO_CATEGORY: Record<string, ModelCategory> = {
   image_generation: 'image',
   video_generation: 'video',
   audio_speech: 'tts',
+  audio_generation: 'audio',
   audio_transcription: 'stt',
   realtime: 'realtime',
 };

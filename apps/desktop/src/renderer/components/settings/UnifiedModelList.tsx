@@ -222,11 +222,22 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
     name: string;
     disabled?: boolean;
     availability?: CatalogModel['availability'];
-    group: 'image' | 'video' | 'embedding';
+    group: 'image' | 'video' | 'embedding' | 'audio' | 'tts' | 'stt' | 'realtime';
+    mode?: string;
     modalities?: CatalogModel['modalities'];
   }> = [
     ...(provider.imageModels ?? []).map((m) => ({ ...m, group: 'image' as const })),
     ...(provider.videoModels ?? []).map((m) => ({ ...m, group: 'video' as const })),
+    ...(provider.audioModels ?? []).map((m) => ({
+      ...m,
+      group: (m.mode === 'audio_generation'
+        ? 'audio'
+        : m.mode === 'audio_transcription'
+          ? 'stt'
+          : m.mode === 'realtime'
+            ? 'realtime'
+            : 'tts') as 'audio' | 'stt' | 'realtime' | 'tts',
+    })),
     ...(provider.embeddingModels ?? []).map((m) => ({ ...m, group: 'embedding' as const })),
   ];
   for (const m of media) {
@@ -239,11 +250,12 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
       defaultEffort: null,
       group: m.group,
       mode:
-        m.group === 'image'
+        m.mode ??
+        (m.group === 'image'
           ? 'image_generation'
           : m.group === 'video'
             ? 'video_generation'
-            : 'embedding',
+            : 'embedding'),
       ...(m.modalities ? { modalities: m.modalities } : {}),
       ...(m.disabled === true ? { disabled: true } : {}),
       ...(m.availability !== undefined ? { availability: m.availability } : {}),
@@ -496,13 +508,17 @@ export function UnifiedModelList({
     (row: UnionModelRow) => pendingDisabled[row.id] ?? isRowDisabled(row),
     [pendingDisabled],
   );
-  const rowState = useCallback((row: UnionModelRow) => modelManagementState(provider, {
-    ids: rowModelIds(row),
-    capability: isCapabilityRow(row, provider.source === 'user'),
-    savedSelected: rowAnyEnabled(provider.id, row),
-    disabled: rowDisabledEffective(row),
-    paymentRequired: isRowPaymentRequired(row),
-  }), [provider, rowDisabledEffective, visibilityVersion]);
+  const rowState = useCallback(
+    (row: UnionModelRow) =>
+      modelManagementState(provider, {
+        ids: rowModelIds(row),
+        capability: isCapabilityRow(row, provider.source === 'user'),
+        savedSelected: rowAnyEnabled(provider.id, row),
+        disabled: rowDisabledEffective(row),
+        paymentRequired: isRowPaymentRequired(row),
+      }),
+    [provider, rowDisabledEffective, visibilityVersion],
+  );
   const focusedRow = useMemo(() => {
     if (!focusModelId) return null;
     return (
@@ -561,8 +577,12 @@ export function UnifiedModelList({
   const deleteInstalledModel = useCallback(
     async (row: UnionModelRow) => {
       const ok = await confirm({
-        title: t('settings.providers.local.deleteModelConfirmTitle', { name: localizedModelName(row.name, t) }),
-        description: t('settings.providers.local.deleteModelConfirmBody', { name: localizedModelName(row.name, t) }),
+        title: t('settings.providers.local.deleteModelConfirmTitle', {
+          name: localizedModelName(row.name, t),
+        }),
+        description: t('settings.providers.local.deleteModelConfirmBody', {
+          name: localizedModelName(row.name, t),
+        }),
         confirmText: t('settings.providers.local.deleteModelConfirm'),
         cancelText: t('settings.providers.custom.deleteConfirm.cancel'),
         confirmVariant: 'destructive',
@@ -570,7 +590,9 @@ export function UnifiedModelList({
       if (!ok) return;
       try {
         await window.electronAPI.maker.localModelDelete(row.id);
-        toast.success(t('settings.providers.local.deleteModelDone', { name: localizedModelName(row.name, t) }));
+        toast.success(
+          t('settings.providers.local.deleteModelDone', { name: localizedModelName(row.name, t) }),
+        );
       } catch {
         toast.error(t('settings.providers.local.deleteModelFailed'));
       }
@@ -768,7 +790,9 @@ export function UnifiedModelList({
     <Tip text={t('settings.providers.models.advanced.open')}>
       <button
         type="button"
-        aria-label={t('settings.providers.models.advanced.openAria', { name: localizedModelName(row.name, t) })}
+        aria-label={t('settings.providers.models.advanced.openAria', {
+          name: localizedModelName(row.name, t),
+        })}
         onClick={() => openAdvanced(row)}
         className={cn(
           'flex h-6 w-6 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity',

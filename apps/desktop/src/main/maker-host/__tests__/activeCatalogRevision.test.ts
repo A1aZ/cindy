@@ -78,6 +78,50 @@ describe('active catalog revision', () => {
     expect(getActiveCatalog().providers.some((provider) => provider.id === 'xai')).toBe(true);
   });
 
+  it('refreshes custom media defaults without losing discovered or explicit fields', () => {
+    const current = structuredClone(BUNDLED_CATALOG);
+    const base = current.modelRegistry!.baseModels!.find((m) => m.id === 'openai/gpt-4o-mini-tts')!;
+    setActiveCatalog(current);
+    setCustomProviderConfigs([
+      {
+        id: 'private-audio',
+        name: 'Private',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://private.example/v1',
+            models: [
+              {
+                id: 'gpt-4o-mini-tts',
+                name: 'Live',
+                nameExplicit: false,
+                mode: 'audio_speech',
+                modalities: { input: [], output: [] },
+                discoveredMetadata: { name: 'Live', officialDocs: 'https://private.example/docs' },
+              },
+            ],
+          },
+        },
+      },
+    ]);
+    const read = () => getActiveCatalog().providers.find((p) => p.id === 'private-audio')!;
+    expect(read().audioModels![0]).toMatchObject({
+      name: 'Live',
+      mode: 'audio_speech',
+      officialDocs: 'https://private.example/docs',
+      modalities: { input: [], output: [] },
+    });
+    base.defaults.description = 'Updated public description';
+    current.modelRegistry!.updatedAt = '2099-09-09T00:00:00.000Z';
+    setActiveCatalog(current);
+    expect(read().audioModels![0]).toMatchObject({
+      name: 'Live',
+      description: 'Updated public description',
+      officialDocs: 'https://private.example/docs',
+      modalities: { input: [], output: [] },
+    });
+    expect(read().routing.codex?.upstream).toBe('https://private.example/v1');
+  });
+
   it('routes Anthropic discovery through the same revision listener', () => {
     const start = getActiveCatalogRevision();
     const listener = vi.fn((revision: number) => ({

@@ -232,6 +232,34 @@ A pre-migration stash was retained as a recovery copy.
   trigger pressure and stick axes. This is evidence of a native reading-path gap,
   not proof of a cable fault or proof that a replacement backend is already fixed.
 
+### Follow-up: USB Xbox input (Codex 3976765716)
+
+- Xbox/XInput-compatible controllers now use XInput 1.4, not WGI readings, for
+  both USB and Bluetooth. WGI no longer publishes the Xbox family, avoiding a
+  second presence owner or stale neutral frames overwriting XInput input.
+- The selected XInput slot remains stable while readable; failure emits absence
+  before a replacement's presence/frame, resets trigger state, and releases via
+  the existing Host/controller protocol. Empty slots are scanned on a one-second
+  cadence or explicit probe, not every frame. No idle-frame fallback heuristic.
+- XInput has slot identity rather than WGI device names: the accessory reports
+  Xbox Controller (XInput N), category XInput, and unknown transport rather than
+  pretending to infer a physical device name or USB/Bluetooth mapping. Native
+  non-XInput PlayStation/Nintendo/generic controllers retain their WGI path;
+  controllers exposed by external XInput emulators appear in the Xbox slot.
+- RED: three new tests failed at the missing XInput implementation. GREEN: all
+  16 Rust tests and six shared Host/controller contract tests passed, including
+  every supported button, axis endpoints, trigger normalization/hysteresis,
+  stable multi-slot selection, actual read failure, and exactly ordered release.
+- Clippy --all-targets and release build passed. Existing discovery tests moved
+  unchanged to a sibling test module to satisfy the all-targets Clippy check.
+- Live USB enumeration still succeeds. The new helper read a non-neutral D-pad
+  state, but this unattended 30-second capture did not show a press/release
+  sequence. Do NOT count it as complete physical input or UI acceptance; user
+  retest and Bluetooth regression on the new backend remain required.
+- cargo-llvm-cov is not installed, so no numerical coverage claim is made.
+- Required submission gates passed: root related unit gate (Desktop 152.7 seconds),
+  Desktop typecheck, Rust formatting and diff checks.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

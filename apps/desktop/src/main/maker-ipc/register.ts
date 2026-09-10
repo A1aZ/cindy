@@ -59,6 +59,7 @@ import {
   effectiveSourceIdForModel,
   findCatalogModel,
   storedCustomProviderId,
+  isLocalOnlyProviderForAgent,
 } from '@cindy/model-providers';
 import { createId } from '@paralleldrive/cuid2';
 import {
@@ -15353,9 +15354,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           );
         }
       }
-      if (runtimeStatus.remoteHostId && dbToMakerAgentKind(runtimeStatus.agentKind) === 'codex' &&
-          isCodexAccountProvider(effectiveProviderId === undefined ? currentProviderId : effectiveProviderId)) {
-        throwIpcError('INVALID_PARAMS', 'This Codex account belongs to the local device');
+      if (runtimeStatus.remoteHostId) {
+        const targetId = effectiveProviderId === undefined ? currentProviderId : effectiveProviderId;
+        const target = getActiveCatalog().providers.find((provider) => provider.id === targetId);
+        if (target && isLocalOnlyProviderForAgent(target, dbToMakerAgentKind(runtimeStatus.agentKind))) {
+          throwIpcError('INVALID_PARAMS', 'This provider requires local execution');
+        }
       }
       if (atomicSelection) {
         const meta = await maker.getSessionMeta(sessionId);

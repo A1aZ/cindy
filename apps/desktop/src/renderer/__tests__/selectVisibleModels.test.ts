@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelDescriptor } from '@/hooks/useAgentCapabilities';
 import {
   filterChatBridgedCodexProviders,
-  isLocalOnlyCodexProvider,
+  isLocalOnlyProviderForAgent,
   isDeviceModelVisible,
   selectVisibleModels,
 } from '@/lib/providerModels';
@@ -305,6 +305,18 @@ describe('selectVisibleModels — excludeChatBridgedCodex(SSH 远程隐藏 Chat 
 });
 
 describe('filterChatBridgedCodexProviders — provider source sections', () => {
+  it('filters Pi Claude accounts before deduplication, retaining Grok and API sources', () => {
+    const claude = { ...provider('claude-account', 'pi', ['claude-only', 'shared']), auth: { method: 'oauth', native: 'claude' } } as ProviderView;
+    const grok = { ...provider('grok-account', 'pi', ['grok-model']), auth: { method: 'oauth', native: 'xai' } } as ProviderView;
+    const api = { ...provider('api', 'pi', ['shared']), auth: { method: 'apiKey' } } as ProviderView;
+    const providers = [claude, grok, api];
+    expect(filterChatBridgedCodexProviders(providers, 'pi', true)).toEqual([grok, api]);
+    expect(filterChatBridgedCodexProviders(providers, 'pi', false)).toEqual(providers);
+    expect(filterChatBridgedCodexProviders([claude], 'claude-code', true)).toEqual([claude]);
+    const input = { agentKind: 'pi' as const, deviceId: undefined, providers, deviceCcModels: [], deviceCodexModels: [], excludeChatBridgedCodex: true };
+    expect(ids(selectVisibleModels(input))).toEqual(['grok-model', 'shared']);
+    expect(ids(selectVisibleModels({ ...input, deviceId: 'host', devicePiModels: [devModel('claude-only')] }))).toEqual(['claude-only']);
+  });
   const bridged = { ...codexProvider('bridged', ['deepseek-chat'], 'openai-chat'), connected: true };
   const native = { ...codexProvider('native', ['gpt-5.5'], 'openai-responses'), connected: true };
 
@@ -317,13 +329,13 @@ describe('filterChatBridgedCodexProviders — provider source sections', () => {
     const builtin = { ...account, id: 'openai', models: native.models };
     const api = { ...native, auth: { method: 'apiKey' } } as ProviderView;
     const providers = [account, builtin, api];
-    expect(isLocalOnlyCodexProvider(account)).toBe(true);
-    expect(isLocalOnlyCodexProvider(builtin)).toBe(false);
-    expect(isLocalOnlyCodexProvider(api)).toBe(false);
+    expect(isLocalOnlyProviderForAgent(account, 'codex')).toBe(true);
+    expect(isLocalOnlyProviderForAgent(builtin, 'codex')).toBe(false);
+    expect(isLocalOnlyProviderForAgent(api, 'codex')).toBe(false);
     expect(filterChatBridgedCodexProviders(providers, 'codex', true)).toEqual([builtin, api]);
     expect(filterChatBridgedCodexProviders(providers, 'codex', false)).toEqual(providers);
-    expect(filterChatBridgedCodexProviders(providers, 'claude-code', true)).toEqual(providers);
-    expect(filterChatBridgedCodexProviders(providers, 'pi', true)).toEqual(providers);
+    expect(filterChatBridgedCodexProviders(providers, 'claude-code', true)).toEqual([api]);
+    expect(filterChatBridgedCodexProviders(providers, 'pi', true)).toEqual([api]);
     const input = {
       agentKind: 'codex' as const, deviceId: undefined, providers,
       deviceCcModels: [], deviceCodexModels: [], excludeChatBridgedCodex: true,

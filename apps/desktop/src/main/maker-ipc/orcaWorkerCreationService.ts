@@ -81,10 +81,10 @@ export interface OrcaWorkerProviderSnapshot {
   /** true 表示该来源必须写入 session provider store 才能注入自己的 API key/OAuth token。 */
   requiresExplicitRoute?: boolean;
   /**
-   * Legacy field: true for local-only Codex routes, including Chat bridges and
-   * independent OAuth accounts. Shares isLocalOnlyCodexProvider with the picker.
+   * Local execution required for this provider/agent pair. Shares
+   * isLocalOnlyProviderForAgent with the picker.
    */
-  chatBridgedCodex?: boolean;
+  localOnlyForSsh?: boolean;
 }
 
 /** 自带凭证或明确无鉴权的第三方路由都不能回落到 worker/lead 的默认上游。 */
@@ -886,13 +886,13 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
       }
       // 未显式来源的 Worker 也必须按最终持久化的实际 routeProvider 判定；否则
       // 默认来源上的 chat-bridged provider 会漏过远端兼容闸。
-      if (routeProvider?.chatBridgedCodex === true) {
+      if (routeProvider?.localOnlyForSsh === true) {
         return {
           ok: false,
           errorCode: 'INVALID_PARAMS',
           message:
             `provider "${routeProvider.id}" is not available for SSH remote workers: ` +
-            'this Codex provider requires local execution — pick an SSH-compatible provider',
+            'this provider requires local execution — pick an SSH-compatible provider',
         };
       }
     }

@@ -2464,7 +2464,7 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
     });
   });
 
-  it.each(['deepseek', 'user-openai-account'])('rejects local-only Codex source %s before allocating a remote worker', async (providerId) => {
+  it.each([['deepseek', 'codex'], ['user-openai-account', 'codex'], ['user-claude-account', 'pi']] as const)('rejects local-only source %s/%s before allocating a remote worker', async (providerId, agent) => {
     const { service, deps } = createDeps({
       getLeadSessionRow: vi.fn(async () => remoteLeadRow),
       getAvailableModels: vi.fn(() => [
@@ -2472,7 +2472,7 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
       ]),
       getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
         'claude-code': [],
-        codex: [{ id: providerId, name: providerId, models: ['deepseek-v4'], chatBridgedCodex: true }],
+        [agent]: [{ id: providerId, name: providerId, models: ['deepseek-v4'], localOnlyForSsh: true }],
       })),
     });
 
@@ -2480,7 +2480,7 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
       service.createWorker({
         leadSessionId: 'lead-1',
         role: 'reviewer',
-        agent: 'codex',
+        agent,
         label: 'reviewer',
         model: 'deepseek-v4',
         providerId,
@@ -2559,7 +2559,7 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
       ]),
       getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
         'claude-code': [],
-        codex: [{ id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4'], chatBridgedCodex: true }],
+        codex: [{ id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4'], localOnlyForSsh: true }],
       })),
     });
 
@@ -2601,7 +2601,7 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
       ]),
       getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
         'claude-code': [],
-        codex: [{ id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4'], chatBridgedCodex: true }],
+        codex: [{ id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4'], localOnlyForSsh: true }],
       })),
     });
 

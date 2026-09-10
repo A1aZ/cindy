@@ -1,9 +1,18 @@
-import type { Provider } from './types.js';
+import type { AgentKind, Provider } from './types.js';
 
-/** SSH Codex cannot use the local Chat bridge or an independent local OAuth home. */
-export function isLocalOnlyCodexProvider(provider: Pick<Provider, 'id' | 'auth' | 'routing'>): boolean {
-  return provider.routing?.codex?.wireProtocol === 'openai-chat'
-    || (provider.id !== 'openai' && isOpenAiSubscriptionProvider(provider));
+/** Match the native SSH adapters; xAI forwarding and native Claude Code remain available. */
+export function isLocalOnlyProviderForAgent(
+  provider: Pick<Provider, 'id' | 'auth' | 'routing'>,
+  agent: AgentKind,
+): boolean {
+  if (agent === 'codex' && provider.routing?.codex?.wireProtocol === 'openai-chat') return true;
+  if (provider.auth?.method === 'oauth') {
+    const brand = providerCatalogId(provider);
+    if (brand === 'openai') return !(agent === 'codex' && provider.id === 'openai');
+    if (brand === 'anthropic') return agent !== 'claude-code';
+    if (brand === 'xai') return agent !== 'pi';
+  }
+  return false;
 }
 
 /** Provider identity is separate from the account entry's stable id. */

@@ -1,3 +1,4 @@
+import type { TurnUsageContext } from './turnUsageContext.js';
 import { registerPluginListHandler } from './pluginListHandler.js';
 import { initializeBotAuthorizationHost } from './botAuthorizationHost.js';
 import { resolveBotAuthorizationDelivery, buildBotAuthorizationContinuation, commitBotAuthorizationInput, type BotAuthorizationInputGuard, getBotAuthorizationService } from './botAuthorizationService.js';
@@ -2809,8 +2810,8 @@ async function readSessionModelForUsage(sessionId: string): Promise<string> {
  * 只在第一次 isRunning:true 时写入,避免后续 progress status 在用户切模型后覆盖本轮归因。
  */
 const turnModelPromiseBySession = new Map<string, Promise<string>>();
-/** Pi request pricing variant captured at product-turn start. */
-const turnPiFastModeBySession = new Map<string, boolean>();
+/** Billing identity and Pi tariff captured at product-turn start. */
+const turnUsageContextBySession = new Map<string, TurnUsageContext>();
 
 /**
  * Zero-value marker for a future subscription turn that was deliberately not
@@ -4300,7 +4301,7 @@ function cleanupClosedSessionRuntime(session: WiredSession): void {
   lastReportedCostUsdBySession.delete(session.id);
   lastReportedModelUsageBySession.delete(session.id);
   turnModelPromiseBySession.delete(session.id);
-  turnPiFastModeBySession.delete(session.id);
+  turnUsageContextBySession.delete(session.id);
   productTurnWallClockTracker.clear(session.id);
   productTurnUsageTargetTracker.clear(session.id);
   claudeOutputLagTimingGuard.clear(session.id);
@@ -4392,8 +4393,8 @@ const sessionEventDependencies: SessionEventDependencies = {
   get readSessionModelForUsage() {
     return readSessionModelForUsage;
   },
-  get turnPiFastModeBySession() {
-    return turnPiFastModeBySession;
+  get turnUsageContextBySession() {
+    return turnUsageContextBySession;
   },
   get silentStopTurnLeaseGate() {
     return silentStopTurnLeaseGate;

@@ -1,3 +1,4 @@
+import type { TurnUsageContext } from '../turnUsageContext.js';
 import { Session, type AgentEvent, type AgentSessionHandle } from '@cindy/maker-core';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { handleSessionEvent, type SessionEventDependencies } from '../sessionEventPipeline.js';
@@ -282,7 +283,7 @@ function harness() {
     },
     turnModelPromiseBySession: new Map<string, Promise<string>>(),
     readSessionModelForUsage: vi.fn(async () => 'test-model'),
-    turnPiFastModeBySession: new Map<string, boolean>(),
+    turnUsageContextBySession: new Map<string, TurnUsageContext>(),
     silentStopTurnLeaseGate: { turnLeaseIdForEvent: vi.fn(() => 'instance:1') },
     agentInputCoordinatorHolder: {
       getActiveInputClientId: vi.fn((): string | null => null),
@@ -947,6 +948,52 @@ describe('usage through the production event pipeline', () => {
     await h.dispose();
   });
 
+  it.each(([
+    ['pi', 'claude'], ['pi', 'xai'], ['pi', 'codex'],
+    ['codex', 'claude'], ['codex', 'xai'], ['codex', 'codex'],
+  ] as const).flatMap(([source, native]) => [[source, native, false] as const, [source, native, true] as const]))('keeps %s %s subscription identity after deletion (error=%s)', async (source, native, failed) => {
+    const h = harness();
+    pricing(true);
+    effects.fn('getSessionProvider').mockReturnValue('old-account');
+    effects.fn('isUserProviderSession').mockReturnValue(true);
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'old-account',
+      auth: { method: 'oauth', native }, access: { kind: 'subscription' } }] });
+    h.emit(event('status', { isRunning: true }, { source }));
+    effects.fn('getSessionProvider').mockReturnValue('xd');
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [] });
+    effects.fn('isUserProviderSession').mockReturnValue(false);
+    h.emit(event('status', { isRunning: true }, { source }));
+    if (failed) h.emit(event('error', { message: 'provider failed', isTerminal: true }, { source }));
+    h.emit(event('done', { usage: usage(source) }, { source }));
+    await microtasks();
+    expect(effects.fn('recordModelTurnUsage')).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.stringContaining('#billing=subscription'), inputTokensDelta: 100,
+      outputTokensDelta: 20, cacheReadTokensDelta: 10,
+      money: expect.objectContaining({ kind: 'value-estimate' }),
+    }));
+    expect(effects.fn('getCodexProviderSubscriptionValuePrice')).toHaveBeenCalledWith(
+      'old-account', expect.anything(), expect.anything(), ...(source === 'pi' ? [undefined, undefined, 'pi'] : []),
+    );
+    expect(effects.fn('recordTurnSpend')).not.toHaveBeenCalled();
+    expect(effects.fn('recordSessionTurnSpend')).not.toHaveBeenCalled();
+    expect(h.deps.turnUsageContextBySession.has('task')).toBe(false);
+    h.emit(event('status', { isRunning: true }, { source }));
+    expect(h.deps.turnUsageContextBySession.get('task')?.providerId).toBe('xd');
+    await h.dispose();
+  });
+
+  it('overwrites failed-turn billing identity when the next turn starts without a paired done', async () => {
+    const h = harness();
+    pricing(true);
+    h.emit(event('status', { isRunning: true }, { source: 'pi' }));
+    expect(h.deps.turnUsageContextBySession.get('task')?.providerId).toBe('openai');
+    h.emit(event('error', { message: 'provider failed', isTerminal: true }, { source: 'pi' }));
+    effects.fn('getSessionProvider').mockReturnValue('xd');
+    h.emit(event('status', { isRunning: true }, { source: 'pi', turnAttemptToken: 2 }));
+    expect(h.deps.turnUsageContextBySession.get('task')?.providerId).toBe('xd');
+    await h.dispose();
+  });
+
   it.each([['openai-account', 'codex', 'chatgpt/gpt-5.6-luna'], ['claude-account', 'claude', 'claude-sonnet-4-6'], ['xai-account', 'xai', 'xai/grok-4.6']])('uses the %s Pi subscription price override', async (providerId, native, model) => {
     const h = harness();
     pricing(true);
@@ -1093,12 +1140,17 @@ describe('usage through the production event pipeline', () => {
     await h.dispose();
   });
 
-  it.each([false, true])('keeps independent Claude subscription accounting out of actual spend (fallback=%s)', async (fallback) => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])('keeps independent Claude subscription accounting out of actual spend (fallback=%s, deleted=%s)', async (fallback, deleted) => {
     const h = harness();
     pricing(true);
     effects.fn('getSessionProvider').mockReturnValue('claude-account');
     effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'claude-account', auth: { method: 'oauth', native: 'claude' }, access: { kind: 'subscription' } }] });
     h.deps.lastReportedCostUsdBySession.set('task', 10);
+    if (deleted) {
+      h.emit(event('status', { isRunning: true }, { source: 'claude-code' }));
+      effects.fn('getActiveCatalog').mockReturnValue({ providers: [] });
+      effects.fn('getSessionProvider').mockReturnValue('new-api-account');
+    }
     h.emit(event('done', {
       total_cost_usd: 12,
       usage: { input_tokens: 100, output_tokens: 20 },

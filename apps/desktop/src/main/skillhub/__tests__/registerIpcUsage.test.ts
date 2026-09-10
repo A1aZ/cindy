@@ -65,6 +65,7 @@ vi.mock('../../authManager', () => ({ getCurrentDataOwnerId }));
 const ownerState = { generation: 1, pending: false };
 vi.mock('../../appSessionState', () => ({
   activeOwnerScopeKey: () => `cloud:owner:${ownerState.generation}`,
+  getActiveDataOwnerPushStamp: () => ({ dataOwnerId: 'owner', ownerGeneration: ownerState.generation }),
   isAppSessionBoundaryPending: vi.fn(() => ownerState.pending),
 }));
 
@@ -193,7 +194,9 @@ describe('registerSkillhubIpc usage handlers', () => {
     });
     const feedback = { phase: 'scan-result', name: 'review-helper', status: 'rejected', rejectionReason: 'Private feedback' };
     publishServiceOptions.onProgress!(feedback);
-    expect(trusted.webContents.send).toHaveBeenCalledWith('skillhub:publish-progress', feedback);
+    expect(trusted.webContents.send).toHaveBeenCalledWith('skillhub:publish-progress', {
+      ...feedback, ownerStamp: { dataOwnerId: 'owner', ownerGeneration: 1 },
+    });
     for (const win of [utility, navigated, destroyed]) {
       expect(isTrustedAppRendererWindow).toHaveBeenCalledWith(win);
       expect(win.webContents.send).not.toHaveBeenCalled();
@@ -204,6 +207,13 @@ describe('registerSkillhubIpc usage handlers', () => {
     isTrustedAppRendererWindow.mockReturnValue(false);
     publishServiceOptions.onProgress!(feedback);
     expect(trusted.webContents.send).toHaveBeenCalledTimes(1);
+
+    ownerState.pending = true;
+    isTrustedAppRendererWindow.mockReturnValue(true);
+    vi.mocked(BrowserWindow.getAllWindows).mockReturnValueOnce([trusted] as never);
+    publishServiceOptions.onProgress!(feedback);
+    expect(trusted.webContents.send).toHaveBeenCalledTimes(1);
+    vi.mocked(BrowserWindow.getAllWindows).mockReset().mockReturnValue([]);
   });
 
   describe.each([

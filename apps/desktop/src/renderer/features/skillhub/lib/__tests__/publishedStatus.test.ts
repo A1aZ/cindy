@@ -93,6 +93,16 @@ describe('published status badges', () => {
     ], '1.0.0', 'rejected')).toEqual({ version: '1.0.0', status: 'rejected' });
   });
 
+  it.each(['failed', 'blocked', 'FAIL', ' failed '])('does not classify first-version %s as a manual rejection', (status) => {
+    expect(rejectedPublishedReviewFromVersions([
+      { version: '1.0.0', scanStatus: status },
+    ], '1.0.0', status)).toBeNull();
+    // A stale info snapshot must not override the newer version-history status.
+    expect(rejectedPublishedReviewFromVersions([
+      { version: '1.0.0', scanStatus: status },
+    ], '1.0.0', 'rejected')).toBeNull();
+  });
+
   it('clears stale rejection feedback when that version is now approved', () => {
     expect(rejectedPublishedReviewFromVersions([
       { version: '1.0.0', scanStatus: 'approved' },

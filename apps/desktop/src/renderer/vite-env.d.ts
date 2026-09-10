@@ -6969,7 +6969,7 @@ type SkillhubPublishErrorCode =
   | 'INVALID_VISIBILITY'
   | 'INTERNAL';
 
-type SkillhubPublishProgressEvent =
+type SkillhubPublishProgressEvent = (
   | { phase: 'packing' }
   | { phase: 'init' }
   | { phase: 'uploading' }
@@ -7000,7 +7000,8 @@ type SkillhubPublishProgressEvent =
         issues?: unknown[];
       }>;
     }
-  | { phase: 'failed'; name?: string; errorCode: SkillhubPublishErrorCode; message: string };
+  | { phase: 'failed'; name?: string; errorCode: SkillhubPublishErrorCode; message: string }
+) & { ownerStamp?: import('../shared/dataOwnerPush').DataOwnerPushStamp };
 
 interface Window {
   electronAPI: ElectronAPI;

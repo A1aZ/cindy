@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { Spinner } from '@/components/ui/spinner';
 import { toast } from '@/lib/toast';
 import { useAuth } from '@/contexts/AuthContext';
+import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { pickDefaultVersion } from './versionUtils';
 import { triggerIncrementalSync } from './hooks/useSkillSync';
@@ -653,11 +654,13 @@ export function PublishDialog({
         return;
       }
       if (event.phase === 'scan-result') {
+        const owner = getDataOwnerGeneration();
         const eff = effectiveSkill();
         if (event.name !== eff.name) return;
         void (async () => {
           invalidateHash(eff.absolutePath);
           await refreshSkillhub();
+          if (!isDataOwnerGenerationCurrent(owner)) return;
           void triggerIncrementalSync([event.name]);
           dispatch({ type: 'CLOSE' });
           onOpenChange(false);
@@ -667,7 +670,9 @@ export function PublishDialog({
           }
           activePublishNameRef.current = null;
           failedProgressNameRef.current = null;
-          onScanResult?.({ status: event.status, gates: event.gates, rejectionReason: event.rejectionReason });
+          if (isDataOwnerGenerationCurrent(owner)) {
+            onScanResult?.({ status: event.status, gates: event.gates, rejectionReason: event.rejectionReason });
+          }
         })();
         return;
       }

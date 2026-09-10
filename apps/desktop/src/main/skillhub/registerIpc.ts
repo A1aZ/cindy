@@ -9,7 +9,7 @@ import path from 'node:path';
 import type { Maker } from '@cindy/maker-core';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { getCurrentDataOwnerId } from '../authManager';
-import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState';
+import { activeOwnerScopeKey, getActiveDataOwnerPushStamp, isAppSessionBoundaryPending } from '../appSessionState';
 import { ensureReady as ensureLocalDbReady } from '../localDb';
 import {
   getCurrentDbClientSnapshot,
@@ -24,7 +24,7 @@ import { type MdKind, parseAndValidateFrontmatter } from './frontmatterValidatio
 import * as importLocalSkill from './importLocalSkill';
 import * as installService from './installService';
 import { SkillhubMarketService, skillhubIpcError } from './marketService';
-import type { PublishParams } from './publishService';
+import type { PublishParams, PublishProgressEvent } from './publishService';
 import { SkillPublishService } from './publishService';
 import { reconcileMineRegistry } from './reconcileMineRegistry';
 import { registryService } from './registry';
@@ -341,10 +341,12 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
     }
   };
 
-  const broadcastPublishProgress = (payload: unknown) => {
+  const broadcastPublishProgress = (payload: PublishProgressEvent) => {
+    if (isAppSessionBoundaryPending()) return;
+    const stampedPayload = { ...payload, ownerStamp: getActiveDataOwnerPushStamp() };
     for (const win of BrowserWindow.getAllWindows()) {
       try {
-        if (isTrustedAppRendererWindow(win)) win.webContents.send('skillhub:publish-progress', payload);
+        if (isTrustedAppRendererWindow(win)) win.webContents.send('skillhub:publish-progress', stampedPayload);
       } catch {
         // Window teardown can race with background scan reconciliation.
       }

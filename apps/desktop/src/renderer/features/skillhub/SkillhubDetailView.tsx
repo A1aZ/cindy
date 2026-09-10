@@ -76,6 +76,7 @@ import { PublishDialog, type ScanResultPayload } from './PublishDialog';
 import { ScanResultDialog } from './ScanResultDialog';
 import { useSkillhubIdentityPolicy } from './hooks/useSkillhubIdentityPolicy';
 import { useRejectionFeedback } from './hooks/useRejectionFeedback';
+import { shouldHandlePublishProgressEvent } from './lib/publishProgressFilter';
 import { SkillhubDiffPanel } from './SkillhubDiffPanel';
 
 const log = createLogger('SkillhubDetailView');
@@ -1203,6 +1204,7 @@ export function SkillhubDetailView() {
   useEffect(() => {
     if (!publishProgressTarget) return;
     const unsubscribe = window.electronAPI.skillhub.onPublishProgress((event) => {
+      if (!shouldHandlePublishProgressEvent(event, publishProgressTarget.name)) return;
       if (event.phase === 'done') {
         if (event.name !== publishProgressTarget.name) return;
         if (publishOpenRef.current) {

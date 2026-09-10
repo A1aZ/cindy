@@ -1,3 +1,5 @@
+import { normalizeScanStatus } from './scanStatus';
+
 export type SpecialPublishedStatus = 'pending' | 'scanning' | 'quarantine' | 'rejected';
 
 export interface PublishedStatusSource {
@@ -140,7 +142,10 @@ export function rejectedPublishedReviewFromVersions(
   if (!rejected) return null;
   const latest = latestVersion?.trim() ?? '';
   // On a first publication, latestVersion is the rejected version itself, not an approved market version.
-  const isRejectedFirstVersion = rejected.version === latest && specialPublishedStatus(latestVersionStatus) === 'rejected';
+  const isRejectedFirstVersion = rejected.version === latest
+    && normalizeScanStatus(latestVersionStatus ?? '') === 'rejected'
+    && (versions ?? []).some((item) => readStringField(item, 'version') === latest
+      && normalizeScanStatus(readStringField(item, 'scanStatus') || readStringField(item, 'status')) === 'rejected');
   if (latest && compareDottedVersion(rejected.version, latest) <= 0 && !isRejectedFirstVersion) return null;
   return rejected;
 }

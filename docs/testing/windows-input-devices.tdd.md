@@ -163,6 +163,22 @@ A pre-migration stash was retained as a recovery copy.
 - Final submission validation passed: related Desktop unit gate (169.7 seconds),
   Desktop typecheck with the existing temporary incremental cache, and diff checks.
 
+### Follow-up: legacy Micro compatibility (Codex 3975189213 / 3975189217)
+
+- Native input now follows the existing host contract for omitted/null act, exact
+  numeric strings, numeric values, key aliases and encoder identifiers. Invalid
+  coercions remain rejected. RED dropped valid legacy notifications; GREEN covers
+  bare and wrapped notifications plus invalid actions.
+- RPC rejections retain typed details internally. Only explicit unsupported-method
+  responses to device.status degrade to empty optional telemetry. Timeouts, HID
+  failures, permission errors and other remote failures remain fatal; other RPCs
+  do not use this fallback. RED rejected method-not-found status; GREEN keeps the
+  device usable while preserving real failure behavior.
+- All 14 Micro Rust tests, Clippy and release build pass. The existing local test
+  installer predates these review fixes and has not been rebuilt during monitoring.
+- Final submission gates passed: related Desktop unit tests (283.8 seconds),
+  Desktop typecheck with the existing temporary cache, and diff checks.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

@@ -11,6 +11,117 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Preserve remote rejection details for narrow optional-method compatibility decisions.
+#[derive(Debug)]
+struct RpcFailure(Value);
+impl std::fmt::Display for RpcFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Micro RPC rejected")
+    }
+}
+impl std::error::Error for RpcFailure {}
+impl RpcFailure {
+    fn unsupported_method(&self) -> bool {
+        if self.0.get("code").and_then(Value::as_i64) == Some(-32601) {
+            return true;
+        }
+        let code: String = self
+            .0
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| !matches!(c, '_' | '-' | ' '))
+            .collect();
+        if [
+            "notsupported",
+            "unsupported",
+            "notimplemented",
+            "methodnotfound",
+            "enosys",
+        ]
+        .iter()
+        .any(|marker| code.contains(marker))
+        {
+            return true;
+        }
+        let message = self
+            .0
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| self.0.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        [
+            "not supported",
+            "unsupported",
+            "not implemented",
+            "unknown method",
+            "method not found",
+        ]
+        .iter()
+        .any(|marker| {
+            message == *marker || (message.contains("status") && message.contains(marker))
+        })
+    }
+}
+
+fn rpc_response(reply: &Value) -> Result<Value> {
+    if let Some(error) = reply.get("error") {
+        return Err(Box::new(RpcFailure(error.clone())));
+    }
+    Ok(reply["result"].clone())
+}
+
+fn optional_status(outcome: Result<Value>) -> Result<Value> {
+    match outcome {
+        Err(error)
+            if error
+                .downcast_ref::<RpcFailure>()
+                .is_some_and(RpcFailure::unsupported_method) =>
+        {
+            Ok(json!({}))
+        }
+        // Timeouts, HID errors and other remote rejections still recycle the handle.
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    #[test]
+    fn unsupported_status_rpc_keeps_the_device_usable_without_telemetry() {
+        for error in [
+            json!({"code":-32601,"message":"Method not found"}),
+            json!({"message":"not supported"}),
+            json!({"code":"ERR_NOT_IMPLEMENTED","message":"status unavailable"}),
+        ] {
+            let response = json!({"id":1,"error":error});
+            assert!(rpc_response(&response).is_err()); // Non-status RPCs remain fatal.
+            assert_eq!(optional_status(rpc_response(&response)).unwrap(), json!({}));
+        }
+    }
+    #[test]
+    fn real_status_errors_and_transport_failures_stay_fatal() {
+        for error in [
+            json!({"code":-13,"message":"permission denied"}),
+            json!({"message":"device disconnected"}),
+            json!({"code":-32602,"message":"invalid params"}),
+        ] {
+            assert!(optional_status(rpc_response(&json!({"error":error}))).is_err());
+        }
+        assert!(optional_status(Err("Micro RPC timed out".into())).is_err());
+        assert!(optional_status(Err("short Micro write".into())).is_err());
+        assert_eq!(
+            optional_status(Ok(json!({"version":"1.2.3"}))).unwrap(),
+            json!({"version":"1.2.3"})
+        );
+    }
+}
+
 fn emit(message: Value) -> Result<()> {
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, &message)?;
@@ -89,17 +200,14 @@ impl Micro {
         while Instant::now() < deadline {
             for reply in self.read(20)? {
                 if reply["id"].as_u64() == Some(id) {
-                    if reply.get("error").is_some() {
-                        return Err("Micro RPC rejected".into());
-                    }
-                    return Ok(reply["result"].clone());
+                    return rpc_response(&reply);
                 }
             }
         }
         Err("Micro RPC timed out".into())
     }
     fn status(&mut self) -> Result<()> {
-        let status = self.rpc(json!({"method":"device.status"}))?;
+        let status = optional_status(self.rpc(json!({"method":"device.status"})))?;
         emit(json!({"kind":"device","device":{
             "deviceType":"codex-micro", "isUsbConnection":true,
             "firmwareVersion":status.get("version").and_then(Value::as_str),

@@ -58,7 +58,11 @@ pub fn input(message: &Value) -> Option<Value> {
     } else {
         return None;
     };
-    if method == Some("v.oai.rad") || (method.is_none() && params.get("k").is_none()) {
+    let hid_key = params
+        .get("key")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("k").and_then(Value::as_str));
+    if method == Some("v.oai.rad") || (method.is_none() && hid_key.is_none()) {
         let angle = params.get("a").or_else(|| params.get("angle"))?.as_f64()?;
         let distance = params
             .get("d")
@@ -73,15 +77,40 @@ pub fn input(message: &Value) -> Option<Value> {
         }
         return Some(json!({"kind":"joystick","event":{"angle":angle,"distance":distance}}));
     }
-    let key = params["k"].as_str()?;
-    let act = params["act"].as_u64()?;
+    let key = hid_key?;
+    if key.is_empty() || key.len() > 32 {
+        return None;
+    }
+    // Match parseWorkLouderCodexHidAct: omitted/null means press; only exact
+    // numeric strings are accepted (no boolean or arbitrary string coercion).
+    let act = match params.get("act") {
+        None | Some(Value::Null) => 1,
+        Some(Value::String(value)) => match value.as_str() {
+            "0" => 0,
+            "1" => 1,
+            "2" => 2,
+            _ => return None,
+        },
+        Some(Value::Number(value)) => match value.as_f64()? {
+            0.0 => 0,
+            1.0 => 1,
+            2.0 => 2,
+            _ => return None,
+        },
+        _ => return None,
+    };
     let valid = [
         "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
         "AG11", "AG12", "ACT06", "ACT07", "ACT08", "ACT09", "ACT10", "ACT11", "ACT12", "ENC",
         "ENC_CW", "ENC_CC",
     ]
-    .contains(&key);
-    if !valid || act > 2 {
+    .contains(&key)
+        || key.strip_prefix("ENC").is_some_and(|suffix| {
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    if !valid {
         return None;
     }
     Some(json!({"kind":"hid", "event":{"key":key,"act":act}}))
@@ -129,6 +158,51 @@ pub fn off_frame() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accepts_legacy_act_defaults_and_exact_numeric_strings() {
+        for (act, expected) in [
+            (Value::Null, 1),
+            (json!("0"), 0),
+            (json!("1"), 1),
+            (json!("2"), 2),
+            (json!(1.0), 1),
+        ] {
+            assert_eq!(
+                input(&json!({"k":"AG06","act":act})),
+                Some(json!({"kind":"hid","event":{"key":"AG06","act":expected}}))
+            );
+            assert_eq!(
+                input(&json!({"method":"v.oai.hid","params":{"k":"AG06","act":act}})),
+                Some(json!({"kind":"hid","event":{"key":"AG06","act":expected}}))
+            );
+        }
+        assert_eq!(
+            input(&json!({"k":"AG00"})),
+            Some(json!({"kind":"hid","event":{"key":"AG00","act":1}}))
+        );
+        for act in [
+            json!(false),
+            json!(3),
+            json!(-1),
+            json!(0.5),
+            json!("1.0"),
+            json!("true"),
+        ] {
+            assert!(input(&json!({"k":"AG00","act":act})).is_none());
+        }
+    }
+    #[test]
+    fn preserves_the_host_key_alias_and_encoder_acceptance_contract() {
+        assert_eq!(
+            input(&json!({"key":"AG12","act":"1"})),
+            Some(json!({"kind":"hid","event":{"key":"AG12","act":1}}))
+        );
+        assert_eq!(
+            input(&json!({"k":"ENC_TOUCH","act":0})),
+            Some(json!({"kind":"hid","event":{"key":"ENC_TOUCH","act":0}}))
+        );
+        assert!(input(&json!({"k":"ENC-bad","act":1})).is_none());
+    }
     #[test]
     fn preserves_all_legacy_agent_keys_in_bare_and_wrapped_notifications() {
         for slot in 0..=12 {

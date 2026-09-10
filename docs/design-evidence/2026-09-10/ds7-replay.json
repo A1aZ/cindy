@@ -1,7 +1,7 @@
 {
   "date": "2026-09-10",
   "executor": "Codex",
-  "reviewerStatus": "pending independent reviewer and administrator before merge",
+  "reviewerStatus": "User explicitly waived independent dual review on 2026-09-10; executor self-review and E2E completed, administrator approval still required before merge",
   "scriptHashes": {
     "scripts/hardcoded-color-audit.mjs": "ccadd6ea522f6dcb194eb4ca7811de306be87de0e8c436319e31453b988512b0",
     "scripts/shared/hardcoded-color-match.mjs": "5e61f5fffbcf978f6a1ffc1ec7030d1af2141a488dd8b812b1cbab8abf70fa66",

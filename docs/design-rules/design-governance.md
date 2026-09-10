@@ -213,7 +213,7 @@ Primitive 与 Pattern 默认只绑定 semantic 角色。只有品牌表达、兼
 3. 没有标准替代道路时不上阻断级门禁——先报告模式运行并用历史 PR 回放验证误报率，
    再升级阻断；门禁错误信息必须包含文件、行号与推荐改法。
 
-### DS-7 首批接线（2026-09-10 本地候选，尚未合入）
+### DS-7 首批接线（2026-09-10 提交候选，尚未合入）
 
 复用 `client-ci` 的 `verify-checks → verify`，增量运行 `pnpm check:design-colors` 与
 `pnpm check:design-inventory`。`hardcoded-color-audit.test.mjs` 验证脚本入口、真实 CLI
@@ -234,6 +234,8 @@ Primitive 与 Pattern 默认只绑定 semantic 角色。只有品牌表达、兼
 变成报告成功，操作错误仍失败。未提交候选用 `--worktree --base-ref <实际基线>`，默认
 commit 模式不覆盖未提交内容。正式 CI 比较事件 base 与当前候选 merge/head，所有引用
 经环境变量和参数数组传递。
+
+2026-09-10 手机端协作约定：同事正在重构，DS-7入口发现不冻结布局或组件；DS-10与未成熟规则等重构方案明确后一起评估。新增/改名路由同步台账，不能把旧组件结构当永久规范。
 
 回退本批新增颜色检查时，可把该 CI 步骤切到 `pnpm report:design-colors` 或撤回新增
 接线；保留现有主题、排版、Mobile、单测、类型、Windows 与 verify 汇总。台账发现和

@@ -6,7 +6,7 @@
 
 DS-6 已随 [#4135](https://github.com/makecindy/cindy/pull/4135) 合入（head `62472f559c` / merge `6559d2610a`）。表单贡献入口：先读 [DESIGN §4](./DESIGN.md#inputs--forms)，在真实字段中复用 [FormField](../../apps/desktop/src/renderer/components/ui/form-field.tsx) 与 [SettingsTextInput](../../apps/desktop/src/renderer/components/settings/SettingsTextInput.tsx)（普通域用 Input）；保存反馈用 [Button loading](../../apps/desktop/src/renderer/components/ui/button.tsx)。业务校验、请求与焦点由表单持有；首消费者为 [CustomProviderDialog](../../apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx)，第二消费者为 [McpServerDialog](../../apps/desktop/src/renderer/components/settings/McpServerDialog.tsx)。[证据与未验收项](../design-evidence/2026-09-08/ds6-forms.md) 区分组件/整页/人工/G2，settings 仍是 pilot。
 
-DS-7 本地候选入口：[规则范围与回退](./design-governance.md#8-治理接线纪律)、[固定历史回放、注入和接线证据](../design-evidence/2026-09-10/ds7-guards.md)。新增颜色可用 `pnpm check:design-colors --base-ref <基线> --worktree` 检查；只报告用 `pnpm report:design-colors`。当前 main 尚未启用候选接线，管理员审核与实际合并另行记录。
+DS-7 提交候选入口：[规则范围与回退](./design-governance.md#8-治理接线纪律)、[固定历史回放、注入和接线证据](../design-evidence/2026-09-10/ds7-guards.md)。新增颜色可用 `pnpm check:design-colors --base-ref <基线> --worktree` 检查；只报告用 `pnpm report:design-colors`。当前 main 尚未启用候选接线，管理员审核与实际合并另行记录。
 
 ## 文档索引
 

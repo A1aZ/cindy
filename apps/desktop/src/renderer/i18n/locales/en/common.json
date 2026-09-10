@@ -1294,7 +1294,6 @@
           },
           "toast": {
             "title": "Added to dictionary",
-            "titleMultiple": "Added {{count}} terms",
             "termsSummary": "{{terms}} and {{count}} terms total",
             "automaticAdded": "Auto-added to dictionary: {{term}}",
             "automaticAddedMultiple": "Auto-added {{count}} terms, including {{term}}",
@@ -1614,6 +1613,7 @@
           "modelIdPlaceholder": "model-id",
           "modelNamePlaceholder": "Display name",
           "modelContextWindowPlaceholder": "Context (tokens)",
+          "modelType": "Model type",
           "modelContextWindowTitle": "Context window in tokens. Leave empty for the conservative 200K default; affects the window display and compaction threshold.",
           "modelSupportsImageInput": "Supports image input",
           "modelSupportsImageInputHelp": "Enable only when the model actually accepts visual input. Start a new Pi task after saving.",
@@ -7729,6 +7729,7 @@
         "china": "China",
         "image": "Image",
         "video": "Video",
+        "audio": "Audio Generation",
         "tts": "Text to Speech",
         "stt": "Speech to Text",
         "realtime": "Realtime Audio",

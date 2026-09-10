@@ -339,8 +339,10 @@ test('GENERATED 含 §2.1 六项字段,裸颜色与 audit 共用匹配器', () =
   assert.equal(/from ['"]\.\/shared\/hardcoded-color-match\.mjs['"]/.test(auditSource), true);
   assert.equal(/HEX_RE\s*=/.test(auditSource), false, 'audit 不得再内联第二套 HEX 正则');
 
-  const hits = matchBareColors('color:#fff; bg:rgb(1, 2, 3); overlay:rgba(0,0,0,.4); hsl(120, 10%, 20%); hsla(1,2%,3%,.5)');
-  assert.deepEqual(hits, ['#fff', 'rgb(1, 2, 3)', 'rgba(0,0,0,.4)', 'hsl(120, 10%, 20%)', 'hsla(1,2%,3%,.5)']);
+  const hits = matchBareColors('color:#fff; background:rgb(1, 2, 3); border-color:rgba(0,0,0,.4); hsl(120, 10%, 20%); hsla(1,2%,3%,.5)');
+  assert.deepEqual(hits, ['#fff', 'rgb(1, 2, 3)', 'rgba(0,0,0,.4)']);
+  // 数值颜色函数需要样式语境：脱离声明的函数文本与普通字符串一样不计入裸颜色。
+  assert.deepEqual(matchBareColors("const label = 'hsl(120, 10%, 20%)';"), []);
 });
 
 test('孤儿人工行只报告不删除', () => {

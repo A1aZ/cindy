@@ -7,7 +7,7 @@ import matter from 'gray-matter';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { findBareColors, matchBareColors } from '../shared/hardcoded-color-match.mjs';
-import { addedLines, inspectFile, readExemptions, audit } from '../hardcoded-color-audit.mjs';
+import { addedLines, inspectFile, readExemptions, objectPathAt, audit } from '../hardcoded-color-audit.mjs';
 import { classifyDesignLayer, reportDesignLayers } from '../shared/design-layer-report.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const exemptions = readExemptions(root);
@@ -23,6 +23,21 @@ test('semantic colours, PR prose, URL and comments are not literals; numeric hex
   for (const value of ['#fff', '#1234', '#123456', '#12345678', 'rgb(1, 2, 3)', 'hsl(120 10% 20%)', 'oklch(.4 .2 120)']) {
     assert.deepEqual(matchBareColors(`const style = { color: '${value}' };`), [value]);
   }
+});
+
+test('numeric colour functions need a colour-bearing context; plain strings are prose', () => {
+  for (const source of [
+    "const label = 'RGB(1, 2, 3)';", "const label = 'hsl(120, 10%, 20%)';",
+    "title: 'rgb(1, 2, 3) format example'", '帮助文案：支持 RGB(1, 2, 3) 与 HEX 两种写法',
+  ]) assert.deepEqual(matchBareColors(source), [], source);
+  for (const [source, values] of [
+    ["const style = { backgroundColor: 'rgb(1, 2, 3)' };", ['rgb(1, 2, 3)']],
+    ["const strokeColor = 'hsl(120 10% 20%)';", ['hsl(120 10% 20%)']],
+    ["panel.style.boxShadow = '0 0 0 rgba(0,0,0,0)';", ['rgba(0,0,0,0)']],
+    ['<circle fill="rgb(1,2,3)" />', ['rgb(1,2,3)']],
+    ["'--panel-shadow':\n    'inset 0 1px 0 rgb(1 2 3)',", ['rgb(1 2 3)']],
+    ["backgroundImage: 'linear-gradient(rgb(1,2,3), var(--x))'", ['rgb(1,2,3)']],
+  ]) assert.deepEqual(matchBareColors(source), values, source);
 });
 
 test('nested fallback and mixed expressions report each literal at its real location', () => {
@@ -46,19 +61,30 @@ test('every old exempt Desktop consumer rejects an unapproved new colour', () =>
 
 test('old approved Toast, hljs, composer and asset values are narrow, not file bypasses', () => {
   const cases = [
-    ['components/ui/toast/Toast.tsx', "color: '#417CDD',", 'allowed'],
+    ['components/ui/toast/Toast.tsx', "export const VARIANT_MAP = { info: { color: '#417CDD' } };", 'allowed'],
+    ['components/ui/toast/Toast.tsx', "const OTHER_MAP = { color: '#417CDD' };", 'block'],
+    ['components/ui/toast/Toast.tsx', "export const VARIANT_MAP = { error: { color: '#417CDD' } };", 'block'],
     ['components/ui/toast/Toast.tsx', "backgroundColor: '#417CDD',", 'block'],
     ['components/ui/toast/Toast.tsx', "background-color: '#417CDD';", 'block'],
-    ['components/ui/toast/Toast.tsx', "color: '#417CCE',", 'block'],
+    ['components/ui/toast/Toast.tsx', "export const VARIANT_MAP = { info: { color: '#417CCE' } };", 'block'],
     ['styles/globals.css', '[data-theme="cindy-dark"] .hljs-section { color: #2573ec; }', 'allowed'],
     ['styles/globals.css', '.new-control { color: #2573ec; }', 'block'],
     ['components/new-chat/ChatInput.tsx', "'var(--composer-pill-bg, #FCFCFC)'", 'allowed'],
     ['components/new-chat/ChatInput.tsx', "'var(--composer-pill-bg, #123abc)'", 'block'],
     ['components/new-chat/ChatInput.tsx', "'var(--other-bg, #FCFCFC)'", 'block'],
-    ['components/settings/AgentIslandSection.tsx', "eyeColor: 'rgb(107 61 50)'", 'allowed'],
+    ['components/settings/AgentIslandSection.tsx', "export const MASCOT_PREVIEW_CONFIGS = { cindy: { eyeColor: 'rgb(107 61 50)' } };", 'allowed'],
+    ['components/settings/AgentIslandSection.tsx', "const PREVIEW = { eyeColor: 'rgb(107 61 50)' };", 'block'],
+    ['components/settings/AgentIslandSection.tsx', "export const MASCOT_PREVIEW_CONFIGS = { erika: { eyeColor: 'rgb(107 61 50)' } };", 'block'],
     ['components/settings/AgentIslandSection.tsx', "background: 'rgb(107 61 50)'", 'block'],
   ];
   for (const [file, source, expected] of cases) assert.equal(inspect(renderer + file, source).find(f => f.rule === 'bare-color')?.disposition, expected, source);
+  // The binding is structural: the same file's own object resolves to the
+  // approved path, so the real sources stay allowed while lookalikes block.
+  const toast = fs.readFileSync(path.join(root, renderer, 'components/ui/toast/Toast.tsx'), 'utf8');
+  assert.deepEqual(objectPathAt(toast, toast.indexOf("'#417CDD'")), ['VARIANT_MAP', 'info']);
+  assert.deepEqual(objectPathAt("const OTHER_MAP = { color: '#417CDD' };", 28), ['OTHER_MAP']);
+  const anonymous = 'registerColor("md-table-bg", { light: "#fff" });';
+  assert.deepEqual(objectPathAt(anonymous, anonymous.indexOf('"#fff"')), []);
   const css = fs.readFileSync(path.join(root,renderer,'styles/globals.css'),'utf8');
   const approvedSelectors = inspect(renderer+'styles/globals.css',css).filter(f=>f.rule==='bare-color' && f.disposition==='allowed');
   assert.deepEqual(approvedSelectors.map(f=>f.value),['#2573ec','#c9d1d9']);
@@ -119,10 +145,14 @@ test('worktree includes staged, unstaged and untracked source; commit mode exclu
   run('update-ref','HEAD',commit);
   fs.appendFileSync(path.join(temp,file), "const b = '#123abc';\n"); run('add',file);
   fs.appendFileSync(path.join(temp,file), "const c = 'var(--x, #abc123)';\n");
-  fs.writeFileSync(path.join(temp,renderer+'new.tsx'), "const d = 'rgb(4,5,6)';\n");
+  fs.writeFileSync(path.join(temp,renderer+'new.tsx'), "const style = { color: 'rgb(4,5,6)' };\n");
+  fs.writeFileSync(path.join(temp,renderer+'plain.tsx'), "const label = 'RGB(1, 2, 3)';\n");
   const result = audit({root:temp,baseRef:commit,worktree:true});
   assert.equal(result.counts.unexpected,3);
   assert.deepEqual(result.findings.filter(f=>f.file===file).map(f=>f.line),[2,3]);
+  // Plain-string function colours in an untracked renderer file are prose,
+  // not palette values: no finding, so verify does not fail on help text.
+  assert.deepEqual(result.findings.filter(f=>f.file===renderer+'plain.tsx'),[]);
   assert.equal(audit({root:temp,baseRef:commit}).counts.unexpected,0);
   assert.equal(audit({root:temp,baseRef:commit,worktree:true}).candidateHash,result.candidateHash);
   // Execute the real CLI against this isolated candidate, then the actual CI

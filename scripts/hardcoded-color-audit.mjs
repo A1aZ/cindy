@@ -38,13 +38,48 @@ export function readExemptions(root) {
     if (entry.matches !== undefined && !Array.isArray(entry.matches)) throw new Error(`Invalid matches: ${entry.glob}`);
     for (const rule of entry.matches ?? []) {
       if (typeof rule.value !== 'string' || typeof rule.before !== 'string' || !rule.before || !entry.reviewDate) throw new Error(`Invalid narrow exemption: ${entry.glob}`);
+      if (rule.object !== undefined && !(typeof rule.object === 'string' ? rule.object
+        : Array.isArray(rule.object) && rule.object.length && rule.object.every(o => typeof o === 'string' && o))) {
+        throw new Error(`Invalid object binding: ${entry.glob}`);
+      }
       new RegExp(rule.before);
     }
   }
   return data;
 }
 
+/** Key path of the object literals enclosing index, outermost first — e.g.
+ * ['VARIANT_MAP', 'info'] for a colour inside `VARIANT_MAP = { info: { … } }`.
+ * Anonymous blocks (function bodies, call arguments, array literals) add no
+ * segment; string contents are skipped. Lexical, like the rest of this
+ * scanner: unbalanced braces inside regex literals can only fail closed
+ * (the binding stops matching and the hit is reported). */
+export function objectPathAt(source, index) {
+  const stack = [];
+  let quote = '';
+  for (let i = 0; i < index; i++) {
+    const char = source[i];
+    if (quote) {
+      if (char === '\\') i++;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') { quote = char; continue; }
+    if (char === '{') {
+      const head = source.slice(Math.max(0, i - 200), i);
+      // `key: {` (optionally quoted), `NAME = {` and `NAME: Type = {`; the
+      // type annotation may not cross statement or block boundaries, and the
+      // 200-char window bounds how far back we look for the declared name.
+      const prop = /["']?([A-Za-z_$][\w$]*)["']?\s*:\s*$/.exec(head);
+      const decl = /([A-Za-z_$][\w$]*)\s*(?::[^;{}=]*)?=\s*$/.exec(head);
+      stack.push(prop ? prop[1] : decl ? decl[1] : null);
+    } else if (char === '}' && stack.length) stack.pop();
+  }
+  return stack.filter(Boolean);
+}
+
 export function approvedColor(file, source, hit, exemptions) {
+  let enclosing; // lazy: object key path at the hit, shared by every rule below
   return exemptions.find(entry => {
     const glob = new RegExp('^' + entry.glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
     if (!glob.test(file)) return false;
@@ -57,6 +92,14 @@ export function approvedColor(file, source, hit, exemptions) {
         const prevClose = source.lastIndexOf('}', open);
         const normalize = value => value.replace(/'/g, '"').replace(/\s+/g, ' ').trim();
         if (normalize(source.slice(prevClose + 1, open)) !== normalize(rule.selector)) return false;
+      }
+      // Bind the exception to the approved object (and variant/skin): the same
+      // value under the same property in any other object of the file stays a
+      // violation. Without this, a new object could reuse an approved colour.
+      if (rule.object) {
+        enclosing ??= objectPathAt(source, hit.index).join('.');
+        const objects = Array.isArray(rule.object) ? rule.object : [rule.object];
+        if (!objects.includes(enclosing)) return false;
       }
       return true;
     });

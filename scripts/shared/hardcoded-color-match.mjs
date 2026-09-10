@@ -1,6 +1,9 @@
 /** Shared lexical colour scan for inventory and added-line audit. Offsets refer to
  * original source. Computed channels, named colours and concatenation still need
- * review; this scanner is not a CSS evaluator (governance §13). */
+ * review; this scanner is not a CSS evaluator (governance §13). Numeric colour
+ * functions additionally require a colour-bearing context (style property, CSS
+ * function, arbitrary value or whole source): rgb()/hsl() mentioned inside a
+ * plain string is documentation or diagnostics, not a palette value. */
 export function maskColorComments(text) {
   return String(text).replace(
     /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\n]*|<!--[\s\S]*?-->/g,
@@ -15,6 +18,25 @@ function closeParen(source, open) {
     if (source[i] === ')' && --depth === 0) return i;
   }
   return -1;
+}
+
+/** Colour-word segments of the HEX declaration vocabulary. Compared per segment
+ * (camelCase / dash / SCREAMING_SNAKE delimited) so `borderColor` and
+ * `chat-input-border-focus` match while `fulfillment` or `label` do not. */
+const COLOUR_WORDS = new Set(['color', 'background', 'border', 'fill', 'stroke', 'shadow', 'outline']);
+
+/** A numeric colour function sits in a colour-bearing context when a style
+ * property, CSS custom property or colour-ish assignment precedes it. Unlike
+ * HEX, a bare quoted literal is not enough: prose and diagnostics routinely
+ * mention rgb()/hsl() as text, so `const label = 'RGB(1, 2, 3)'` is not a
+ * colour while `backgroundColor: 'rgb(1, 2, 3)'`, `style.boxShadow = '0 0 0
+ * rgba(0,0,0,0)'` and `'--panel-shadow': 'inset 0 1px 0 rgb(1 2 3)'` are. */
+function stylePropContext(before) {
+  const prop = /["']?(--[\w-]+|[A-Za-z_$][\w$-]*)["']?\s*[:=]\s*[^;{}=:]*$/.exec(before);
+  if (!prop) return false;
+  if (prop[1].startsWith('--')) return true;
+  const segments = prop[1].replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[-_\s]+/);
+  return segments.some(segment => COLOUR_WORDS.has(segment.toLowerCase()));
 }
 
 /** Traverse semantic wrappers too: var() must never hide a literal fallback. */
@@ -53,7 +75,16 @@ export function findBareColors(text) {
       ? /^(?:srgb(?:-linear)?|display-p3|a98-rgb|prophoto-rgb|rec2020|xyz(?:-d50|-d65)?)\s+/i.test(channels)
         && channelList.test(channels.replace(/^\S+\s+/, ''))
       : channelList.test(channels);
-    if (literal) add(source.slice(match.index, close + 1), match.index, close + 1);
+    if (!literal) continue;
+    // Same context discipline as the HEX branch, minus bare quoted literals:
+    // require a style property, colour-bearing CSS function, arbitrary value or
+    // whole-source position. Plain strings are prose, not palettes.
+    const before = source.slice(0, match.index);
+    const cssFunction = /\b(?:var|(?:repeating-)?(?:linear|radial|conic)-gradient|color-mix|(?:rgb|hsl)a?|drop-shadow)\([^;{}=:]*$/i.test(before);
+    const arbitrary = /[\w-]+-\[[^\]\n]*$/.test(before);
+    if (!stylePropContext(before) && !cssFunction && !arbitrary
+      && source.trim() !== source.slice(match.index, close + 1)) continue;
+    add(source.slice(match.index, close + 1), match.index, close + 1);
   }
   return hits.sort((a, b) => a.index - b.index);
 }

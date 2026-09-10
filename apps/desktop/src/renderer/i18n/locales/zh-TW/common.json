@@ -11224,6 +11224,10 @@
       }
     },
     "scanResult": {
+      "rejectedTitle": "審核未通過",
+      "rejectedDesc": "該版本未通過審核，請根據以下回饋修改後重新發布。",
+      "rejectionReasonUnavailable": "該版本未通過審核，暫未提供具體原因。請聯絡審核方了解詳情。",
+      "rejectionReason": "拒審原因",
       "dismiss": "知道了",
       "passedTitle": "安全掃描通過",
       "passedDesc": "該版本已通過所有安全檢查，現已釋出到市場。",

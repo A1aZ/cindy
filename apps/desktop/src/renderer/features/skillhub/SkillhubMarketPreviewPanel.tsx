@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, FileText, GraduationCap, X } from 'lucide-react';
 
@@ -76,6 +76,15 @@ export function SkillhubMarketPreviewPanel({
   const [scanResult, setScanResult] = useState<ScanResultPayload | null>(null);
   const [scanDialogOpen, setScanDialogOpen] = useState(false);
   const status = skill ? effectivePublishedStatus(skill) : null;
+  const reviewVersion = skill ? effectivePublishedStatusVersion(skill) ?? skill.latestVersion : undefined;
+  const scanRequestId = useRef(0);
+
+  useEffect(() => {
+    setScanDialogOpen(false);
+    setScanResult(null);
+    // A late reply must not show another Skill/version's private review feedback.
+    return () => { scanRequestId.current += 1; };
+  }, [panelOpen, skillName, reviewVersion, status, skill?.catalogScope, skill?.canManage]);
 
   // ESC 关闭
   useEffect(() => {
@@ -206,16 +215,23 @@ export function SkillhubMarketPreviewPanel({
                       type="button"
                       title={t('skillhub.marketActions.viewScanResult')}
                       onClick={() => {
+                        const requestId = ++scanRequestId.current;
                         void window.electronAPI.skillhub
                           .getScanStatus({
                             slug: skill.name,
-                            version: effectivePublishedStatusVersion(skill) ?? skill.latestVersion,
+                            version: reviewVersion,
                             catalogScope: skill.catalogScope,
                           })
                           .then((res) => {
+                            if (requestId !== scanRequestId.current) return;
                             setScanResult(res.success
-                              ? { status: res.status, gates: res.gates as ScanResultPayload['gates'] }
+                              ? { status: res.status, gates: res.gates as ScanResultPayload['gates'], rejectionReason: res.rejectionReason }
                               : { status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }] });
+                            setScanDialogOpen(true);
+                          })
+                          .catch(() => {
+                            if (requestId !== scanRequestId.current) return;
+                            setScanResult({ status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }] });
                             setScanDialogOpen(true);
                           });
                       }}

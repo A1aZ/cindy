@@ -3240,6 +3240,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }): Promise<{
       success: boolean;
       status: string;
+      rejectionReason?: string;
       gates?: Array<{ name: string; status: string; issues?: unknown[] }>;
       scorecard?: Record<string, unknown>;
       error?: string;

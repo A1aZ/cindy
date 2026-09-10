@@ -62,6 +62,7 @@ interface FailurePayload {
 
 export interface ScanResultPayload {
   status: string;
+  rejectionReason?: string;
   gates?: Array<{ name: string; label?: Record<string, string>; status: string; issues?: unknown[] }>;
 }
 
@@ -666,7 +667,7 @@ export function PublishDialog({
           }
           activePublishNameRef.current = null;
           failedProgressNameRef.current = null;
-          onScanResult?.({ status: event.status, gates: event.gates });
+          onScanResult?.({ status: event.status, gates: event.gates, rejectionReason: event.rejectionReason });
         })();
         return;
       }

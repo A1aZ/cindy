@@ -76,7 +76,7 @@ export type PublishProgressEvent =
   | { phase: 'commit' }
   | { phase: 'done'; name: string; version: string }
   | { phase: 'scan-status'; name: string; version: string; status: string; gates?: ScanGate[] }
-  | { phase: 'scan-result'; name: string; version: string; status: string; gates?: ScanGate[] }
+  | { phase: 'scan-result'; name: string; version: string; status: string; rejectionReason?: string; gates?: ScanGate[] }
   | { phase: 'failed'; name?: string; errorCode: PublishErrorCode; message: string };
 
 type ProgressCb = (e: PublishProgressEvent) => void;
@@ -98,6 +98,7 @@ export interface ScanGate {
 
 interface ScanStatusResponse {
   status: string;
+  rejectionReason?: string;
   gates?: ScanGate[];
   scorecard?: unknown;
 }
@@ -713,6 +714,7 @@ export class SkillPublishService {
             version,
             status: result.status,
             gates: result.gates,
+            rejectionReason: result.rejectionReason,
           });
           return;
         }

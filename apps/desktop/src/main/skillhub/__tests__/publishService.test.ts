@@ -1044,6 +1044,30 @@ describe('SkillPublishService', () => {
     }
   });
 
+  it('delivers manual rejection feedback when review finishes during the publish poll', async () => {
+    vi.useFakeTimers();
+    try {
+      const { serverApiFetch } = await import('../../serverApiClient');
+      const { SkillPublishService } = await import('../publishService');
+      vi.mocked(serverApiFetch).mockResolvedValue({
+        status: 'rejected', rejectionReason: 'Remove private notes',
+        gates: [{ name: 'security-scan', status: 'passed' }],
+      });
+      const onProgress = vi.fn();
+      const service = new SkillPublishService({ scanPollIntervalMs: 10, onProgress });
+      service.startScanPoll('review-helper', '1.0.1');
+      await vi.advanceTimersByTimeAsync(30);
+      expect(onProgress).toHaveBeenCalledWith({
+        phase: 'scan-result', name: 'review-helper', version: '1.0.1',
+        status: 'rejected', rejectionReason: 'Remove private notes',
+        gates: [{ name: 'security-scan', status: 'passed' }],
+      });
+      expect(serverApiFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('finishes the publish-scoped poll when machine review hands off to manual review', async () => {
     vi.useFakeTimers();
     try {

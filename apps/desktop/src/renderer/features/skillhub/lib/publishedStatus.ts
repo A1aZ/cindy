@@ -134,11 +134,14 @@ export function latestRejectedVersionFromVersions(
 export function rejectedPublishedReviewFromVersions(
   versions: unknown[] | null | undefined,
   latestVersion: string | null | undefined,
+  latestVersionStatus?: string | null,
 ): { version: string; status: 'rejected' } | null {
   const rejected = latestRejectedVersionFromVersions(versions);
   if (!rejected) return null;
   const latest = latestVersion?.trim() ?? '';
-  if (latest && compareDottedVersion(rejected.version, latest) <= 0) return null;
+  // On a first publication, latestVersion is the rejected version itself, not an approved market version.
+  const isRejectedFirstVersion = rejected.version === latest && specialPublishedStatus(latestVersionStatus) === 'rejected';
+  if (latest && compareDottedVersion(rejected.version, latest) <= 0 && !isRejectedFirstVersion) return null;
   return rejected;
 }
 

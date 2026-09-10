@@ -1104,7 +1104,7 @@ export function SkillhubDetailView() {
       if (active) {
         return { info, liveScanStatus: { status: active.status, version: active.version } };
       }
-      const rejected = rejectedPublishedReviewFromVersions(versionsRes.versions, info?.latestVersion);
+      const rejected = rejectedPublishedReviewFromVersions(versionsRes.versions, info?.latestVersion, info?.moderationStatus);
       if (rejected) {
         return { info, liveScanStatus: { status: rejected.status, version: rejected.version } };
       }
@@ -1234,7 +1234,7 @@ export function SkillhubDetailView() {
         void triggerIncrementalSync([event.name]);
         setInfoFetchTrigger((n) => n + 1);
         if (!publishOpenRef.current) {
-          setScanResult({ status: event.status, gates: event.gates });
+          setScanResult({ status: event.status, gates: event.gates, rejectionReason: event.rejectionReason });
         }
         return;
       }
@@ -1310,6 +1310,11 @@ export function SkillhubDetailView() {
   const showForeignDirtyBanner = detailActionState?.showForeignDirtyBanner ?? false;
 
   const [scanResult, setScanResult] = useState<ScanResultPayload | null>(null);
+  const rejectionRequestId = useRef(0);
+  useEffect(() => {
+    setScanResult(null);
+    return () => { rejectionRequestId.current += 1; };
+  }, [entryInfoKey]);
 
   // Diff panel state — 点 mine-dirty banner 时打开,看本地跟上次发布版的逐文件 diff
   const [diffPanelOpen, setDiffPanelOpen] = useState(false);
@@ -1894,8 +1899,10 @@ export function SkillhubDetailView() {
                   className="inline-flex h-5 shrink-0 items-center text-[var(--error-fg-strong)] hover:opacity-70 transition-opacity"
                   onClick={async () => {
                     if (!entry?.name) return;
-                    const res = await window.electronAPI.skillhub.listPublishedVersions(entry.name);
-                    if (!res.success || !res.versions) {
+                    const requestId = ++rejectionRequestId.current;
+                    const res = await window.electronAPI.skillhub.listPublishedVersions(entry.name).catch(() => null);
+                    if (requestId !== rejectionRequestId.current) return;
+                    if (!res?.success || !res.versions) {
                       setScanResult({ status: 'rejected', gates: [] });
                       return;
                     }
@@ -1912,7 +1919,11 @@ export function SkillhubDetailView() {
                     const gates = (parsed && typeof parsed === 'object' && Array.isArray((parsed as { gates?: unknown }).gates))
                       ? (parsed as { gates: Array<{ name: string; label?: Record<string, string>; status: string; issues?: unknown[] }> }).gates
                       : [];
-                    setScanResult({ status: 'rejected', gates });
+                    setScanResult({
+                      status: 'rejected',
+                      gates,
+                      rejectionReason: typeof item?.rejectionReason === 'string' ? item.rejectionReason : undefined,
+                    });
                   }}
                 >
                   <AlertCircle size={14} />

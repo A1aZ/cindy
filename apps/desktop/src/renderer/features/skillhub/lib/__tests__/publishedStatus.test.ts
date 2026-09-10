@@ -87,6 +87,18 @@ describe('published status badges', () => {
     expect(rejectedPublishedReviewFromVersions(versions, '1.0.4')).toBeNull();
   });
 
+  it('retains rejection feedback when the first published version itself was rejected', () => {
+    expect(rejectedPublishedReviewFromVersions([
+      { version: '1.0.0', scanStatus: 'rejected', rejectionReason: 'Remove private notes' },
+    ], '1.0.0', 'rejected')).toEqual({ version: '1.0.0', status: 'rejected' });
+  });
+
+  it('clears stale rejection feedback when that version is now approved', () => {
+    expect(rejectedPublishedReviewFromVersions([
+      { version: '1.0.0', scanStatus: 'approved' },
+    ], '1.0.0', 'rejected')).toBeNull();
+  });
+
   it('keeps rejected status for a newer rejected version than the current published version', () => {
     const versions = [
       { version: '1.0.4', status: 'rejected' },

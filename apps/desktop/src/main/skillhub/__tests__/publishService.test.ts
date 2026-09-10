@@ -250,7 +250,7 @@ describe('SkillPublishService', () => {
     });
     expect(commitCall?.[1]?.body).not.toHaveProperty('tags');
     expect(commitCall?.[1]?.body).not.toHaveProperty('visibility');
-    expect(scanPollSpy).toHaveBeenCalledWith('lark-task', '1.1.0');
+    expect(scanPollSpy).toHaveBeenCalledWith('lark-task', '1.1.0', 'signed-in:user-1:1');
   });
 
   it('publishes through Hub without requiring a local LLM API key file', async () => {

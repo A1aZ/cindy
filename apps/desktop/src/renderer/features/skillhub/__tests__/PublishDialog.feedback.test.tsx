@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 
 const mocks = vi.hoisted(() => ({
-  confirm: vi.fn(), refresh: vi.fn(), sync: vi.fn(), publish: vi.fn(),
+  confirm: vi.fn(), refresh: vi.fn(), sync: vi.fn(), publish: vi.fn(), cancelPublish: vi.fn(),
 }));
 vi.mock('react-i18next', async (importOriginal) => ({
   ...await importOriginal<typeof import('react-i18next')>(),
@@ -19,7 +19,7 @@ vi.mock('../hooks/useSkillSync', () => ({ triggerIncrementalSync: mocks.sync }))
 vi.mock('../hooks/useSkillFolderHash', () => ({ invalidateHash: vi.fn() }));
 vi.mock('../components/PlatformTagSelector', () => ({ PlatformTagSelector: () => null }));
 
-import { PublishDialog } from '../PublishDialog';
+import { PublishDialog, type PublishDialogProps } from '../PublishDialog';
 
 let progress!: (event: SkillhubPublishProgressEvent) => void;
 const feedback: SkillhubPublishProgressEvent = {
@@ -36,24 +36,32 @@ beforeEach(() => {
   mocks.publish.mockResolvedValue({ success: true, result: { name: 'review-helper', version: '1.0.1' } });
   vi.stubGlobal('electronAPI', { skillhub: {
     publish: mocks.publish,
+    cancelPublish: mocks.cancelPublish,
     onPublishProgress: (listener: typeof progress) => { progress = listener; return () => {}; },
   } });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-async function startPublication() {
+function mountPublication() {
   const onScanResult = vi.fn();
   const onOpenChange = vi.fn();
-  render(<PublishDialog open onOpenChange={onOpenChange} onScanResult={onScanResult}
-    isFirstPublish={false} latestVersion="1.0.0" skill={{
+  const props: PublishDialogProps = {
+    open: true, onOpenChange, onScanResult, isFirstPublish: false, latestVersion: '1.0.0', skill: {
       id: 'review-helper', urlKey: 'review-helper', engine: 'claude-code', linkedEngines: [],
       kind: 'skill', scope: 'global', mdPath: '/fixture/review-helper/SKILL.md', files: [], registryEntry: null,
       name: 'review-helper', absolutePath: '/fixture/review-helper', frontmatter: { version: '1.0.1' },
-    }} />);
+    },
+  };
+  const view = render(<PublishDialog {...props} />);
   fireEvent.change(screen.getByPlaceholderText('skillhub.publishDialog.changelogPlaceholder'), { target: { value: 'Improve documentation' } });
+  return { onScanResult, onOpenChange, rerender: (open = true) => view.rerender(<PublishDialog {...props} open={open} />) };
+}
+
+async function startPublication() {
+  const view = mountPublication();
   fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.startPublish' }));
   await waitFor(() => expect(mocks.publish).toHaveBeenCalledOnce());
-  return { onScanResult, onOpenChange };
+  return view;
 }
 
 describe('PublishDialog result delivery', () => {
@@ -88,5 +96,73 @@ describe('PublishDialog result delivery', () => {
     await act(async () => progress(feedback));
     expect(mocks.refresh).not.toHaveBeenCalled();
     expect(onScanResult).not.toHaveBeenCalled();
+  });
+
+  it.each(['same-membership-new-realm', 'different-owner'] as const)(
+    'closes a scanning dialog on %s without waiting for another poll event', async (transition) => {
+      const view = await startPublication();
+      expect(screen.getByText('skillhub.publishDialog.phaseScanningWait')).toBeTruthy();
+      setDataOwnerGeneration(transition === 'different-owner' ? 'owner-b' : 'owner-a', 2);
+      view.rerender();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(view.onOpenChange).toHaveBeenCalledWith(false);
+      expect(view.onScanResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['success', 'failure', 'exception'] as const)(
+    'ignores the old publication %s after the same membership opens a dialog in a new realm', async (outcome) => {
+      let settle!: (value: unknown) => void;
+      let reject!: (error: Error) => void;
+      mocks.publish
+        .mockReturnValueOnce(new Promise((resolve, rejectPromise) => { settle = resolve; reject = rejectPromise; }))
+        .mockReturnValueOnce(new Promise(() => {}));
+      const view = await startPublication();
+      expect(screen.getByText('skillhub.publishDialog.phasePacking')).toBeTruthy();
+      setDataOwnerGeneration('owner-a', 2);
+      view.rerender();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(view.onOpenChange).toHaveBeenCalledWith(false);
+      view.rerender(false);
+      view.rerender(true);
+      fireEvent.change(screen.getByPlaceholderText('skillhub.publishDialog.changelogPlaceholder'), { target: { value: 'New realm publication' } });
+      fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.startPublish' }));
+      await waitFor(() => expect(mocks.publish).toHaveBeenCalledTimes(2));
+      await act(async () => {
+        if (outcome === 'exception') reject(new Error('Old realm request failed'));
+        else settle(outcome === 'success'
+          ? { success: true, result: { name: 'review-helper', version: '1.0.1' } }
+          : { success: false, errorCode: 'INTERNAL', error: 'Old realm request failed' });
+      });
+      expect(screen.getByText('skillhub.publishDialog.phasePacking')).toBeTruthy();
+      expect(screen.queryByText('skillhub.publishDialog.phaseScanningWait')).toBeNull();
+      expect(view.onOpenChange).toHaveBeenCalledTimes(1);
+      expect(view.onScanResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not submit an old confirmation in the new realm', async () => {
+    let finishConfirm!: (confirmed: boolean) => void;
+    mocks.confirm.mockReturnValueOnce(new Promise((resolve) => { finishConfirm = resolve; }));
+    const view = mountPublication();
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.startPublish' }));
+    setDataOwnerGeneration('owner-a', 2);
+    view.rerender();
+    await act(async () => { finishConfirm(true); });
+    expect(mocks.publish).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('does not cancel a new-realm publication from an old cancellation confirmation', async () => {
+    mocks.publish.mockReturnValueOnce(new Promise(() => {}));
+    const view = await startPublication();
+    let finishConfirm!: (confirmed: boolean) => void;
+    mocks.confirm.mockReturnValueOnce(new Promise((resolve) => { finishConfirm = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.cancelReview' }));
+    setDataOwnerGeneration('owner-a', 2);
+    view.rerender();
+    await act(async () => { finishConfirm(true); });
+    expect(mocks.cancelPublish).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

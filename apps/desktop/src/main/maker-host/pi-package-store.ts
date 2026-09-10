@@ -16,7 +16,7 @@ import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 import type {
-  PiManagedPackageMutationFailureCode,
+  PiPackageCommandDiagnostic,
   PiNativeManagementCommand,
   PiManagedCommandFailure,
   PiNativePackageEntry,
@@ -53,6 +53,9 @@ import {
   type PiPackageMutationGrant,
 } from './pi-package-mutation-grant.js';
 import { killProcessTree } from '../scheduler-host/proc-util.js';
+
+import { createPiPackageCommandError, piPackageCommandDiagnostic, piPackageMutationFailureCategory } from './pi-package-diagnostic.js';
+export { piPackageMutationFailureCategory } from './pi-package-diagnostic.js';
 
 const log = createLogger('pi-package-store');
 interface PicomatchOptions {
@@ -128,7 +131,8 @@ function notifyPiPackagesChanged(origin: PiPackagesChangeOrigin): void {
       listener(origin);
     } catch (error) {
       log.warn('Pi package change listener failed', {
-        message: error instanceof Error ? error.message : String(error),
+        failureCategory: piPackageMutationFailureCategory(error),
+        diagnostic: piPackageCommandDiagnostic(error),
       });
     }
   }
@@ -366,22 +370,6 @@ type PiPackageStateReadResult =
   | { ok: true; state: PiPackageState }
   | { ok: false; error: unknown };
 
-export function piPackageMutationFailureCategory(
-  error: unknown,
-): PiManagedPackageMutationFailureCode {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (message.includes('state is unavailable')) return 'state-unavailable';
-  if (/\betarget\b|no matching version|version[^\n]*not found/.test(message)) {
-    return 'version-not-found';
-  }
-  if (/\be404\b|package[^\n]*not found|repository[^\n]*not found|404 not found/.test(message)) {
-    return 'package-not-found';
-  }
-  if (/\benotfound\b|\beai_again\b|\beconnrefused\b|\betimedout\b|network|fetch failed|could not resolve host|unable to access/.test(message)) {
-    return 'source-unavailable';
-  }
-  return 'native-command-failed';
-}
 
 class PiPackageStateUnavailableError extends Error {
   constructor() {
@@ -1013,6 +1001,7 @@ function boundedAppend(current: string, chunk: Buffer): string {
 interface RunPiPackageCommandOptions {
   /** Incremental native projection; returned diagnostic stdout remains bounded. */
   onStdoutChunk?: (chunk: Buffer) => void;
+  command?: PiPackageCommandDiagnostic['command'];
 }
 
 function truncateDisplayField(value: string, maxBytes: number): string {
@@ -1062,6 +1051,8 @@ async function runPackageProcess(
     });
     let stdout = '';
     let stderr = '';
+    let observedExitCode: number | null = null;
+    let observedSignal: PiPackageCommandDiagnostic['signal'];
     let settled = false;
     let timedOut = false;
     let childClosedAfterTimeout = false;
@@ -1075,7 +1066,13 @@ async function runPackageProcess(
       if (settled || !timedOut || !childClosedAfterTimeout || !treeTerminationSettled) return;
       settled = true;
       clearCommandTimers();
-      reject(new Error('Pi package command timed out'));
+      reject(createPiPackageCommandError(redactPackageCommandMessage(
+        ['Pi package command timed out', stderr, stdout].filter(Boolean).join('\n'),
+      ), {
+        command: options.command,
+        phase: 'native-command', outcome: 'timed-out', exitCode: observedExitCode,
+        ...(observedSignal ? { signal: observedSignal } : {}),
+      }));
     };
     const timer = setTimeout(() => {
       if (settled) return;
@@ -1113,10 +1110,14 @@ async function runPackageProcess(
       if (timedOut) return;
       settled = true;
       clearCommandTimers();
-      reject(error);
+      reject(createPiPackageCommandError(error.message, { command: options.command, phase: 'prepare', outcome: 'failed' }));
     });
-    child.once('close', (code) => {
+    child.once('close', (code, signal) => {
       if (settled) return;
+      observedExitCode = code;
+      observedSignal = signal
+        ? signal === 'SIGTERM' || signal === 'SIGKILL' || signal === 'SIGINT' ? signal : 'other'
+        : undefined;
       if (timedOut) {
         childClosedAfterTimeout = true;
         settleTimedOutCommand();
@@ -1126,9 +1127,13 @@ async function runPackageProcess(
       clearCommandTimers();
       if (code === 0) {
         resolve({ stdout, stderr });
-      } else reject(new Error(redactPackageCommandMessage(
-        (stderr || stdout || `Pi package command failed (${code ?? 'unknown'})`).trim(),
-      )));
+      } else reject(createPiPackageCommandError(redactPackageCommandMessage(
+        [stderr, stdout].filter(Boolean).join('\n').trim() || `Pi package command failed (${code ?? 'unknown'})`,
+      ), {
+        command: options.command,
+        phase: 'native-command', outcome: code === null ? 'unknown' : 'failed', exitCode: code,
+        ...(observedSignal ? { signal: observedSignal } : {}),
+      }));
     });
   });
 }
@@ -1138,10 +1143,19 @@ export async function runPiPackageCommand(
   timeoutMs = COMMAND_TIMEOUT_MS,
   options: RunPiPackageCommandOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  const command = args[0] === '--version' ? 'version'
+    : args[0] === 'install' || args[0] === 'update' || args[0] === 'remove' || args[0] === 'list' ? args[0] : undefined;
   const binaryPath = getReadyBinaryPath('pi');
-  if (!binaryPath) throw new Error('Pi is not installed in Cindy');
-  await fs.mkdir(packageHome(), { recursive: true, mode: 0o700 });
-  return runPackageProcess(binaryPath, args, packageHome(), timeoutMs, options);
+  if (!binaryPath) throw createPiPackageCommandError('Pi is not installed in Cindy', { command, phase: 'prepare', outcome: 'failed' });
+  try {
+    await fs.mkdir(packageHome(), { recursive: true, mode: 0o700 });
+    return await runPackageProcess(binaryPath, args, packageHome(), timeoutMs, { ...options, command });
+  } catch (error) {
+    if (piPackageCommandDiagnostic(error)) throw error;
+    throw createPiPackageCommandError(error instanceof Error ? error.message : '', {
+      command, phase: 'prepare', outcome: 'failed',
+    });
+  }
 }
 
 function parsePiVersionOutput(output: string): string | undefined {
@@ -2055,7 +2069,8 @@ async function inspectPackage(
   } catch (error) {
     log.warn('failed to inspect Pi package', {
       source: displaySource,
-      message: error instanceof Error ? error.message : String(error),
+      failureCategory: piPackageMutationFailureCategory(error),
+      diagnostic: piPackageCommandDiagnostic(error),
     });
     const deterministicLimit = isDurableInspectionFailure(error);
     const snapshotUnavailable = deterministicLimit
@@ -2741,7 +2756,8 @@ export async function resolveManagedPiPackageResources(
     return await resolveResources();
   } catch (error) {
     log.warn('Pi package resources unavailable; starting without user packages', {
-      message: error instanceof Error ? error.message : String(error),
+      failureCategory: piPackageMutationFailureCategory(error),
+      diagnostic: piPackageCommandDiagnostic(error),
     });
     return { extensions: [], skills: [], promptTemplates: [], packageRoots: [] };
   } finally {
@@ -3581,12 +3597,14 @@ async function buildMissingDeclaredPiExtensions(pkg: InspectedPackage): Promise<
     [...npmPrefix, 'install', '--include=dev', '--no-audit', '--no-fund'],
     pkg.installedRoot,
     COMMAND_TIMEOUT_MS,
+    { command: 'dependency-install' },
   );
   await runPackageProcess(
     npmExecutable,
     [...npmPrefix, 'run', 'build'],
     pkg.installedRoot,
     COMMAND_TIMEOUT_MS,
+    { command: 'build' },
   );
   return true;
 }
@@ -3615,6 +3633,7 @@ export async function mutatePiPackage(
     throw new Error('Relative local Pi package sources require a task working directory');
   }
   let mutationMayHaveChangedState = false;
+  let nativeCommandSucceeded = false;
   let runtimeInvalidationPublished = false;
   const publishRuntimeInvalidation = async (
     invalidateCache = false,
@@ -3672,12 +3691,15 @@ export async function mutatePiPackage(
     const inspectedBeforeMutation: InspectedPackage[] = [];
     let affectedSource: string | undefined;
     let installEnableProjectionUnavailable = false;
+    const diagnostics: PiPackageCommandDiagnostic[] = [];
     const runNativeMutationCommand = async (args: string[]): Promise<void> => {
       try {
         await runPiPackageCommand(args);
+        nativeCommandSucceeded = true;
         mutationMayHaveChangedState = true;
       } catch (error) {
-        mutationMayHaveChangedState = piPackageMutationFailureCategory(error) === 'native-command-failed';
+        mutationMayHaveChangedState = piPackageCommandDiagnostic(error)?.phase !== 'prepare'
+          && piPackageMutationFailureCategory(error) === 'native-command-failed';
         throw error;
       }
     };
@@ -3744,6 +3766,10 @@ export async function mutatePiPackage(
         try {
           built = await buildMissingDeclaredPiExtensions(buildTarget);
         } catch (error) {
+          diagnostics.push({
+            ...(piPackageCommandDiagnostic(error) ?? { outcome: 'failed', reason: 'unknown', recovery: 'check-build-dependencies' }),
+            phase: 'cindy-analysis',
+          });
           log.warn('optional Pi package build assistance failed', {
             failureCategory: piPackageMutationFailureCategory(error),
             mayHaveChangedState: true,
@@ -3769,7 +3795,7 @@ export async function mutatePiPackage(
       } catch (error) {
         log.warn('Pi package installed but optional Cindy snapshot metadata refresh failed', {
           source: logSource,
-          message: error instanceof Error ? error.message : String(error),
+          failureCategory: piPackageMutationFailureCategory(error),
         });
       }
     } else if (request.action === 'remove') {
@@ -3800,7 +3826,7 @@ export async function mutatePiPackage(
       } catch (error) {
         log.warn('Pi package removed but Cindy projection cleanup failed', {
           source: logSource,
-          message: error instanceof Error ? error.message : String(error),
+          failureCategory: piPackageMutationFailureCategory(error),
         });
       }
     } else if (request.action === 'update') {
@@ -3830,7 +3856,7 @@ export async function mutatePiPackage(
       } catch (error) {
         log.warn('Pi package updated but Cindy approval projection could not be refreshed', {
           source: logSource,
-          message: error instanceof Error ? error.message : String(error),
+          failureCategory: piPackageMutationFailureCategory(error),
         });
       }
       invalidateInspectionCache();
@@ -3850,6 +3876,10 @@ export async function mutatePiPackage(
         try {
           built = await buildMissingDeclaredPiExtensions(buildTarget);
         } catch (error) {
+          diagnostics.push({
+            ...(piPackageCommandDiagnostic(error) ?? { outcome: 'failed', reason: 'unknown', recovery: 'check-build-dependencies' }),
+            phase: 'cindy-analysis',
+          });
           log.warn('optional Pi package update build assistance failed', {
             failureCategory: piPackageMutationFailureCategory(error),
             mayHaveChangedState: true,
@@ -3873,7 +3903,7 @@ export async function mutatePiPackage(
       } catch (error) {
         log.warn('Pi package updated but Cindy projection refresh failed', {
           source: logSource,
-          message: error instanceof Error ? error.message : String(error),
+          failureCategory: piPackageMutationFailureCategory(error),
         });
       }
     } else if (request.action === 'set-enabled') {
@@ -3989,6 +4019,8 @@ export async function mutatePiPackage(
       const mutationResult = {
         ...result,
         changed: true,
+        ...(nativeCommandSucceeded ? { nativeCommandSucceeded: true as const } : {}),
+        ...(diagnostics.length ? { diagnostics } : {}),
         packages: [...result.packages, fallback],
         affectedPackage: fallback,
         ...(projectionUnavailable ? { projectionUnavailable: true as const } : {}),
@@ -4007,13 +4039,15 @@ export async function mutatePiPackage(
       } catch (error) {
         log.warn('Pi package enabled; optional Cindy snapshot metadata unavailable', {
           source: logSource,
-          message: error instanceof Error ? error.message : String(error),
+          failureCategory: piPackageMutationFailureCategory(error),
         });
       }
     }
     const mutationResult = {
       ...result,
       changed: true,
+      ...(nativeCommandSucceeded ? { nativeCommandSucceeded: true as const } : {}),
+      ...(diagnostics.length ? { diagnostics } : {}),
       ...(affectedPackage ? { affectedPackage } : {}),
       ...(projectionUnavailable ? { projectionUnavailable: true as const } : {}),
     };
@@ -4029,6 +4063,18 @@ export async function mutatePiPackage(
       }
     });
   } catch (error) {
+    if (nativeCommandSucceeded) {
+      log.warn('Pi native package command succeeded; Cindy analysis unavailable', {
+        action: request.action, failureCategory: 'projection-unavailable',
+      });
+      return {
+        available: false, packages: [], changed: true, projectionUnavailable: true, nativeCommandSucceeded: true,
+        diagnostics: [{
+          ...(piPackageCommandDiagnostic(error) ?? { outcome: 'failed', reason: 'unknown', recovery: 'refresh-package-state' }),
+          phase: 'cindy-analysis',
+        }],
+      };
+    }
     if (mutationMayHaveChangedState && typeof error === 'object' && error !== null) {
       packageMutationMayHaveChangedErrors.add(error);
     }

@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 import { usePublicationFeedback, useRejectionFeedback } from '../useRejectionFeedback';
+import { effectivePublishedStatus, effectivePublishedStatusVersion } from '../../lib/publishedStatus';
 
 const target = { entryKey: 'local:helper', name: 'helper', version: '1.1.0', canManage: true };
 const response = { success: true, status: 'rejected', gates: [], rejectionReason: 'Remove private notes' };
@@ -116,10 +117,26 @@ describe('useRejectionFeedback', () => {
     expect(result.current.result).toBeNull();
   });
 
-  it('keeps the historical fallback when the lookup fails', async () => {
-    getScanStatus.mockRejectedValueOnce(new Error('Unavailable'));
-    const { result } = renderHook(() => useRejectionFeedback(target));
-    await act(() => result.current.open());
-    expect(result.current.result).toEqual({ status: 'rejected', gates: [] });
+  describe.each(['rejected', 'failed', 'blocked'])('a manageable version with native status %s', (status) => {
+    const source = { latestVersion: target.version, moderationStatus: status };
+    const version = effectivePublishedStatus(source) === 'rejected' ? effectivePublishedStatusVersion(source) : null;
+
+    it.each(['exception', 'error response'])('does not invent manual rejection on lookup %s', async (failure) => {
+      if (failure === 'exception') getScanStatus.mockRejectedValueOnce(new Error('Unavailable'));
+      else getScanStatus.mockResolvedValueOnce({ success: false, error: 'Unavailable' });
+      const { result } = renderHook(() => useRejectionFeedback({ ...target, version }));
+      await act(() => result.current.open());
+      expect(getScanStatus).toHaveBeenCalledWith({ slug: target.name, version: target.version });
+      expect(result.current.result).toEqual({
+        status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }],
+      });
+    });
+
+    it('preserves the native status when lookup succeeds without a rejection reason', async () => {
+      getScanStatus.mockResolvedValueOnce({ success: true, status, gates: [] });
+      const { result } = renderHook(() => useRejectionFeedback({ ...target, version }));
+      await act(() => result.current.open());
+      expect(result.current.result).toEqual({ status, gates: [], rejectionReason: undefined });
+    });
   });
 });

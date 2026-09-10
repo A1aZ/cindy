@@ -50,7 +50,7 @@ export function useRejectionFeedback({ entryKey, name, version, canManage }: Rej
       scope,
       result: response?.success
         ? { status: response.status, gates: response.gates as ScanResultPayload['gates'], rejectionReason: response.rejectionReason }
-        : { status: 'rejected', gates: [] },
+        : { status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }] },
     });
   }, [scope]);
 

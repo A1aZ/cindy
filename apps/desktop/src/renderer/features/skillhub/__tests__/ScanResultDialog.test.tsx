@@ -72,6 +72,15 @@ describe('ScanResultDialog pending review presentation', () => {
     expect(document.body.textContent).not.toContain('Stale private notes');
   });
 
+  it('presents a lookup failure as unavailable without inventing a rejection or missing reason', () => {
+    render(<ScanResultDialog open onClose={vi.fn()} result={{
+      status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }],
+    }} />);
+    expect(screen.queryByRole('heading', { name: 'skillhub.scanResult.rejectedTitle' })).toBeNull();
+    expect(screen.queryByText('skillhub.scanResult.rejectionReasonUnavailable')).toBeNull();
+    expect(document.body.textContent).toContain('skillhub.scanResult.statusLabel.unavailable');
+  });
+
   it('presents passed machine checks as success instead of failure', () => {
     render(
       <ScanResultDialog

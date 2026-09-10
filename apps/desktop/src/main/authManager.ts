@@ -2720,6 +2720,10 @@ function commitCloudAppSession(ownerId: string, authRealmChanged = false): void 
   } else {
     commitActiveAppSession('cloud', ownerId, authRealmChanged);
   }
+  // Publish the new generation in the same synchronous commit as the token
+  // and endpoint switch, before any post-commit migration/projection await.
+  // Same-id realm moves do not necessarily enter a Ghost owner boundary.
+  if (authRealmChanged) notifyRenderer();
 }
 
 /**

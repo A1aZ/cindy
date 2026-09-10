@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import ts from 'typescript';
 
 const ghostBoundary = vi.hoisted(() => ({ stable: false }));
 
@@ -38,7 +41,25 @@ import {
   clearAllSessionRuntimeControlStates,
   sessionRuntimeControlOwnerEpochMatches,
 } from '../maker-ipc/sessionRuntimeControl.js';
-import { isDataOwnerPushCurrent, setDataOwnerGeneration } from '../../renderer/contexts/dataOwnerGeneration';
+import { getDataOwnerGeneration, isDataOwnerGenerationCurrent, isDataOwnerPushCurrent, setDataOwnerGeneration } from '../../renderer/contexts/dataOwnerGeneration';
+
+// Execute the actual private auth commit with real session state and an IPC
+// queue double, without importing credentials or the full Electron runtime.
+const authSource = readFileSync(resolve(process.cwd(), 'src/main/authManager.ts'), 'utf8').replace(/\r\n/g, '\n');
+const commitStart = authSource.indexOf('function commitCloudAppSession(');
+const commitSource = authSource.slice(commitStart, authSource.indexOf('\n}\n', commitStart) + 2);
+const compiledCommit = ts.transpileModule(commitSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const createCloudCommit = new Function(
+  'isPassiveSharedUserDataInstance', 'commitVolatileAppSession', 'commitActiveAppSession', 'notifyRenderer',
+  `${compiledCommit}\nreturn commitCloudAppSession;`,
+) as (
+  passive: () => boolean,
+  volatileCommit: typeof commitVolatileAppSession,
+  activeCommit: typeof commitActiveAppSession,
+  notify: () => void,
+) => (ownerId: string, authRealmChanged: boolean) => void;
 
 describe('application session boundary isolation', () => {
   it('does not treat a different durable Ghost projection owner as an App transition', () => {
@@ -139,4 +160,38 @@ describe('application session boundary isolation', () => {
       setAppSessionCommitBoundaryHook(null);
     }
   });
+});
+
+describe('cloud session realm publication', () => {
+  it.each([false, true])('publishes a realm generation before yielding to post-commit work (passive=%s)', async (passive) => {
+    commitActiveAppSession('cloud', 'shared-membership-id');
+    const previous = getActiveAppSession();
+    setDataOwnerGeneration(previous.dataOwnerId, previous.generation);
+    const oldRendererOwner = getDataOwnerGeneration();
+    const frames: ReturnType<typeof getActiveAppSession>[] = [];
+    const commit = createCloudCommit(
+      () => passive, commitVolatileAppSession, commitActiveAppSession,
+      () => { frames.push(getActiveAppSession()); },
+    );
+    let finishMigration!: () => void;
+    const migration = new Promise<void>((resolve) => { finishMigration = resolve; });
+    const transition = (async () => {
+      commit('shared-membership-id', true);
+      await migration;
+    })();
+    // No process-local boundary is needed on the stable same-owner fast path.
+    // The auth frame must already precede any response to a new-realm read.
+    expect(isAppSessionBoundaryPending()).toBe(false);
+    expect(frames).toEqual([{ ...previous, generation: previous.generation + 1 }]);
+    for (const frame of frames) setDataOwnerGeneration(frame.dataOwnerId, frame.generation);
+    expect(isDataOwnerGenerationCurrent(oldRendererOwner)).toBe(false);
+    const current = getActiveAppSession();
+    frames.length = 0;
+    commit('shared-membership-id', false);
+    expect(getActiveAppSession()).toEqual(current);
+    expect(frames).toEqual([]);
+    finishMigration();
+    await transition;
+  });
+
 });

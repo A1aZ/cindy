@@ -217,6 +217,21 @@ A pre-migration stash was retained as a recovery copy.
 - The successful installer built from 0b926345e predates this fix and is intermediate
   evidence only; final-head packaging and physical/UI acceptance remain pending.
 
+### Follow-up: coalesced native output (Codex 3976294716)
+
+- RED: one fragmented message followed by 2,000 complete messages in one chunk
+  delivered zero events because the aggregate buffer exceeded the per-line cap.
+- Complete lines are now consumed individually, retaining the 65,536-character
+  limit for each complete line and the unfinished tail. Oversized terminated and
+  unterminated lines still fail closed; valid batching does not consume retries.
+- GREEN: 41 adapter/HostClient tests and targeted ESLint passed. The required root
+  related-unit gate and Desktop typecheck also passed before submission.
+- User hardware acceptance: Bluetooth buttons, sticks and triggers were reported
+  working. USB is NOT accepted: the native WGI helper emitted only one neutral
+  frame over 30 seconds while an independent XInput sample read active buttons,
+  trigger pressure and stick axes. This is evidence of a native reading-path gap,
+  not proof of a cable fault or proof that a replacement backend is already fixed.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

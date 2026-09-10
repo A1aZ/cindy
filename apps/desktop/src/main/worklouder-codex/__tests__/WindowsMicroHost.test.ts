@@ -17,6 +17,42 @@ function fakeChild() {
 }
 
 describe('Windows Micro native host adapter', () => {
+  it('accepts coalesced complete messages larger than the per-line limit', async () => {
+    const child = fakeChild();
+    const host = new WindowsMicroHost({
+      resolveBinary: async () => 'helper.exe',
+      spawn: () => child as unknown as ChildProcessWithoutNullStreams,
+    });
+    const message = vi.fn();
+    const error = vi.fn();
+    host.on('message', message);
+    host.on('error', error);
+    await host.whenReady;
+    const payload = { kind: 'joystick', event: { angle: 0.25, distance: 0.8 } };
+    const line = `${JSON.stringify(payload)}\n`;
+    try {
+      child.stdout.write(line.slice(0, 12));
+      child.stdout.write(line.slice(12) + line.repeat(2000));
+      expect(message).toHaveBeenCalledTimes(2001);
+      expect(error).not.toHaveBeenCalled();
+      expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      host.kill();
+    }
+  });
+  it.each(['', '\n'])('rejects an oversized individual line with terminator %j', async (end) => {
+    const child = fakeChild();
+    const host = new WindowsMicroHost({
+      resolveBinary: async () => 'helper.exe',
+      spawn: () => child as unknown as ChildProcessWithoutNullStreams,
+    });
+    const error = vi.fn();
+    host.on('error', error);
+    await host.whenReady;
+    child.stdout.write('x'.repeat(65_537) + end);
+    expect(error).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledOnce();
+  });
   it('coalesces polling and latest state during a slow native build', async () => {
     let ready!: (binary: string) => void;
     const child = fakeChild();

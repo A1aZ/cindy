@@ -44,13 +44,14 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
         child.stdout.on('data', (chunk: string) => {
           if (this.ended) return;
           buffer += chunk;
-          if (buffer.length > 65_536) {
-            this.fail();
-            return;
-          }
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
           for (const line of lines) {
+            if (this.ended) return;
+            if (line.length > 65_536) {
+              this.fail();
+              return;
+            }
             try {
               const message: unknown = JSON.parse(line);
               if (isWorkLouderCodexHostMessage(message)) this.emit('message', message);
@@ -58,6 +59,7 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
               /* Ignore malformed device-host output. */
             }
           }
+          if (!this.ended && buffer.length > 65_536) this.fail();
         });
         // Drain stderr; native diagnostics are intentionally not forwarded with raw paths.
         child.stderr.resume();

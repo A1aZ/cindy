@@ -9,6 +9,20 @@ interface RejectionFeedbackTarget {
   canManage: boolean;
 }
 
+/** Keep already displayed automatic results inside the same owner generation and entry. */
+export function usePublicationFeedback(entryKey: string | null) {
+  const owner = getDataOwnerGeneration();
+  const scope = useMemo(() => ({ entryKey, owner }), [entryKey, owner]);
+  const [feedback, setFeedback] = useState<{ scope: typeof scope; result: ScanResultPayload } | null>(null);
+  const setResult = useCallback((result: ScanResultPayload | null) => {
+    if (!isDataOwnerGenerationCurrent(scope.owner)) return;
+    setFeedback(result ? { scope, result } : null);
+  }, [scope]);
+  const result = feedback?.scope === scope && isDataOwnerGenerationCurrent(scope.owner)
+    ? feedback.result : null;
+  return { result, setResult };
+}
+
 /** User-requested feedback is scoped separately from automatic publication results. */
 export function useRejectionFeedback({ entryKey, name, version, canManage }: RejectionFeedbackTarget) {
   const owner = getDataOwnerGeneration();

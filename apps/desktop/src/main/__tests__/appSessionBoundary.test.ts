@@ -28,6 +28,8 @@ import {
   commitActiveAppSession,
   commitVolatileAppSession,
   getActiveAppSession,
+  activeOwnerScopeKey,
+  getActiveDataOwnerPushStamp,
   isAppSessionBoundaryPending,
   setAppSessionCommitBoundaryHook,
 } from '../appSessionState.js';
@@ -36,6 +38,7 @@ import {
   clearAllSessionRuntimeControlStates,
   sessionRuntimeControlOwnerEpochMatches,
 } from '../maker-ipc/sessionRuntimeControl.js';
+import { isDataOwnerPushCurrent, setDataOwnerGeneration } from '../../renderer/contexts/dataOwnerGeneration';
 
 describe('application session boundary isolation', () => {
   it('does not treat a different durable Ghost projection owner as an App transition', () => {
@@ -88,6 +91,35 @@ describe('application session boundary isolation', () => {
       setAppSessionCommitBoundaryHook(null);
     }
   });
+
+  it.each([['primary', commitActiveAppSession], ['passive', commitVolatileAppSession]] as const)(
+    'invalidates request scopes and queued push stamps on a same-id realm move in %s instances', (_name, commit) => {
+      commit('cloud', 'shared-membership-id');
+      const oldScope = activeOwnerScopeKey();
+      const oldStamp = getActiveDataOwnerPushStamp();
+      const hook = vi.fn();
+      setAppSessionCommitBoundaryHook(hook);
+      try {
+        // Auth commits force this bump only when the issuing realm changes.
+        commit('cloud', 'shared-membership-id', true);
+        expect(activeOwnerScopeKey()).not.toBe(oldScope);
+        expect(getActiveDataOwnerPushStamp()).toEqual({
+          dataOwnerId: oldStamp.dataOwnerId, ownerGeneration: oldStamp.ownerGeneration + 1,
+        });
+        const movedScope = activeOwnerScopeKey();
+        const movedStamp = getActiveDataOwnerPushStamp();
+        setDataOwnerGeneration(movedStamp.dataOwnerId, movedStamp.ownerGeneration);
+        expect(isDataOwnerPushCurrent(oldStamp)).toBe(false);
+        expect(isDataOwnerPushCurrent(movedStamp)).toBe(true);
+        commit('cloud', 'shared-membership-id');
+        expect(activeOwnerScopeKey()).toBe(movedScope);
+        expect(getActiveDataOwnerPushStamp()).toEqual(movedStamp);
+        expect(hook).not.toHaveBeenCalled();
+      } finally {
+        setAppSessionCommitBoundaryHook(null);
+      }
+    },
+  );
 
   it('does not create a boundary for a repeated volatile commit to the same owner', () => {
     const current = getActiveAppSession();

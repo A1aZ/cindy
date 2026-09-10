@@ -72,10 +72,10 @@ import {
 } from './lib/skillUsageState';
 import { buildRecentTrendRows, formatLocalDayKey } from './lib/skillUsageTrend';
 import { type SkillUsageVersionComparison, selectSkillUsageVersionComparison } from './lib/skillUsageViewModel';
-import { PublishDialog, type ScanResultPayload } from './PublishDialog';
+import { PublishDialog } from './PublishDialog';
 import { ScanResultDialog } from './ScanResultDialog';
 import { useSkillhubIdentityPolicy } from './hooks/useSkillhubIdentityPolicy';
-import { useRejectionFeedback } from './hooks/useRejectionFeedback';
+import { usePublicationFeedback, useRejectionFeedback } from './hooks/useRejectionFeedback';
 import { shouldHandlePublishProgressEvent } from './lib/publishProgressFilter';
 import { SkillhubDiffPanel } from './SkillhubDiffPanel';
 
@@ -971,7 +971,7 @@ function FileTreeRow({ entry, parentDir, depth, currentPath, onSelectFile }: Fil
 
 export function SkillhubDetailView() {
   const { t } = useTranslation();
-  const { user, dataOwnerId } = useAuth();
+  const { user } = useAuth();
   const identityPolicy = useSkillhubIdentityPolicy(user);
   const params = useParams();
   const [searchParams] = useSearchParams();
@@ -1071,6 +1071,7 @@ export function SkillhubDetailView() {
   // 改成同步从 SWR 缓存取上次结果,缓存命中(常见的重访场景)时直接渲染最终态,
   // 完全不闪;缓存 miss(首访)时才退回到 null + loading=true。
   const entryInfoKey = entry?.name ? `${entryCatalogScope ?? 'default'}:${entry.name}` : null;
+  const { result: scanResult, setResult: setScanResult } = usePublicationFeedback(entryInfoKey);
   const [trackedEntryInfoKey, setTrackedEntryInfoKey] = useState<string | null>(entryInfoKey);
   if (entryInfoKey !== trackedEntryInfoKey) {
     setTrackedEntryInfoKey(entryInfoKey);
@@ -1243,7 +1244,7 @@ export function SkillhubDetailView() {
       }
     });
     return unsubscribe;
-  }, [publishProgressTarget]);
+  }, [publishProgressTarget, setScanResult]);
 
   // dialog 关闭后重新查一次当前 skill 远端状态。进入人工审核后不再自动轮询，
   // 用户主动刷新时由常规 info 请求读取最新状态。
@@ -1313,10 +1314,6 @@ export function SkillhubDetailView() {
   const isMineDirty = detailActionState?.isMineDirty ?? false;
   const showForeignDirtyBanner = detailActionState?.showForeignDirtyBanner ?? false;
 
-  const [scanResult, setScanResult] = useState<ScanResultPayload | null>(null);
-  useEffect(() => {
-    setScanResult(null);
-  }, [entryInfoKey, dataOwnerId]);
   const rejectionFeedback = useRejectionFeedback({
     entryKey: entryInfoKey,
     name: entry?.name ?? null,

@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
-import { useRejectionFeedback } from '../useRejectionFeedback';
+import { usePublicationFeedback, useRejectionFeedback } from '../useRejectionFeedback';
 
 const target = { entryKey: 'local:helper', name: 'helper', version: '1.1.0', canManage: true };
 const response = { success: true, status: 'rejected', gates: [], rejectionReason: 'Remove private notes' };
@@ -14,6 +14,46 @@ beforeEach(() => {
   vi.stubGlobal('electronAPI', { skillhub: { getScanStatus } });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe('automatic publication feedback', () => {
+  it('keeps visible results through ordinary same-owner refreshes and supports dismissing them', () => {
+    const { result, rerender } = renderHook(() => usePublicationFeedback(target.entryKey));
+    act(() => result.current.setResult(response));
+    rerender();
+    expect(result.current.result?.rejectionReason).toBe(response.rejectionReason);
+    act(() => result.current.setResult(null));
+    expect(result.current.result).toBeNull();
+  });
+
+  it('hides stored reasons during the first render after a same-id realm generation change', () => {
+    const renderedReasons: Array<string | undefined> = [];
+    const { result, rerender } = renderHook(() => {
+      const feedback = usePublicationFeedback(target.entryKey);
+      renderedReasons.push(feedback.result?.rejectionReason);
+      return feedback;
+    });
+    act(() => result.current.setResult(response));
+    const oldDelivery = result.current.setResult;
+    setDataOwnerGeneration('owner-a', 2);
+    renderedReasons.length = 0;
+    rerender();
+    expect(renderedReasons).toEqual([undefined]);
+    act(() => oldDelivery(response));
+    expect(result.current.result).toBeNull();
+    act(() => result.current.setResult({ ...response, rejectionReason: 'Current realm feedback' }));
+    expect(result.current.result?.rejectionReason).toBe('Current realm feedback');
+  });
+
+  it('does not reuse stored feedback or an old callback for another entry', () => {
+    const { result, rerender } = renderHook(key => usePublicationFeedback(key), { initialProps: target.entryKey });
+    act(() => result.current.setResult(response));
+    const oldDelivery = result.current.setResult;
+    rerender('local:another');
+    expect(result.current.result).toBeNull();
+    act(() => oldDelivery(response));
+    expect(result.current.result).toBeNull();
+  });
+});
 
 describe('useRejectionFeedback', () => {
   it.each(['local', 'team'])('requests the native rejected version for a %s entry and shows manual feedback', async (catalog) => {

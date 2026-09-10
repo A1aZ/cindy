@@ -204,6 +204,19 @@ A pre-migration stash was retained as a recovery copy.
 - Final submission gates passed: related Desktop unit tests (283.8 seconds),
   Desktop typecheck with the existing temporary cache, and diff checks.
 
+### Follow-up: bounded cold-start state (Codex 3976152597)
+
+- RED reproduced queue overflow while native binary preparation remained pending:
+  repeated discovery/probe/lighting polling exhausted the old 64-item FIFO.
+- Preparation now retains only the latest idempotent request per kind, with the
+  existing bound preserved for unknown requests. A pending stop supersedes all
+  obsolete state and prevents later polling from restarting work.
+- GREEN: 38 adapter/HostClient tests passed, including 200 polling iterations
+  during deferred preparation and stop supersession; targeted ESLint passed.
+- Required pre-commit related unit gate and Desktop typecheck both passed.
+- The successful installer built from 0b926345e predates this fix and is intermediate
+  evidence only; final-head packaging and physical/UI acceptance remain pending.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

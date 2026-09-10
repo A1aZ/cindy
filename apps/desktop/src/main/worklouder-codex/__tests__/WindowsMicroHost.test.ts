@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import { WindowsMicroHost } from '../WindowsMicroHost.js';
+import { createWorkLouderCodexOffFrame } from '../protocol.js';
 
 vi.mock('electron', () => ({ app: { isPackaged: true } }));
 
@@ -16,6 +17,72 @@ function fakeChild() {
 }
 
 describe('Windows Micro native host adapter', () => {
+  it('coalesces polling and latest state during a slow native build', async () => {
+    let ready!: (binary: string) => void;
+    const child = fakeChild();
+    const writes: unknown[] = [];
+    child.stdin.on('data', (chunk) => writes.push(JSON.parse(String(chunk))));
+    const spawn = vi.fn(() => child as unknown as ChildProcessWithoutNullStreams);
+    const host = new WindowsMicroHost({
+      resolveBinary: () =>
+        new Promise((resolve) => {
+          ready = resolve;
+        }),
+      spawn,
+    });
+    const latestFrame = createWorkLouderCodexOffFrame();
+    try {
+      await Promise.resolve();
+      host.postMessage({ kind: 'init', sdkEntry: 'cindy:windows-micro' });
+      expect(() => {
+        for (let tick = 0; tick < 200; tick++) {
+          host.postMessage({ kind: 'discover' });
+          host.postMessage({ kind: 'probe' });
+          host.postMessage({ kind: 'listen' });
+          latestFrame.keys.brightness = tick / 200;
+          host.postMessage({ kind: 'apply', frame: latestFrame });
+        }
+      }).not.toThrow();
+      expect(spawn).not.toHaveBeenCalled();
+      ready('helper.exe');
+      await host.whenReady;
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(writes).toEqual([
+        { kind: 'init', sdkEntry: 'cindy:windows-micro' },
+        { kind: 'discover' },
+        { kind: 'probe' },
+        { kind: 'listen' },
+        { kind: 'apply', frame: latestFrame },
+      ]);
+    } finally {
+      host.kill();
+    }
+  });
+  it('lets stop supersede queued state while preparation is pending', async () => {
+    let ready!: (binary: string) => void;
+    const child = fakeChild();
+    const writes: unknown[] = [];
+    child.stdin.on('data', (chunk) => writes.push(JSON.parse(String(chunk))));
+    const host = new WindowsMicroHost({
+      resolveBinary: () =>
+        new Promise((resolve) => {
+          ready = resolve;
+        }),
+      spawn: () => child as unknown as ChildProcessWithoutNullStreams,
+    });
+    try {
+      await Promise.resolve();
+      host.postMessage({ kind: 'init', sdkEntry: 'cindy:windows-micro' });
+      host.postMessage({ kind: 'apply', frame: createWorkLouderCodexOffFrame() });
+      host.postMessage({ kind: 'stop' });
+      host.postMessage({ kind: 'discover' });
+      ready('helper.exe');
+      await host.whenReady;
+      expect(writes).toEqual([{ kind: 'stop' }]);
+    } finally {
+      host.kill();
+    }
+  });
   it('forwards normalized joystick movement and center but rejects out-of-range input', async () => {
     const child = fakeChild();
     const spawn = vi.fn(() => child as unknown as ChildProcessWithoutNullStreams);

@@ -5,6 +5,14 @@ import { isWorkLouderCodexHostMessage } from './protocol.js';
 import type { WorkLouderCodexChildLike } from './WorkLouderCodexHostClient.js';
 
 export const WINDOWS_MICRO_NATIVE_ENTRY = 'cindy:windows-micro';
+const PREPARATION_STATE_REQUESTS = new Set([
+  'init',
+  'discover',
+  'probe',
+  'listen',
+  'apply',
+  'rebind-creator-keymap',
+]);
 
 interface WindowsMicroHostDeps {
   resolveBinary(): Promise<string>;
@@ -15,7 +23,7 @@ interface WindowsMicroHostDeps {
 export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChildLike {
   readonly whenReady: Promise<void>;
   private child: ChildProcessWithoutNullStreams | null = null;
-  private queued: string[] = [];
+  private readonly queued = new Map<string, string>();
   private ended = false;
 
   constructor(
@@ -56,8 +64,8 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
         child.stdin.on('error', () => this.fail());
         child.on('error', () => this.fail());
         child.on('exit', (code) => this.finish(code ?? 1));
-        for (const line of this.queued) child.stdin.write(line);
-        this.queued = [];
+        for (const line of this.queued.values()) child.stdin.write(line);
+        this.queued.clear();
       })
       .catch(() => this.fail());
   }
@@ -65,10 +73,29 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
   postMessage(message: unknown): void {
     if (this.ended) throw new Error('Windows Micro host stopped');
     const line = `${JSON.stringify(message)}\n`;
-    if (line.length > 65_536 || this.queued.length >= 64)
+    if (line.length > 65_536) throw new Error('Windows Micro host queue exceeded');
+    if (this.child) {
+      this.child.stdin.write(line);
+      return;
+    }
+    const kind =
+      message && typeof message === 'object' ? (message as { kind?: unknown }).kind : undefined;
+    // Stopping during preparation must never replay obsolete input/lighting work.
+    if (kind === 'stop') {
+      this.queued.clear();
+      this.queued.set('stop', line);
+      return;
+    }
+    if (this.queued.has('stop')) return;
+    // Pollers and lighting may run throughout a slow Cargo build. Keep the latest
+    // desired state per idempotent command, rather than charging them to a FIFO limit.
+    const key =
+      typeof kind === 'string' && PREPARATION_STATE_REQUESTS.has(kind)
+        ? kind
+        : `unknown:${this.queued.size}`;
+    if (!this.queued.has(key) && this.queued.size >= 64)
       throw new Error('Windows Micro host queue exceeded');
-    if (this.child) this.child.stdin.write(line);
-    else this.queued.push(line);
+    this.queued.set(key, line);
   }
 
   kill(): boolean {
@@ -89,7 +116,7 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
     if (this.ended) return;
     this.ended = true;
     this.child = null;
-    this.queued = [];
+    this.queued.clear();
     this.emit('exit', code);
   }
 }

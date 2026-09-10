@@ -1855,7 +1855,10 @@ export function getMaker(): Maker {
       },
       resolveCodexThreadStorageHome: async (threadId) => {
         if (!getActiveAppSession().dataOwnerId) return;
-        return new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations')).readStorageHome(threadId);
+        return new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations')).readStorageHome(threadId, {
+          home: getCodexHome(),
+          prepare: prepareExternalCodexSessionForResume,
+        });
       },
       recordCodexThreadLocation: async (threadId, storageHome, rolloutPath) => {
         if (!rolloutPath || !getActiveAppSession().dataOwnerId) return;

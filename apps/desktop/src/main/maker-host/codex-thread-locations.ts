@@ -33,9 +33,19 @@ export class CodexThreadLocations {
     return value.path;
   }
 
-  async readStorageHome(threadId: string): Promise<string | undefined> {
+  async readStorageHome(
+    threadId: string,
+    legacy?: { home: string; prepare: (threadId: string) => Promise<string | undefined> },
+  ): Promise<string | undefined> {
     const rollout = await this.read(threadId);
-    if (!rollout) return;
+    if (!rollout) {
+      // Pre-multi-account threads have no location record. Resolve their native
+      // storage before an account-specific host starts, without moving history.
+      const legacyRollout = await legacy?.prepare(threadId);
+      if (!legacy || !legacyRollout) return;
+      await this.record(threadId, legacyRollout, legacy.home);
+      return legacy.home;
+    }
     const value = JSON.parse(await fs.readFile(this.file(threadId), 'utf8'));
     if (value.sqliteHome !== undefined) {
       if (typeof value.sqliteHome !== 'string' || !path.isAbsolute(value.sqliteHome)) throw new Error('Invalid Codex history storage');

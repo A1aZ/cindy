@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CodexThreadLocations } from '../codex-thread-locations';
 
 const directories: string[] = [];
@@ -30,6 +30,30 @@ describe('native thread locations across accounts', () => {
     expect(await reopened.readStorageHome('unknown')).toBeUndefined();
     expect(await fs.readFile(rollout, 'utf8')).toBe('history');
   });
+  it('resolves unindexed legacy history before account host startup and remembers its native home', async () => {
+    const { root, locations } = await fixture();
+    const home = path.join(root, 'codex-home');
+    const rollout = path.join(home, 'sessions', 'old.jsonl');
+    await fs.mkdir(path.dirname(rollout), { recursive: true });
+    await fs.writeFile(rollout, 'old native history\n');
+    const prepare = vi.fn().mockResolvedValue(rollout);
+    expect(await locations.readStorageHome('old-thread', { home, prepare })).toBe(home);
+    expect(prepare).toHaveBeenCalledWith('old-thread');
+    expect(await locations.read('old-thread')).toBe(rollout);
+    expect(await locations.readStorageHome('old-thread', { home, prepare })).toBe(home);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(rollout, 'utf8')).toBe('old native history\n');
+    await fs.rm(rollout);
+    await expect(locations.readStorageHome('old-thread', { home, prepare })).rejects.toThrow();
+    expect(prepare).toHaveBeenCalledTimes(1);
+  });
+  it('does not invent a storage home when legacy preparation finds no history', async () => {
+    const { root, locations } = await fixture();
+    const prepare = vi.fn().mockResolvedValue(undefined);
+    expect(await locations.readStorageHome('missing', { home: root, prepare })).toBeUndefined();
+    expect(await locations.read('missing')).toBeUndefined();
+  });
+
   it('preserves the latest history when A resumes in B and returns to A', async () => {
     const { root, locations } = await fixture();
     const rollout = path.join(root, 'account-a.jsonl');

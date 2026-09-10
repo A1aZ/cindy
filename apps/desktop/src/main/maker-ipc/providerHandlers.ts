@@ -2034,6 +2034,7 @@ export function registerProviderHandlers(
   registry.handle(
     MAKER_INVOKE.PROVIDER_OAUTH_LOGIN,
     async (event, providerId: unknown, rawOptions?: unknown) => {
+      assertTrustedProviderMutationSender(event);
       const id = requireProviderId(providerId);
       const { ownerId } = requireProviderOAuthLoginOptions(rawOptions);
       const sender = providerOAuthRendererSender(event);
@@ -2092,7 +2093,8 @@ export function registerProviderHandlers(
       }
     },
   );
-  registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (_event, providerId: unknown) => {
+  registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (event, providerId: unknown) => {
+    assertTrustedProviderMutationSender(event);
     const id = requireProviderId(providerId);
     const ownerAtIngress = captureProviderOwnerSession();
     const generation = beginOAuthMutation(id);
@@ -2139,6 +2141,7 @@ export function registerProviderHandlers(
   registry.handle(
     MAKER_INVOKE.PROVIDER_OAUTH_CANCEL,
     async (event, providerId: unknown, rawOptions?: unknown) => {
+      assertTrustedProviderMutationSender(event);
       const id = requireProviderId(providerId);
       const { releaseOwner, ownerId } = requireProviderOAuthCancelOptions(rawOptions);
       if (releaseOwner) {

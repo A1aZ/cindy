@@ -128,20 +128,24 @@ describe('SessionDragReleaseNativeHost', () => {
   });
 
   it('is included in the macOS package helper build', () => {
-    const forgeSource = fs.readFileSync(
-      path.resolve(__dirname, '..', '..', '..', 'forge.config.ts'),
-      'utf8',
-    );
+    const forgeSource = fs
+      .readFileSync(
+        path.resolve(__dirname, '..', '..', '..', 'forge.config.ts'),
+        'utf8',
+      )
+      .replace(/\r\n?/g, '\n');
     expect(forgeSource).toContain('function buildMacSessionDragReleaseHelper(');
     expect(forgeSource).toContain('buildMacSessionDragReleaseHelper(platform, arch);');
     expect(forgeSource).toContain("'xdt-macos-session-drag-release-helper'");
   });
 
   it('uses a complete macOS target triple for the remote desktop input helper', () => {
-    const forgeSource = fs.readFileSync(
-      path.resolve(__dirname, '..', '..', '..', 'forge.config.ts'),
-      'utf8',
-    );
+    const forgeSource = fs
+      .readFileSync(
+        path.resolve(__dirname, '..', '..', '..', 'forge.config.ts'),
+        'utf8',
+      )
+      .replace(/\r\n?/g, '\n');
     expect(forgeSource).toContain(
       "const MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET = 'macos10.15';",
     );

@@ -4,9 +4,7 @@ import { getDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
  *
  * 数据通道:
  *   maker-core codex translator emit AgentEvent { type: 'account_usage', source: 'codex', data: RateLimitSnapshot }
- *   → main register.ts wireSessionToIpc broadcast `maker:event` { sessionId, event }
- *   → preload window.electronAPI.maker.onEvent
- *   → 本 hook 按 sessionId 过滤
+ *   → main 按实际运行账号归档并推送账号级快照
  *   ChatGPT WHAM 后台刷新 emit `usage:codex-account-changed`
  *   → preload window.electronAPI.maker.usage.onCodexAccountChanged
  *   → 本 hook 直接更新账号级快照
@@ -19,7 +17,7 @@ import { getDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
  * (绝不显示不是这个会话在消耗的配额)。
  *
  * 设计与 useSessionSpend 对齐:
- *   - 按 sessionId 过滤 (虽然 host 端是 fan-out 给所有 active subscriber, 每个 session 都收一份)
+ *   - 只消费按 providerId 隔离的账号读取与推送；待生效选择不代表当前回合账号
  *   - Codex 账号用量是账号级数据, 切 session 时复用最近一次快照, 避免 chip 闪回占位态
  *   - vendorKey !== 'codex' 直接返 null (claude session 不订阅, 节省一次回调过滤开销)
  *
@@ -497,7 +495,7 @@ export function useAccountUsage(
         );
       })
       .catch(() => {
-        /* Best-effort warm start; live account_usage events still update the chip. */
+        /* Best-effort warm start; account-scoped pushes still update the chip. */
       });
 
     return () => {
@@ -521,40 +519,7 @@ export function useAccountUsage(
     };
   }, [vendorKey, quotaSource, reselect, providerId, state]);
 
-  useEffect(() => {
-    if (vendorKey !== 'codex' || !sessionId) return;
-    const api = (window as unknown as {
-      electronAPI?: {
-        maker?: {
-          onEvent?: (cb: (data: unknown) => void) => () => void;
-        };
-      };
-    }).electronAPI?.maker;
-    if (!api?.onEvent) return;
-    let cancelled = false;
-    // 注: 这里不再在 turn 事件后拉 getAccount 触发 WHAM 刷新 —— CLI chip 只显示
-    // app-server 槽, WHAM 刷新帮不上它, 白耗后台请求(旧行为还会把 WHAM 桶合并
-    // 进单槽缓存, 正是「turn 刚结束数据被顶掉」的来源)。bridge 槽的保鲜由
-    // main 的 bridge turn-done 触发 + mount 读 + 悬念期催刷负责。
-    const unsubscribe = api.onEvent((data: unknown) => {
-      if (cancelled) return;
-      const payload = data as {
-        sessionId?: string;
-        event?: { type?: string; source?: string; data?: RateLimitSnapshot };
-      };
-      if (payload.sessionId !== sessionId) return;
-      if (payload.event?.type !== 'account_usage') return;
-      if (payload.event.source !== 'codex') return;
-      if (!payload.event.data) return;
-      // 只更新桶表(事件带 limitId, 进它自己的桶); **不**据此判会话归属 ——
-      // 这是账号级 fan-out 事件(见 matchCodexBucketForModel 注释)。
-      applyCodexAccountUsageSnapshot(state, payload.event.data, reselect);
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [sessionId, vendorKey, quotaSource, reselect, providerId, state]);
-
+  // 不直接消费无 providerId 的 maker:account_usage：同一 session 的待生效账号
+  // 可能已切换，事件仍属于旧回合。Main 归档后发出的账号级推送是唯一实时入口。
   return snapshot;
 }

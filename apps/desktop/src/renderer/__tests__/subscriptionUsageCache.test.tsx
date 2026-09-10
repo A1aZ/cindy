@@ -132,3 +132,51 @@ it('OpenAI status quota reselects account/source caches and ignores pre-push rea
   hook.rerender({ id: 'openai' });
   expect(hook.result.current?.primary?.usedPercent).toBe(20);
 });
+
+describe('OpenAI quota during a deferred account switch', () => {
+  it.each([
+    ['openai', 'empty'], ['openai', 'offline'],
+    ['openai-a', 'empty'], ['openai-a', 'offline'],
+  ])('keeps %s turn events out of the selected account when reads are %s', async (runningId, readResult) => {
+    setDataOwnerGeneration(`${runningId}-${readResult}`);
+    const pushes = new Map<string, Set<(value: unknown) => void>>();
+    const events = new Set<(value: unknown) => void>();
+    const reader = readResult === 'empty'
+      ? vi.fn().mockResolvedValue(null)
+      : vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('electronAPI', { maker: {
+      onEvent: (callback: (value: unknown) => void) => {
+        events.add(callback); return () => events.delete(callback);
+      },
+      usage: {
+        getAccount: reader,
+        onCodexAccountChanged: (callback: (value: unknown) => void, id = 'openai') => {
+          const listeners = pushes.get(id) ?? new Set();
+          listeners.add(callback); pushes.set(id, listeners);
+          return () => listeners.delete(callback);
+        },
+      },
+    } });
+    const push = (id: string, value: unknown) => pushes.get(id)?.forEach(callback => callback(value));
+    const quota = (usedPercent: number) => ({ source: 'codex-app-server', primary: { usedPercent } });
+    const hook = renderHook(({ id }) => useAccountUsage('same-session', 'codex', 'app-server', 'gpt-6', id),
+      { initialProps: { id: 'openai-b' } });
+    act(() => push('openai-b', quota(20)));
+    hook.rerender({ id: runningId });
+    act(() => push(runningId, quota(40)));
+    hook.rerender({ id: 'openai-b' });
+    await act(async () => {});
+    act(() => {
+      events.forEach(callback => callback({ sessionId: 'same-session',
+        event: { type: 'account_usage', source: 'codex', data: quota(90) } }));
+      push(runningId, quota(90));
+    });
+    expect(hook.result.current?.primary?.usedPercent).toBe(20);
+    hook.rerender({ id: runningId });
+    expect(hook.result.current?.primary?.usedPercent).toBe(90);
+    hook.rerender({ id: 'openai-b' });
+    expect(hook.result.current?.primary?.usedPercent).toBe(20);
+    act(() => push('openai-b', null));
+    expect(hook.result.current).toBeNull();
+  });
+});

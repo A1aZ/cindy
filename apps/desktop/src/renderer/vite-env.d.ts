@@ -12,6 +12,7 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
+type BotToolsetContext = import('../shared/botRemoteCapabilities').BotToolsetContext;
 type AgentProxyPrefPayload = import('../shared/agentProxyConfig').SshHostAgentProxyPref;
 type AgentProxyTunnelStatePayload = import('../shared/agentProxyConfig').AgentProxyTunnelState;
 type ModelAccessStatusPayload = import('../shared/modelAccess').ModelAccessStatus;
@@ -989,6 +990,8 @@ interface CrossAgentStepEvent {
 }
 
 interface PluginListItem {
+  /** Present only when queried for a Bot runtime context. */
+  available?: boolean;
   id: string;
   name: string;
   description: string;
@@ -2977,6 +2980,8 @@ interface ElectronAPI {
 
   /** Open Cindy's managed Make tools directory (`<userData>/cindy-make/tools`). */
   openCindyMakeToolsDir: () => Promise<{ success: boolean }>;
+  getCindyMakeSourceStatus: () => Promise<import('../shared/cindyMakeDoctor').MakeSourceStatus>;
+  openCindyMakeSourceDir: () => Promise<{ success: boolean }>;
 
   /**
    * Reveal a file in the OS file manager (Explorer / Finder). Accepts either
@@ -3432,6 +3437,7 @@ interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       status: string;
+      rejectionReason?: string;
       gates?: Array<{ name: string; status: string; issues?: unknown[] }>;
       scorecard?: Record<string, unknown>;
       error?: string;
@@ -3595,6 +3601,10 @@ interface ElectronAPI {
       error?: string;
       blobs: { totalCount: number; totalBytes: number; cacheCount: number; cacheBytes: number };
       legacy: { bytes: number; fileCount: number };
+      fixedCaches: {
+        legacyImages: { bytes: number; fileCount: number };
+        chatAttachments: { bytes: number; fileCount: number };
+      };
       deadDirs: Array<{
         name: string;
         exists: boolean;
@@ -4423,6 +4433,32 @@ interface ElectronAPI {
           };
         }
     >;
+    databaseSizeWarning: {
+      getSettings: () => Promise<{
+        thresholdGiB: number;
+        disabled: boolean;
+        isCustomized?: boolean;
+        defaultThresholdGiB: number;
+      }>;
+      setSettings: (settings: {
+        thresholdGiB?: number;
+        disabled?: boolean;
+      }) => Promise<{
+        thresholdGiB: number;
+        disabled: boolean;
+        isCustomized?: boolean;
+        defaultThresholdGiB: number;
+      }>;
+      resetSettings: () => Promise<{
+        thresholdGiB: number;
+        disabled: boolean;
+        isCustomized?: boolean;
+        defaultThresholdGiB: number;
+      }>;
+      getStatus: () => Promise<{ databaseBytes: number | null }>;
+      measure: () => Promise<{ databaseBytes: number | null }>;
+      onChanged: (callback: () => void) => () => void;
+    };
     maintenance: {
       scan: (
         input: import('../shared/localDbMaintenance').DbSlimmingScanInput,
@@ -5177,9 +5213,7 @@ interface ElectronAPI {
     onProvidersChanged: (cb: () => void) => () => void;
 
     // 自定义 MCP 服务器配置 CRUD（可选 bearer token 另走通用 safeStorage IPC，不经这里）。
-    listCustomMcpServers: () => Promise<{
-      servers: import('../shared/customMcp').CustomMcpConfig[];
-    }>;
+    listCustomMcpServers: (context?: import('../shared/customMcp').CustomMcpListContext) => Promise<import('../shared/customMcp').CustomMcpListResult>;
     createCustomMcpServer: (
       config: import('../shared/customMcp').CustomMcpConfig,
     ) => Promise<{ ok: true }>;
@@ -5274,6 +5308,7 @@ interface ElectronAPI {
       dataOwnerId: string | null,
       ownerGeneration: number,
       map: Record<string, boolean>,
+      policy?: import('../shared/modelVisibility').ModelVisibilityPolicy,
     ) => Promise<void>;
     /** Resolve the stable local/cloud owner allowed to import the pre-account preference key. */
     claimLegacyModelVisibilityOwner: () => import('../shared/modelVisibility').ModelVisibilityLegacyOwnerClaim;
@@ -6315,9 +6350,9 @@ interface ElectronAPI {
         reasoningTokens?: number;
         cachedTokens?: number;
       }>;
-      getAccount: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<unknown | null>;
+      getAccount: (agentKind: 'claude-code' | 'codex' | 'pi', providerId?: string) => Promise<unknown | null>;
       /** Codex app-server authoritative windows and banked reset-credit metadata. */
-      getCodexRateLimits: () => Promise<
+      getCodexRateLimits: (providerId?: string) => Promise<
         import('@cindy/maker-shared/device-link-contract').MobileCodexRateLimitsResult
       >;
       /** Cindy AI /models 下发的 XD 原生报价。 */
@@ -6381,6 +6416,7 @@ interface ElectronAPI {
           updatedAt?: number | null;
           accountId?: string | null;
         }) => void,
+        providerId?: string,
       ) => () => void;
       /** xAI(SuperGrok bridge)限流快照推送;字段与 main usageBroadcaster XaiRateLimitSnapshot 对齐。
        *  null = main 主动清空(xAI 登出 / 换账号,clearXaiRateLimitSnapshot)。 */
@@ -6395,8 +6431,14 @@ interface ElectronAPI {
           } | null,
         ) => void,
       ) => () => void;
-      getXaiSubscription: () => Promise<unknown | null>;
-      onXaiSubscriptionChanged: (cb: (payload: unknown) => void) => () => void;
+      /** Existing native Anthropic subscription snapshot (null means cleared). */
+      getClaudeSubscription: (providerId?: string) => Promise<import('../shared/claudeSubscriptionUsage').ClaudeSubscriptionUsageSnapshot | null>;
+      onClaudeSubscriptionChanged: (
+        cb: (snapshot: import('../shared/claudeSubscriptionUsage').ClaudeSubscriptionUsageSnapshot | null) => void,
+        providerId?: string,
+      ) => () => void;
+      getXaiSubscription: (providerId?: string) => Promise<unknown | null>;
+      onXaiSubscriptionChanged: (cb: (payload: unknown) => void, providerId?: string) => () => void;
     };
 
     /* ── 跨 Agent 工作区互转（双向，5 项独立判断；进度 step 通过 push 流转）── */
@@ -6534,7 +6576,7 @@ interface ElectronAPI {
     };
 
     plugins: {
-      list: (workingDir?: string) => Promise<PluginListItem[]>;
+      list: (workingDir?: string, includeHidden?: boolean, botContext?: Omit<BotToolsetContext, 'workingDir'>) => Promise<PluginListItem[]>;
       getState: (
         id: string,
         workingDir?: string,
@@ -6936,7 +6978,7 @@ type SkillhubPublishErrorCode =
   | 'INVALID_VISIBILITY'
   | 'INTERNAL';
 
-type SkillhubPublishProgressEvent =
+type SkillhubPublishProgressEvent = (
   | { phase: 'packing' }
   | { phase: 'init' }
   | { phase: 'uploading' }
@@ -6959,6 +7001,7 @@ type SkillhubPublishProgressEvent =
       name: string;
       version: string;
       status: string;
+      rejectionReason?: string;
       gates?: Array<{
         name: string;
         label?: Record<string, string>;
@@ -6966,7 +7009,8 @@ type SkillhubPublishProgressEvent =
         issues?: unknown[];
       }>;
     }
-  | { phase: 'failed'; name?: string; errorCode: SkillhubPublishErrorCode; message: string };
+  | { phase: 'failed'; name?: string; errorCode: SkillhubPublishErrorCode; message: string }
+) & { ownerStamp?: import('../shared/dataOwnerPush').DataOwnerPushStamp };
 
 interface Window {
   electronAPI: ElectronAPI;

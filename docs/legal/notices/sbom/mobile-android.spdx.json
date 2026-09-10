@@ -3,14 +3,34 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "cindy-mobile-android",
-  "documentNamespace": "https://cindy.app/spdx/mobile-android/1add7883c8c6cb9c4b2177966c07a70165dd0578fb5101cc3972376fca323768",
+  "documentNamespace": "https://cindy.app/spdx/mobile-android/dd75db18ed7f49134892bf750cfad168c898c5f8a0456a20e38bfc7667c2120f",
   "creationInfo": {
-    "created": "2026-09-08T11:11:04Z",
+    "created": "2026-09-10T10:12:32Z",
     "creators": [
       "Tool: scripts/generate-third-party-notices.mjs"
     ]
   },
   "packages": [
+    {
+      "name": "androidx.biometric:biometric",
+      "SPDXID": "SPDXRef-Package-6f75599db059a549",
+      "versionInfo": "1.1.0",
+      "downloadLocation": "https://developer.android.com/jetpack/androidx/releases/biometric",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "com.nimbusds:nimbus-jose-jwt",
+      "SPDXID": "SPDXRef-Package-222113c8e8549c78",
+      "versionInfo": "10.9.1",
+      "downloadLocation": "https://bitbucket.org/connect2id/nimbus-jose-jwt",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
     {
       "name": "com.taptap.sdk:tap-core and declared TapTap modules",
       "SPDXID": "SPDXRef-Package-a7c06f99e5a4cd74",
@@ -10440,6 +10460,16 @@
     }
   ],
   "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-6f75599db059a549"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-222113c8e8549c78"
+    },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",

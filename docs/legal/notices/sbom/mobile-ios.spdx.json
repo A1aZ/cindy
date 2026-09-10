@@ -3,9 +3,9 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "cindy-mobile-ios",
-  "documentNamespace": "https://cindy.app/spdx/mobile-ios/1ef5e40e5c36713886f485ab26e3fff632a6a8c7edb8d5baae2b698c22846e51",
+  "documentNamespace": "https://cindy.app/spdx/mobile-ios/88943e24e7cee9f96720104195d988ca90749b20f22b29825c8c755898d9e593",
   "creationInfo": {
-    "created": "2026-09-08T11:11:04Z",
+    "created": "2026-09-10T10:12:32Z",
     "creators": [
       "Tool: scripts/generate-third-party-notices.mjs"
     ]
@@ -19,6 +19,16 @@
       "filesAnalyzed": false,
       "licenseConcluded": "OFL-1.1",
       "licenseDeclared": "OFL-1.1",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "JOSESwift",
+      "SPDXID": "SPDXRef-Package-252de9e411c654b4",
+      "versionInfo": "3.0.0",
+      "downloadLocation": "https://github.com/airsidemobile/JOSESwift/tree/3.0.0",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION"
     },
     {
@@ -10444,6 +10454,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-4aed76e603981340"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-252de9e411c654b4"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",

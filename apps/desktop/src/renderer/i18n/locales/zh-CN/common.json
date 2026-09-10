@@ -11228,6 +11228,10 @@
       }
     },
     "scanResult": {
+      "rejectedTitle": "审核未通过",
+      "rejectedDesc": "该版本未通过审核，请根据以下反馈修改后重新发布。",
+      "rejectionReasonUnavailable": "该版本未通过审核，暂未提供具体原因。请联系审核方了解详情。",
+      "rejectionReason": "拒审原因",
       "dismiss": "知道了",
       "passedTitle": "安全扫描通过",
       "passedDesc": "该版本已通过所有安全检查，现已发布到市场。",

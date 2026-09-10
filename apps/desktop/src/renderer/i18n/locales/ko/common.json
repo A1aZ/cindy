@@ -11228,6 +11228,10 @@
       }
     },
     "scanResult": {
+      "rejectedTitle": "심사 거절",
+      "rejectedDesc": "이 버전은 심사를 통과하지 못했습니다. 아래 피드백에 따라 수정한 후 다시 게시하세요.",
+      "rejectionReasonUnavailable": "이 버전은 심사를 통과하지 못했지만 구체적인 사유가 제공되지 않았습니다. 자세한 내용은 심사 담당자에게 문의하세요.",
+      "rejectionReason": "거절 사유",
       "dismiss": "확인",
       "passedTitle": "보안 스캔 통과",
       "passedDesc": "이 버전은 모든 보안 검사를 통과하여 마켓에 게시되었습니다.",

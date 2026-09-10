@@ -11244,6 +11244,10 @@
       }
     },
     "scanResult": {
+      "rejectedTitle": "Review Rejected",
+      "rejectedDesc": "This version did not pass review. Address the feedback below and publish again.",
+      "rejectionReasonUnavailable": "This version did not pass review, but no specific reason is available. Contact the reviewer for details.",
+      "rejectionReason": "Rejection Reason",
       "dismiss": "Got it",
       "passedTitle": "Security Scan Passed",
       "passedDesc": "This version has passed all security checks and is now live on the market.",

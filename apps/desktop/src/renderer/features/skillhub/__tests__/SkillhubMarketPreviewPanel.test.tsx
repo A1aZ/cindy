@@ -120,4 +120,23 @@ describe('published Skill rejection feedback', () => {
     rerender(<SkillhubMarketPreviewPanel skill={skill} open onClose={onClose} />);
     expect(screen.queryByText(feedback.rejectionReason)).toBeNull();
   });
+
+  it.each(['team', 'market'] as const)('reads a managed rejected version from the native record for %s', async (catalogScope) => {
+    // Match the server boundary: scoped catalog reads cannot expose unapproved versions.
+    getScanStatus.mockImplementation(async (request) => request.catalogScope
+      ? { success: false } : feedback);
+    render(<SkillhubMarketPreviewPanel skill={{ ...skill, catalogScope }} open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishedStatus.rejected' }));
+    expect(await screen.findByText(feedback.rejectionReason)).toBeTruthy();
+    expect(getScanStatus).toHaveBeenCalledWith({ slug: skill.name, version: '1.0.1', catalogScope: undefined });
+  });
+
+  it.each(['pending', 'rejected'] as const)('preserves the team scope for an ordinary %s catalog read', async (status) => {
+    getScanStatus.mockResolvedValue({ success: true, status, gates: [] });
+    const record = { ...skill, canManage: status !== 'rejected', catalogScope: 'team' as const, pendingVersion: { version: '1.0.1', status } };
+    render(<SkillhubMarketPreviewPanel skill={record} open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: status === 'pending' ? 'skillhub.publishedStatus.waitingReview' : 'skillhub.publishedStatus.rejected' }));
+    await act(async () => {});
+    expect(getScanStatus).toHaveBeenCalledWith({ slug: skill.name, version: '1.0.1', catalogScope: 'team' });
+  });
 });

@@ -16,7 +16,7 @@ import {
   type CurrentDbClientSnapshot,
 } from '../localDb/client/current.js';
 import { createLogger } from '../logger';
-import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
+import { assertTrustedAppRendererEvent, isTrustedAppRendererWindow } from '../security/trustedAppRenderer.js';
 import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
 import { isSkillhubCatalogScope } from '../../shared/skillhubCatalog.js';
 import { computeFolderHashDetailed } from './folderHash';
@@ -344,7 +344,7 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   const broadcastPublishProgress = (payload: unknown) => {
     for (const win of BrowserWindow.getAllWindows()) {
       try {
-        if (!win.isDestroyed()) win.webContents.send('skillhub:publish-progress', payload);
+        if (isTrustedAppRendererWindow(win)) win.webContents.send('skillhub:publish-progress', payload);
       } catch {
         // Window teardown can race with background scan reconciliation.
       }

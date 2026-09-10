@@ -13,6 +13,15 @@ const showOpenDialog = vi.fn();
 const showMessageBox = vi.fn();
 vi.mock('../../i18n.js', () => ({ t: (key: string) => key }));
 const assertTrustedAppRendererEvent = vi.fn();
+const isTrustedAppRendererWindow = vi.fn();
+const publishServiceOptions = vi.hoisted(() => ({ onProgress: null as null | ((event: unknown) => void) }));
+vi.mock('../publishService', () => ({
+  SkillPublishService: class {
+    constructor(options: { onProgress: (event: unknown) => void }) {
+      publishServiceOptions.onProgress = options.onProgress;
+    }
+  },
+}));
 const importLocalSkillMocks = vi.hoisted(() => ({
   inspectLocalSkill: vi.fn(),
   importLocalSkill: vi.fn(),
@@ -47,6 +56,7 @@ vi.mock('electron', () => ({
 
 vi.mock('../../security/trustedAppRenderer.js', () => ({
   assertTrustedAppRendererEvent,
+  isTrustedAppRendererWindow,
 }));
 
 const getCurrentDataOwnerId = vi.fn((): string | null => 'local-v1');
@@ -131,6 +141,8 @@ const marketService = {
 
 describe('registerSkillhubIpc usage handlers', () => {
   beforeEach(async () => {
+    publishServiceOptions.onProgress = null;
+    isTrustedAppRendererWindow.mockReset();
     ownerState.generation = 1;
     ownerState.pending = false;
     installServiceMocks.listPendingUninstallCleanups.mockReturnValue([]);
@@ -164,6 +176,34 @@ describe('registerSkillhubIpc usage handlers', () => {
       marketService: marketService as never,
       publishService: { publish, cancel } as never,
     });
+  });
+
+  it('delivers private publication feedback only to currently trusted app windows', async () => {
+    const { BrowserWindow } = await import('electron');
+    const { registerSkillhubIpc } = await import('../registerIpc');
+    const trusted = { webContents: { send: vi.fn() } };
+    const utility = { webContents: { send: vi.fn() } };
+    const navigated = { webContents: { send: vi.fn() } };
+    const destroyed = { webContents: { send: vi.fn() } };
+    vi.mocked(BrowserWindow.getAllWindows).mockReturnValueOnce([trusted, utility, navigated, destroyed] as never);
+    isTrustedAppRendererWindow.mockImplementation((win) => win === trusted);
+    registerSkillhubIpc({
+      getMaker: () => ({ listAgentSkills }) as never,
+      getManagedSkillRoots, getAllowedProjectRoots, marketService: marketService as never,
+    });
+    const feedback = { phase: 'scan-result', name: 'review-helper', status: 'rejected', rejectionReason: 'Private feedback' };
+    publishServiceOptions.onProgress!(feedback);
+    expect(trusted.webContents.send).toHaveBeenCalledWith('skillhub:publish-progress', feedback);
+    for (const win of [utility, navigated, destroyed]) {
+      expect(isTrustedAppRendererWindow).toHaveBeenCalledWith(win);
+      expect(win.webContents.send).not.toHaveBeenCalled();
+    }
+
+    // A window can navigate away between successive progress frames.
+    vi.mocked(BrowserWindow.getAllWindows).mockReturnValueOnce([trusted] as never);
+    isTrustedAppRendererWindow.mockReturnValue(false);
+    publishServiceOptions.onProgress!(feedback);
+    expect(trusted.webContents.send).toHaveBeenCalledTimes(1);
   });
 
   describe.each([

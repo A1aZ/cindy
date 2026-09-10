@@ -229,7 +229,8 @@ export function SkillhubMarketPreviewPanel({
                           .getScanStatus({
                             slug: skill.name,
                             version: reviewVersion,
-                            catalogScope: skill.catalogScope,
+                            // Catalog reads only expose approved releases; owners read rejected releases natively.
+                            catalogScope: status === 'rejected' && skill.canManage ? undefined : skill.catalogScope,
                           })
                           .then((res) => {
                             if (!isCurrentRequest()) return;

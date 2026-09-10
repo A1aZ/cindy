@@ -22,6 +22,7 @@ import type { PackResult } from './zipPacker';
 import { registryService } from './registry';
 import type { SkillhubCatalogScope } from '../../shared/skillhubCatalog';
 import { getCurrentDataOwnerId, getCurrentUserId } from '../authManager';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState';
 import { getAppCapabilities } from '../appCapabilities.js';
 import { currentSkillhubIdentityPolicy } from './identityPolicy';
 
@@ -688,12 +689,24 @@ export class SkillPublishService {
 
   startScanPoll(slug: string, version: string): void {
     this.stopScanPoll();
+    if (!getCurrentDataOwnerId() || isAppSessionBoundaryPending()) return;
+    const ownerScope = activeOwnerScopeKey();
     const generation = this.scanPollGeneration;
-    const isCurrentPoll = () =>
-      this.scanPollGeneration === generation &&
-      this.activeScanPoll?.slug === slug &&
-      this.activeScanPoll?.version === version;
+    const isCurrentPoll = () => {
+      if (
+        this.scanPollGeneration !== generation ||
+        this.activeScanPoll?.slug !== slug ||
+        this.activeScanPoll?.version !== version
+      ) return false;
+      if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) {
+        this.stopScanPoll();
+        return false;
+      }
+      return true;
+    };
     const poll = async (): Promise<void> => {
+      // A scheduled request must not start with another account's credentials.
+      if (!isCurrentPoll()) return;
       try {
         const result = await this.getScanStatus(slug, version);
         if (!isCurrentPoll()) return;

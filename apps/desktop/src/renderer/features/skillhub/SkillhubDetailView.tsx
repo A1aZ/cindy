@@ -57,8 +57,8 @@ import {
   activePublishedReviewFromVersions,
   activePublishedReviewVersion,
   effectivePublishedStatus,
+  effectivePublishedStatusVersion,
   isEffectiveActivePublishedReview,
-  latestRejectedVersionFromVersions,
   publishedStatusLabelKey,
   rejectedPublishedReviewFromVersions,
 } from './lib/publishedStatus';
@@ -75,6 +75,7 @@ import { type SkillUsageVersionComparison, selectSkillUsageVersionComparison } f
 import { PublishDialog, type ScanResultPayload } from './PublishDialog';
 import { ScanResultDialog } from './ScanResultDialog';
 import { useSkillhubIdentityPolicy } from './hooks/useSkillhubIdentityPolicy';
+import { useRejectionFeedback } from './hooks/useRejectionFeedback';
 import { SkillhubDiffPanel } from './SkillhubDiffPanel';
 
 const log = createLogger('SkillhubDetailView');
@@ -969,7 +970,7 @@ function FileTreeRow({ entry, parentDir, depth, currentPath, onSelectFile }: Fil
 
 export function SkillhubDetailView() {
   const { t } = useTranslation();
-  const { user } = useAuth();
+  const { user, dataOwnerId } = useAuth();
   const identityPolicy = useSkillhubIdentityPolicy(user);
   const params = useParams();
   const [searchParams] = useSearchParams();
@@ -1267,7 +1268,8 @@ export function SkillhubDetailView() {
   const effectivePublishLoading = entryCatalogScope === 'team' ? publishTargetLoading : infoLoading;
   const reviewVersion = activePublishedReviewVersion(effectivePublishInfo) ?? activePublishedReviewVersion(liveScanSource);
   const isPublishedReviewing = isEffectiveActivePublishedReview(effectivePublishInfo) || isEffectiveActivePublishedReview(liveScanSource);
-  const publishedStatus = effectivePublishedStatus(effectivePublishInfo) ?? effectivePublishedStatus(liveScanSource);
+  const publishedStatusSource = effectivePublishedStatus(effectivePublishInfo) ? effectivePublishInfo : liveScanSource;
+  const publishedStatus = effectivePublishedStatus(publishedStatusSource);
   const publishDialogPendingVersion =
     effectivePublishInfo?.pendingVersion ??
     (reviewVersion && publishedStatus
@@ -1310,11 +1312,15 @@ export function SkillhubDetailView() {
   const showForeignDirtyBanner = detailActionState?.showForeignDirtyBanner ?? false;
 
   const [scanResult, setScanResult] = useState<ScanResultPayload | null>(null);
-  const rejectionRequestId = useRef(0);
   useEffect(() => {
     setScanResult(null);
-    return () => { rejectionRequestId.current += 1; };
-  }, [entryInfoKey]);
+  }, [entryInfoKey, dataOwnerId]);
+  const rejectionFeedback = useRejectionFeedback({
+    entryKey: entryInfoKey,
+    name: entry?.name ?? null,
+    version: publishedStatus === 'rejected' ? effectivePublishedStatusVersion(publishedStatusSource) : null,
+    canManage: publishDetailState?.canManage === true,
+  });
 
   // Diff panel state — 点 mine-dirty banner 时打开,看本地跟上次发布版的逐文件 diff
   const [diffPanelOpen, setDiffPanelOpen] = useState(false);
@@ -1897,33 +1903,9 @@ export function SkillhubDetailView() {
                 <button
                   type="button"
                   className="inline-flex h-5 shrink-0 items-center text-[var(--error-fg-strong)] hover:opacity-70 transition-opacity"
-                  onClick={async () => {
-                    if (!entry?.name) return;
-                    const requestId = ++rejectionRequestId.current;
-                    const res = await window.electronAPI.skillhub.listPublishedVersions(entry.name).catch(() => null);
-                    if (requestId !== rejectionRequestId.current) return;
-                    if (!res?.success || !res.versions) {
-                      setScanResult({ status: 'rejected', gates: [] });
-                      return;
-                    }
-                    const rejected = latestRejectedVersionFromVersions(res.versions);
-                    if (!rejected) {
-                      setScanResult({ status: 'rejected', gates: [] });
-                      return;
-                    }
-                    const item = (res.versions as Array<Record<string, unknown>>).find(
-                      (v) => String(v.version ?? '').trim() === rejected.version,
-                    );
-                    const raw = item?.scanResult;
-                    const parsed = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
-                    const gates = (parsed && typeof parsed === 'object' && Array.isArray((parsed as { gates?: unknown }).gates))
-                      ? (parsed as { gates: Array<{ name: string; label?: Record<string, string>; status: string; issues?: unknown[] }> }).gates
-                      : [];
-                    setScanResult({
-                      status: 'rejected',
-                      gates,
-                      rejectionReason: typeof item?.rejectionReason === 'string' ? item.rejectionReason : undefined,
-                    });
+                  onClick={() => {
+                    setScanResult(null);
+                    void rejectionFeedback.open();
                   }}
                 >
                   <AlertCircle size={14} />
@@ -2593,9 +2575,9 @@ export function SkillhubDetailView() {
       />
 
       <ScanResultDialog
-        open={scanResult !== null}
-        onClose={() => setScanResult(null)}
-        result={scanResult}
+        open={rejectionFeedback.result !== null || scanResult !== null}
+        onClose={() => { rejectionFeedback.dismiss(); setScanResult(null); }}
+        result={rejectionFeedback.result ?? scanResult}
       />
     </div>
   );

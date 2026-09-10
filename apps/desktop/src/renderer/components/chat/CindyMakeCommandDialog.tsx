@@ -80,7 +80,7 @@ export function CindyMakeCommandDialog({
               <button
                 type="button"
                 className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-                aria-label={t('common.close')}
+                aria-label={t('common.dismiss')}
               >
                 <X size={16} aria-hidden />
               </button>

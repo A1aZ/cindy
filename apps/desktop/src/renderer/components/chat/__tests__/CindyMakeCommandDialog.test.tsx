@@ -25,7 +25,7 @@ describe('Cindy Make command dialog', () => {
     render(<CindyMakeCommandDialog sessionId={null} open onOpenChange={onOpenChange} />);
 
     const dialog = screen.getByRole('dialog');
-    const closeButton = screen.getByRole('button', { name: 'common.close' });
+    const closeButton = screen.getByRole('button', { name: 'common.dismiss' });
     await waitFor(() => expect(document.activeElement).toBe(dialog));
     expect(document.activeElement).not.toBe(closeButton);
 

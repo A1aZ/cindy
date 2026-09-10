@@ -84,7 +84,7 @@ export function CindyMakeTabBody({ ctx }: TabKindBodyProps<CindyMakeState>) {
             size="md"
             disabled={!draft.trim() || !ctx.workdir || chat.isStreaming}
           >
-            {t('cindyMake.source.prepare')}
+            {t('settings.cindyMake.source.prepare')}
           </Button>
         </div>
       </form>

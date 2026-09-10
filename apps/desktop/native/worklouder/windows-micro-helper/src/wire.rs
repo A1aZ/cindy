@@ -76,8 +76,9 @@ pub fn input(message: &Value) -> Option<Value> {
     let key = params["k"].as_str()?;
     let act = params["act"].as_u64()?;
     let valid = [
-        "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "ACT06", "ACT07", "ACT08", "ACT09",
-        "ACT10", "ACT11", "ACT12", "ENC", "ENC_CW", "ENC_CC",
+        "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
+        "AG11", "AG12", "ACT06", "ACT07", "ACT08", "ACT09", "ACT10", "ACT11", "ACT12", "ENC",
+        "ENC_CW", "ENC_CC",
     ]
     .contains(&key);
     if !valid || act > 2 {
@@ -128,6 +129,23 @@ pub fn off_frame() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_all_legacy_agent_keys_in_bare_and_wrapped_notifications() {
+        for slot in 0..=12 {
+            let key = format!("AG{slot:02}");
+            for act in [0, 1] {
+                let expected = Some(json!({"kind":"hid","event":{"key":key,"act":act}}));
+                assert_eq!(input(&json!({"k":key,"act":act})), expected);
+                assert_eq!(
+                    input(&json!({"method":"v.oai.hid","params":{"k":key,"act":act}})),
+                    expected
+                );
+            }
+        }
+        for key in ["AG13", "AG99", "AG6", "AG-1"] {
+            assert!(input(&json!({"k":key,"act":1})).is_none());
+        }
+    }
     #[test]
     fn forwards_joystick_directions_and_center_in_both_notify_formats() {
         for (angle, distance) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.7), (0.75, 0.5), (1.0, 0.0)] {

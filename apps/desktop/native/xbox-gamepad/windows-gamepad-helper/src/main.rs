@@ -80,16 +80,18 @@ fn presence(family: &str, device: Option<&Device>) -> io::Result<()> {
 fn discover(
     current: &BTreeMap<&'static str, Device>,
 ) -> windows::core::Result<BTreeMap<&'static str, Device>> {
-    let mut devices = BTreeMap::new();
-    for pad in Gamepad::Gamepads()? {
-        let raw = RawGameController::FromGameController(&pad)?;
-        let name = raw.DisplayName()?.to_string();
-        let family = mapping::family(raw.HardwareVendorId()?, &name);
-        let id = raw.NonRoamableId()?.to_string();
-        // Keep the selected pad stable when multiple same-family pads reorder.
-        let preferred = current.get(family).is_some_and(|old| old.id == id);
-        if !devices.contains_key(family) || preferred {
-            devices.insert(
+    let preferred = current
+        .iter()
+        .map(|(&family, device)| (family, device.id.clone()))
+        .collect();
+    let candidates = Gamepad::Gamepads()?
+        .into_iter()
+        .map(|pad| -> windows::core::Result<_> {
+            let raw = RawGameController::FromGameController(&pad)?;
+            let name = raw.DisplayName()?.to_string();
+            let family = mapping::family(raw.HardwareVendorId()?, &name);
+            let id = raw.NonRoamableId()?.to_string();
+            Ok((
                 family,
                 Device {
                     pad,
@@ -98,10 +100,62 @@ fn discover(
                     last_frame: None,
                     triggers: mapping::TriggerState::default(),
                 },
-            );
+            ))
+        });
+    Ok(select_devices(candidates, &preferred, |device| {
+        device.id.as_str()
+    }))
+}
+
+/// Select one stable device per family from independent metadata probes.
+fn select_devices<T, E>(
+    candidates: impl IntoIterator<Item = std::result::Result<(&'static str, T), E>>,
+    preferred: &BTreeMap<&'static str, String>,
+    id: impl Fn(&T) -> &str,
+) -> BTreeMap<&'static str, T> {
+    let mut devices = BTreeMap::new();
+    for candidate in candidates {
+        // Hot-unplug and broken metadata belong to this device, not the host's crash budget.
+        let Ok((family, device)) = candidate else {
+            continue;
+        };
+        let is_preferred = preferred.get(family).is_some_and(|old| old == id(&device));
+        if !devices.contains_key(family) || is_preferred {
+            devices.insert(family, device);
         }
     }
-    Ok(devices)
+    devices
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn a_failed_device_probe_does_not_drop_healthy_devices() {
+        let candidates = [
+            Err("conversion failed"),
+            Ok(("xbox", "first".to_string())),
+            Err("property read failed"),
+            Ok(("xbox", "selected".to_string())),
+            Ok(("generic", "other".to_string())),
+        ];
+        let preferred = BTreeMap::from([("xbox", "selected".to_string())]);
+        let selected = select_devices(candidates, &preferred, |id| id.as_str());
+        assert_eq!(
+            selected,
+            BTreeMap::from([
+                ("xbox", "selected".to_string()),
+                ("generic", "other".to_string())
+            ])
+        );
+    }
+    #[test]
+    fn all_failed_probes_leave_an_empty_snapshot_without_terminating_the_host() {
+        let candidates: [std::result::Result<(&'static str, String), &str>; 2] =
+            [Err("removed"), Err("unreadable")];
+        let selected = select_devices(candidates, &BTreeMap::new(), |id| id.as_str());
+        assert!(selected.is_empty());
+    }
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {

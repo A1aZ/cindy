@@ -127,7 +127,26 @@ A pre-migration stash was retained as a recovery copy.
   It was not installed or published. It includes the uncommitted fixes; the build-info
   commit SHA identifies the base commit, not a newly committed revision.
 
-## Self-check
+## PR #4208 review iteration (2026-09-10)
+
+- Greptile 3974944109: restored AG00–AG12 compatibility in native Micro input.
+  RED dropped AG06; GREEN covers press/release in bare and wrapped notifications,
+  while rejecting AG13, AG99 and malformed key names (10 Micro Rust tests pass).
+- Greptile 3974944114: each WGI device metadata probe now returns an independent
+  result; the selector skips failed devices and retains stable healthy selections.
+  RED propagated one bad device; GREEN covers mixed healthy/failing candidates and
+  an all-failed snapshot without terminating the host (8 gamepad Rust tests pass).
+- Codex 3974959503: native preparation now exposes readiness separately from HID
+  connection time. The connection watchdog starts after helper spawn and ignores
+  late readiness from disposed children. RED killed the adapter four times during
+  a simulated 30-second build; GREEN preserves one build, then enforces the normal
+  five-second connection timeout (36 host/client tests pass).
+- Both native Clippy checks pass. Final combined-change submission gates passed:
+  related Desktop tests (165.0 seconds) and Desktop typecheck (incremental cache in
+  a unique temporary directory, with unchanged strict checking). The previously packaged 0.0.0 installer predates this
+  review iteration and is not evidence for these additional fixes.
+
+## Delivery self-check
 
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.

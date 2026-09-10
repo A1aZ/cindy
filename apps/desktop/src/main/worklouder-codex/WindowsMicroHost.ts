@@ -13,6 +13,7 @@ interface WindowsMicroHostDeps {
 
 /** Adapts native NDJSON to the existing utility-host lifecycle; no separate retry loop. */
 export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChildLike {
+  readonly whenReady: Promise<void>;
   private child: ChildProcessWithoutNullStreams | null = null;
   private queued: string[] = [];
   private ended = false;
@@ -24,7 +25,7 @@ export class WindowsMicroHost extends EventEmitter implements WorkLouderCodexChi
     },
   ) {
     super();
-    void Promise.resolve()
+    this.whenReady = Promise.resolve()
       .then(() => deps.resolveBinary())
       .then((binary) => {
         if (this.ended) return;

@@ -70,11 +70,37 @@ fn emit(value: &Value) -> io::Result<()> {
 }
 
 fn presence(family: &str, device: Option<&Device>) -> io::Result<()> {
-    emit(&match device {
-        Some(device) => json!({ "kind": "presence", "family": family, "present": true,
-            "name": device.name, "category": "Windows.Gaming.Input", "transport": "unknown" }),
+    emit(&presence_message(
+        family,
+        device.map(|device| device.name.as_str()),
+    ))
+}
+
+fn presence_message(family: &str, name: Option<&str>) -> Value {
+    match name {
+        Some(name) => json!({ "kind": "presence", "family": family, "present": true,
+            "name": name, "category": "Windows.Gaming.Input", "transport": "unknown" }),
         None => json!({ "kind": "presence", "family": family, "present": false }),
-    })
+    }
+}
+
+/// Pure wire projection shared with contract tests; replacement releases the old
+/// slot before exposing the new device, while unchanged snapshots preserve holds.
+fn snapshot_messages(
+    family: &str,
+    old: Option<(&str, &str)>,
+    new: Option<(&str, &str)>,
+    force: bool,
+) -> Vec<Value> {
+    let unchanged = old.map(|(id, _)| id) == new.map(|(id, _)| id);
+    let mut messages = Vec::new();
+    if !unchanged && old.is_some() && new.is_some() {
+        messages.push(presence_message(family, None));
+    }
+    if force || !unchanged {
+        messages.push(presence_message(family, new.map(|(_, name)| name)));
+    }
+    messages
 }
 
 /// Re-enumeration handles hotplug without callbacks racing the polling thread.
@@ -150,6 +176,114 @@ fn select_devices<T, E>(
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+    #[test]
+    fn lifecycle_messages_match_the_host_controller_contract_fixture() {
+        #[derive(Clone)]
+        struct FixtureDevice {
+            handle: String,
+            id: String,
+            name: String,
+            triggers: mapping::TriggerState,
+        }
+        let mut fixture: Value = serde_json::from_str(include_str!(
+            "../../../../src/main/xbox-gamepad/__tests__/fixtures/windowsLifecycle.json"
+        ))
+        .unwrap();
+        // JavaScript JSON has one number type; native axes/triggers are f64.
+        // Normalize only these declared numeric fields, not arbitrary payloads.
+        for frame in fixture["frames"].as_object_mut().unwrap().values_mut() {
+            for group in ["axes", "triggers"] {
+                for number in frame[group].as_object_mut().unwrap().values_mut() {
+                    *number = json!(number.as_f64().unwrap());
+                }
+            }
+        }
+        for scenario in fixture["scenarios"].as_array().unwrap() {
+            let mut current: BTreeMap<&'static str, FixtureDevice> = BTreeMap::new();
+            for step in scenario["steps"].as_array().unwrap() {
+                for _ in 0..step["repeat"].as_u64().unwrap_or(1) {
+                    let messages = match step["kind"].as_str().unwrap() {
+                        "snapshot" => {
+                            let preferred = current
+                                .iter()
+                                .map(|(&family, device)| (family, device.id.clone()))
+                                .collect();
+                            let candidates =
+                                step["devices"].as_array().unwrap().iter().map(|record| {
+                                    let handle = record["handle"].as_str().unwrap();
+                                    let existing = current
+                                        .iter()
+                                        .find(|(_, device)| device.handle == handle)
+                                        .map(|(&family, device)| (family, device));
+                                    reuse_live_device(existing, || {
+                                        if record["metadataOk"] == false {
+                                            return Err("metadata unavailable");
+                                        }
+                                        Ok((
+                                            "xbox",
+                                            FixtureDevice {
+                                                handle: handle.into(),
+                                                id: record["id"].as_str().unwrap().into(),
+                                                name: record["name"].as_str().unwrap().into(),
+                                                triggers: mapping::TriggerState::default(),
+                                            },
+                                        ))
+                                    })
+                                });
+                            let next =
+                                select_devices(candidates, &preferred, |device| device.id.as_str());
+                            let messages = snapshot_messages(
+                                "xbox",
+                                current
+                                    .get("xbox")
+                                    .map(|d| (d.id.as_str(), d.name.as_str())),
+                                next.get("xbox").map(|d| (d.id.as_str(), d.name.as_str())),
+                                step["force"].as_bool().unwrap_or(false),
+                            );
+                            current = next;
+                            messages
+                        }
+                        "frame" => {
+                            let reading = &fixture["readings"][step["frame"].as_str().unwrap()];
+                            let reading = windows::Gaming::Input::GamepadReading {
+                                LeftTrigger: reading["lt"].as_f64().unwrap(),
+                                RightThumbstickY: reading["ry"].as_f64().unwrap(),
+                                ..Default::default()
+                            };
+                            vec![mapping::frame(
+                                "xbox",
+                                &reading,
+                                &mut current.get_mut("xbox").unwrap().triggers,
+                            )]
+                        }
+                        "read-error" => {
+                            current.remove("xbox");
+                            vec![presence_message("xbox", None)]
+                        }
+                        other => panic!("unknown fixture step {other}"),
+                    };
+                    let expected: Vec<Value> = step["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|m| match m.as_str() {
+                            Some(key) => fixture["frames"][key].clone(),
+                            None => m.clone(),
+                        })
+                        .collect();
+                    assert_eq!(
+                        messages, expected,
+                        "scenario: {}, step: {}",
+                        scenario["name"], step["kind"]
+                    );
+                    assert_eq!(
+                        current.get("xbox").map(|d| d.name.as_str()),
+                        step["expect"]["name"].as_str()
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn a_selected_live_handle_does_not_depend_on_fallible_metadata_refresh() {
         let old = "selected".to_string();
@@ -256,12 +390,15 @@ fn poll() -> Result<(), Box<dyn std::error::Error>> {
                             old.last_frame.clone()
                         };
                     }
-                } else if old.is_some() && new.is_some() {
-                    // Reset held input before selecting a replacement controller.
-                    presence(family, None)?;
                 }
-                if refresh || !unchanged {
-                    presence(family, next.get(family))?;
+                for message in snapshot_messages(
+                    family,
+                    old.map(|device| (device.id.as_str(), device.name.as_str())),
+                    next.get(family)
+                        .map(|device| (device.id.as_str(), device.name.as_str())),
+                    refresh,
+                ) {
+                    emit(&message)?;
                 }
             }
             devices = next;

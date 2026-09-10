@@ -148,6 +148,31 @@ A pre-migration stash was retained as a recovery copy.
 
 ## Delivery self-check
 
+### Issue #4212 acceptance follow-up
+
+- Action plan posted to #4212 before implementation (issuecomment-5613783170).
+- Extracted the existing native presence/snapshot message projection without
+  changing state semantics. Rust producer tests and TypeScript consumer tests use
+  the same windowsLifecycle.json contract fixture. The producer exercises live
+  metadata reuse, stable selection, real removal, read failure and frame mapping;
+  the consumer streams fragmented JSON/UTF-8 through the actual Host and controller.
+- Assertions cover repeated recoverable metadata failures while voice/scroll are
+  held, no same-family switch, exactly-once releases for real disconnect/read error,
+  and replacement ordering. Additional Host/controller tests cover disable, loss of
+  foreground and layout preview. These are simulated fault/contract tests, not
+  physical-device or full-UI evidence.
+- The consumer baseline passed before refactoring. The producer contract initially
+  lacked a pure message projection seam; after extraction, all 11 gamepad Rust
+  tests and all 6 cross-layer consumer tests passed. No new product bug was claimed
+  from the test-seam or JSON numeric-representation setup failures.
+- An actual active Xbox One Game Controller was enumerated on this Windows host.
+  Complete UI/hardware operation acceptance and final-head installer evidence are
+  still pending. Final acceptance will be reported in #4212 only after all checks,
+  physical operation evidence and maintainer approval are satisfied.
+- Pre-commit validation passed: related Desktop unit gate (432.3 seconds), Desktop
+  typecheck, 11 gamepad / 14 Micro Rust tests, both Clippy checks, 9 license/SBOM
+  tests, targeted ESLint and diff checks.
+
 ### Follow-up: transient metadata is not unplug (Greptile 3975106066)
 
 - Fresh WGI list membership is checked by COM object identity. A selected handle

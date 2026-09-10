@@ -52,8 +52,10 @@ vi.mock('../../security/trustedAppRenderer.js', () => ({
 const getCurrentDataOwnerId = vi.fn((): string | null => 'local-v1');
 vi.mock('../../authManager', () => ({ getCurrentDataOwnerId }));
 
+const ownerState = { generation: 1, pending: false };
 vi.mock('../../appSessionState', () => ({
-  isAppSessionBoundaryPending: vi.fn(() => false),
+  activeOwnerScopeKey: () => `cloud:owner:${ownerState.generation}`,
+  isAppSessionBoundaryPending: vi.fn(() => ownerState.pending),
 }));
 
 const ensureReady = vi.fn();
@@ -122,12 +124,15 @@ const marketService = {
   info: vi.fn(),
   listMarket: vi.fn(),
   listPublishedVersions: vi.fn(),
+  getScanStatus: vi.fn(),
   sync: vi.fn(),
   updatePublished: vi.fn(),
 };
 
 describe('registerSkillhubIpc usage handlers', () => {
   beforeEach(async () => {
+    ownerState.generation = 1;
+    ownerState.pending = false;
     installServiceMocks.listPendingUninstallCleanups.mockReturnValue([]);
     handlers.clear();
     vi.clearAllMocks();
@@ -158,6 +163,57 @@ describe('registerSkillhubIpc usage handlers', () => {
       getAllowedProjectRoots,
       marketService: marketService as never,
       publishService: { publish, cancel } as never,
+    });
+  });
+
+  describe.each([
+    { channel: 'skillhub:get-scan-status', field: 'slug', method: 'getScanStatus' },
+    { channel: 'skillhub:list-published-versions', field: 'name', method: 'listPublishedVersions' },
+  ] as const)('$channel private review boundary', ({ channel, field, method }) => {
+    it('rejects an untrusted sender before accessing the service', async () => {
+      assertTrustedAppRendererEvent.mockImplementationOnce(() => { throw new Error('PERMISSION_DENIED'); });
+      await expect(handlers.get(channel)!({}, { [field]: 'review-helper' })).rejects.toThrow('PERMISSION_DENIED');
+      expect(marketService[method]).not.toHaveBeenCalled();
+    });
+
+    it.each([null, [], {}, { value: 3 }, { value: '' }, { value: 'a'.repeat(129) },
+      { value: 'valid', version: 3 }, { value: 'valid', version: 'v'.repeat(129) },
+      { value: 'valid', catalogScope: 'invalid' }, { value: 'bad\0name' },
+    ])('rejects malformed parameters %j without a service request', async (input) => {
+      const params = input && !Array.isArray(input) ? { ...input, [field]: input.value } : input;
+      await expect(handlers.get(channel)!({}, params)).rejects.toThrow('INVALID_PARAMS');
+      expect(marketService[method]).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'team', 'market'] as const)('preserves catalog selection %s for trusted reads', async (catalogScope) => {
+      const result = { success: true, rejectionReason: 'Private feedback' };
+      marketService[method].mockResolvedValueOnce(result);
+      const event = { sender: { id: 11 } };
+      expect(await handlers.get(channel)!(event, { [field]: 'review-helper', version: '1.0.1', catalogScope })).toEqual(result);
+      expect(assertTrustedAppRendererEvent).toHaveBeenCalledWith(event);
+      if (method === 'getScanStatus') {
+        expect(marketService[method]).toHaveBeenCalledWith({ slug: 'review-helper', version: '1.0.1', ...(catalogScope ? { catalogScope } : {}) });
+      } else {
+        expect(marketService[method]).toHaveBeenCalledWith('review-helper', catalogScope);
+      }
+    });
+
+    it.each(['generation', 'boundary'] as const)('drops a private response across an account %s change', async (transition) => {
+      let resolve!: (value: unknown) => void;
+      marketService[method].mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+      const request = handlers.get(channel)!({}, { [field]: 'review-helper' });
+      if (transition === 'generation') ownerState.generation += 1;
+      else ownerState.pending = true;
+      resolve({ success: true, rejectionReason: 'Private feedback', versions: [{ rejectionReason: 'Private feedback' }] });
+      const result = await request;
+      expect(result).toMatchObject({ success: false });
+      expect(JSON.stringify(result)).not.toContain('Private feedback');
+    });
+
+    it('preserves the empty-version shorthand for the latest release', async () => {
+      marketService[method].mockResolvedValueOnce({ success: true });
+      expect(await handlers.get(channel)!({}, { [field]: 'review-helper', version: '' })).toEqual({ success: true });
+      if (method === 'getScanStatus') expect(marketService[method]).toHaveBeenCalledWith({ slug: 'review-helper' });
     });
   });
 

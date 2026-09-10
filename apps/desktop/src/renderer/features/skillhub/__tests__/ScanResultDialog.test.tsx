@@ -55,7 +55,7 @@ describe('ScanResultDialog pending review presentation', () => {
     expect(screen.getByRole('button', { name: 'skillhub.scanResult.dismiss' })).toBeTruthy();
   });
 
-  it.each(['approved', 'pending'])('does not display stale rejection feedback for %s', (status) => {
+  it.each(['approved', 'pending', 'failed', 'blocked'])('does not display stale rejection feedback for %s', (status) => {
     render(<ScanResultDialog open onClose={vi.fn()} result={{
       status, rejectionReason: 'Stale private notes', gates: [],
     }} />);

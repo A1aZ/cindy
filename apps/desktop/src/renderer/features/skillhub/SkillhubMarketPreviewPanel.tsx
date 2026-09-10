@@ -5,6 +5,8 @@ import { Download, FileText, GraduationCap, X } from 'lucide-react';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { Button } from '@/components/ui/button';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
+import { useAuth } from '@/contexts/AuthContext';
+import { getDataOwnerGeneration, isDataOwnerGenerationCurrent, type DataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 import { useNavigate } from 'react-router-dom';
 
 import { cn } from '@/lib/utils';
@@ -63,6 +65,8 @@ export function SkillhubMarketPreviewPanel({
 }: SkillhubMarketPreviewPanelProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { dataOwnerId } = useAuth();
+  const owner = getDataOwnerGeneration();
   const skillName = skill?.name ?? null;
   const skillVersion = skill?.latestVersion;
   const panelOpen = open && skillName !== null;
@@ -75,6 +79,7 @@ export function SkillhubMarketPreviewPanel({
   // 审核状态徽标点击 → 拉取扫描结果,复用发布完成时的 ScanResultDialog
   const [scanResult, setScanResult] = useState<ScanResultPayload | null>(null);
   const [scanDialogOpen, setScanDialogOpen] = useState(false);
+  const [scanResultOwner, setScanResultOwner] = useState<DataOwnerGeneration | null>(null);
   const status = skill ? effectivePublishedStatus(skill) : null;
   const reviewVersion = skill ? effectivePublishedStatusVersion(skill) ?? skill.latestVersion : undefined;
   const scanRequestId = useRef(0);
@@ -82,9 +87,10 @@ export function SkillhubMarketPreviewPanel({
   useEffect(() => {
     setScanDialogOpen(false);
     setScanResult(null);
+    setScanResultOwner(null);
     // A late reply must not show another Skill/version's private review feedback.
     return () => { scanRequestId.current += 1; };
-  }, [panelOpen, skillName, reviewVersion, status, skill?.catalogScope, skill?.canManage]);
+  }, [panelOpen, skillName, reviewVersion, status, skill?.catalogScope, skill?.canManage, dataOwnerId, owner]);
 
   // ESC 关闭
   useEffect(() => {
@@ -165,6 +171,7 @@ export function SkillhubMarketPreviewPanel({
   }, [panelOpen, selectedPath, skill?.catalogScope, skillName, skillVersion, t]);
 
   const tree = useMemo(() => buildPreviewTree(files), [files]);
+  const currentScanResult = scanResultOwner && isDataOwnerGenerationCurrent(scanResultOwner) ? scanResult : null;
 
   return (
     <>
@@ -215,7 +222,9 @@ export function SkillhubMarketPreviewPanel({
                       type="button"
                       title={t('skillhub.marketActions.viewScanResult')}
                       onClick={() => {
+                        if (!isDataOwnerGenerationCurrent(owner)) return;
                         const requestId = ++scanRequestId.current;
+                        const isCurrentRequest = () => requestId === scanRequestId.current && isDataOwnerGenerationCurrent(owner);
                         void window.electronAPI.skillhub
                           .getScanStatus({
                             slug: skill.name,
@@ -223,14 +232,16 @@ export function SkillhubMarketPreviewPanel({
                             catalogScope: skill.catalogScope,
                           })
                           .then((res) => {
-                            if (requestId !== scanRequestId.current) return;
+                            if (!isCurrentRequest()) return;
+                            setScanResultOwner(owner);
                             setScanResult(res.success
                               ? { status: res.status, gates: res.gates as ScanResultPayload['gates'], rejectionReason: res.rejectionReason }
                               : { status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }] });
                             setScanDialogOpen(true);
                           })
                           .catch(() => {
-                            if (requestId !== scanRequestId.current) return;
+                            if (!isCurrentRequest()) return;
+                            setScanResultOwner(owner);
                             setScanResult({ status: 'scan_status_unavailable', gates: [{ name: 'scan-status', status: 'unavailable' }] });
                             setScanDialogOpen(true);
                           });
@@ -373,9 +384,9 @@ export function SkillhubMarketPreviewPanel({
       </aside>
 
       <ScanResultDialog
-        open={scanDialogOpen}
-        onClose={() => setScanDialogOpen(false)}
-        result={scanResult}
+        open={scanDialogOpen && currentScanResult !== null}
+        onClose={() => { scanRequestId.current += 1; setScanDialogOpen(false); }}
+        result={currentScanResult}
       />
     </>
   );

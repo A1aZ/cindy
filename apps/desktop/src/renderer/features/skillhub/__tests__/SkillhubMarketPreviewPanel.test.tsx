@@ -2,6 +2,11 @@
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getDataOwnerGeneration, setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ dataOwnerId: getDataOwnerGeneration().dataOwnerId }),
+}));
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
@@ -37,6 +42,7 @@ const feedback = {
 };
 
 beforeEach(() => {
+  setDataOwnerGeneration('owner-a', 1);
   getScanStatus.mockReset();
   vi.stubGlobal('electronAPI', { skillhub: {
     getPublishedFiles: vi.fn().mockResolvedValue({ success: true, files: [] }),
@@ -84,6 +90,34 @@ describe('published Skill rejection feedback', () => {
     fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishedStatus.rejected' }));
     expect(await screen.findByRole('dialog', { name: 'skillhub.scanResult.failedTitle' })).toBeTruthy();
     expect(screen.getByText('skillhub.scanResult.statusLabel.unavailable')).toBeTruthy();
+    expect(screen.queryByText(feedback.rejectionReason)).toBeNull();
+  });
+
+  it.each(['response', 'exception'])('drops a previous account %s before the panel rerenders', async (outcome) => {
+    let resolve!: (value: typeof feedback) => void;
+    let reject!: (error: Error) => void;
+    getScanStatus.mockReturnValue(new Promise<typeof feedback>((done, fail) => { resolve = done; reject = fail; }));
+    render(<SkillhubMarketPreviewPanel skill={skill} open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishedStatus.rejected' }));
+    setDataOwnerGeneration('owner-b', 2);
+    setDataOwnerGeneration('owner-a', 3);
+    await act(async () => {
+      if (outcome === 'response') resolve(feedback);
+      else reject(new Error('Old account request failed'));
+    });
+    expect(screen.queryByText(feedback.rejectionReason)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'skillhub.scanResult.rejectedTitle' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'skillhub.scanResult.failedTitle' })).toBeNull();
+  });
+
+  it.each(['owner-b', 'owner-a'])('closes visible feedback when the owner generation changes to %s', async (nextOwner) => {
+    getScanStatus.mockResolvedValue(feedback);
+    const onClose = vi.fn();
+    const { rerender } = render(<SkillhubMarketPreviewPanel skill={skill} open onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishedStatus.rejected' }));
+    expect(await screen.findByText(feedback.rejectionReason)).toBeTruthy();
+    setDataOwnerGeneration(nextOwner, 2);
+    rerender(<SkillhubMarketPreviewPanel skill={skill} open onClose={onClose} />);
     expect(screen.queryByText(feedback.rejectionReason)).toBeNull();
   });
 });

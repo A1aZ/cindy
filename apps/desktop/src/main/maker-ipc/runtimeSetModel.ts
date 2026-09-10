@@ -266,10 +266,12 @@ export async function applyRuntimeSetModelChange(
   if (sess && (shouldCloseSession || requiresCodexThreadRelink)) {
     input.assertSessionCloseSupported?.();
     if (isSelfBusy() && input.registerPendingCredentialSwitch) {
+      // A required credential rebuild must also survive close failure: keeping
+      // the old process alive cannot be treated as applying the new account.
       await input.registerPendingCredentialSwitch(sessionId, {
         model,
         providerId: nextProviderId,
-        ...((input.forceSessionRebuild || modelSwitchRequiresRebuild) ? { forceSessionRebuild: true } : {}),
+        ...(shouldCloseSession ? { forceSessionRebuild: true } : {}),
       });
       logger?.info('set-model: session rebuild deferred until turn end', {
         sessionId,
@@ -319,7 +321,7 @@ export async function applyRuntimeSetModelChange(
         input.registerPendingCredentialSwitch(sessionId, {
           model,
           providerId: nextProviderId,
-          ...((input.forceSessionRebuild || modelSwitchRequiresRebuild) ? { forceSessionRebuild: true } : {}),
+          ...(shouldCloseSession ? { forceSessionRebuild: true } : {}),
         });
         logger?.info('set-model: credential switch deferred after busy race', {
           sessionId,

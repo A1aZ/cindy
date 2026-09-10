@@ -4,6 +4,7 @@ import { setCustomProviders } from '../../maker-host/active-catalog.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acceptSessionRuntimeMutation, getPendingSessionRuntimeMutation, clearSessionRuntimeControlState } from '../sessionRuntimeControl.js';
 import { createPendingAgentSwitchRegistry } from '../sessionAgentSwitchHandler.js';
+import { PendingCredentialSwitchService } from '../pendingCredentialSwitch.js';
 import { withSendToSessionLock } from '../sendToSessionLock.js';
 
 import {
@@ -676,6 +677,7 @@ describe('applyRuntimeSetModelChange', () => {
     expect(registerPendingCredentialSwitch).toHaveBeenCalledWith(sessionId, {
       model: 'codex/gpt-5.5',
       providerId: 'xd',
+      forceSessionRebuild: true,
     });
     expect(closeSession).not.toHaveBeenCalled();
     expect(setModel).not.toHaveBeenCalled();
@@ -784,6 +786,7 @@ describe('applyRuntimeSetModelChange', () => {
     expect(registerPendingCredentialSwitch).toHaveBeenCalledWith(sessionId, {
       model: 'codex/gpt-5.5',
       providerId: 'xd',
+      forceSessionRebuild: true,
     });
     expect(setModel).not.toHaveBeenCalled();
     expect(getSessionProvider(sessionId)).toBe('openai');
@@ -991,6 +994,7 @@ describe('applyRuntimeSetModelChange', () => {
     expect(registerPendingCredentialSwitch).toHaveBeenCalledWith(sessionId, {
       model: 'gpt-5.5',
       providerId: 'xd',
+      forceSessionRebuild: true,
     });
     expect(closeSession).not.toHaveBeenCalled();
     // route 保持旧值:运行中的 turn 继续用原来源,pending 兑现时才写新值。
@@ -1097,6 +1101,7 @@ describe('applyRuntimeSetModelChange', () => {
     expect(registerPendingCredentialSwitch).toHaveBeenCalledWith(sessionId, {
       model: 'gpt-5.4',
       providerId: 'xd',
+      forceSessionRebuild: true,
     });
     // route 保持旧值,等 pending 兑现。
     expect(getSessionProvider(sessionId)).toBe('openai');
@@ -1324,6 +1329,7 @@ describe('applyRuntimeSetModelChange', () => {
     expect(registerPendingCredentialSwitch).toHaveBeenCalledWith(sessionId, {
       model: 'gpt-5.6-sol',
       providerId: 'openai',
+      forceSessionRebuild: true,
     });
     expect(closeSession).not.toHaveBeenCalled();
     expect(setModel).not.toHaveBeenCalled();
@@ -1691,6 +1697,75 @@ describe('context configuration refresh across live routes', () => {
       hasPendingSelection: () => false, withSessionLock: async (_id, run) => run(),
       inferProviderId: () => 'xd', assertCurrent: () => { if (!current) throw new Error('owner changed'); },
     })).rejects.toThrow('owner changed');
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('Claude native account switching', () => {
+  it.each([
+    ['claude-a', 'claude-b'], ['claude-b', 'claude-a'],
+    ['anthropic', 'claude-a'], ['claude-a', 'anthropic'],
+    ['xd', 'claude-a'], ['claude-a', 'xd'],
+  ].flatMap(([from, to]) => ([false, true, 'race'] as const).map(busy => ({ from, to, busy }))))(
+    'rebuilds $from to $to at the safe boundary (busy=$busy)', async ({ from, to, busy }) => {
+      const original = BUNDLED_CATALOG.providers.find(p => p.id === 'anthropic')!;
+      setCustomProviders(['claude-a', 'claude-b'].map(id => ({ ...original, id,
+        auth: { method: 'oauth' as const, native: 'claude' as const }, source: 'user' as const })));
+      const sessionId = rememberSession(`claude-accounts-${from}-${to}-${busy}`);
+      setSessionProvider(sessionId, from);
+      let running = busy !== false;
+      const isTurnRunning = vi.fn(() => running);
+      if (busy === 'race') isTurnRunning.mockReturnValueOnce(false);
+      const setModel = vi.fn(async () => {});
+      const cleanup = vi.fn(async () => {});
+      const closeSession = vi.fn(async (id: string) => {
+        expect(getSessionProvider(id)).toBe(from);
+        await rehydrateCloseSuppression.runOnCloseSideEffects(id, cleanup);
+      });
+      const maker: RuntimeSetModelMaker = {
+        getSession: () => ({ agentKind: 'claude-code', model: 'claude-opus-5', setModel }),
+        listActiveSessions: () => [
+          { id: sessionId, agentKind: 'claude-code', isTurnRunning },
+          { id: 'other-task', agentKind: 'claude-code', isTurnRunning: () => true },
+        ], closeSession,
+      };
+      const pending = new PendingCredentialSwitchService({ maker });
+      try {
+        const result = await applyRuntimeSetModelChange({ maker, sessionId, model: 'claude-opus-5', providerId: to,
+          registerPendingCredentialSwitch: (id, target) => pending.register(id, target) });
+        if (busy) {
+          expect(result.status).toBe('deferred');
+          expect(getSessionProvider(sessionId)).toBe(from);
+          expect(closeSession).not.toHaveBeenCalled();
+          await pending.onTurnSettled(sessionId);
+          expect(closeSession).not.toHaveBeenCalled();
+          running = false;
+          closeSession.mockRejectedValueOnce(new Error('process still alive'));
+          await pending.onTurnSettled(sessionId);
+          expect(getSessionProvider(sessionId)).toBe(from);
+          expect(pending.has(sessionId)).toBe(true);
+          await pending.onTurnSettled(sessionId);
+          expect(pending.has(sessionId)).toBe(false);
+        } else {
+          expect(result.status).toBe('applied');
+        }
+        expect(getSessionProvider(sessionId)).toBe(to);
+        expect(closeSession).toHaveBeenLastCalledWith(sessionId);
+        expect(setModel).not.toHaveBeenCalled();
+        expect(cleanup).not.toHaveBeenCalled();
+      } finally { pending.clear(sessionId); }
+    },
+  );
+  it('keeps the same native account process for model-only changes', async () => {
+    const original = BUNDLED_CATALOG.providers.find(p => p.id === 'anthropic')!;
+    setCustomProviders([{ ...original, id: 'claude-a', auth: { method: 'oauth', native: 'claude' }, source: 'user' }]);
+    const sessionId = rememberSession('claude-same-account');
+    setSessionProvider(sessionId, 'claude-a');
+    const setModel = vi.fn(async () => {}), closeSession = vi.fn(async () => {});
+    await applyRuntimeSetModelChange({ sessionId, model: 'claude-fable-5',
+      maker: { getSession: () => ({ agentKind: 'claude-code', model: 'claude-opus-5', setModel }),
+        listActiveSessions: () => [{ id: sessionId, agentKind: 'claude-code', isTurnRunning: () => true }], closeSession } });
+    expect(setModel).toHaveBeenCalled();
     expect(closeSession).not.toHaveBeenCalled();
   });
 });

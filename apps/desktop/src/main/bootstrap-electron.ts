@@ -1,7 +1,6 @@
 import { codexAccountState } from './maker-host/codex-account-auth.js';
 import { syncSubscriptionAccountUsage } from './usage/subscriptionAccountUsage.js';
-import { setSubscriptionAccountInvalidatedHandler } from './maker-host/subscription-account-auth.js';
-import { setXaiDiscoveredModels } from './maker-host/active-catalog.js';
+import { clearSubscriptionAccountDiscoveredModels, setSubscriptionAccountInvalidatedHandler } from './maker-host/subscription-account-auth.js';
 import { startWorktreeRecycleMaintenance, stopWorktreeRecycleMaintenance, auditRegisteredWorktrees } from './worktree/recycleMaintenance';
 import { requestWorktreeRecycle } from './worktree/managedRecycle';
 import { recycleSessionWorktreeForStatusChange } from './localDb/ipc/sessions';
@@ -4894,7 +4893,7 @@ const registerIpcHandlers = () => {
   });
   setXaiAuthInvalidatedHandler((providerId) => {
     if (providerId !== 'xai') {
-      setXaiDiscoveredModels(null, providerId);
+      void clearSubscriptionAccountDiscoveredModels(providerId);
       void syncSubscriptionAccountUsage(providerId).then(broadcastXaiAuthStateChanged, broadcastXaiAuthStateChanged);
       return;
     }

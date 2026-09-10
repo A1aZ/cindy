@@ -9,6 +9,11 @@ import path from 'node:path';
 
 import { BUNDLED_CATALOG, type Catalog } from '@cindy/model-providers';
 
+// Account discovery persistence is outside this runtime/route fixture.
+vi.mock('../model-discovery/xai.js', () => ({
+  discardXaiModelsDiskCache: vi.fn(async () => {}),
+}));
+
 vi.mock('../grok-oauth-login.js', () => ({
   hasGrokOAuthLogin: () => true,
 }));

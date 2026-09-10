@@ -24,6 +24,11 @@ const effects = vi.hoisted(() => {
   }
   return { calls, fns, fn };
 });
+// Account discovery persistence is outside this runtime/route fixture.
+vi.mock('../../maker-host/model-discovery/xai.js', () => ({
+  discardXaiModelsDiskCache: vi.fn(async () => {}),
+}));
+
 vi.mock('../../logger.js', () => ({
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));

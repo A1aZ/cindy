@@ -1,9 +1,10 @@
 import { app } from 'electron';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending, ownerScopedUserDataPath } from '../appSessionState.js';
 import { genericOAuthSecretIo } from '../secrets/providerSecretStore.js';
-import { getActiveCatalog } from './active-catalog.js';
+import { getActiveCatalog, setDiscoveredProviderModels, setXaiDiscoveredModels } from './active-catalog.js';
+import { discardXaiModelsDiskCache } from './model-discovery/xai.js';
 import { createClaudeOAuthRefresher, type GetValidOAuthOptions } from './claude-oauth-refresh.js';
 import { type ClaudeAiOAuth, readClaudeAiOAuth } from './claude-credentials-store.js';
 import { runClaudeOAuthLogin, cancelClaudeOAuthLogin } from './claude-oauth-login.js';
@@ -35,6 +36,19 @@ function credentialFingerprint(raw: string): string {
 export function subscriptionAccountKind(providerId?: string | null): 'claude' | 'xai' | null {
   const native = getActiveCatalog().providers.find((p) => p.id === providerId)?.auth.native;
   return native === 'claude' || native === 'xai' ? native : null;
+}
+/** Account replacement/removal invalidates membership, never another connection's catalog. */
+export function clearSubscriptionAccountDiscoveredModels(providerId: string): Promise<void> {
+  setDiscoveredProviderModels(providerId, 'claude-code', []);
+  setXaiDiscoveredModels(null, providerId);
+  if (subscriptionAccountKind(providerId) === 'xai') {
+    // Share the discovery writer's queue so an older pending write cannot recreate the LKG.
+    return discardXaiModelsDiskCache({
+      getScopeKey: () => `${activeOwnerScopeKey()}:${providerId}`,
+      cacheFilePath: () => ownerScopedUserDataPath('model-discovery', `${providerId}-models.json`),
+    });
+  }
+  return Promise.resolve();
 }
 export function isClaudeSubscriptionProviderId(providerId?: string | null): boolean {
   return providerId === 'anthropic' || subscriptionAccountKind(providerId) === 'claude';
@@ -83,6 +97,7 @@ function claudeAccount(providerId: string) {
         if (!genericOAuthSecretIo.remove(providerId)) {
           log.warn('revoked account credential could not be removed; suppressing retained credential', { providerId });
         }
+        void clearSubscriptionAccountDiscoveredModels(providerId);
         onInvalidated(providerId);
       },
     });
@@ -170,7 +185,13 @@ export async function loginSubscriptionAccount(
         ? genericOAuthSecretIo.remove(providerId)
         : genericOAuthSecretIo.write(providerId, before);
     if (kind === 'xai') resetGrokOAuthMemoryCache(providerId);
+    if (restored) void clearSubscriptionAccountDiscoveredModels(providerId);
     return restored;
+  };
+  const restoreWrittenCredentials = () => {
+    if (written && activeOwnerScopeKey() === scope && genericOAuthSecretIo.readStrict(providerId) === written) {
+      if (!rollbackCredentials()) throw new Error('Failed to restore credentials after unsuccessful login');
+    }
   };
   try {
     const persist = (blob: unknown) => {
@@ -191,18 +212,23 @@ export async function loginSubscriptionAccount(
           })
         : await runGrokOAuthLogin({ isCurrent: current, persist }, providerId);
     if (!current()) {
-      rollbackCredentials();
+      restoreWrittenCredentials();
       return { ok: false, reason: 'login_cancelled' };
     }
     if (!result.ok && written && !rollbackCredentials()) {
       throw new Error('Failed to restore credentials after unsuccessful login');
     }
+    if (result.ok) {
+      await clearSubscriptionAccountDiscoveredModels(providerId);
+      if (!current()) {
+        restoreWrittenCredentials();
+        return { ok: false, reason: 'login_cancelled' };
+      }
+    }
     // Profile backfill is deferred to the account refresher after the login transaction commits.
     return { ...result, firstLogin: before === null, rollbackCredentials };
   } catch (error) {
-    if (written && activeOwnerScopeKey() === scope && genericOAuthSecretIo.readStrict(providerId) === written) {
-      if (!rollbackCredentials()) throw new Error('Failed to restore credentials after unsuccessful login');
-    }
+    restoreWrittenCredentials();
     throw error;
   } finally {
     if (logins.get(key) === operation) logins.delete(key);
@@ -216,11 +242,13 @@ export function removeSubscriptionAccountCredentialsReversibly(providerId: strin
   if (subscriptionAccountKind(providerId) === 'xai') logoutGrok(providerId);
   else if (!genericOAuthSecretIo.remove(providerId))
     throw new Error('Failed to remove account credentials');
+  void clearSubscriptionAccountDiscoveredModels(providerId);
   return () => {
     if (activeOwnerScopeKey() !== scope || genericOAuthSecretIo.readStrict(providerId) !== null)
       return false;
     const restored = previous === null || genericOAuthSecretIo.write(providerId, previous);
     if (subscriptionAccountKind(providerId) === 'xai') resetGrokOAuthMemoryCache(providerId);
+    if (restored) void clearSubscriptionAccountDiscoveredModels(providerId);
     return restored;
   };
 }

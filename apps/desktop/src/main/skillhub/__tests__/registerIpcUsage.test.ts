@@ -149,6 +149,7 @@ describe('registerSkillhubIpc usage handlers', () => {
     installServiceMocks.listPendingUninstallCleanups.mockReturnValue([]);
     handlers.clear();
     vi.clearAllMocks();
+    renameLocalSkill.mockReset();
     getManagedSkillRoots.mockReturnValue([]);
     getCurrentDataOwnerId.mockReturnValue('local-v1');
     getCurrentDbClientSnapshot.mockReset();
@@ -342,6 +343,37 @@ describe('registerSkillhubIpc usage handlers', () => {
     );
     expect(afterDestroy).toMatchObject({ success: false });
   });
+
+  it.each(['unchanged', 'grant-wait', 'mutation-wait', 'boundary-pending'] as const)(
+    'guards local rename at its original owner generation: %s', async (transition) => {
+      const sender = { id: 71, on: vi.fn(), once: vi.fn() };
+      scanAllSkills.mockResolvedValueOnce({ skills: [{
+        absolutePath: '/physical/demo', discoveredPath: '/repo/.pi/skills/authorized/demo',
+        scope: 'project', projectRoot: '/repo',
+      }], sources: [] });
+      await handlers.get('skillhub:scan')!({ sender }, { projects: [] });
+      const mutate = vi.fn();
+      renameLocalSkill.mockImplementationOnce(async (_params, canMutate: () => boolean) => {
+        if (transition === 'mutation-wait') ownerState.generation += 1;
+        if (transition === 'boundary-pending') ownerState.pending = true;
+        if (!canMutate()) return { success: false, error: 'Skill mutation context changed' };
+        mutate();
+        return { success: true, newAbsolutePath: '/physical/renamed' };
+      });
+      if (transition === 'grant-wait') getAllowedProjectRoots.mockImplementationOnce(async () => {
+        ownerState.generation += 1;
+        return ['/repo'];
+      });
+      const result = await handlers.get('skillhub:rename-local')!({ sender }, {
+        absolutePath: '/repo/.pi/skills/authorized/demo', newName: 'renamed',
+      });
+      expect(result).toMatchObject({ success: transition === 'unchanged' });
+      expect(mutate).toHaveBeenCalledTimes(transition === 'unchanged' ? 1 : 0);
+      if (transition === 'grant-wait') {
+        expect(renameLocalSkill).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('revokes project scan grants after the last active project session disappears', async () => {
     const sender = { id: 12, on: vi.fn(), once: vi.fn() };

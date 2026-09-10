@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils';
 import { Spinner } from '@/components/ui/spinner';
 import { toast } from '@/lib/toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
+import { getDataOwnerGeneration, isDataOwnerGenerationCurrent, isDataOwnerIdCurrent } from '@/contexts/dataOwnerGeneration';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { pickDefaultVersion } from './versionUtils';
 import { triggerIncrementalSync } from './hooks/useSkillSync';
@@ -534,14 +534,11 @@ export function PublishDialog({
   const renamedToRef = useRef<{ absolutePath: string; name: string } | null>(null);
   const activePublishNameRef = useRef<string | null>(null);
   const failedProgressNameRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   useEffect(() => {
-    if (!open || isDialogOwnerCurrent) return;
-    activePublishNameRef.current = null;
-    failedProgressNameRef.current = null;
-    renamedToRef.current = null;
-    dispatch({ type: 'CLOSE' });
-    onOpenChange(false);
-  }, [open, isDialogOwnerCurrent, onOpenChange]);
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   /** 拿当前应使用的 (absolutePath, name) — rename 之后是新值,否则用 prop。 */
   const effectiveSkill = useCallback(
     (): { absolutePath: string; name: string } => ({
@@ -564,6 +561,21 @@ export function PublishDialog({
     }
   }, [onLocalRenamed]);
 
+  const reconcileCommittedRename = useCallback(() => {
+    // A committed filesystem rename remains real across auth realms sharing
+    // this local owner. Repair its mounted route without resuming publication.
+    if (mountedRef.current && isDataOwnerIdCurrent(dialogOwner)) notifyRenameAndReset();
+    else renamedToRef.current = null;
+  }, [dialogOwner, notifyRenameAndReset]);
+
+  useEffect(() => {
+    if (!open || isDialogOwnerCurrent) return;
+    activePublishNameRef.current = null;
+    failedProgressNameRef.current = null;
+    reconcileCommittedRename();
+    dispatch({ type: 'CLOSE' });
+    onOpenChange(false);
+  }, [open, isDialogOwnerCurrent, onOpenChange, reconcileCommittedRename]);
 
   // ── Hub categories (required for first publish only) ─────────────────────
   const [categoryState, setCategoryState] = useState<CategoryState>({
@@ -809,8 +821,8 @@ export function PublishDialog({
         absolutePath: skill.discoveredPath ?? eff.absolutePath,
         newName: submitName,
       });
-      if (!isDataOwnerGenerationCurrent(dialogOwner)) return;
       if (!renameRes.success) {
+        if (!isDataOwnerGenerationCurrent(dialogOwner)) return;
         toast.error(t('skillhub.publishDialog.renameFailed', { error: renameRes.error }));
         return;
       }
@@ -818,6 +830,10 @@ export function PublishDialog({
       publishAbsolutePath = renameRes.newAbsolutePath;
       // 旧路径的 hash 缓存清掉(它指向已不存在的目录)
       invalidateHash(eff.absolutePath);
+      if (!isDataOwnerGenerationCurrent(dialogOwner)) {
+        reconcileCommittedRename();
+        return;
+      }
     }
 
     dispatch({ type: 'SUBMIT' });
@@ -840,6 +856,7 @@ export function PublishDialog({
     runPublish,
     skill.discoveredPath,
     dialogOwner,
+    reconcileCommittedRename,
   ]);
 
   // ── Cancel publish in progress (working / failure 都可调) ────────────────

@@ -526,9 +526,11 @@ export function registerSkillhubIpc(options: RegisterSkillhubIpcOptions): void {
   ipcMain.handle(
     'skillhub:rename-local',
     async (event, params: { absolutePath: string; newName: string }) => {
+      const ownerScope = activeOwnerScopeKey();
+      const canMutate = () => ownerScope === activeOwnerScopeKey() && !isAppSessionBoundaryPending();
       if (!await hasScannedSkillGrant(event, params.absolutePath)) return scanGrantDenied();
-      const ownerId = getCurrentDataOwnerId();
-      const result = await renameLocalSkill(params, () => ownerId === getCurrentDataOwnerId() && !isAppSessionBoundaryPending());
+      if (!canMutate()) return { success: false, error: 'Skill mutation context changed' };
+      const result = await renameLocalSkill(params, canMutate);
       if (result.success) broadcastLocalChange();
       return result;
     },

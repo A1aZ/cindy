@@ -5,6 +5,7 @@ import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 
 const mocks = vi.hoisted(() => ({
   confirm: vi.fn(), refresh: vi.fn(), sync: vi.fn(), publish: vi.fn(), cancelPublish: vi.fn(),
+  renameLocal: vi.fn(), listCategories: vi.fn(),
 }));
 vi.mock('react-i18next', async (importOriginal) => ({
   ...await importOriginal<typeof import('react-i18next')>(),
@@ -34,31 +35,42 @@ beforeEach(() => {
   mocks.refresh.mockReset().mockResolvedValue([]);
   mocks.confirm.mockResolvedValue(true);
   mocks.publish.mockResolvedValue({ success: true, result: { name: 'review-helper', version: '1.0.1' } });
+  mocks.renameLocal.mockReset().mockResolvedValue({ success: true, newAbsolutePath: '/fixture/renamed-helper' });
+  mocks.listCategories.mockResolvedValue({ success: true, categories: [] });
   vi.stubGlobal('electronAPI', { skillhub: {
     publish: mocks.publish,
     cancelPublish: mocks.cancelPublish,
+    renameLocal: mocks.renameLocal,
+    listCategories: mocks.listCategories,
     onPublishProgress: (listener: typeof progress) => { progress = listener; return () => {}; },
   } });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-function mountPublication() {
+function mountPublication(overrides: Partial<PublishDialogProps> = {}) {
   const onScanResult = vi.fn();
   const onOpenChange = vi.fn();
+  const onLocalRenamed = vi.fn();
   const props: PublishDialogProps = {
-    open: true, onOpenChange, onScanResult, isFirstPublish: false, latestVersion: '1.0.0', skill: {
+    open: true, onOpenChange, onScanResult, onLocalRenamed, isFirstPublish: false, latestVersion: '1.0.0', skill: {
       id: 'review-helper', urlKey: 'review-helper', engine: 'claude-code', linkedEngines: [],
       kind: 'skill', scope: 'global', mdPath: '/fixture/review-helper/SKILL.md', files: [], registryEntry: null,
       name: 'review-helper', absolutePath: '/fixture/review-helper', frontmatter: { version: '1.0.1' },
     },
+    ...overrides,
   };
   const view = render(<PublishDialog {...props} />);
-  fireEvent.change(screen.getByPlaceholderText('skillhub.publishDialog.changelogPlaceholder'), { target: { value: 'Improve documentation' } });
-  return { onScanResult, onOpenChange, rerender: (open = true) => view.rerender(<PublishDialog {...props} open={open} />) };
+  if (props.isFirstPublish) {
+    fireEvent.change(screen.getByPlaceholderText('skillhub.publishDialog.skillNamePlaceholder'), { target: { value: 'renamed-helper' } });
+  } else {
+    fireEvent.change(screen.getByPlaceholderText('skillhub.publishDialog.changelogPlaceholder'), { target: { value: 'Improve documentation' } });
+  }
+  return { onScanResult, onOpenChange, onLocalRenamed, unmount: view.unmount,
+    rerender: (open = true) => view.rerender(<PublishDialog {...props} open={open} />) };
 }
 
-async function startPublication() {
-  const view = mountPublication();
+async function startPublication(overrides: Partial<PublishDialogProps> = {}) {
+  const view = mountPublication(overrides);
   fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.startPublish' }));
   await waitFor(() => expect(mocks.publish).toHaveBeenCalledOnce());
   return view;
@@ -165,4 +177,38 @@ describe('PublishDialog result delivery', () => {
     expect(mocks.cancelPublish).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('repairs the same-owner route for a committed rename when closing an old-realm publication', async () => {
+    mocks.publish.mockReturnValueOnce(new Promise(() => {}));
+    const view = await startPublication({ isFirstPublish: true, autoCleanName: true });
+    expect(mocks.renameLocal).toHaveBeenCalledOnce();
+    expect(view.onLocalRenamed).not.toHaveBeenCalled();
+    setDataOwnerGeneration('owner-a', 2);
+    view.rerender();
+    expect(view.onLocalRenamed).toHaveBeenCalledExactlyOnceWith('/fixture/renamed-helper', 'renamed-helper');
+    expect(view.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(mocks.publish).toHaveBeenCalledOnce();
+  });
+
+  it.each(['same-owner', 'different-owner', 'unmounted', 'rename-rejected'] as const)(
+    'reconciles a delayed rename reply only for its still-mounted local owner: %s', async (transition) => {
+      let finishRename!: (value: unknown) => void;
+      mocks.renameLocal.mockReturnValueOnce(new Promise((resolve) => { finishRename = resolve; }));
+      const view = mountPublication({ isFirstPublish: true, autoCleanName: true });
+      fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishDialog.startPublish' }));
+      await waitFor(() => expect(mocks.renameLocal).toHaveBeenCalledOnce());
+      setDataOwnerGeneration(transition === 'different-owner' ? 'owner-b' : 'owner-a', 2);
+      if (transition === 'unmounted') view.unmount();
+      else view.rerender();
+      await act(async () => { finishRename(transition === 'rename-rejected'
+        ? { success: false, error: 'Skill mutation context changed' }
+        : { success: true, newAbsolutePath: '/fixture/renamed-helper' }); });
+      if (transition === 'same-owner') {
+        expect(view.onLocalRenamed).toHaveBeenCalledExactlyOnceWith('/fixture/renamed-helper', 'renamed-helper');
+      } else expect(view.onLocalRenamed).not.toHaveBeenCalled();
+      expect(mocks.publish).not.toHaveBeenCalled();
+      expect(view.onScanResult).not.toHaveBeenCalled();
+    },
+  );
 });

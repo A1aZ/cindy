@@ -34,6 +34,7 @@ import { createLogger } from '@/lib/logger';
 import { buildFence, detectRenderable } from '@/lib/textPreview';
 import { toast } from '@/lib/toast';
 import { useAuth } from '@/contexts/AuthContext';
+import { getDataOwnerGeneration, isDataOwnerIdCurrent } from '@/contexts/dataOwnerGeneration';
 import { cn } from '@/lib/utils';
 import { getDraft, getFastModeForModel } from '@/state/newMakerDraft';
 import { useMetaColumnResize } from './hooks/useMetaColumnResize';
@@ -2553,9 +2554,11 @@ export function SkillhubDetailView() {
             // + 旧 name 的 info 缓存(让新 name 重新查),然后刷新 scanner,
             // 最后导航到新 URL。先 await refresh 才 navigate,确保新 URL 落地时
             // skills 已包含新 entry,免得短暂闪一下"未找到"。
+            const owner = getDataOwnerGeneration();
             invalidateInfo(entry.name);
             invalidateHash(newAbsolutePath);
             void refreshSkillhub().then((scannedSkills) => {
+              if (!isDataOwnerIdCurrent(owner)) return;
               const renamed = findLocalSkillByPath(scannedSkills, newAbsolutePath);
               if (!renamed) return;
               setLastEntryId(renamed.id);

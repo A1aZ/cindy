@@ -260,6 +260,31 @@ A pre-migration stash was retained as a recovery copy.
 - Required submission gates passed: root related unit gate (Desktop 152.7 seconds),
   Desktop typecheck, Rust formatting and diff checks.
 
+### Follow-up: XInput/WGI duplicate enumeration (Codex 3978022650)
+
+- Windows Raw Input HID interfaces now identify XInput-owned hardware products
+  using the documented IG_ component and VID/PID, independently of vendor brands
+  and display names. Filter candidates before per-family selection, including
+  cached WGI metadata, so an excluded duplicate does not hide a healthy candidate.
+- Complete inventory refresh replaces the exclusion set; partial enumeration
+  retains known exclusions and adds newly confirmed products. Raw paths stay
+  internal, buffers/counts are bounded, and no drivers or input registration change.
+- This uses Microsoft's product-level XInput exclusion convention, not an exact
+  XInput-slot-to-WGI-object identity mapping. Devices sharing a VID/PID in mixed
+  XInput/non-XInput modes remain a limitation requiring broader hardware coverage.
+  Reference: https://learn.microsoft.com/en-us/windows/win32/xinput/xinput-and-directinput
+- RED: three ownership tests executed and failed at the missing implementation
+  (an earlier test syntax typo was corrected first and is not RED evidence).
+  GREEN: 19 gamepad Rust tests, 14 Micro Rust tests, both Clippy checks and nine
+  notices/SBOM tests passed; the gamepad release build is also validated.
+- User confirmed the b310ae048 isolated instance (ready, PID 31860) handles USB
+  and Bluetooth buttons, both sticks, LT/RT and release/return-to-neutral correctly.
+  This is user-performed hardware evidence, not simulated input. Explicit unplug
+  while held, foreground/background dispatch and final-head package smoke still
+  need separate evidence. Third-party duplicate hardware is not available locally.
+- Required submission gates passed: root related unit gate (Desktop 138.9 seconds),
+  Desktop typecheck and diff checks.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

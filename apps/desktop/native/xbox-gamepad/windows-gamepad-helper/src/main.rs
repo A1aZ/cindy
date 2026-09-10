@@ -1,5 +1,6 @@
 mod mapping;
 mod xinput;
+mod xinput_devices;
 
 use serde_json::{json, Value};
 use std::{
@@ -59,6 +60,8 @@ struct Device {
     pad: Gamepad,
     id: String,
     name: String,
+    vendor: u16,
+    product: u16,
     last_frame: Option<Value>,
     triggers: mapping::TriggerState,
 }
@@ -107,6 +110,7 @@ fn snapshot_messages(
 /// Re-enumeration handles hotplug without callbacks racing the polling thread.
 fn discover(
     current: &BTreeMap<&'static str, Device>,
+    xinput_products: &xinput_devices::XInputProducts,
 ) -> windows::core::Result<BTreeMap<&'static str, Device>> {
     let preferred = current
         .iter()
@@ -122,7 +126,9 @@ fn discover(
             reuse_live_device(existing, || {
                 let raw = RawGameController::FromGameController(&pad)?;
                 let name = raw.DisplayName()?.to_string();
-                let family = mapping::family(raw.HardwareVendorId()?, &name);
+                let vendor = raw.HardwareVendorId()?;
+                let product = raw.HardwareProductId()?;
+                let family = mapping::family(vendor, &name);
                 let id = raw.NonRoamableId()?.to_string();
                 Ok((
                     family,
@@ -130,11 +136,19 @@ fn discover(
                         pad,
                         id,
                         name,
+                        vendor,
+                        product,
                         last_frame: None,
                         triggers: mapping::TriggerState::default(),
                     },
                 ))
             })
+        })
+        .filter(|candidate| match candidate {
+            Ok((family, device)) => {
+                *family != "xbox" && !xinput_products.contains(device.vendor, device.product)
+            }
+            Err(_) => true,
         });
     let mut selected = select_devices(candidates, &preferred, |device| device.id.as_str());
     // Xbox has one owner across USB/Bluetooth: XInput. Do not publish WGI's
@@ -207,6 +221,7 @@ fn poll() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut devices = BTreeMap::<&'static str, Device>::new();
     let mut xbox = xinput::XboxInput::default();
+    let mut xinput_products = xinput_devices::XInputProducts::default();
     let mut refresh = true;
     let mut last_scan = Instant::now();
     let mut last_xinput_scan = Instant::now();
@@ -222,7 +237,8 @@ fn poll() -> Result<(), Box<dyn std::error::Error>> {
             || refresh
             || last_scan.elapsed() >= Duration::from_secs(1)
         {
-            let mut next = discover(&devices)?;
+            xinput_products.refresh();
+            let mut next = discover(&devices, &xinput_products)?;
             for family in FAMILIES {
                 if family == "xbox" {
                     continue;

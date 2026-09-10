@@ -53,6 +53,7 @@ impl Drop for HotplugWatch {
 }
 
 /// One active controller per family matches the existing Cindy accessory slots.
+#[derive(Clone)]
 struct Device {
     pad: Gamepad,
     id: String,
@@ -87,24 +88,43 @@ fn discover(
     let candidates = Gamepad::Gamepads()?
         .into_iter()
         .map(|pad| -> windows::core::Result<_> {
-            let raw = RawGameController::FromGameController(&pad)?;
-            let name = raw.DisplayName()?.to_string();
-            let family = mapping::family(raw.HardwareVendorId()?, &name);
-            let id = raw.NonRoamableId()?.to_string();
-            Ok((
-                family,
-                Device {
-                    pad,
-                    id,
-                    name,
-                    last_frame: None,
-                    triggers: mapping::TriggerState::default(),
-                },
-            ))
+            let existing = current
+                .iter()
+                .find(|(_, device)| device.pad == pad)
+                .map(|(&family, device)| (family, device));
+            reuse_live_device(existing, || {
+                let raw = RawGameController::FromGameController(&pad)?;
+                let name = raw.DisplayName()?.to_string();
+                let family = mapping::family(raw.HardwareVendorId()?, &name);
+                let id = raw.NonRoamableId()?.to_string();
+                Ok((
+                    family,
+                    Device {
+                        pad,
+                        id,
+                        name,
+                        last_frame: None,
+                        triggers: mapping::TriggerState::default(),
+                    },
+                ))
+            })
         });
     Ok(select_devices(candidates, &preferred, |device| {
         device.id.as_str()
     }))
+}
+
+/// Called only for a handle still present in the fresh Gamepads snapshot.
+fn reuse_live_device<T: Clone, E>(
+    existing: Option<(&'static str, &T)>,
+    probe: impl FnOnce() -> std::result::Result<(&'static str, T), E>,
+) -> std::result::Result<(&'static str, T), E> {
+    // Metadata is stable for the lifetime of a WGI object. Fresh-list membership
+    // and GetCurrentReading determine liveness, not a repeated DisplayName query.
+    if let Some((family, device)) = existing {
+        return Ok((family, device.clone()));
+    }
+    probe()
 }
 
 /// Select one stable device per family from independent metadata probes.
@@ -130,6 +150,30 @@ fn select_devices<T, E>(
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+    #[test]
+    fn a_selected_live_handle_does_not_depend_on_fallible_metadata_refresh() {
+        let old = "selected".to_string();
+        let candidate = reuse_live_device(Some(("xbox", &old)), || Err("transient metadata error"));
+        let selected = select_devices(
+            [Ok(("xbox", "other".to_string())), candidate],
+            &BTreeMap::from([("xbox", old.clone())]),
+            |id| id.as_str(),
+        );
+        assert_eq!(selected.get("xbox"), Some(&old));
+    }
+    #[test]
+    fn disappeared_handles_are_not_retained_by_cached_metadata() {
+        let preferred = BTreeMap::from([("xbox", "removed".to_string())]);
+        let candidate: std::result::Result<_, &str> =
+            reuse_live_device(None, || Ok(("xbox", "replacement".to_string())));
+        let selected = select_devices([candidate], &preferred, |id| id.as_str());
+        assert_eq!(
+            selected.get("xbox").map(String::as_str),
+            Some("replacement")
+        );
+        let absent: Vec<std::result::Result<(&'static str, String), &str>> = Vec::new();
+        assert!(select_devices(absent, &preferred, |id| id.as_str()).is_empty());
+    }
     #[test]
     fn a_failed_device_probe_does_not_drop_healthy_devices() {
         let candidates = [
@@ -204,9 +248,13 @@ fn poll() -> Result<(), Box<dyn std::error::Error>> {
                 if unchanged {
                     if let (Some(old), Some(new)) = (old, new) {
                         new.triggers = old.triggers;
-                        if !refresh {
-                            new.last_frame = old.last_frame.clone();
-                        }
+                        // Cached live devices also carry their last frame. Explicit
+                        // probes must still emit a fresh sample for layout preview.
+                        new.last_frame = if refresh {
+                            None
+                        } else {
+                            old.last_frame.clone()
+                        };
                     }
                 } else if old.is_some() && new.is_some() {
                     // Reset held input before selecting a replacement controller.

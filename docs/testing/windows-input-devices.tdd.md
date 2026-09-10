@@ -148,6 +148,21 @@ A pre-migration stash was retained as a recovery copy.
 
 ## Delivery self-check
 
+### Follow-up: transient metadata is not unplug (Greptile 3975106066)
+
+- Fresh WGI list membership is checked by COM object identity. A selected handle
+  that remains present reuses its known metadata; only new handles need fallible
+  metadata queries. Real removal and GetCurrentReading failures still release input.
+- RED selected a second controller when the current controller's metadata probe
+  failed. GREEN retains the current controller and separately proves disappeared
+  handles are not retained. All 10 gamepad Rust tests and Clippy pass.
+- Explicit probe frames remain forced even when the selected Device is cloned;
+  cached metadata does not suppress layout-preview snapshots.
+- The maintainer architecture approval gate is tracked in upstream issue #4212;
+  this fix does not bypass that gate or replace maintainer approval.
+- Final submission validation passed: related Desktop unit gate (169.7 seconds),
+  Desktop typecheck with the existing temporary incremental cache, and diff checks.
+
 Accuracy 4/5: passing tests and actual native-load failure recorded; live input unverified.
 Completeness 4/5: bridge connection verified; physical input and full UI still need validation.
 Clarity 4/5: separates path discovery from functional support; findings span two different devices.

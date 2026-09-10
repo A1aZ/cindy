@@ -5,7 +5,7 @@
   "name": "cindy-desktop-macos",
   "documentNamespace": "https://cindy.app/spdx/desktop-macos/7a188fd38c636b249f8ca6c8e292a748e66535e389b72d172b7b74e1cbd3975e",
   "creationInfo": {
-    "created": "2026-09-02T19:21:04Z",
+    "created": "2026-09-08T11:11:04Z",
     "creators": [
       "Tool: scripts/generate-third-party-notices.mjs"
     ]

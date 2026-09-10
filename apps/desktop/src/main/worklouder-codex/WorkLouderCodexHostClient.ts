@@ -36,7 +36,7 @@ export interface WorkLouderCodexLoggerLike {
 
 export interface WorkLouderSdkLocation {
   entry: string;
-  source: 'cindy-package' | 'openai-app';
+  source: 'cindy-package' | 'openai-app' | 'cindy-native';
 }
 
 export interface WorkLouderCodexHostClientDeps {

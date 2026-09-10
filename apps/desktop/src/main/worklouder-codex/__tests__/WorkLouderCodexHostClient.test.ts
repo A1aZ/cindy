@@ -751,9 +751,12 @@ describe('WorkLouderCodexHostClient', () => {
 describe('Work Louder SDK resolution', () => {
   it('looks for ChatGPT and Codex installs on Windows as well as macOS', () => {
     const source = readFileSync(resolve(__dirname, '..', 'index.ts'), 'utf8');
+    const resolver = readFileSync(resolve(__dirname, '..', 'sdkResolver.ts'), 'utf8');
     expect(source).toContain("process.platform === 'win32'");
-    expect(source).toContain('LOCALAPPDATA');
-    expect(source).toContain("path.join(root, 'Programs', appName, packageTail)");
+    expect(source).toContain('createWorkLouderSdkResolver');
+    expect(source).toContain('nativeFallback:');
+    expect(resolver).toContain('LOCALAPPDATA');
+    expect(resolver).toContain("paths.join(root, 'Programs', name, tail)");
     expect(source).not.toContain("if (process.platform !== 'darwin') return null;");
   });
 });

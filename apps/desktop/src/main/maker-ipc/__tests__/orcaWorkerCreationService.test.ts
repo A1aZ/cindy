@@ -2464,15 +2464,15 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
     });
   });
 
-  it('rejects chat-bridged codex providers for a remote lead (wireProtocol=openai-chat)', async () => {
-    const { service } = createDeps({
+  it.each(['deepseek', 'user-openai-account'])('rejects local-only Codex source %s before allocating a remote worker', async (providerId) => {
+    const { service, deps } = createDeps({
       getLeadSessionRow: vi.fn(async () => remoteLeadRow),
       getAvailableModels: vi.fn(() => [
         { id: 'deepseek-v4', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high', supportsFastMode: true },
       ]),
       getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
         'claude-code': [],
-        codex: [{ id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4'], chatBridgedCodex: true }],
+        codex: [{ id: providerId, name: providerId, models: ['deepseek-v4'], chatBridgedCodex: true }],
       })),
     });
 
@@ -2483,13 +2483,14 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
         agent: 'codex',
         label: 'reviewer',
         model: 'deepseek-v4',
-        providerId: 'deepseek',
+        providerId,
       }),
     ).resolves.toMatchObject({
       ok: false,
       errorCode: 'INVALID_PARAMS',
       message: expect.stringContaining('not available for SSH remote workers'),
     });
+    expect(deps.createSessionId).not.toHaveBeenCalled();
   });
 
   it('still allows SSH-compatible models for a remote lead', async () => {

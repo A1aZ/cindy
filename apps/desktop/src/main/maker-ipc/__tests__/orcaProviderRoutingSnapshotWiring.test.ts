@@ -60,6 +60,29 @@ describe('Orca provider routing snapshot wiring', () => {
     expect(worktreeAllocation).toBeGreaterThan(validation);
   });
 
+  it('marks independent OpenAI accounts local-only before SSH worker creation', async () => {
+    const builtin = BUNDLED_CATALOG.providers.find((provider) => provider.id === 'openai')!;
+    const account = { ...builtin, id: 'user-openai-account', auth: { method: 'oauth' as const, native: 'codex' as const } };
+    const catalog = { ...BUNDLED_CATALOG, providers: [account, builtin] };
+    const routing = await readOrcaWorkerProviderRoutingContext({
+      providerService: {
+        listProviders: vi.fn(async () => buildRegistry(catalog, { [account.id]: true, openai: true })),
+      },
+      getCatalog: () => catalog,
+    });
+    expect(routing.availability.codex.find((provider) => provider.id === account.id)?.chatBridgedCodex).toBe(true);
+    expect(routing.availability.codex.find((provider) => provider.id === 'openai')?.chatBridgedCodex).toBe(false);
+  });
+
+  it('rejects SSH account switching before deferring or replacing the running route', () => {
+    const guard = registerSource.indexOf("throwIpcError('INVALID_PARAMS', 'This Codex account belongs to the local device')");
+    expect(guard).toBeGreaterThan(-1);
+    expect(registerSource.slice(guard - 300, guard)).toContain('runtimeStatus.remoteHostId');
+    expect(registerSource.slice(guard - 300, guard)).toContain('isCodexAccountProvider');
+    expect(registerSource.indexOf('const deferLockedSelection =', guard)).toBeGreaterThan(guard);
+    expect(registerSource.indexOf('const previousRuntime =', guard)).toBeGreaterThan(guard);
+  });
+
   it('waits for the first Anthropic claim and routes the discovered model from the same full snapshot', async () => {
     const anthropic = BUNDLED_CATALOG.providers.find((provider) => provider.id === 'anthropic')!;
     const seed = BUNDLED_CATALOG.providers.find((provider) => provider.id === 'xd')!.models[

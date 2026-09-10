@@ -2370,7 +2370,11 @@ export function NewMakerDraftRoute() {
       // (当 device-link 草稿活跃时 chatPrefs.model 是旧的 controller-local 值)。
       // bridge 模型(chatgpt/ / xai/)在远程模式不可用(不经本地 compat-proxy),需降级。
       // 非 bridge 模型也必须在已连接的本地来源中存在,否则 SSH 会话首消息会被阻塞。
-      const sshConnected = connectedProvidersForAgent(localProviders, capabilityAgentKind);
+      const sshConnected = filterChatBridgedCodexProviders(
+        connectedProvidersForAgent(localProviders, capabilityAgentKind),
+        capabilityAgentKind,
+        true,
+      );
       // admissionFiltered:SSH 候选是「挑一个可路由模型」的清单,停用条目与能力模型
       // 不参与(降级兜底也不能落到停用模型上,PR #744 review)。
       const sshVisibleModels = deriveModelsFromProviders(sshConnected, capabilityAgentKind, {
@@ -2387,18 +2391,17 @@ export function NewMakerDraftRoute() {
       // chatPrefs.providerId(可能是旧的 controller-local 值)。
       const rawProviderId = chatInitialProviderId ?? null;
       const sshLocalSourceId = effectiveSourceIdForModel(
-        localProviders,
+        sshConnected,
         rawProviderId,
         sshModel,
         capabilityAgentKind,
       );
-      // 只有用户显式选中的来源在本地仍可用时才保留;否则 null = 走默认路由。
-      const sshProviderId =
-        rawProviderId && sshLocalSourceId === rawProviderId ? rawProviderId : null;
+      // 固定已通过 SSH 筛选的实际来源，避免 null 默认路由重新选回被排除的本机账号。
+      const sshProviderId = sshLocalSourceId;
       // fast mode:来源不支持就关闭;支持时保留用户在 composer 里看到的 effectiveFastMode
       // (device-link 草稿活跃时来自 dlSel/deviceLinkInitial,本地草稿来自 per-model 记忆)。
       const sshSourceSupportsFast = sessionModelSupportsFastMode(
-        localProviders,
+        sshConnected,
         sshProviderId,
         sshModel,
         capabilityAgentKind,
@@ -2407,7 +2410,7 @@ export function NewMakerDraftRoute() {
       // effort: 用 draftInitialEffort(用户在 composer 里看到的值)作 currentEffort,
       // 再由 resolveNewMakerDraftEffort 按本地 SSH model 支持的 levels 做 clamp。
       const sshLocalProvider = sshLocalSourceId
-        ? localProviders.find((p) => p.id === sshLocalSourceId)
+        ? sshConnected.find((p) => p.id === sshLocalSourceId)
         : undefined;
       const sshLocalModelDesc = sshLocalProvider
         ? getModel(sshLocalProvider, sshModel, capabilityAgentKind)

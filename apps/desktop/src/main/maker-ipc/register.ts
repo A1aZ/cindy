@@ -15353,6 +15353,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           );
         }
       }
+      if (runtimeStatus.remoteHostId && dbToMakerAgentKind(runtimeStatus.agentKind) === 'codex' &&
+          isCodexAccountProvider(effectiveProviderId === undefined ? currentProviderId : effectiveProviderId)) {
+        throwIpcError('INVALID_PARAMS', 'This Codex account belongs to the local device');
+      }
       if (atomicSelection) {
         const meta = await maker.getSessionMeta(sessionId);
         const runtimeAgentKind =

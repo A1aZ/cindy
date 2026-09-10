@@ -82,7 +82,7 @@ import { modelPriceDiscountLabelValues, modelPriceDetailRows } from '@/lib/model
 import { resolveModelPricePresentation } from '@/lib/modelPricePresentation';
 import {
   filterChatBridgedCodexProviders,
-  isChatBridgedCodexProvider,
+  isLocalOnlyCodexProvider,
   isDeviceModelVisible,
   providerMonogram,
   resolveVisibleModelAgentKind,
@@ -1297,7 +1297,7 @@ function ModelSelectorContentView({
     () =>
       excludeChatBridgedCodex
         ? (provider: ProviderView, agent: AgentKind): boolean =>
-            agent === 'codex' && isChatBridgedCodexProvider(provider)
+            agent === 'codex' && isLocalOnlyCodexProvider(provider)
         : undefined,
     [excludeChatBridgedCodex],
   );

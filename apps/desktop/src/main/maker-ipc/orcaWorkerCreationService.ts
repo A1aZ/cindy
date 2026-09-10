@@ -81,10 +81,8 @@ export interface OrcaWorkerProviderSnapshot {
   /** true 表示该来源必须写入 session provider store 才能注入自己的 API key/OAuth token。 */
   requiresExplicitRoute?: boolean;
   /**
-   * true 表示 chat-bridged codex 供应商 (wireProtocol=openai-chat, 与
-   * renderer/lib/providerModels.ts 的 isChatBridgedCodexProvider 同语义):
-   * 其 Responses→Chat 翻译只挂在本地 codex-proxy, SSH 远端 worker 不兼容
-   * (codex-connector R23 P2 的拒绝依据)。
+   * Legacy field: true for local-only Codex routes, including Chat bridges and
+   * independent OAuth accounts. Shares isLocalOnlyCodexProvider with the picker.
    */
   chatBridgedCodex?: boolean;
 }
@@ -894,7 +892,7 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
           errorCode: 'INVALID_PARAMS',
           message:
             `provider "${routeProvider.id}" is not available for SSH remote workers: ` +
-            'chat-bridged Codex providers require the local proxy path — pick an SSH-compatible provider',
+            'this Codex provider requires local execution — pick an SSH-compatible provider',
         };
       }
     }

@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelDescriptor } from '@/hooks/useAgentCapabilities';
 import {
   filterChatBridgedCodexProviders,
+  isLocalOnlyCodexProvider,
   isDeviceModelVisible,
   selectVisibleModels,
 } from '@/lib/providerModels';
@@ -306,6 +307,33 @@ describe('selectVisibleModels — excludeChatBridgedCodex(SSH 远程隐藏 Chat 
 describe('filterChatBridgedCodexProviders — provider source sections', () => {
   const bridged = { ...codexProvider('bridged', ['deepseek-chat'], 'openai-chat'), connected: true };
   const native = { ...codexProvider('native', ['gpt-5.5'], 'openai-responses'), connected: true };
+
+  it('excludes independent accounts only for SSH Codex, preserving native and API routes', () => {
+    const account = {
+      ...codexProvider('user-openai-account', ['gpt-5.5', 'account-only'], 'openai-responses'),
+      auth: { method: 'oauth', native: 'codex' },
+      connected: true,
+    } as ProviderView;
+    const builtin = { ...account, id: 'openai', models: native.models };
+    const api = { ...native, auth: { method: 'apiKey' } } as ProviderView;
+    const providers = [account, builtin, api];
+    expect(isLocalOnlyCodexProvider(account)).toBe(true);
+    expect(isLocalOnlyCodexProvider(builtin)).toBe(false);
+    expect(isLocalOnlyCodexProvider(api)).toBe(false);
+    expect(filterChatBridgedCodexProviders(providers, 'codex', true)).toEqual([builtin, api]);
+    expect(filterChatBridgedCodexProviders(providers, 'codex', false)).toEqual(providers);
+    expect(filterChatBridgedCodexProviders(providers, 'claude-code', true)).toEqual(providers);
+    expect(filterChatBridgedCodexProviders(providers, 'pi', true)).toEqual(providers);
+    const input = {
+      agentKind: 'codex' as const, deviceId: undefined, providers,
+      deviceCcModels: [], deviceCodexModels: [], excludeChatBridgedCodex: true,
+    };
+    expect(ids(selectVisibleModels(input))).toEqual(['gpt-5.5']);
+    expect(ids(selectVisibleModels({ ...input, excludeChatBridgedCodex: false })))
+      .toEqual(['gpt-5.5', 'account-only']);
+    expect(ids(selectVisibleModels({ ...input, deviceId: 'host', deviceCodexModels: [devModel('account-only')] })))
+      .toEqual(['account-only']);
+  });
 
   it('SSH exclusion removes bridged Codex sources from section inputs', () => {
     expect(filterChatBridgedCodexProviders([bridged, native], 'codex', true).map((p) => p.id)).toEqual(['native']);

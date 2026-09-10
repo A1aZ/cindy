@@ -1,5 +1,11 @@
 import type { Provider } from './types.js';
 
+/** SSH Codex cannot use the local Chat bridge or an independent local OAuth home. */
+export function isLocalOnlyCodexProvider(provider: Pick<Provider, 'id' | 'auth' | 'routing'>): boolean {
+  return provider.routing?.codex?.wireProtocol === 'openai-chat'
+    || (provider.id !== 'openai' && isOpenAiSubscriptionProvider(provider));
+}
+
 /** Provider identity is separate from the account entry's stable id. */
 export function isOpenAiSubscriptionProvider(provider: Pick<Provider, 'id' | 'auth'> | null | undefined): boolean {
   return !!provider && provider.auth?.method === 'oauth'

@@ -5036,10 +5036,10 @@ async function completeLogin(
                 passiveLocalSignOut = false;
                 foreignDeviceLocalSignOut = false;
                 currentUser = nextUser;
-                commitCloudAppSession(currentUser.id, authRealmChanged);
                 if (!isPassiveSharedUserDataInstance()) {
                   canaryFlagStore.clear();
                 }
+                commitCloudAppSession(currentUser.id, authRealmChanged);
                 pendingAuthRealm = null;
               }),
           });

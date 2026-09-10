@@ -1116,11 +1116,13 @@ describe('auth login-flow reset', () => {
     const completeStart = source.indexOf('async function completeLogin(');
     const completeEnd = source.indexOf('\n}\n\nasync function acceptLoginOutcome', completeStart);
     const completeBody = source.slice(completeStart, completeEnd);
+    const acceptedUser = completeBody.indexOf('currentUser = nextUser;');
     const ownerCommit = completeBody.indexOf('commitCloudAppSession(currentUser.id, authRealmChanged);');
-    const clearPreviousFlag = completeBody.indexOf('canaryFlagStore.clear();', ownerCommit);
-    expect(ownerCommit).toBeGreaterThan(-1);
-    expect(clearPreviousFlag).toBeGreaterThan(ownerCommit);
-    expect(completeBody.slice(ownerCommit, clearPreviousFlag)).toContain(
+    const clearPreviousFlag = completeBody.indexOf('canaryFlagStore.clear();', acceptedUser);
+    expect(acceptedUser).toBeGreaterThan(-1);
+    expect(clearPreviousFlag).toBeGreaterThan(acceptedUser);
+    expect(ownerCommit).toBeGreaterThan(clearPreviousFlag);
+    expect(completeBody.slice(acceptedUser, clearPreviousFlag)).toContain(
       'if (!isPassiveSharedUserDataInstance()) {',
     );
 

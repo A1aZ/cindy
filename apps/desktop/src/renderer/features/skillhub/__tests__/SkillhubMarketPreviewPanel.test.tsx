@@ -139,4 +139,19 @@ describe('published Skill rejection feedback', () => {
     await act(async () => {});
     expect(getScanStatus).toHaveBeenCalledWith({ slug: skill.name, version: '1.0.1', catalogScope: 'team' });
   });
+
+  it.each([
+    ['team', 'failed'], ['team', 'blocked'], ['market', 'failed'], ['market', 'blocked'],
+  ] as const)('reads managed %s/%s failure details natively without presenting a manual rejection', async (catalogScope, status) => {
+    getScanStatus.mockImplementation(async (request) => request.catalogScope ? { success: false } : {
+      success: true, status, gates: [{ name: 'internal-error', status: 'failed',
+        issues: [{ severity: 'error', message: 'Unable to process archive' }] }],
+    });
+    render(<SkillhubMarketPreviewPanel skill={{ ...skill, catalogScope, pendingVersion: { version: '1.0.1', status } }} open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'skillhub.publishedStatus.rejected' }));
+    expect(await screen.findByRole('heading', { name: 'skillhub.scanResult.processingFailedTitle' })).toBeTruthy();
+    expect(screen.getByText('Unable to process archive')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'skillhub.scanResult.rejectedTitle' })).toBeNull();
+    expect(getScanStatus).toHaveBeenCalledWith({ slug: skill.name, version: '1.0.1', catalogScope: undefined });
+  });
 });

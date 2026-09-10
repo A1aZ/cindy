@@ -55,6 +55,16 @@ describe('ScanResultDialog pending review presentation', () => {
     expect(screen.getByRole('button', { name: 'skillhub.scanResult.dismiss' })).toBeTruthy();
   });
 
+  it('identifies missing manual feedback even when failed scan findings are available', () => {
+    render(<ScanResultDialog open onClose={vi.fn()} result={{
+      status: 'rejected', gates: [{ name: 'archive-safety', status: 'failed',
+        issues: [{ severity: 'error', message: 'Unsafe archive path' }] }],
+    }} />);
+    expect(screen.getByText('skillhub.scanResult.rejectionReasonUnavailable')).toBeTruthy();
+    expect(screen.getByText('Unsafe archive path')).toBeTruthy();
+    expect(screen.queryByText('skillhub.scanResult.rejectedDesc')).toBeNull();
+  });
+
   it.each(['approved', 'pending', 'failed', 'blocked'])('does not display stale rejection feedback for %s', (status) => {
     render(<ScanResultDialog open onClose={vi.fn()} result={{
       status, rejectionReason: 'Stale private notes', gates: [],

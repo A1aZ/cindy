@@ -164,7 +164,7 @@ export function ScanResultDialog({ open, onClose, result }: ScanResultDialogProp
           : t('skillhub.scanResult.failedTitle', { status: result.status });
   const statusLabel = scanStatusLabel(result.status, t);
   const description = rejected
-    ? t(rejectionReason || failedGates.length > 0
+    ? t(rejectionReason
       ? 'skillhub.scanResult.rejectedDesc'
       : 'skillhub.scanResult.rejectionReasonUnavailable')
     : passed

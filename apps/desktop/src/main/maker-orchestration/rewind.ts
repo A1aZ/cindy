@@ -21,7 +21,7 @@
  *     tailTurnsToDrop 调 thread/rollback。
  */
 
-import { and, asc, desc, eq, gt, gte, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
 import { sessions, messages } from '../localDb/schema';
@@ -226,13 +226,18 @@ async function loadRewindContext(
   // agent_switch 行 = target 属于上一个引擎时代——当前引擎的原生会话里没有那些
   // turn 的锚点(Claude 的 assistant uuid / Codex 的 tail turn 计数都会错配),
   // 强行执行要么报错要么错删。v1 每次切换重新交接,不保留切回指针,故直接拒绝。
+  // Codex / Pi 还要拦 context_rebuild(原生会话重建):重建后的 live thread 里没有
+  // 重建前那些 turn,按 tail turn 数 rollback 或按边界 fork 都对不上目标(#4423
+  // review P1)。Claude 路径按 assistant uuid 锚点回退,不在此处拦。
+  const boundaryRoles: Array<'agent_switch' | 'context_rebuild'> =
+    agentKind === 'claude-code' ? ['agent_switch'] : ['agent_switch', 'context_rebuild'];
   const [boundaryAfterTarget] = await db
     .select({ rowid: messageRowid })
     .from(messages)
     .where(
       and(
         eq(messages.sessionId, sessionId),
-        eq(messages.role, 'agent_switch'),
+        inArray(messages.role, boundaryRoles),
         isNull(messages.rewindAt),
         or(
           gt(messages.createdAt, target.createdAt),
@@ -244,7 +249,7 @@ async function loadRewindContext(
   if (boundaryAfterTarget) {
     throw rewindError(
       'REWIND_UNSUPPORTED_HISTORY',
-      '目标消息在引擎切换边界之前,当前引擎的会话历史无法回滚到那里',
+      '目标消息在引擎切换或会话重建边界之前,当前引擎的会话历史无法回滚到那里',
     );
   }
 
@@ -572,7 +577,7 @@ async function loadCodexRewindNativeBoundary(
   sessionId: string,
   ctx: Pick<RewindContext, 'targetCreatedAt' | 'targetRowid'>,
   liveSdkSessionId: string | undefined,
-): Promise<{ lastTurnId?: string; forkAtTimestampMs?: number }> {
+): Promise<{ sdkSessionId?: string; lastTurnId?: string; forkAtTimestampMs?: number }> {
   const currentSessionMeta = await getMaker().getSessionMeta(sessionId);
   const sdkSessionId =
     activeSdkSessionId(liveSdkSessionId) ??
@@ -600,9 +605,9 @@ async function loadCodexRewindNativeBoundary(
     .limit(200);
   const rows = [...recent].reverse();
   const lastTurnId = resolveCodexTurnAnchor(rows, sdkSessionId);
-  if (lastTurnId) return { lastTurnId };
+  if (lastTurnId) return { sdkSessionId, lastTurnId };
   const forkAtTimestampMs = resolveCodexForkEventTimestamp(rows);
-  return forkAtTimestampMs !== undefined ? { forkAtTimestampMs } : {};
+  return forkAtTimestampMs !== undefined ? { sdkSessionId, forkAtTimestampMs } : { sdkSessionId };
 }
 
 export async function commitRewindAtMessage(
@@ -622,11 +627,12 @@ export async function commitRewindAtMessage(
   // userUuid 缺失 (老消息) 时跳 SDK 文件回滚, 直接进 DB 段; ctx.assistantUuid 设进
   // pendingRewindTo, 下次 send 仍走三件套 (forkSession=true CLI 端兜底回滚)。
   let rewindResult: Awaited<ReturnType<typeof makerSession.commitRewindFiles>> | undefined;
+  let nativeForkAnchorSessionMap: Array<[string, string]> | undefined;
   if (ctx.agentKind === 'codex' || ctx.agentKind === 'pi') {
     const filePlan = await buildCodexFilePlanForSession(sessionId, clientId, ctx.codexUserMessages ?? [], makerSession);
     // Codex 分页线程拒绝 thread/rollback(#4421):把 target 之前的原生 turn 边界
     // (持久化锚点或事件时间戳)一并交给 maker-core,遇拒绝时改走 thread/fork。
-    const nativeBoundary =
+    const { sdkSessionId: previousSdkSessionId, ...nativeBoundary } =
       ctx.agentKind === 'codex'
         ? await loadCodexRewindNativeBoundary(sessionId, ctx, makerSession.sdkSessionId)
         : {};
@@ -654,6 +660,17 @@ export async function commitRewindAtMessage(
               logCompensationError(compErr, execution.rollbackCommit),
           });
     rewindResult = result.threadRollback;
+    // thread/rollback 或分页 fork 换出新 thread id 时,保留消息里的 nativeForkAnchor
+    // 仍指向旧 thread,下一次回退/fork 会把它们判为异线程锚点丢弃(#4423 review
+    // P2)。与 fork.session 一样在同一事务里把 sdkSessionId 重映射到新 thread。
+    if (
+      ctx.agentKind === 'codex' &&
+      previousSdkSessionId &&
+      rewindResult?.sdkSessionId &&
+      rewindResult.sdkSessionId !== previousSdkSessionId
+    ) {
+      nativeForkAnchorSessionMap = [[previousSdkSessionId, rewindResult.sdkSessionId]];
+    }
   } else if (ctx.userUuid) {
     rewindResult = await makerSession.commitRewindFiles(ctx.userUuid, ctx.assistantUuid!);
   } else {
@@ -685,6 +702,7 @@ export async function commitRewindAtMessage(
       sdkSessionId: rewindResult?.sdkSessionId,
       now,
       ...(opts?.requireLatestUser ? { requireLatestUser: true } : {}),
+      ...(nativeForkAnchorSessionMap ? { nativeForkAnchorSessionMap } : {}),
     });
     if (ctx.assistantUuid) {
       setLastAssistantTranscriptUuid(sessionId, ctx.assistantUuid);

@@ -949,7 +949,38 @@ describe('commitRewindAtMessage', () => {
 
     expect(commitRewindFilesMock).toHaveBeenCalledWith('', '', { tailTurnsToDrop: 1, lastTurnId: 'turn-9' });
     const txCall = txCalls.find((c) => c.name === 'rewind.commit');
-    expect(txCall?.args).toMatchObject({ sdkSessionId: 'fork-thread-id' });
+    // 换出新 thread:保留消息的原生锚点在同一事务里重映射到新 thread。
+    expect(txCall?.args).toMatchObject({
+      sdkSessionId: 'fork-thread-id',
+      nativeForkAnchorSessionMap: [['codex-thread-old', 'fork-thread-id']],
+    });
+  });
+
+  it('Codex: does not request anchor remap when the thread id is unchanged (#4423)', async () => {
+    useFakeSession('codex');
+    commitRewindFilesMock.mockResolvedValueOnce({ sdkSessionId: 'codex-thread-old' });
+    selectQueue.push([makeUserMessageRow({ agentMeta: null })]);
+    selectQueue.push([]);
+    selectQueue.push([makeUserMessageRow({ clientId: 'client-id', createdAt: 3000 })]);
+    selectQueue.push([]);
+    selectQueue.push([makeSessionRow({ agentKind: 'codex' })]);
+
+    await commitRewindAtMessage('sess-1', 'client-id');
+
+    const txCall = txCalls.find((c) => c.name === 'rewind.commit');
+    expect(txCall?.args).not.toHaveProperty('nativeForkAnchorSessionMap');
+  });
+
+  it('Codex: 目标在 context_rebuild 边界之前 → REWIND_UNSUPPORTED_HISTORY,SDK 与 DB 均未执行 (#4423)', async () => {
+    useFakeSession('codex');
+    selectQueue.push([makeUserMessageRow({ agentMeta: null })]); // target user msg
+    selectQueue.push([{ rowid: 11 }]); // agent_switch / context_rebuild 边界守卫命中
+
+    await expect(commitRewindAtMessage('sess-1', 'client-id')).rejects.toMatchObject({
+      code: 'REWIND_UNSUPPORTED_HISTORY',
+    });
+    expect(commitRewindFilesMock).not.toHaveBeenCalled();
+    expect(txCalls).toHaveLength(0);
   });
 
   it('Codex: falls back to the last model-output timestamp when no native anchor is persisted (#4421)', async () => {

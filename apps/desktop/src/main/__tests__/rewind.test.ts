@@ -974,7 +974,8 @@ describe('commitRewindAtMessage', () => {
   it('Codex: 目标在 context_rebuild 边界之前 → REWIND_UNSUPPORTED_HISTORY,SDK 与 DB 均未执行 (#4423)', async () => {
     useFakeSession('codex');
     selectQueue.push([makeUserMessageRow({ agentMeta: null })]); // target user msg
-    selectQueue.push([{ rowid: 11 }]); // agent_switch / context_rebuild 边界守卫命中
+    // 边界守卫命中(context_rebuild 行 rewind_at 固定非 NULL,守卫对它豁免可见性过滤)。
+    selectQueue.push([{ rowid: 11 }]);
 
     await expect(commitRewindAtMessage('sess-1', 'client-id')).rejects.toMatchObject({
       code: 'REWIND_UNSUPPORTED_HISTORY',

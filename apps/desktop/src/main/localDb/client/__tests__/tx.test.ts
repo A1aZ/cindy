@@ -1145,7 +1145,9 @@ describe('db worker tx handlers', () => {
     },
   );
 
-  it('rewind.commit remaps surviving native fork anchors to the replacement thread', async () => {
+  it.each([false, true])(
+    'rewind.commit remaps surviving native fork anchors to the replacement thread (inline=%s)',
+    async (useInlineWorker) => {
     await withClient(async (client) => {
       await seedSession(client, 's1');
       const keptMeta = JSON.stringify({
@@ -1191,8 +1193,9 @@ describe('db worker tx handlers', () => {
       // 异线程锚点与被软删的行都不动。
       expect(rows[1]!.agent_meta).toBe(foreignMeta);
       expect(rows[3]!.agent_meta).toBe(droppedMeta);
-    });
-  });
+    }, { useInlineWorker });
+    },
+  );
 
   it('rewind.commit uses target message id to avoid same-timestamp over-delete', async () => {
     await withClient(async (client) => {

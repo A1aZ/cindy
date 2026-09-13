@@ -21,7 +21,7 @@
  *     tailTurnsToDrop 调 thread/rollback。
  */
 
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
 import { sessions, messages } from '../localDb/schema';
@@ -229,16 +229,22 @@ async function loadRewindContext(
   // Codex / Pi 还要拦 context_rebuild(原生会话重建):重建后的 live thread 里没有
   // 重建前那些 turn,按 tail turn 数 rollback 或按边界 fork 都对不上目标(#4423
   // review P1)。Claude 路径按 assistant uuid 锚点回退,不在此处拦。
-  const boundaryRoles: Array<'agent_switch' | 'context_rebuild'> =
-    agentKind === 'claude-code' ? ['agent_switch'] : ['agent_switch', 'context_rebuild'];
+  // context_rebuild 的写入契约是 rewind_at 固定非 NULL(schema.ts),与 fork.ts 的
+  // 边界查询一样对它豁免可见性过滤,否则守卫永远不命中(review P2)。
+  const boundaryRole =
+    agentKind === 'claude-code'
+      ? and(eq(messages.role, 'agent_switch'), isNull(messages.rewindAt))
+      : or(
+          and(eq(messages.role, 'agent_switch'), isNull(messages.rewindAt)),
+          eq(messages.role, 'context_rebuild'),
+        );
   const [boundaryAfterTarget] = await db
     .select({ rowid: messageRowid })
     .from(messages)
     .where(
       and(
         eq(messages.sessionId, sessionId),
-        inArray(messages.role, boundaryRoles),
-        isNull(messages.rewindAt),
+        boundaryRole,
         or(
           gt(messages.createdAt, target.createdAt),
           and(eq(messages.createdAt, target.createdAt), gt(messageRowid, target.rowid)),

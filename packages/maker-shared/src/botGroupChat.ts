@@ -172,8 +172,35 @@ export interface BotGroupMessageView {
   createdAt: number;
   /** Thread roots only: the newest replies, shown in the main chat without opening the thread. */
   threadPreview?: BotGroupThreadPreview;
+  /**
+   * Thread roots only: replies from others since this reader last opened the Thread, by the
+   * server's read state. Omitted when the server keeps no read state (older servers).
+   */
+  threadUnread?: BotGroupThreadUnread;
   /** A main-chat message that re-posts an existing thread reply by reference. */
   threadShare?: BotGroupThreadShareView;
+}
+
+/** Unread replies of one Thread; `mentioned` when one of them names this reader. */
+export interface BotGroupThreadUnread {
+  count: number;
+  mentioned: boolean;
+  /** Sequence of the newest unread reply; tells a new reply apart from the same ones counted again. */
+  latest?: number;
+}
+
+/**
+ * One Thread of the group for the in-chat 话题 list (bot-group-chat.md §10「话题未读与提示」).
+ * Root text and author come from the server's copy; empty while that copy is still being read.
+ */
+export interface BotGroupThreadSummary {
+  rootId: string;
+  rootAuthorName: string;
+  rootAuthorBotId: string | null;
+  rootText: string;
+  replyCount: number;
+  unread: BotGroupThreadUnread;
+  lastReply: { authorName: string; text: string; createdAt: number } | null;
 }
 
 /** Spoken summaries and distinct responders have independent limits. */
@@ -455,6 +482,11 @@ export interface BotGroupDetail extends BotGroupSummary {
   round: BotGroupRoundView;
   /** Plans referenced by the loaded messages, plus the open plan. */
   plans: BotGroupPlanView[];
+  /**
+   * Threads with replies in the newest window, unread ones first. Omitted by local groups,
+   * older hosts and servers without read state.
+   */
+  threads?: BotGroupThreadSummary[];
 }
 
 export type BotGroupErrorCode =
@@ -731,10 +763,15 @@ export interface ChatServerApi {
   ownedBots(): Promise<ChatServerResult<{ bots: Array<{ actorId: string; botId?: string; name: string }> }>>;
   refreshProfile(): Promise<ChatServerResult<Record<never, never>>>;
   status(): Promise<{ enabled: boolean; connected: boolean }>;
-  thread(input: { groupId: string; rootId: string; before?: number; sourceMessageIds?: string[] }): Promise<ChatServerResult<{
+  /**
+   * `markRead` (latest page only): the reader is looking at the Thread, so its server read state
+   * moves to the newest reply read here; `readBefore` is where it stood before this read.
+   */
+  thread(input: { groupId: string; rootId: string; before?: number; sourceMessageIds?: string[]; markRead?: boolean }): Promise<ChatServerResult<{
     root: BotGroupMessageView; replies: BotGroupMessageView[]; hasMore: boolean;
     /** Same authoritative state as the main timeline; root and replies use one projection. */
     executionFailures?: BotGroupExecutionFailureView[];
+    readBefore?: number;
   }>>;
   reply(input: { groupId: string; rootId: string; text: string; clientId: string; mentions: BotGroupMention }): Promise<ChatServerResult<{ messageId: string }>>;
   /**

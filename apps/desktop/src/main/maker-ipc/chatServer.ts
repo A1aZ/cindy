@@ -36,7 +36,7 @@ import {
   readImportedBotGroupRuntimeFailureCode,
   readBotGroupExecutionFailure, type BotGroupExecutionFailureView,
   buildBotGroupThreadShareCard, botGroupThreadShareOperationId, readBotGroupThreadShareCard,
-  type BotGroupThreadShareView,
+  type BotGroupThreadShareView, type BotGroupThreadSummary, type BotGroupThreadUnread,
   type BotGroupDetail, type BotGroupSpeaker, type BotGroupPlanView, type BotGroupFailure, type BotGroupMessageView, type BotGroupAttachment, type ChatServerApi,
   botGroupQuoteAttachmentName, botGroupQuoteExcerpt, botGroupQuoteFromMessage, buildBotGroupQuoteCard, readBotGroupQuote, readBotGroupQuoteCard, type BotGroupQuoteView,
   readBotGroupTaskCard, botGroupMessageSummaryText,
@@ -58,12 +58,15 @@ interface Message {
   id: string; seq: string; authorId: string; replyCount?: number; reactions?: Array<{ emoji: string; count: number; me: boolean }>; author: { kind: string; name: string };
   content: Array<{ type: string; text?: string; fallback?: string; namespace?: string; schemaRevision?: number; data?: Record<string, unknown>; mediaId?: string; caption?: string }>;
   origin?: string; createdAt: string; deleted: boolean; threadRootId: string | null; revision?: number;
+  /** Actor IDs this message names. */
+  mentions?: string[];
 }
 interface Room {
   id: string; name: string; topic: string; description: string; response_mode: 'all' | 'mentioned'; speaking_mode: 'auto' | 'sequential';
   created_at: string; updated_at: string; revision: number; archived: boolean; dissolved_at?: string | null; organizer_id?: string | null; kind?: string;
 }
-interface Snapshot { room: Room; members: Member[]; messages: Message[]; cursor: string }
+/** `reads`: this reader's read position per Thread (`thread_key` = root ID, `main` for the main timeline); older servers omit it. */
+interface Snapshot { room: Room; members: Member[]; messages: Message[]; cursor: string; reads?: Array<{ thread_key: string; read_seq: string }> }
 interface Execution {
   id: string; conversation_id: string; source_message_id: string; bot_id: string;
   requester_id?: string;
@@ -94,6 +97,8 @@ export class ChatResponseError extends Error {
 }
 const CHAT_AUTH_RETRY_MS = 60_000;
 const ATTACHMENT_REFRESH_COALESCE_MS = 200;
+/** Threads listed in a group's 话题 list. */
+const THREAD_LIST_LIMIT = 50;
 /**
  * One push per change: notices for the same group inside this window (a local write and its
  * WebSocket echo, an execution and its message, several change batches) leave one broadcast at
@@ -852,6 +857,8 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
               if (change.type === 'conversation.list.changed') personalList.merge(change.data);
               if (change.type === 'conversation.updated' && change.data?.dissolvedAt) retirePlanning(change.entityId);
               if (change.type === 'membership.changed' || change.type === 'conversation.updated') changed(change.entityId);
+              // A Thread read on another device clears its unread here too.
+              if (change.type === 'read.changed' && typeof change.entityId === 'string') changed(change.entityId);
             }
             if (companionHome && (event.changes ?? []).some((change: { type?: unknown }) => change?.type === 'actor.changed')) void refreshHomes();
             changed('');
@@ -999,6 +1006,49 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
     }
     return times.sort((a, b) => b.at - a.at).slice(0, 99).reverse().map(time => time.iso);
   }
+  /** This reader's read position per Thread, or null when the server keeps no read state. */
+  function threadReads(s: Snapshot): Map<string, bigint> | null {
+    return s.reads ? new Map(s.reads.map(read => [read.thread_key, BigInt(read.read_seq)])) : null;
+  }
+  /**
+   * Replies from others in one Thread after this reader's read position, among the snapshot's
+   * newest window (bot-group-chat.md §10「话题未读与提示」). A Thread never opened counts from the start.
+   */
+  function threadUnread(rootId: string, messages: Message[], reads: Map<string, bigint>): BotGroupThreadUnread {
+    const read = reads.get(rootId) ?? 0n;
+    let count = 0;
+    let mentioned = false;
+    let latest = 0;
+    for (const m of messages) {
+      if (m.threadRootId !== rootId || m.deleted || m.origin === 'system' || m.authorId === selfId || BigInt(m.seq) <= read) continue;
+      count += 1;
+      latest = Math.max(latest, Number(m.seq));
+      if (m.mentions?.includes(selfId)) mentioned = true;
+    }
+    return count ? { count, mentioned, latest } : { count, mentioned };
+  }
+  /** The group's Threads with replies in the newest window, unread ones first, newest reply next. */
+  function threadSummaries(roomId: string, s: Snapshot, page: Message[], reads: Map<string, bigint>): BotGroupThreadSummary[] {
+    const known = [...s.messages, ...page];
+    const rootIds = new Set<string>();
+    for (const m of s.messages) if (m.threadRootId) rootIds.add(m.threadRootId);
+    for (const m of known) if (!m.threadRootId && (m.replyCount ?? 0) > 0) rootIds.add(m.id);
+    // A root outside the window is read in the background; its summary fills in on the next refresh.
+    const roots = threads.sources(roomId, [...rootIds], known);
+    return [...rootIds].map((rootId): BotGroupThreadSummary => {
+      const root = roots.get(rootId) ?? undefined;
+      const rootView = root ? messageView(root, s.members) : null;
+      // The snapshot is newest first.
+      const last = s.messages.find(m => m.threadRootId === rootId && !m.deleted && m.origin !== 'system');
+      const lastView = last ? messageView(last, s.members) : null;
+      return { rootId, rootAuthorName: rootView?.authorName ?? '', rootAuthorBotId: rootView?.authorBotId ?? null,
+        rootText: root && !root.deleted ? threadPreviewText(root) || mediaNames(root) : '',
+        replyCount: root?.replyCount ?? s.messages.filter(m => m.threadRootId === rootId).length,
+        unread: threadUnread(rootId, s.messages, reads),
+        lastReply: last && lastView ? { authorName: lastView.authorName, text: threadPreviewText(last) || mediaNames(last), createdAt: lastView.createdAt } : null };
+    }).sort((a, b) => Number(b.unread.count > 0) - Number(a.unread.count > 0) || (b.lastReply?.createdAt ?? 0) - (a.lastReply?.createdAt ?? 0))
+      .slice(0, THREAD_LIST_LIMIT);
+  }
   /**
    * The quoted message as this member reads it from the server: the room scopes the read,
    * so another group's or an invisible message is a 404. Only a live main-timeline chat
@@ -1106,6 +1156,27 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
     return { version, updates: Object.fromEntries(shownShares.filter(share => !byId.has(share.id)).map(({ id: shareId, sharerId, ...card }) =>
       [shareId, shareView(card, sharerId && (actors.find(actor => actor.externalId === sharerId)?.id ?? sharerId))])) };
   }
+  /**
+   * The reader is looking at this Thread's latest page: move its server read position to the
+   * newest reply read. Only a forward move is written, so the refresh it causes writes nothing.
+   * A server without read state, or a failed write, leaves unread as it was. Returns the position
+   * before this read, or undefined without read state.
+   */
+  async function markThreadRead(roomId: string, root: Message, newestFirst: Message[]): Promise<number | undefined> {
+    const reads = threadReads(await recentSnapshot(roomId));
+    if (!reads) return undefined;
+    const before = reads.get(root.id) ?? 0n;
+    const newest = newestFirst.reduce((max, m) => BigInt(m.seq) > max ? BigInt(m.seq) : max, BigInt(root.seq));
+    if (newest > before) {
+      try {
+        await api(`/conversations/${roomId}/read`, 'POST', { operationId: randomUUID(), threadRootId: root.id, readSeq: String(newest) });
+        changed(roomId);
+      } catch (error) {
+        deps.log?.warn('Chat thread read not recorded', { groupId: roomId, ...chatErrorDiagnostic(error) });
+      }
+    }
+    return Number(before);
+  }
   async function detail(roomId: string, options?: unknown, summaryOnly = false): Promise<BotGroupDetail> {
     id.parse(roomId);
     const o = z.object({ beforeSequence: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional(),
@@ -1145,6 +1216,9 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
     const messages = summaryOnly ? [] : await messageViews(roomId, page, s.members);
     const shares = summaryOnly ? undefined : await decorateThreads(roomId, messages, page, s.messages, s.members, true, o.shownShares);
     const threadShareUpdates = shares?.updates;
+    const reads = summaryOnly ? null : threadReads(s);
+    if (reads) for (const view of messages) if (!view.threadRootId && (view.replyCount ?? 0) > 0) view.threadUnread = threadUnread(view.id, s.messages, reads);
+    const threadList = reads ? threadSummaries(roomId, s, page, reads) : undefined;
     messages.sort((a, b) => a.sequence - b.sequence);
     const last = s.messages[0];
     const lastView = last ? messageView(last, s.members) : null;
@@ -1170,7 +1244,7 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
       incomingMessageTimes: incomingMessageTimes(s.messages, s.members),
       createdAt: Date.parse(s.room.created_at), updatedAt: Date.parse(s.room.updated_at ?? s.room.created_at),
       messages, executionFailures, ...(threadShareUpdates && Object.keys(threadShareUpdates).length ? { threadShareUpdates } : {}),
-      ...(shares ? { threadShareVersion: shares.version } : {}), hasMoreBefore: page.length === (o.limit ?? 100), plans,
+      ...(shares ? { threadShareVersion: shares.version } : {}), ...(threadList ? { threads: threadList } : {}), hasMoreBefore: page.length === (o.limit ?? 100), plans,
       round: { status: deciding || executions.some(e => ['queued', 'running'].includes(e.status)) ? 'running' : 'idle', speakers, canContinue: !open && !planning.has(roomId) && (executions.some(e => !e.plan_id && ordinaryExecution(e)) || s.messages.some(discussionSource)) && !executions.some(e => ['queued','running','stopping'].includes(e.status)) } };
   }
   function planView(plan: ServerPlan, members: Member[], workspace: ReturnType<ReturnType<typeof chatServerWorkspaces>['read']>): BotGroupPlanView {
@@ -1891,7 +1965,8 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
     }),
     status: async () => ({ enabled: true, connected: current() && connected }),
     thread: input => result(async () => {
-      const i = z.object({ groupId: id, rootId: id, before: z.number().int().positive().optional(), sourceMessageIds: z.array(id).optional() }).parse(input);
+      const i = z.object({ groupId: id, rootId: id, before: z.number().int().positive().optional(), sourceMessageIds: z.array(id).optional(),
+        markRead: z.boolean().optional() }).parse(input);
       i.groupId = await groupRoom(i.groupId);
       // One round trip; awaited in the former order so the same failure is reported first.
       const membersRead = api<Member[]>(`/conversations/${i.groupId}/members`);
@@ -1905,8 +1980,10 @@ function createChatServer(local: BotGroupChatService, deps: BotGroupChatServiceD
       // A share in the main chat can itself be a thread root.
       const rootViews = await messageViews(i.groupId, [root], members);
       await decorateThreads(i.groupId, rootViews, [root], page, members, false);
+      const readBefore = i.markRead && !i.before ? await markThreadRead(i.groupId, root, page) : undefined;
       return { root: rootViews[0], executionFailures,
-        replies: await messageViews(i.groupId, page.reverse(), members), hasMore: page.length === 50 };
+        replies: await messageViews(i.groupId, page.reverse(), members), hasMore: page.length === 50,
+        ...(readBefore !== undefined ? { readBefore } : {}) };
     }),
     shareToMain: input => result(async () => {
       const i = z.object({ groupId: id, messageId: id }).strict().parse(input);

@@ -135,6 +135,9 @@ export function ChatThreadPanel({ group, rootId, quoteSources = group.messages, 
 
   /** Lowest sequence of the last latest-page read; replies below it live only on opened older pages. */
   const latestFloorRef = useRef(Number.POSITIVE_INFINITY);
+  /** Where the reader had read up to when the panel opened; fixed for the panel's life. */
+  const [readBefore, setReadBefore] = useState<number | null>(null);
+  const readBeforeRef = useRef<number | null>(null);
 
   /**
    * Reads the latest page, or the page before `before`. `rereadOnly` re-reads an opened page for a
@@ -149,9 +152,16 @@ export function ChatThreadPanel({ group, rootId, quoteSources = group.messages, 
     const anchorId = before ? shown[0]?.id : undefined;
     const anchored = (replies: BotGroupMessageView[]) => !anchorId || replies.some(reply => reply.id === anchorId);
     try {
-      const result = await api().thread({ groupId: group.id, rootId, before, sourceMessageIds: shown.map(message => message.id) });
+      // Reading the latest page marks the Thread read only while the reader is at the newest reply:
+      // a reply that arrives while they read further up stays unread until they scroll down to it.
+      const markRead = !before && stickToBottomRef.current;
+      const result = await api().thread({ groupId: group.id, rootId, before, sourceMessageIds: shown.map(message => message.id), markRead });
       if (!current()) return;
       if (!result.ok) { setError(t(chatErrorKey(result.errorCode))); return; }
+      if (readBeforeRef.current === null && result.readBefore !== undefined) {
+        readBeforeRef.current = result.readBefore;
+        setReadBefore(result.readBefore);
+      }
       setRoot(previous => (previous && JSON.stringify(previous) === JSON.stringify(result.root) ? previous : result.root));
       setError('');
       setExecutionFailures(result.executionFailures ?? []);
@@ -374,6 +384,10 @@ export function ChatThreadPanel({ group, rootId, quoteSources = group.messages, 
     );
   };
   const replyCount = Math.max(root?.replyCount ?? 0, realReplies.filter(reply => reply.kind === 'message').length);
+  // The first reply from someone else after where the reader had read; only worth a divider
+  // when older replies sit above it.
+  const firstNewIndex = readBefore === null ? -1 : replyRows.findIndex(message => message.sequence > readBefore && !message.isSelf && !message.deleted && message.authorKind !== 'system');
+  const firstNewId = firstNewIndex > 0 ? replyRows[firstNewIndex]!.id : null;
 
   return <aside ref={panelRef} aria-labelledby={titleId}
         className="flex h-full min-w-0 w-1/2 max-w-[min(50%,28rem)] shrink-0 flex-col overflow-hidden border-l border-[var(--border-default)] bg-[var(--surface)]">
@@ -388,7 +402,10 @@ export function ChatThreadPanel({ group, rootId, quoteSources = group.messages, 
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 pb-4 pt-3"
           onScroll={(event) => {
             const element = event.currentTarget;
+            const wasAtBottom = stickToBottomRef.current;
             stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < STICK_TO_BOTTOM_PX;
+            // Back at the newest reply: what arrived meanwhile has now been seen.
+            if (!wasAtBottom && stickToBottomRef.current) refreshRef.current();
           }}>
           <div ref={contentRef} className="flex min-w-0 flex-col">
             {rootRows.map(message => <Fragment key={message.id}>{renderRow(message, false)}</Fragment>)}
@@ -399,7 +416,13 @@ export function ChatThreadPanel({ group, rootId, quoteSources = group.messages, 
             {hasMore && <div className="mt-2"><Button variant="secondary" size="sm" onClick={() => void read(replies[0]?.sequence)}>{t('bots.groupChat.timeline.loadEarlier')}</Button></div>}
             {replyRows.map(message => (
               <Fragment key={adoptedKeysRef.current.get(message.id) ?? message.id}>
-                {renderRow(message, layout.get(message.id)?.continued ?? false)}
+                {message.id === firstNewId ? (
+                  <div data-testid="bot-group-thread-new-replies" className="mt-3 flex select-none items-center gap-3 text-12 font-medium text-[var(--text-primary)]">
+                    <span className="flex shrink-0 items-center gap-1.5"><span aria-hidden className="size-1.5 rounded-full bg-[var(--bot-unread-bg)]" />{t(key('thread.newSeparator'))}</span>
+                    <span aria-hidden className="h-px flex-1 bg-[var(--border-default)]" />
+                  </div>
+                ) : null}
+                {renderRow(message, firstNewId === message.id ? false : layout.get(message.id)?.continued ?? false)}
               </Fragment>
             ))}
           </div>

@@ -64,6 +64,7 @@ import { useRegisterContentHeader } from '../feature-context';
 import { BotGroupAvatarStack } from './BotGroupAvatars';
 import { botGroupAttachmentScope, refreshPendingBotGroupAttachments } from './botGroupAttachments';
 import { BotGroupComposer } from './BotGroupComposer';
+import { BotGroupThreadHint } from './BotGroupThreadHint';
 import { findThreadMessageElement, flashThreadTarget } from './BotGroupThreadViews';
 import {
   BotGroupHeaderStatusText,
@@ -1195,6 +1196,14 @@ function BotGroupChatContent({ groupId }: { groupId: string }) {
           </div>
         </div>
       )}
+      {group.threads?.length && !sharing && !group.archived ? (
+        // Floats over the bottom of the timeline, at the column's right edge (bot-group-chat.md §10).
+        <div className="relative h-0 shrink-0 px-5">
+          <div className="pointer-events-none relative mx-auto h-0 w-full max-w-[760px] px-2">
+            <BotGroupThreadHint threads={group.threads} members={group.members} openRootId={threadRootId} onOpen={rootId => onOpenThread(rootId)} />
+          </div>
+        </div>
+      ) : null}
       {running && (runningStep || speakers.length > 0) && !sharing && !group.archived ? (
         <BotGroupProgressStrip
           key={runningStep ? `step:${runningStep.plan.id}:${runningStep.step.position}` : speakingKey}

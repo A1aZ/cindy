@@ -2439,6 +2439,48 @@ describe('Chat Server result delivery and refresh', () => {
 
     // r4325201240: the public group projection must carry earlier distinct authors
     // separately from the newest two spoken summaries, which may share one author.
+    // bot-group-chat.md §10「话题未读与提示」: unread comes from the server's per-Thread read state.
+    it('counts replies from others after the read position, names an @mention, and shows nothing without read state', async () => {
+      const mentioning = { ...replies[2], mentions: [selfId] };
+      const withReads = (reads?: Array<{ thread_key: string; read_seq: string }>) => fixture.handle.mockImplementation((route, method, body) =>
+        route.endsWith('/snapshot') ? { body: { room: room(roomId), members, messages: [...shares, mentioning, replies[1], replies[0], root].sort((a, b) => Number(b.seq) - Number(a.seq)), cursor: '8', ...(reads ? { reads } : {}) } }
+          : threadResponse(route, method, body));
+      withReads([{ thread_key: rootId, read_seq: '2' }]);
+      const read = await service.getGroup(roomId);
+      if (!read.ok) throw new Error('Expected group');
+      // Only Alice's reply after seq 2 counts; the deleted one never does.
+      expect(read.group.messages.find(m => m.id === rootId)!.threadUnread).toEqual({ count: 1, mentioned: true, latest: Number(mentioning.seq) });
+      expect(read.group.threads).toEqual([expect.objectContaining({ rootId, rootText: '周末去哪？ @Bot', rootAuthorName: 'Alice',
+        unread: { count: 1, mentioned: true, latest: Number(mentioning.seq) }, lastReply: expect.objectContaining({ authorName: 'Alice', text: `text of ${aliceReply}` }) })]);
+      // An older server keeps no read state: nothing is shown as unread rather than everything.
+      withReads(undefined);
+      const older = await service.getGroup(roomId);
+      if (!older.ok) throw new Error('Expected group');
+      expect(older.group.messages.find(m => m.id === rootId)!.threadUnread).toBeUndefined();
+      expect(older.group.threads).toBeUndefined();
+    });
+
+    it('records a Thread read once when its latest page is read, and never moves it back', async () => {
+      let readSeq = '2';
+      fixture.handle.mockImplementation((route, method, body) => {
+        if (route.endsWith('/snapshot')) return { body: { room: room(roomId), members, messages: [...shares, ...replies, root].sort((a, b) => Number(b.seq) - Number(a.seq)), cursor: '8', reads: [{ thread_key: rootId, read_seq: readSeq }] } };
+        if (route.includes('threadRootId=')) return { body: [...replies].reverse() };
+        if (route === `/conversations/${roomId}/read` && method === 'POST') { readSeq = String((body as { readSeq: string }).readSeq); return { body: {} }; }
+        return threadResponse(route, method, body);
+      });
+      const opened = await service.chatServer!.thread({ groupId: roomId, rootId, markRead: true });
+      expect(opened).toMatchObject({ ok: true, readBefore: 2 });
+      const writes = () => fixture.handle.mock.calls.filter(([route, method]) => route === `/conversations/${roomId}/read` && method === 'POST');
+      expect(writes()).toHaveLength(1);
+      expect(writes()[0]![2]).toMatchObject({ threadRootId: rootId, readSeq: '4' });
+      // The refresh this causes reads the same page again: already read, nothing is written.
+      await vi.advanceTimersByTimeAsync(150);
+      expect(await service.chatServer!.thread({ groupId: roomId, rootId, markRead: true })).toMatchObject({ ok: true, readBefore: 4 });
+      // An older page is history being scrolled, not the reader catching up.
+      await service.chatServer!.thread({ groupId: roomId, rootId, before: 3, markRead: true });
+      expect(writes()).toHaveLength(1);
+    });
+
     it('projects distinct responders independently of repeated-author summaries', async () => {
       const rows = [botId, botId, botId, aliceId, selfId].map((author, i) =>
         msg(`70000000-0000-4000-8000-00000000000${i + 1}`, 6 - i, author, { threadRootId: rootId }));

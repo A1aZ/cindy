@@ -1000,7 +1000,12 @@ export function useVoiceInput(
       if (!shouldHandleVoiceInputEvent(
         ownedRunIdRef.current,
         event.runId,
-        !optionsRef.current?.textTarget && isVoiceInputEventScopeActive(stateRef.current),
+        isVoiceInputEventScopeActive(stateRef.current) && (
+          !optionsRef.current?.textTarget
+          // start() can emit auth-required before its IPC result supplies runId.
+          // Keep other unowned textarea events fenced out during that window.
+          || (event.type === 'auth-required' && optionsRef.current.shouldApplyToEditor?.() !== false)
+        ),
       )) return;
       switch (event.type) {
         case 'auth-required':

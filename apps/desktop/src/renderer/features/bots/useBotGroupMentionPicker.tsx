@@ -73,6 +73,8 @@ export function useBotGroupMentionPicker({
   const [dismissedStart, setDismissedStart] = useState<number | null>(null);
   const [tracked, setTracked] = useState<BotGroupTrackedMention[]>([]);
   const selectionRef = useRef({ start: 0, end: 0 });
+  const textRef = useRef(text);
+  textRef.current = text;
   const pendingCaretRef = useRef<number | null>(null);
   // @ list: glide highlight on the aria-selected option; arrow keys stay in the textarea.
   const listRef = useMenuPanel<HTMLDivElement>(undefined, {
@@ -138,6 +140,7 @@ export function useBotGroupMentionPicker({
     // Re-picking a namesake can leave the text as is; then no re-render moves the caret.
     if (next.text === text) textareaRef.current?.setSelectionRange(next.caret, next.caret);
     else pendingCaretRef.current = next.caret;
+    textRef.current = next.text;
     onTextChange(next.text);
     selectionRef.current = { start: next.caret, end: next.caret };
     setCaret(next.caret);
@@ -157,14 +160,18 @@ export function useBotGroupMentionPicker({
     textareaRef.current?.focus();
   };
 
-  /** The textarea's new value; the caret is read from the element, which already has it. */
-  const onChange = (value: string) => {
-    const nextCaret = textareaRef.current?.selectionStart ?? value.length;
-    const editStart = Math.min(selectionRef.current.start, nextCaret);
-    const editEnd = selectionRef.current.end;
+  /** Typing reads the updated DOM; programmatic edits supply the previous range. */
+  const onChange = (value: string, edit?: { start: number; end: number; caret: number }) => {
+    const nextCaret = edit?.caret ?? textareaRef.current?.selectionStart ?? value.length;
+    const editStart = edit?.start ?? Math.min(selectionRef.current.start, nextCaret);
+    const editEnd = edit?.end ?? selectionRef.current.end;
+    // Submitted and refined events can arrive before React commits either value.
+    const previousText = textRef.current;
+    textRef.current = value;
+    if (edit) pendingCaretRef.current = nextCaret;
     onTextChange(value);
     setTracked((current) =>
-      retainBotGroupTrackedMentions(text, value, {
+      retainBotGroupTrackedMentions(previousText, value, {
         members: mentionMembers,
         allLabels: resolveLabels,
         tracked: current,

@@ -11,23 +11,26 @@ import { playVoiceInputEndCue, playVoiceInputStartCue } from '@/voice-input/star
 let activeComposer: symbol | null = null;
 
 export function useBotGroupVoiceInput({
-  draftKey, textareaRef, text, onChange, disabled,
+  draftKey, textareaRef, text, onChange, disabled, maxLength = -1, onTooLong,
 }: {
   draftKey: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
-  onChange: (text: string) => void;
+  onChange: (text: string, edit: { start: number; end: number; caret: number }) => void;
   disabled: boolean;
+  maxLength?: number;
+  onTooLong?: () => void;
 }) {
   const { settings } = useVoiceInputSettings();
   const identity = useRef(Symbol('group-dictation')).current;
   const mounted = useRef(false);
-  const current = useRef({ draftKey, text, onChange, disabled });
-  current.current = { draftKey, text, onChange, disabled };
+  const current = useRef({ draftKey, text, onChange, disabled, maxLength, onTooLong });
+  current.current = { draftKey, text, onChange, disabled, maxLength, onTooLong };
   const owner = useRef<ReturnType<typeof getDataOwnerGeneration> | null>(null);
   const startedDraft = useRef<string | null>(null);
   const expectedText = useRef('');
   const caret = useRef<number | null>(null);
+  const tooLongNotified = useRef(false);
   const canApply = useCallback(() => mounted.current
     && !current.current.disabled
     && startedDraft.current === current.current.draftKey
@@ -53,10 +56,17 @@ export function useBotGroupVoiceInput({
     replace: (range, inserted) => {
       if (!canApply() || range.from < 0 || range.to > current.current.text.length || range.to < range.from) return null;
       const value = current.current.text.slice(0, range.from) + inserted + current.current.text.slice(range.to);
+      if (current.current.maxLength >= 0 && value.length > current.current.maxLength) {
+        if (!tooLongNotified.current) {
+          tooLongNotified.current = true;
+          current.current.onTooLong?.();
+        }
+        return null;
+      }
       expectedText.current = value;
       current.current.text = value;
-      current.current.onChange(value);
       caret.current = range.from + inserted.length;
+      current.current.onChange(value, { start: range.from, end: range.to, caret: caret.current });
       return { start: range.from, end: caret.current };
     },
     focus: () => {
@@ -81,7 +91,10 @@ export function useBotGroupVoiceInput({
     const claimed = input.start({
       onStartFeedback: () => { if (config.playInteractionSound) return playVoiceInputStartCue(); },
     });
-    if (claimed) activeComposer = identity;
+    if (claimed) {
+      activeComposer = identity;
+      tooLongNotified.current = false;
+    }
     return claimed;
   }, [identity]);
 

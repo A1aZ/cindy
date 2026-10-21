@@ -48,6 +48,8 @@ vi.mock('@/components/new-chat/ComposerAttachments', () => ({ AttachmentRejectio
 import { useBotGroupVoiceInput } from '../useBotGroupVoiceInput';
 import { BotGroupComposer } from '../BotGroupComposer';
 import { Tooltip } from '@/components/ui/tooltip';
+import { toast } from '@/lib/toast';
+import { BOT_GROUP_MESSAGE_MAX_CHARS } from '../../../../shared/botGroupChat';
 import { armDetachedVoiceDraftPersist, clearArmedDetachedVoiceDraft, hasArmedDetachedVoiceDraft } from '@/components/new-chat/composerSendOwnership';
 
 type Trigger = { id: string; phase?: 'start' | 'tap' | 'end' };
@@ -98,6 +100,97 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clearArmedDetachedVoiceDraft(); events.clear(); shortcuts.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('group textarea dictation ownership (#6650)', () => {
+  // PR #6656 review regressions (unit): real shared hook/composer entry points.
+  // Existing tests emit only after start resolves, use no picked mentions and
+  // short transcripts. Minimal failures: early auth; preview before a picked
+  // namesake/reserved label; submitted/refined text one character over the limit.
+  it('prompts for early authentication only in the active composer and rejects stale auth after ownership', async () => {
+    api.start.mockImplementationOnce(async () => {
+      emit({ type: 'auth-required', runId: 'run', reason: 'expired', provider: 'codex' });
+      return { ok: true, runId: 'run' };
+    });
+    render(<><Harness id="group" /><Harness id="thread" /></>);
+    await start('thread');
+    expect(mocks.expired).toHaveBeenCalledExactlyOnceWith('expired');
+    act(() => emit({ type: 'auth-required', runId: 'stale', reason: 'stale', provider: 'codex' }));
+    expect(mocks.expired).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['Ann', 'bots.groupChat.mention.all'])('keeps the picked recipient %s through voice preview, submission and refinement', async name => {
+    const sendReply = vi.fn().mockResolvedValue({ ok: true, messageId: 'reply' });
+    const members = ['picked', 'other'].map(botId => ({ botId, name, avatar: '', avatarColor: 'green', status: 'active' as const }));
+    render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey={`voice-mentions-${name}`} mode="thread"
+      members={members} running={false} sendReply={sendReply} /></Tooltip.Provider>);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    act(() => textbox.focus());
+    fireEvent.change(textbox, { target: { value: 'before @', selectionStart: 8 } });
+    fireEvent.click(screen.getAllByRole('option')[1]!);
+    expect(textbox.value).toBe(`before @${name} `);
+    act(() => { textbox.setSelectionRange(0, 6); fireEvent.select(textbox); });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'newChat.chatInput.voiceInput.start' })));
+    act(() => emit({ type: 'draft', runId: 'run', text: 'a longer preview', source: 'partial', segment }));
+    expect(textbox.value).toBe(`a longer preview @${name} `);
+    // Native result events may arrive in one render batch, before the textarea
+    // changes from its preview value to the submitted and then refined text.
+    await act(async () => fireEvent.keyDown(textbox, { key: 'Enter' }));
+    expect(textbox.value).toBe(`Spoken. @${name} `);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'bots.groupChat.server.sendReply' })));
+    expect(sendReply).toHaveBeenCalledWith(expect.objectContaining({ mentions: { all: false, botIds: ['picked'] } }));
+  });
+
+  it.each(['submitted', 'refined'] as const)('rejects an oversized %s without changing the accepted draft and reports the limit', async stage => {
+    const sendReply = vi.fn().mockResolvedValue({ ok: true, messageId: 'reply' });
+    render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey={`voice-limit-${stage}`} mode="thread"
+      members={[]} running={false} sendReply={sendReply} /></Tooltip.Provider>);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const initial = 'x'.repeat(BOT_GROUP_MESSAGE_MAX_CHARS);
+    fireEvent.change(textbox, { target: { value: initial } });
+    act(() => { textbox.focus(); textbox.setSelectionRange(0, stage === 'refined' ? 6 : 0); });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'newChat.chatInput.voiceInput.start' })));
+    await act(async () => fireEvent.keyDown(textbox, { key: 'Enter' }));
+    const accepted = stage === 'submitted' ? initial : `spoken${initial.slice(6)}`;
+    expect(textbox.value).toBe(accepted);
+    expect(toast.warning).toHaveBeenCalledWith('bots.groupChat.composer.tooLong');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'bots.groupChat.server.sendReply' })));
+    expect(sendReply).toHaveBeenCalledWith(expect.objectContaining({ text: accepted }));
+  });
+
+  // Follow-up review: main-group dictation follows typing's soft limit, while
+  // thread rejection warns once per recording, even with multiple submissions.
+  it('keeps an oversized main-group transcript for editing and blocks sending, just like typing', async () => {
+    const onSendStart = vi.fn();
+    render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey="voice-main-soft-limit"
+      members={[{ botId: 'member', name: 'Member', avatar: '', avatarColor: 'green', status: 'active' }]}
+      running={false} onSendStart={onSendStart} /></Tooltip.Provider>);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const initial = 'x'.repeat(BOT_GROUP_MESSAGE_MAX_CHARS - 6);
+    fireEvent.change(textbox, { target: { value: initial } });
+    act(() => { textbox.focus(); textbox.setSelectionRange(0, 0); });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'newChat.chatInput.voiceInput.start' })));
+    await act(async () => fireEvent.keyDown(textbox, { key: 'Enter' }));
+    expect(textbox.value).toBe(`Spoken.${initial}`);
+    expect(textbox.value.length).toBe(BOT_GROUP_MESSAGE_MAX_CHARS + 1);
+    expect(screen.getByText('bots.groupChat.composer.tooLong')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'bots.send' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(toast.warning).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    expect(onSendStart).not.toHaveBeenCalled();
+  });
+
+  it('warns once for multiple oversized thread submissions and warns again on the next recording', async () => {
+    render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey="voice-limit-notice" mode="thread"
+      members={[]} running={false} sendReply={vi.fn()} /></Tooltip.Provider>);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'x'.repeat(BOT_GROUP_MESSAGE_MAX_CHARS) } });
+    for (let recording = 1; recording <= 2; recording++) {
+      act(() => { textbox.focus(); textbox.setSelectionRange(0, 0); });
+      await act(async () => fireEvent.click(screen.getByRole('button', { name: 'newChat.chatInput.voiceInput.start' })));
+      act(() => { submit(); submit(); });
+      await act(async () => fireEvent.keyDown(textbox, { key: 'Enter' }));
+      expect(toast.warning).toHaveBeenCalledTimes(recording);
+      expect(textbox.value.length).toBe(BOT_GROUP_MESSAGE_MAX_CHARS);
+    }
+  });
   it('the real reply composer stops on Enter, retains the transcript, and sends only after manual editing', async () => {
     const sendReply = vi.fn().mockResolvedValue({ ok: true, messageId: 'reply' });
     render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey="voice-test-thread" mode="thread"

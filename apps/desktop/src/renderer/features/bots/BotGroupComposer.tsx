@@ -250,9 +250,11 @@ export function BotGroupComposer({
   textRef.current = text;
   const voice = useBotGroupVoiceInput({
     draftKey, textareaRef, text, disabled,
-    onChange: (value) => {
+    maxLength: thread ? BOT_GROUP_MESSAGE_MAX_CHARS : undefined,
+    onTooLong: () => toast.warning(t('bots.groupChat.composer.tooLong', { max: BOT_GROUP_MESSAGE_MAX_CHARS })),
+    onChange: (value, edit) => {
       textRef.current = value;
-      mention.onChange(value);
+      mention.onChange(value, edit);
     },
   });
   const [recordingSeconds, setRecordingSeconds] = useState(0);

@@ -1,7 +1,9 @@
 import { Route, Routes } from 'react-router-dom';
 import { AppFrame, forbid, mountPage, subscription } from '../../ui-page/harness';
 import { BotGroupChatView } from '../../../src/renderer/features/bots/BotGroupChatView';
+import { BotGroupComposer } from '../../../src/renderer/features/bots/BotGroupComposer';
 import { ControlledBanner } from '../../../src/renderer/features/remote-device/ControlledBanner';
+import { getDefaultVoiceInputSettings } from '../../../src/shared/voiceInputData';
 
 interface GroupData {
   name: string;
@@ -11,6 +13,7 @@ interface GroupData {
   /** A server group with teammates' bubbles: quote, reactions, thread entry and a task card. */
   bubbles?: boolean;
   wrappedReactions?: boolean;
+  replyComposer?: boolean;
 }
 
 const T0 = 1700000000000;
@@ -148,6 +151,15 @@ void mountPage({
   host: (ctx) => {
     const group = groupFrom(ctx.data as unknown as GroupData);
     return {
+      voiceInput: {
+        getDataSnapshot: () => ({ settings: { ...getDefaultVoiceInputSettings('win32'), fastActivationEnabled: false }, history: [] }),
+        onDataChanged: subscription('voiceDataChanged'),
+        onEvent: subscription('voiceEvent'),
+        onGlobalShortcutTrigger: subscription('voiceShortcut'),
+        setGlobalShortcut: async () => ({ ok: true }),
+        prewarm: async () => ({ ok: true }),
+        start: forbid('voiceInput.start'),
+      },
       maker: {
         listBotGroups: async () => ({ ok: true, groups: [] }),
         getBotGroup: async () => ({ ok: true, group }),
@@ -173,9 +185,12 @@ void mountPage({
       <>
         <AppFrame sidebar={sidebar}>
           <div className="min-h-0 flex-1" data-ui-page-subject>
-            <Routes>
+            {data.replyComposer ? <div className="flex h-full flex-col justify-end">
+              <BotGroupComposer groupId="fixture-group" draftKey="fixture-reply" mode="thread"
+                members={[]} running={false} sendReply={forbid('sendReply')} />
+            </div> : <Routes>
               <Route path="/bots/groups/:groupId" element={<BotGroupChatView />} />
-            </Routes>
+            </Routes>}
           </div>
         </AppFrame>
         <ControlledBanner />

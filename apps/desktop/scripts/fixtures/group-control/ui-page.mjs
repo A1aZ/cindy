@@ -12,10 +12,19 @@ export default {
   name: 'group-chat',
   entry: './group-control-fixture.tsx',
   viewport: { width: 1280, height: 800 },
+  // esbuild has no Vite ?url loader; visual fixtures never open a microphone.
+  stubs: {
+    'src/renderer/voice-input/workletUrl': 'export function getVoiceInputWorkletUrl() { return ""; }',
+  },
   real: 'BotGroupChatView (timeline, composer, send button, header registration), ControlledBanner, ContentHeader shell, Markdown, theme, fonts and translations',
   notCovered:
-    'Sending, round control, real device-link control and revocation, pending interactions, plans and attachments; the bubbles case shows a task snapshot, not a live task; the sidebar is an empty frame',
+    'Sending, audio capture, native voice shortcuts, round control, real device-link control and revocation, pending interactions, plans and attachments; the bubbles case shows a task snapshot, not a live task; the sidebar is an empty frame',
   cases: {
+    'reply-composer': {
+      about: 'Real thread reply composer with microphone and editable draft at narrow width',
+      viewport: { width: 420, height: 600 },
+      data: { ...base, sidebar: false, replyComposer: true },
+    },
     default: { about: 'Empty group, short controller name, expanded sidebar', data: base },
     'long-thread': {
       about: '40 messages: bottom pin and history position survive notice changes',
@@ -45,6 +54,13 @@ export default {
   async check(page, ui) {
     const definition = this.cases[ui.case];
     const input = page.locator('textarea');
+    if (ui.case === 'reply-composer') {
+      assert.equal(await page.locator('button[aria-pressed="false"]').count(), 1, 'microphone entry is visible');
+      await input.fill('A reply draft ready for dictation');
+      assert.equal(await input.inputValue(), 'A reply draft ready for dictation');
+      await ui.capture('reply-draft');
+      return;
+    }
     const chip = page.locator('[data-controlled-banner-chip]');
     const collapsedDot = page.locator('[data-controlled-banner="collapsed"]');
     const scroller = page.getByTestId('bot-group-timeline');

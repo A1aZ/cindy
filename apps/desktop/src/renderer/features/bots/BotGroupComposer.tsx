@@ -234,18 +234,6 @@ export function BotGroupComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const allLabel = t('bots.groupChat.mention.all');
   const threadAllLabels = useMemo(() => [allLabel, ...THREAD_ALL_ALIASES], [allLabel]);
-  // Same @ picker in the group and in a 话题; the 话题 also resolves the server's aliases.
-  const mention = useBotGroupMentionPicker({
-    text,
-    onTextChange: (value) => {
-      // A 话题 reply is a new attempt as soon as its text changes (even if typed back the same).
-      if (thread && attemptRef.current && attemptRef.current.text !== value.trim()) attemptRef.current = null;
-      setText(value);
-    },
-    members,
-    textareaRef,
-    allLabels: thread ? threadAllLabels : undefined,
-  });
   const textRef = useRef(text);
   textRef.current = text;
   const voice = useBotGroupVoiceInput({
@@ -256,6 +244,19 @@ export function BotGroupComposer({
       textRef.current = value;
       mention.onChange(value, edit);
     },
+  });
+  // Same @ picker in the group and in a 话题; the 话题 also resolves the server's aliases.
+  const mention = useBotGroupMentionPicker({
+    text,
+    disabled: disabled || voice.isBusy,
+    onTextChange: (value) => {
+      // A 话题 reply is a new attempt as soon as its text changes (even if typed back the same).
+      if (thread && attemptRef.current && attemptRef.current.text !== value.trim()) attemptRef.current = null;
+      setText(value);
+    },
+    members,
+    textareaRef,
+    allLabels: thread ? threadAllLabels : undefined,
   });
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   useEffect(() => {

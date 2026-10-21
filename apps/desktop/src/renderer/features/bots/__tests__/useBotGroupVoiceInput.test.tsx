@@ -116,6 +116,33 @@ describe('group textarea dictation ownership (#6650)', () => {
     expect(mocks.expired).toHaveBeenCalledTimes(1);
   });
 
+  // Greptile review #4336362854: an already-open picker could mutate the
+  // read-only draft and cancel capture. Exercise both real composer variants;
+  // existing mention tests picked recipients only before starting dictation.
+  it.each(['group', 'thread'] as const)('closes mention picking throughout %s dictation and restores it afterward', async mode => {
+    render(<Tooltip.Provider><BotGroupComposer groupId="group" draftKey={`voice-picker-lock-${mode}`} mode={mode}
+      members={[{ botId: 'member', name: 'Member', avatar: '', avatarColor: 'green', status: 'active' }]}
+      running={false} sendReply={vi.fn()} /></Tooltip.Provider>);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    act(() => textbox.focus());
+    fireEvent.change(textbox, { target: { value: 'say @', selectionStart: 5 } });
+    expect(screen.getByRole('listbox')).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'newChat.chatInput.voiceInput.start' })));
+    expect(screen.queryByRole('listbox')).toBeNull();
+    act(() => emit({ type: 'draft', runId: 'run', text: 'preview', source: 'partial', segment }));
+    expect(textbox.value).toBe('say @preview');
+    act(() => emit({ type: 'state', runId: 'run', state: 'refining' }));
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(api.cancel).not.toHaveBeenCalled();
+    act(() => { submit(); refine(); emit({ type: 'state', runId: 'run', state: 'done' }); });
+    expect(textbox.value).toBe('say @Spoken.');
+    expect(api.cancel).not.toHaveBeenCalled();
+    act(() => textbox.focus());
+    fireEvent.change(textbox, { target: { value: 'say @Spoken. @', selectionStart: 14 } });
+    fireEvent.click(screen.getByRole('option', { name: 'Member' }));
+    expect(textbox.value).toBe('say @Spoken. @Member ');
+  });
+
   it.each(['Ann', 'bots.groupChat.mention.all'])('keeps the picked recipient %s through voice preview, submission and refinement', async name => {
     const sendReply = vi.fn().mockResolvedValue({ ok: true, messageId: 'reply' });
     const members = ['picked', 'other'].map(botId => ({ botId, name, avatar: '', avatarColor: 'green', status: 'active' as const }));

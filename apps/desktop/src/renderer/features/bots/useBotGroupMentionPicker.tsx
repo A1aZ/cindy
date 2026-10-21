@@ -55,8 +55,11 @@ export function useBotGroupMentionPicker({
   members,
   textareaRef,
   allLabels,
+  disabled = false,
 }: {
   text: string;
+  /** Read-only composer states close the list and reject pending picks. */
+  disabled?: boolean;
   /** Every text change from typing or picking goes through here. */
   onTextChange: (value: string) => void;
   /** Full roster: active members other than you are offered; everyone but you still resolves. */
@@ -67,6 +70,8 @@ export function useBotGroupMentionPicker({
 }) {
   const { t } = useTranslation();
   const listboxId = useId();
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   const [caret, setCaret] = useState(0);
   const [focused, setFocused] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -91,7 +96,7 @@ export function useBotGroupMentionPicker({
   // You never name yourself: the host drops you from the targets (as on mobile).
   const mentionMembers = useMemo(() => withoutSelf(members), [members]);
   const activeMembers = useMemo(() => mentionMembers.filter(isActiveBotGroupMember), [mentionMembers]);
-  const query = focused ? findBotGroupMentionQuery(text, caret) : null;
+  const query = focused && !disabled ? findBotGroupMentionQuery(text, caret) : null;
   const options = useMemo<MentionOption[]>(() => {
     if (!query || activeMembers.length === 0) return [];
     const everyone: MentionOption[] =
@@ -132,7 +137,7 @@ export function useBotGroupMentionPicker({
   };
 
   const choose = (option: MentionOption | undefined) => {
-    if (!option || !query) return;
+    if (disabledRef.current || !option || !query) return;
     const next = insertBotGroupMention(text, { start: query.start, end: caret }, option.label);
     // A pick obeys the field's own maxLength, as typing does (a programmatic value would skip it).
     const limit = textareaRef.current?.maxLength ?? -1;

@@ -133,6 +133,8 @@ function props(groupDevice: boolean): ProjectsSectionProps {
     linkingCodexProject: null,
     onBrowseFiles: vi.fn(),
     onArchiveAll: vi.fn(),
+    onSearchDialogues: vi.fn(),
+    onArchiveAllDialogues: vi.fn(),
     onCreateDialogue: vi.fn(),
   };
 }

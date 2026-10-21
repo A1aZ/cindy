@@ -72,6 +72,7 @@
     "noFileRead": "アップロードできるファイルを読み取れませんでした。"
   },
   "voice": {
+    "cancelled": "音声入力をキャンセルしました。",
     "recordingEmpty": "録音が空のため、文字起こしできません。",
     "recordingTooLarge": "録音が上限の {{size}}MB を超えています。",
     "invalidUploadUrl": "サーバーから有効な音声のアップロードURLが返されませんでした。",

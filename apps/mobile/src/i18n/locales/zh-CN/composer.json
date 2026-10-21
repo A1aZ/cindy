@@ -72,6 +72,7 @@
     "noFileRead": "没有读取到可上传的文件。"
   },
   "voice": {
+    "cancelled": "语音输入已取消。",
     "recordingEmpty": "录音为空，不能转写。",
     "recordingTooLarge": "录音超过上限 {{size}}MB。",
     "invalidUploadUrl": "服务端没有返回有效的语音上传地址。",

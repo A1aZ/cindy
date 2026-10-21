@@ -341,6 +341,9 @@ export const AssistantMessage = memo(function AssistantMessage({
       align="left"
       hovered={hovered}
       simplifiedBotConversation={simplifiedBotConversation}
+      readAloudMessage={simplifiedBotConversation && !ghostReplyPending && currentSessionId && messageClientId
+        ? { sessionId: currentSessionId, messageId: messageClientId }
+        : undefined}
       compact={botBubble}
       onFork={!sharedGuest && canFork ? handleFork : undefined}
       onAddToChat={messageDeepLink ? handleAddToChat : undefined}
@@ -369,10 +372,10 @@ export const AssistantMessage = memo(function AssistantMessage({
           // 导致代码块溢出消息流右边界。加上 min-w-0 让 w-full 真正生效，
           // <pre> 的 overflow-x-auto 才能正常接管横向滚动。
           // 伙伴私聊：回复放进与群聊同一种气泡（卡片底 + 细边框，无阴影），宽度随内容、
-          // 上限 720；组件式回答按可用宽度排版，气泡取满上限。右侧留出贴边操作栏的位置。
+          // 上限 720；组件式回答按可用宽度排版，气泡取满上限。右侧为回复、朗读和更多留出位置。
           botBubble
             ? cn(
-                'relative min-w-0 max-w-[min(720px,calc(100%-72px))] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3.5 py-2.5',
+                'relative min-w-0 max-w-[min(720px,calc(100%-96px))] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3.5 py-2.5',
                 hasRichAnswer(content) ? 'w-full' : 'w-fit',
               )
             : 'w-full min-w-0',

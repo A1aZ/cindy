@@ -1,8 +1,9 @@
 /**
  * The in-chat 话题 hint (docs/product-rules/bot-group-chat.md §10「话题未读与提示」): a small
  * button above the composer, at the column's right edge, shown while a Thread that concerns the
- * reader has unread replies. With one such Thread it opens it; with more it lists this group's
- * Threads, those with news first. Dismissing it hides it until something new arrives.
+ * reader (one they follow, or one naming them) has unread replies. With one such Thread it opens
+ * it; with more it lists this group's Threads, those with news first. Dismissing it hides it until
+ * something new arrives.
  */
 import { useState } from 'react';
 import { MessagesSquare, X } from 'lucide-react';
@@ -16,9 +17,9 @@ import { BotAvatar } from './BotAvatar';
 const key = (name: string) => `bots.groupChat.server.thread.${name}`;
 const FOCUS = 'outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]';
 
-/** A Thread concerns the reader when someone named them in an unread reply. */
+/** A Thread concerns the reader when they follow it or someone named them in an unread reply. */
 export function botGroupHintThreads(threads: readonly BotGroupThreadSummary[], openRootId: string | null) {
-  return threads.filter(thread => thread.rootId !== openRootId && thread.unread.count > 0 && thread.unread.mentioned);
+  return threads.filter(thread => thread.rootId !== openRootId && thread.unread.count > 0 && (thread.unread.mentioned || thread.following === true));
 }
 
 /** What the reader had already been told about when they dismissed the hint: each Thread's newest unread reply. */

@@ -6,11 +6,12 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useRef, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceInputRendererEvent } from '@cindy/voice-input-core';
+import type { VoiceInputShortcut } from '@/voice-input/shortcut';
 
 const mocks = vi.hoisted(() => ({
   t: (key: string) => key,
   expired: vi.fn(),
-  settings: { language: 'auto', refinementEnabled: true, fastActivationEnabled: false, shortcut: null, dictionaryEntries: [], refinementInstructions: '' },
+  settings: { language: 'auto', refinementEnabled: true, fastActivationEnabled: false, shortcut: null as VoiceInputShortcut | null, dictionaryEntries: [], refinementInstructions: '' },
   guards: vi.fn(),
   owner: { dataOwnerId: 'test-owner', generation: 1 },
 }));
@@ -91,6 +92,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   mocks.owner.generation = 1;
+  mocks.settings.shortcut = null;
   mocks.guards.mockResolvedValue({ ok: true, permission: { ok: true }, readiness: { ok: true } });
   api.start.mockResolvedValue({ ok: true, runId: 'run' });
   api.cancel.mockResolvedValue({ ok: true });
@@ -100,6 +102,82 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clearArmedDetachedVoiceDraft(); events.clear(); shortcuts.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('group textarea dictation ownership (#6650)', () => {
+  // PR #6656: prior tests lacked DOM/native duplicate delivery and error
+  // before disposal. Real hook, fake 450ms keys and error -> switch/unmount;
+  // unit tier with native IPC faked, no device/cloud or real waits.
+  it.each([
+    ['win32', false, 'native-first'], ['win32', false, 'local-first'],
+    ['darwin', true, 'native-first'], ['darwin', true, 'local-first'],
+  ] as const)('stops a long keyboard press once on %s (%s, %s), after focus moves', async (platform, altKey, order) => {
+    vi.stubGlobal('electronAPI', { platform, voiceInput: api });
+    mocks.settings.shortcut = { code: 'Space', key: ' ',
+      modifiers: { meta: false, ctrl: !altKey, shift: !altKey, alt: altKey, fn: false } };
+    render(<><Harness id="group" initial="main draft" /><Harness id="thread" /></>);
+    input('thread').focus();
+    await act(async () => {
+      if (order === 'native-first') trigger();
+      fireEvent.keyDown(input('thread'), { code: 'Space', key: ' ', ctrlKey: !altKey, shiftKey: !altKey, altKey });
+      if (order === 'local-first') trigger();
+    });
+    expect(api.start).toHaveBeenCalledTimes(1);
+    expect(api.stop).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(450));
+    input('group').focus();
+    await act(async () => fireEvent.keyUp(input('group'), { code: altKey ? 'AltLeft' : 'ControlLeft' }));
+    expect(api.stop).toHaveBeenCalledTimes(1);
+    expect(input('thread').value).toBe('Spoken.');
+    expect(input('group').value).toBe('main draft');
+  });
+
+  it('keeps a short accelerator tap recording and stops on the next press without restarting', async () => {
+    mocks.settings.shortcut = { code: 'Space', key: ' ', modifiers: { ctrl: true, shift: true, alt: false, meta: false, fn: false } };
+    render(<Harness id="group" />); input('group').focus();
+    await act(async () => trigger());
+    act(() => vi.advanceTimersByTime(449));
+    fireEvent.keyUp(input('group'), { code: 'Space' });
+    expect(api.stop).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(251));
+    await act(async () => {
+      fireEvent.keyDown(input('group'), { code: 'Space', ctrlKey: true, shiftKey: true });
+      trigger();
+    });
+    fireEvent.keyUp(input('group'), { code: 'Space' });
+    expect(api.start).toHaveBeenCalledTimes(1);
+    expect(api.stop).toHaveBeenCalledTimes(1);
+    expect(input('group').value).toBe('Spoken.');
+  });
+
+  it('finishes a long keyboard press on window blur while native startup is pending', async () => {
+    let resolve!: (result: { ok: true; runId: string }) => void;
+    api.start.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    mocks.settings.shortcut = { code: 'Space', key: ' ', modifiers: { ctrl: true, shift: true, alt: false, meta: false, fn: false } };
+    render(<Harness id="group" />); input('group').focus();
+    await act(async () => trigger());
+    act(() => vi.advanceTimersByTime(450));
+    await act(async () => fireEvent.blur(window));
+    expect(screen.getByTestId('group-state').textContent).toBe('submitting');
+    await act(async () => resolve({ ok: true, runId: 'run' }));
+    expect(api.stop).toHaveBeenCalledTimes(1);
+    expect(input('group').value).toBe('Spoken.');
+  });
+
+  it.each(['unmount', 'draft-switch'] as const)('disposes the failed run before %s without cancelling another composer', async boundary => {
+    const view = render(<><Harness key="group" id="group" initial="draft" /><Harness key="thread" id="thread" /></>);
+    await start('group');
+    await act(async () => emit({ type: 'error', runId: 'run', message: 'connection lost' }));
+    expect(screen.getByTestId('group-state').textContent).toBe('error');
+    expect(input('group').readOnly).toBe(false);
+    expect(api.cancel).toHaveBeenCalledExactlyOnceWith({ runId: 'run' });
+    if (boundary === 'unmount') view.rerender(<Harness key="thread" id="thread" />);
+    else view.rerender(<><Harness key="group" id="other-group" initial="draft" /><Harness key="thread" id="thread" /></>);
+    api.start.mockResolvedValueOnce({ ok: true, runId: 'thread-run' });
+    await start('thread');
+    act(() => { submit(); refine(); });
+    expect(input('thread').value).toBe('');
+    expect(api.cancel).toHaveBeenCalledTimes(1);
+    expect(api.start).toHaveBeenCalledTimes(2);
+  });
+
   // PR #6656 review regressions (unit): real shared hook/composer entry points.
   // Existing tests emit only after start resolves, use no picked mentions and
   // short transcripts. Minimal failures: early auth; preview before a picked

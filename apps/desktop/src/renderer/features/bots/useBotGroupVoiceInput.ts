@@ -3,12 +3,14 @@ import { useVoiceInputSettings } from '@/hooks/useVoiceInputSettings';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
 import { useVoiceInput, type VoiceInputTextTarget } from '@/voice-input/useVoiceInput';
 import { isVoiceInputEventScopeActive } from '@/voice-input/eventScope';
-import { formatVoiceInputShortcut } from '@/voice-input/shortcut';
+import { formatVoiceInputShortcut, isVoiceInputShortcutMatch, isVoiceInputShortcutRelease, type VoiceInputShortcut } from '@/voice-input/shortcut';
 import { playVoiceInputEndCue, playVoiceInputStartCue } from '@/voice-input/startCue';
 
 // Both composers subscribe to the native shortcut. One gesture belongs to the
 // input focused at its start, including release after focus moves elsewhere.
 let activeComposer: symbol | null = null;
+const LONG_PRESS_MS = 450;
+const SHORTCUT_DEDUPE_MS = 250;
 
 export function useBotGroupVoiceInput({
   draftKey, textareaRef, text, onChange, disabled, maxLength = -1, onTooLong,
@@ -114,12 +116,63 @@ export function useBotGroupVoiceInput({
   useEffect(() => {
     let startedOnPress = false;
     let suppressRelease = false;
-    return window.electronAPI?.voiceInput?.onGlobalShortcutTrigger((payload) => {
+    let localHandledAt = -Infinity;
+    let nativeHandledAt = -Infinity;
+    let press: { shortcut: VoiceInputShortcut; long: boolean; timer: number } | null = null;
+    const clearPress = () => {
+      if (press) window.clearTimeout(press.timer);
+      press = null;
+    };
+    const beginPress = () => {
+      const shortcut = latest.current.settings.shortcut;
+      if (!shortcut) return;
+      const pending = { shortcut, long: false, timer: 0 };
+      pending.timer = window.setTimeout(() => { pending.long = true; }, LONG_PRESS_MS);
+      press = pending;
+    };
+    const canHandle = () => !current.current.disabled
+      && (activeComposer === null || activeComposer === identity)
+      && (isVoiceInputEventScopeActive(latest.current.voice.getState()) || document.activeElement === textareaRef.current);
+    const finishPress = () => {
+      const held = press?.long;
+      clearPress();
+      if (held) void stop();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!canHandle() || event.repeat || event.isComposing
+        || !isVoiceInputShortcutMatch(event, latest.current.settings.shortcut)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      // The accelerator and DOM keydown may arrive in either order. Native
+      // starts also arm release tracking because Electron may swallow keydown.
+      if (press || performance.now() - nativeHandledAt < SHORTCUT_DEDUPE_MS) return;
+      localHandledAt = performance.now();
+      const state = latest.current.voice.getState();
+      if (state === 'listening') void stop();
+      else if (state !== 'submitting' && state !== 'refining' && start()) beginPress();
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (!press || !isVoiceInputShortcutRelease(event, press.shortcut)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishPress();
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
+    window.addEventListener('blur', finishPress);
+    const unsubscribe = window.electronAPI?.voiceInput?.onGlobalShortcutTrigger((payload) => {
       if (current.current.disabled || (activeComposer !== null && activeComposer !== identity)) return;
       const state = latest.current.voice.getState();
       if (!isVoiceInputEventScopeActive(state) && document.activeElement !== textareaRef.current) return;
       if (payload?.id) window.electronAPI.voiceInput.claimGlobalShortcutTrigger(payload.id);
       const phase = payload?.phase;
+      if (!phase) {
+        if (press || performance.now() - localHandledAt < SHORTCUT_DEDUPE_MS) return;
+        nativeHandledAt = performance.now();
+        if (state === 'listening') void stop();
+        else if (state !== 'submitting' && state !== 'refining' && start()) beginPress();
+        return;
+      }
       if (phase === 'end' || phase === 'tap') {
         if (suppressRelease) { suppressRelease = false; return; }
         if (phase === 'tap' && startedOnPress) { startedOnPress = false; return; }
@@ -137,7 +190,14 @@ export function useBotGroupVoiceInput({
         if (phase !== 'start') start();
       }
     });
-  }, [identity, start, stop, textareaRef]);
+    return () => {
+      clearPress();
+      unsubscribe?.();
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
+      window.removeEventListener('blur', finishPress);
+    };
+  }, [identity, start, stop, textareaRef, draftKey, disabled]);
 
   const range = voice.draftRange;
   const displayText = voice.isBusy && range && voice.draftText && canApply()

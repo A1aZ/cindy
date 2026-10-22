@@ -1159,8 +1159,17 @@ export function useVoiceInput(
           draftDisplayRangeRef.current = null;
           insertionRangeRef.current = null;
           setVoiceState('error');
+          // Dispose the failed main-process run before dropping its ID. This
+          // releases inline shortcut routing even if the composer stays mounted;
+          // a scoped cancel cannot stop a newer run from another composer.
+          const failedRunId = ownedRunIdRef.current ?? runIdRef.current;
           runIdRef.current = null;
           ownedRunIdRef.current = null;
+          if (failedRunId) {
+            void window.electronAPI.voiceInput.cancel({ runId: failedRunId }).catch((error) => {
+              log.warn('failed voice input cleanup:', error instanceof Error ? error.message : String(error));
+            });
+          }
           resolveStopCompletion();
           reportVoiceInputError(formattedMessage);
           restoreEditorFocusAfterVoiceInput();

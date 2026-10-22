@@ -17,6 +17,7 @@ import { isProviderModelRouteDisabled } from '../utility-model/oneShotCandidates
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { VoiceConversationService } from './service.js';
+import { SpeechError } from './speechError.js';
 import { resolveSpeechConnection, speechModels, type SpeechCatalogDeps } from './models.js';
 import {
   companionVoicePreference,
@@ -95,9 +96,11 @@ export function registerVoiceConversationIpc(deps: {
       assertTrustedAppRendererEvent(event);
       try {
         return await action(event, ...args);
-      } catch {
+      } catch (error) {
         // Do not log args or upstream errors: either can include text or secrets.
         log.warn('IPC operation failed', { operation: name });
+        if (error instanceof SpeechError && error.code === 'timeout')
+          throwIpcError('VOICE_SPEECH_TIMEOUT', 'Speech response timed out.');
         throwIpcError('PRECONDITION_FAILED', 'Voice conversation is unavailable.');
       }
     });

@@ -419,6 +419,9 @@ const EXTENDED_INVOKE_CHANNELS: readonly string[] = [
   // 副作用;语义在被控端执行才正确(灵动岛 / Dock 角标 / 侧栏红绿点的未读真相都在被控端
   // main)。老被控端无此 channel → CHANNEL_NOT_ALLOWED → 控制端吞掉降级(仅本地清点)。
   'notification:clear-session-attention',
+  // Completed-card action, guarded by an owner-issued token before any mutation.
+  // Old hosts reject this channel; callers must not fall back to unguarded writes.
+  'agent-island:completion-action',
   // —— Project automation ——
   'maker:project-automation:reconcile',
   'maker:project-automation:list-consents',

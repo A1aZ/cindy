@@ -108,6 +108,66 @@ const start = () =>
     voice: 'alloy',
   });
 
+// Oct 21 TTS stall: transport tests did not cover the IPC catch-all losing its
+// timeout cause. Unit: real handlers/service/transport, stalled fetch or PCM read.
+it.each(['headers', 'read'] as const)(
+  'exposes only a safe timeout code for stalled speech %s',
+  async (stage) => {
+    vi.useFakeTimers();
+    try {
+      await start();
+      if (stage === 'headers') {
+        vi.mocked(outboundFetch).mockImplementation(
+          (_url, init) =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => reject(new Error('private network detail')),
+                { once: true },
+              );
+            }),
+        );
+      } else {
+        vi.mocked(outboundFetch).mockResolvedValue(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new Uint8Array([1, 2]));
+              },
+            }),
+            { headers: { 'Content-Type': 'audio/pcm' } },
+          ),
+        );
+      }
+      const speech = call('speak', { callId: 'call', requestId: 'one', text: 'hello' });
+      let pending = speech;
+      if (stage === 'read') {
+        await speech;
+        await call('read-speech', 'call', 'one');
+        pending = call('read-speech', 'call', 'one');
+      }
+      const result = expect(pending).rejects.toThrow(
+        '[VOICE_SPEECH_TIMEOUT] Speech response timed out.',
+      );
+      await vi.advanceTimersByTimeAsync(stage === 'headers' ? 30_000 : 15_000);
+      await result;
+      expect(outboundFetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('keeps untrusted upstream errors generic rather than forwarding their text or claimed timeout code', async () => {
+  await start();
+  vi.mocked(outboundFetch).mockRejectedValue(
+    new Error('[VOICE_SPEECH_TIMEOUT] private upstream detail'),
+  );
+  await expect(call('speak', { callId: 'call', requestId: 'one', text: 'hello' })).rejects.toThrow(
+    '[PRECONDITION_FAILED] Voice conversation is unavailable.',
+  );
+});
+
 it('patches playback without replacing the saved route and validates boolean overrides', async () => {
   const choice = { modelId: 'voice-test', voice: 'alloy', speed: 1.15 };
   await call('set-preference', 'bot-a', choice);

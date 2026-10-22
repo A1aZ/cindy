@@ -19,6 +19,27 @@ const previewSelection = {
   voice: 'alloy',
   text: 'voice sample',
 };
+// Unit regression: Gateway catalogs were empty for these authorized speech models.
+// Exercise the service entrance so same-ID BYOK connections cannot inherit Gateway
+// references; catalog reads must not trigger a paid preview or allocate ASR.
+it.each(['elevenlabs/eleven_multilingual_v2', 'elevenlabs/eleven_v3', 'minimax/speech-2.8-turbo'])(
+  'offers named references only on the Gateway route for %s',
+  async (modelId) => {
+    const { service, deps } = fixture();
+    const catalog = await service.voices({ modelId });
+    expect(catalog.source).toBe('reference');
+    expect(catalog.voices).toHaveLength(4);
+    expect(catalog.voices.every(({ id, name }) => id && name && id !== name)).toBe(true);
+    expect(await service.voices({ providerId: 'xd', modelId })).toEqual(catalog);
+    expect(await service.voices({ providerId: 'custom', agent: 'codex', modelId })).toEqual({
+      source: 'manual',
+      voices: [],
+    });
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.createProvider).not.toHaveBeenCalled();
+  },
+);
+
 describe('voice preview ownership', () => {
   it('synthesizes the exact selection without allocating ASR, and excludes concurrent calls', async () => {
     const { service, deps } = fixture();

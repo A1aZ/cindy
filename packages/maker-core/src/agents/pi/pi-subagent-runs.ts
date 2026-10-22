@@ -3137,7 +3137,7 @@ async function terminalResultProcessIdentities(
  * Inventory only for receipt recovery; never a source of PIDs to signal.
  * Empty/failed/truncated probes are unknown, not proof of absence. Windows can
  * omit command lines for protected processes in other accounts. Use the OS
- * user filter first (tasklist /FI USERNAME, like POSIX ps -u), then require a
+ * user filter first (WTS primary-token SID, like POSIX ps -u), then require a
  * readable command line or independent exit confirmation for every selected
  * PID, except OS-confirmed antimalware PPL processes (which cannot be our
  * ordinary Node/Electron/Pi runtimes). Other inaccessible live processes keep
@@ -3150,28 +3150,78 @@ async function readRecoveryProcessInventory(deadline: number): Promise<string[] 
     if (process.platform === 'win32') {
       const script = [
         "$ErrorActionPreference = 'Stop'",
-        '$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name',
-        // tasklist reports itself, then exits before CIM runs. Track only our
-        // own probe PID so that its expected exit cannot block every recovery.
-        '$probe = [System.Diagnostics.Process]::new()',
-        '$probe.StartInfo.FileName = "$env:SystemRoot\\System32\\tasklist.exe"',
-        '$probe.StartInfo.Arguments = \'/V /FO CSV /NH /FI "USERNAME eq \' + $user + \'"\'',
-        '$probe.StartInfo.UseShellExecute = $false',
-        '$probe.StartInfo.CreateNoWindow = $true',
-        '$probe.StartInfo.RedirectStandardOutput = $true',
-        'if (-not $probe.Start()) { throw "tasklist did not start" }',
-        '$probeId = $probe.Id',
-        '$csv = $probe.StandardOutput.ReadToEnd()',
-        '$probe.WaitForExit()',
-        '$probeExitCode = $probe.ExitCode',
-        '$probe.Dispose()',
-        'if ($probeExitCode -ne 0) { throw "tasklist failed" }',
-        '$owned = @($csv | ConvertFrom-Csv -Header Name,ProcessId,SessionName,SessionNumber,Memory,Status,UserName,CPUTime,WindowTitle)',
+        // Compare token SIDs without tasklist's per-process account-name/window
+        // lookup, which can block past the entire recovery deadline on Windows.
+        // WTS enumerates the caller's processes without administrator rights;
+        // foreign-user entries do not extend this account's recovery scope.
+        // https://learn.microsoft.com/windows/win32/api/wtsapi32/nf-wtsapi32-wtsenumerateprocessesw
+        "Add-Type -TypeDefinition @'",
+        'using System;',
+        'using System.Collections.Generic;',
+        'using System.ComponentModel;',
+        'using System.Runtime.InteropServices;',
+        'using System.Security.Principal;',
+        'public static class CindyRecoveryProcessOwners {',
+        '  [StructLayout(LayoutKind.Sequential)]',
+        '  private struct Info { public uint SessionId; public uint ProcessId; public IntPtr Name; public IntPtr UserSid; }',
+        '  [DllImport("wtsapi32.dll", EntryPoint = "WTSEnumerateProcessesW", SetLastError = true)]',
+        '  private static extern bool Enumerate(IntPtr server, uint reserved, uint version, out IntPtr buffer, out uint count);',
+        '  [DllImport("wtsapi32.dll")]',
+        '  private static extern void WTSFreeMemory(IntPtr buffer);',
+        '  [StructLayout(LayoutKind.Sequential)]',
+        '  private struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }',
+        '  [DllImport("kernel32.dll", SetLastError = true)]',
+        '  private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);',
+        '  [DllImport("kernel32.dll")]',
+        '  private static extern bool CloseHandle(IntPtr handle);',
+        '  [DllImport("ntdll.dll")]',
+        '  private static extern int NtQueryInformationProcess(IntPtr handle, int kind, IntPtr buffer, uint size, out uint needed);',
+        // CIM can omit command lines for elevated processes of the same user
+        // even though PROCESS_QUERY_LIMITED_INFORMATION can read them. A failed
+        // native query still leaves the PID unknown, never presumed exited.
+        '  public static string CommandLine(uint pid) {',
+        '    IntPtr handle = OpenProcess(0x1000, false, pid);',
+        '    if (handle == IntPtr.Zero) return null;',
+        '    try {',
+        '      uint needed;',
+        '      NtQueryInformationProcess(handle, 60, IntPtr.Zero, 0, out needed); // ProcessCommandLineInformation',
+        '      if (needed < Marshal.SizeOf(typeof(UnicodeString)) || needed > 1024 * 1024) return null;',
+        '      uint size = needed;',
+        '      IntPtr buffer = Marshal.AllocHGlobal(checked((int)size));',
+        '      try {',
+        '        if (NtQueryInformationProcess(handle, 60, buffer, size, out needed) != 0 || needed > size) return null;',
+        '        var value = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));',
+        '        long offset = value.Buffer.ToInt64() - buffer.ToInt64();',
+        '        if (value.Length == 0 || value.Length % 2 != 0 || value.Length > value.MaximumLength || value.Length > size',
+        '          || offset < Marshal.SizeOf(typeof(UnicodeString)) || offset > size - value.Length) return null;',
+        '        return Marshal.PtrToStringUni(value.Buffer, value.Length / 2);',
+        '      } finally { Marshal.FreeHGlobal(buffer); }',
+        '    } finally { CloseHandle(handle); }',
+        '  }',
+        '  public static int[] CurrentUser() {',
+        '    IntPtr buffer; uint count;',
+        '    if (!Enumerate(IntPtr.Zero, 0, 1, out buffer, out count)) throw new Win32Exception(Marshal.GetLastWin32Error());',
+        '    try {',
+        '      using (var identity = WindowsIdentity.GetCurrent()) {',
+        '        if (identity.User == null || buffer == IntPtr.Zero || count == 0) throw new InvalidOperationException("Missing process inventory");',
+        '        var owned = new List<int>();',
+        '        int size = Marshal.SizeOf(typeof(Info));',
+        '        for (int i = 0; i < count; i++) {',
+        '          var row = (Info)Marshal.PtrToStructure(IntPtr.Add(buffer, checked(i * size)), typeof(Info));',
+        '          if (row.UserSid != IntPtr.Zero && identity.User.Equals(new SecurityIdentifier(row.UserSid))) {',
+        '            owned.Add(checked((int)row.ProcessId));',
+        '          }',
+        '        }',
+        '        if (!owned.Contains(System.Diagnostics.Process.GetCurrentProcess().Id)) throw new InvalidOperationException("Incomplete user inventory");',
+        '        return owned.ToArray();',
+        '      }',
+        '    } finally { WTSFreeMemory(buffer); }',
+        '  }',
+        '}',
+        "'@",
         '$processIds = @{}',
-        'foreach ($row in $owned) {',
-        '  $number = 0',
-        '  if (-not [int]::TryParse($row.ProcessId, [ref]$number) -or $number -le 0) { throw "invalid process inventory" }',
-        '  if ($number -eq $probeId) { continue }',
+        'foreach ($number in [CindyRecoveryProcessOwners]::CurrentUser()) {',
+        '  if ($number -le 0) { throw "invalid process inventory" }',
         '  $processIds[$number] = $true',
         '}',
         '$count = $processIds.Count',
@@ -3212,11 +3262,16 @@ async function readRecoveryProcessInventory(deadline: number): Promise<string[] 
         '}',
         "'@",
         '}',
-        // Other short-lived processes can exit between tasklist and CIM too.
+        // Short-lived processes can exit between WTS and CIM too.
         // Missing command lines alone are not exit evidence; independently
         // check each remaining PID. Retire only confirmed exits or the OS
         // antimalware role above, never an arbitrary unreadable live process.
         'foreach ($number in @($processIds.Keys)) {',
+        '  $command = [CindyRecoveryProcessOwners]::CommandLine($number)',
+        '  if (-not [string]::IsNullOrWhiteSpace($command)) {',
+        '    $commands.Add($command)',
+        '    continue',
+        '  }',
         '  $unreadable = $null',
         '  try {',
         '    $unreadable = [System.Diagnostics.Process]::GetProcessById($number)',

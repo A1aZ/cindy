@@ -1073,6 +1073,9 @@
   },
   "agentIsland": {
     "native": {
+      "markRead": "既読にする",
+      "archive": "アーカイブ",
+      "actionFailed": "操作を完了できませんでした。通知は保持されています。もう一度お試しください。",
       "newConversationTitle": "新しいセッション",
       "newConversationHint": "新しいセッションを開始",
       "muteSound": "Agent Island の音をミュート",
@@ -10215,7 +10218,8 @@
       "refreshVoices": "音声リストを更新",
       "voicesLoading": "音声を取得中…",
       "voicesError": "音声を取得できませんでした。再試行するか、音声 ID を入力してください。",
-      "voicesReference": "このモデルの OpenAI 参考音声です。互換サービスで使える音声は異なる場合があります。",
+      "voicesCustomError": "カスタム音声をすべて取得できませんでした。再試行するか、音声 ID を入力してください。",
+      "voicesReference": "このモデルの参考音声です。互換サービスで使える音声は異なる場合があります。",
       "voicesTruncated": "音声リストの一部を表示しています。未掲載の音声は ID を入力してください。",
       "voicesManual": "このインターフェースには音声リストがありません。音声 ID を入力してください。",
       "preview": "試聴",
@@ -10228,12 +10232,12 @@
         "preparing": "試聴用の音声を生成中…",
         "playing": "試聴中…",
         "complete": "試聴が完了しました。",
-        "error": "試聴に失敗しました。インターフェース、モデルの利用権限、音声 ID を確認して再試行してください。"
+        "error": "試聴に失敗しました"
       },
       "readAloud": "読み上げ",
       "stopReadAloud": "読み上げを停止",
       "finishBeforeReadAloud": "メッセージを読み上げるには、音声モードを終了してください。",
-      "readAloudFailed": "読み上げに失敗しました。チームメイトの設定でモデルと音声を確認してから、もう一度お試しください。",
+      "readAloudFailed": "読み上げに失敗しました",
       "finishBeforeDictation": "音声モードを終了してから音声入力を開始してください。",
       "title": "音声モード",
       "model": "読み上げモデル",
@@ -10242,7 +10246,7 @@
       "voiceHint": "選択したモデルが対応する音声名を入力してください（例：alloy）。",
       "modelUnavailable": "保存した読み上げモデルは利用できません。別のモデルを選んでください。",
       "noModels": "利用可能な音声合成モデルがありません。",
-      "noModelsSupportedProtocols": "MiniMax、ElevenLabs、および OpenAI 互換の音声合成 API を提供するプロバイダーに対応しています。",
+      "noModelsSupportedProtocols": "MiniMax、ElevenLabs、Qwen / CosyVoice の HTTP API、および OpenAI 互換の音声合成 API に対応しています。",
       "noModelsSetupHint": "プロバイダーに接続して音声モデルを有効にすると、パートナーの読み上げ音声を設定できます。",
       "openProviders": "モデルプロバイダーを開く",
       "catalogError": "音声設定の読み込み、または保存に失敗しました。もう一度お試しください。",
@@ -10274,7 +10278,8 @@
         "connection": "音声接続が途切れました。未送信のテキストは保持されています。",
         "microphone": "マイクが停止しました。権限と接続を確認して再開してください。",
         "send": "メッセージは受け付けられませんでした。テキストは保持されています。",
-        "speech": "読み上げに失敗しました。返答のテキストは会話に残っています。モデルと音声を確認してください。"
+        "speech": "読み上げに失敗しました。返答のテキストは会話に残っています。",
+        "speechTimeout": "音声の応答がタイムアウトしました"
       },
       "voiceIdHint": "このプロバイダーのアカウントで利用できる音声 ID を入力してください。",
       "speed": "読み上げ速度",

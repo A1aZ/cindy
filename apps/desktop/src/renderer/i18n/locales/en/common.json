@@ -1085,6 +1085,9 @@
   },
   "agentIsland": {
     "native": {
+      "markRead": "Mark as read",
+      "archive": "Archive",
+      "actionFailed": "Could not complete the action. The notification has been kept. Try again.",
       "newConversationTitle": "New Session",
       "newConversationHint": "Start a new session",
       "muteSound": "Mute Agent Island",
@@ -10250,7 +10253,8 @@
       "refreshVoices": "Refresh voices",
       "voicesLoading": "Loading voices…",
       "voicesError": "Couldn't load voices. Retry or enter a voice ID.",
-      "voicesReference": "These are OpenAI reference voices for this model. Compatible services may support different voices.",
+      "voicesCustomError": "Couldn’t load all custom voices. Retry or enter a voice ID.",
+      "voicesReference": "These are reference voices for this model. Compatible services may support different voices.",
       "voicesTruncated": "Showing part of the voice list. Enter an ID to use an unlisted voice.",
       "voicesManual": "No voice list is available for this interface. Enter a voice ID.",
       "preview": "Preview",
@@ -10263,12 +10267,12 @@
         "preparing": "Generating preview…",
         "playing": "Playing preview…",
         "complete": "Preview complete.",
-        "error": "Preview failed. Check the interface, model access and voice ID, then retry."
+        "error": "Could not preview this voice"
       },
       "readAloud": "Read aloud",
       "stopReadAloud": "Stop reading",
       "finishBeforeReadAloud": "End voice mode before reading a message aloud.",
-      "readAloudFailed": "Could not read this reply aloud. Check the model and voice in teammate settings, then try again.",
+      "readAloudFailed": "Could not read this reply aloud",
       "finishBeforeDictation": "End voice mode before starting dictation.",
       "title": "Voice Mode",
       "model": "Speech model",
@@ -10277,7 +10281,7 @@
       "voiceHint": "Use a voice name supported by the selected model, such as alloy.",
       "modelUnavailable": "The saved speech model is unavailable. Choose another model.",
       "noModels": "No text-to-speech models available.",
-      "noModelsSupportedProtocols": "Supports MiniMax, ElevenLabs, and providers with an OpenAI-compatible text-to-speech API.",
+      "noModelsSupportedProtocols": "Supports MiniMax, ElevenLabs, Qwen / CosyVoice HTTP APIs, and OpenAI-compatible text-to-speech providers.",
       "noModelsSetupHint": "Connect a provider and enable a speech model to set up your companion’s voice.",
       "openProviders": "Open Model Providers",
       "catalogError": "Could not load or save speech settings. Please try again.",
@@ -10309,7 +10313,8 @@
         "connection": "Voice connection interrupted. Your unsent text is kept below.",
         "microphone": "Microphone stopped. Check its permission and connection, then resume.",
         "send": "This message was not accepted. Your text is kept below.",
-        "speech": "Could not read the reply aloud. The text reply remains in the conversation. Check the speech model and voice."
+        "speech": "Could not read the reply aloud. The text reply remains in the conversation.",
+        "speechTimeout": "Speech response timed out"
       },
       "voiceIdHint": "Enter a voice ID available to this provider account.",
       "speed": "Speech speed",

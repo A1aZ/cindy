@@ -170,8 +170,11 @@ describe('history ownership gate disposes the clicked island card', () => {
     history.mockResolvedValue([]);
     get.mockResolvedValue({ ...profile, sessions: [{ id: 'old-a', kind: 'channel', role: 'channel', status }] });
     const view = render(<BotHistorySessionView />);
-    await waitFor(() => expect(view.getByTestId('chat').dataset.readonly).toBe('true'));
-    expect(consumeEntryAlert).toHaveBeenCalledExactlyOnceWith('old-a', '42');
+    // The transcript DOM can commit before its passive alert-disposal effect.
+    await waitFor(() => {
+      expect(view.getByTestId('chat').dataset.readonly).toBe('true');
+      expect(consumeEntryAlert).toHaveBeenCalledExactlyOnceWith('old-a', '42');
+    });
   });
 
   it.each([

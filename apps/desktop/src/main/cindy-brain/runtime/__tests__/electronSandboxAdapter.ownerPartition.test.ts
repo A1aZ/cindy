@@ -120,12 +120,14 @@ import { handleGhostSecretsRequest } from '../ghostSecretsEndpoint.js';
 import { ownerScopedGhostPartitionForInstalledGhost } from '../../ghostWebviewPartition.js';
 import {
   electronSandboxAdapter,
+  ghostIdForLogicWebContents,
   invokeGhostMobileRelay,
   fetchGhostMobilePage,
   ensureGhostProtocolRegistered,
   revokeLegacyGhostProtocolPartition,
   setGhostAppContextProvider,
   setGhostAgentModelsProvider,
+  setGhostModelPickerProvider,
   setGhostKvStore,
   setGhostConnectionsHandler,
   setGhostOauthHandler,
@@ -769,6 +771,72 @@ describe('electronSandboxAdapter owner partition', () => {
       (harness.browserWindowOptions[0]?.webPreferences as { partition: string }).partition,
     ).not.toMatch(/^persist:/);
     handle.destroy();
+  });
+
+  // 更新重启的 forceQuit 先逐个 destroy 全部 BrowserWindow,before-quit 才 destroyAll;
+  // 已销毁窗口再读 webContents 抛 Object has been destroyed,曾打断整个 destroyAll。
+  it('收尾已被外部销毁的逻辑沙箱时不再访问窗口，且解除管子验身绑定', () => {
+    const handle = electronSandboxAdapter.create(ghost('gone-first'));
+    const win = harness.BrowserWindow.mock.results[0]!.value as {
+      webContents: { id: number };
+      isDestroyed: ReturnType<typeof vi.fn>;
+      destroy: ReturnType<typeof vi.fn>;
+    };
+    const logicId = win.webContents.id;
+    expect(ghostIdForLogicWebContents(logicId)).not.toBeNull();
+
+    win.isDestroyed.mockReturnValue(true);
+    Object.defineProperty(win, 'webContents', {
+      get() {
+        throw new TypeError('Object has been destroyed');
+      },
+    });
+
+    expect(() => handle.destroy()).not.toThrow();
+    expect(win.destroy).not.toHaveBeenCalled();
+    expect(ghostIdForLogicWebContents(logicId)).toBeNull();
+  });
+});
+
+describe('Host model picker endpoint', () => {
+  beforeEach(() => {
+    kvEndpoint.readBoundedBodyText.mockImplementation((request: Request) => request.text());
+  });
+  // New interactive route: catalog tests cover GET only. Minimal POST must use the
+  // physical plugin identity; author-supplied remote origins must be rejected. Tier: unit.
+  it('opens only from a same-instance POST and returns a credential-free selection', async () => {
+    const route = { agentKind: 'codex', providerId: 'provider', model: 'model', effort: '', fastMode: false };
+    const provider = vi.fn().mockResolvedValue({ ok: true, route });
+    setGhostModelPickerProvider(provider);
+    ensureGhostProtocolRegistered(ghost('model-picker'));
+    const handler = harness.sessions.get(approvedPartition('cindy-ghost-owner:cloud:opaque-owner-a:model-picker'))!.protocolHandler!;
+    for (const [url, method, body, status] of [
+      ['model-picker/model-picker', 'GET', undefined, 405],
+      ['other/model-picker', 'POST', '{}', 403],
+      ['model-picker/model-picker?owner=b', 'POST', '{}', 400],
+      ['model-picker/model-picker', 'POST', '{"mobilePageId":"other"}', 400],
+      ['model-picker/model-picker', 'POST', '{', 400],
+    ] as const) {
+      const result = await handler(new Request('cindy-ghost://' + url, { method, body }));
+      expect(result.status).toBe(status);
+    }
+    expect(provider).not.toHaveBeenCalled();
+    const result = await handler(new Request('cindy-ghost://model-picker/model-picker', { method: 'POST', body: '{}' }));
+    expect(await result.json()).toEqual({ ok: true, route });
+    expect(result.headers.get('cache-control')).toBe('no-store');
+    expect(provider.mock.calls[0][0]).toBe('model-picker');
+  });
+
+  it('withholds an interactive result when the originating installation changes while the picker is open', async () => {
+    let finish!: (value: import('../../../../shared/pluginModelPicker').PluginModelPickerResult) => void;
+    setGhostModelPickerProvider(() => new Promise(resolve => { finish = resolve; }));
+    ensureGhostProtocolRegistered(ghost('model-picker-owner'));
+    const handler = harness.sessions.get(approvedPartition('cindy-ghost-owner:cloud:opaque-owner-a:model-picker-owner'))!.protocolHandler!;
+    const pending = handler(new Request('cindy-ghost://model-picker-owner/model-picker', { method: 'POST', body: '{}' }));
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    harness.activeOwner = { mode: 'cloud', dataOwnerId: 'owner-b', generation: 2 };
+    finish({ ok: true, route: { agentKind: 'codex', providerId: 'provider', model: 'model', effort: '', fastMode: false } });
+    expect((await pending).status).toBe(403);
   });
 });
 

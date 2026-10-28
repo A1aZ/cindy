@@ -37,7 +37,7 @@ import type { Logger } from '../../../interfaces/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../../../../..');
-const PI_BINARY = path.join(
+const PI_BINARY = process.env.CINDY_PI_MCP_TEST_BINARY || path.join(
   REPO_ROOT,
   'apps',
   'pi-bin',
@@ -113,6 +113,37 @@ function anthropicToolTurn(
   );
 }
 
+function anthropicParallelToolTurn(
+  sequence: number,
+  calls: Array<{ name: string; input: Record<string, unknown> }>,
+): string {
+  const blocks = calls.map((call, index) =>
+    sseEvent('content_block_start', {
+      type: 'content_block_start', index,
+      content_block: { type: 'tool_use', id: `toolu_${sequence}_${index}`, name: call.name, input: {} },
+    }) +
+    sseEvent('content_block_delta', {
+      type: 'content_block_delta', index,
+      delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.input) },
+    }) +
+    sseEvent('content_block_stop', { type: 'content_block_stop', index }),
+  ).join('');
+  return (
+    sseEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: `msg_${sequence}`, type: 'message', role: 'assistant', model: 'pi-test-model',
+        content: [], stop_reason: null, usage: { input_tokens: 20, output_tokens: 0 },
+      },
+    }) +
+    blocks +
+    sseEvent('message_delta', {
+      type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 5 },
+    }) +
+    sseEvent('message_stop', { type: 'message_stop' })
+  );
+}
+
 function anthropicTextTurn(sequence: number, text: string): string {
   return (
     sseEvent('message_start', {
@@ -153,6 +184,17 @@ function latestToolResultContent(request: Record<string, unknown>): string {
 
 function scriptedAnthropicTurn(requestBody: string): string {
   const toolResultCount = countToolResults(requestBody);
+  if (requestBody.includes('verify MCP structured result')) {
+    const scenario = requestBody.includes('structured failure') ? 'failure'
+      : requestBody.includes('rich failure') ? 'rich-failure' : 'success';
+    const calls = [
+      { name: 'cindy_mcp_list_tools', input: { server: 'cindy_workspace', tool: 'result_payload' } },
+      { name: 'cindy_mcp_call_tool', input: { server: 'cindy_workspace', tool: 'result_payload', args: { scenario } } },
+    ];
+    const call = calls[toolResultCount];
+    return call ? anthropicToolTurn(toolResultCount + 1, call.name, call.input)
+      : anthropicTextTurn(3, 'Result received');
+  }
   if (requestBody.includes('local host tool isolation')) {
     const calls = [
       { name: 'cindy_mcp_list_tools', input: {} },
@@ -283,6 +325,18 @@ function scriptedAnthropicTurn(requestBody: string): string {
     return toolResultCount === 0
       ? anthropicToolTurn(1, 'cindy_mcp_list_tools', {})
       : anthropicTextTurn(2, 'unavailable servers reported');
+  }
+  if (requestBody.includes('parallel uninspected double call')) {
+    // 同一轮 message 里并行发两个未披露调用：pi 会先依次跑完两个 tool_call hook
+    // （都看到未披露 → 都跳过权限），再依次执行两个 execute。回归 zqchris 指出的
+    // TOCTOU 口子：第二个 execute 不能因为「此时已披露」就在没问过用户的情况下执行。
+    if (toolResultCount === 0) {
+      return anthropicParallelToolTurn(1, [
+        { name: 'cindy_mcp_call_tool', input: { server: 'cindy_echo', tool: 'echo', args: { text: 'parallel-a' } } },
+        { name: 'cindy_mcp_call_tool', input: { server: 'cindy_echo', tool: 'echo', args: { text: 'parallel-b' } } },
+      ]);
+    }
+    return anthropicTextTurn(2, 'both parallel calls were gated safely');
   }
   if (requestBody.includes('call without schema inspection')) {
     if (toolResultCount === 0) {
@@ -582,6 +636,19 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
           })}]};
         });
       } else if (isWorkspace) {
+        server.registerTool('result_payload', {
+          description: 'Return structured workspace data', inputSchema: { scenario: z.enum(['success', 'failure', 'rich-failure']) },
+        }, async ({ scenario }) => ({
+          content: scenario === 'rich-failure' ? [
+            { type: 'text' as const, text: 'Screenshot of the failing input' },
+            { type: 'image' as const, mimeType: 'image/png',
+              data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aifoAAAAASUVORK5CYII=' },
+            { type: 'text' as const, text: 'Correct the highlighted field' },
+          ] : [],
+          structuredContent: { status: scenario, resultCanary: 'MCP_STRUCTURED_MODEL_CANARY' },
+          ...(scenario !== 'success' ? { isError: true } : {}),
+          _meta: { privateCanary: 'MCP_CLIENT_ONLY_CANARY' },
+        }));
         server.registerTool(
           'status',
           { description: 'Read the workspace status', inputSchema: {} },
@@ -927,6 +994,9 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
         | 'local' | 'orca' | 'local-multi' | 'bot-memory' | 'remote' | 'remote-sse' | 'remote-paginated' = 'local',
     prompt = 'call the echo tool',
     localHostOnly: boolean | 'native' = false,
+    // 披露记录按 sessionId 落盘，所以要真正走到「首次未披露」必须给独立会话；
+    // 否则同文件前序用例已落盘的披露会让首次调用直接执行，掩盖门的行为。
+    sessionId = `mcp-itest-${permissionMode}`,
   ): Promise<{
     events: AgentEvent[];
     permissionAsked: boolean;
@@ -941,7 +1011,7 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
     let permissionAsked = false;
     try {
       handle = await agent.startSession({
-        sessionId: `mcp-itest-${permissionMode}`,
+        sessionId,
         workingDir: cwd,
         model: 'pi-test-model',
         permissionMode,
@@ -1084,6 +1154,32 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
         .map((d) => d.text)
         .join('');
       expect(finalText).toContain('ECHO[hello-pi]');
+    },
+  );
+
+  it.each(['success', 'failure', 'rich-failure'] as const)(
+    'preserves MCP structured %s data in the real Pi model request',
+    { timeout: 90_000 },
+    async (scenario) => {
+      const { requests, events } = await runOneTurn('bypassPermissions',
+        async () => ({ kind: 'permission', behavior: 'allow' }), 'local-multi',
+        'verify MCP structured result ' + (scenario === 'failure' ? 'structured failure'
+          : scenario === 'rich-failure' ? 'rich failure' : 'success'));
+      expect(requests).toHaveLength(3);
+      const messages = requests.at(-1)!.messages as Array<{ content: Array<Record<string, unknown>> }>;
+      const result = messages.flatMap(message => message.content).filter(block => block.type === 'tool_result').at(-1)!;
+      expect(JSON.stringify(result.content)).toContain('MCP_STRUCTURED_MODEL_CANARY');
+      expect(Boolean(result.is_error)).toBe(scenario !== 'success');
+      const toolResult = events.filter(event => event.type === 'tool_result_full').at(-1)!;
+      expect((toolResult.data as { isError: boolean }).isError).toBe(scenario !== 'success');
+      if (scenario === 'rich-failure') {
+        const blocks = result.content as Array<Record<string, unknown>>;
+        expect(blocks.map(block => block.type)).toEqual(['text', 'image', 'text', 'text']);
+        expect(blocks[0].text).toBe('Screenshot of the failing input');
+        expect(blocks[1].source).toMatchObject({ type: 'base64', media_type: 'image/png' });
+        expect(blocks[2].text).toBe('Correct the highlighted field');
+      }
+      expect(JSON.stringify(requests)).not.toContain('MCP_CLIENT_ONLY_CANARY');
     },
   );
 
@@ -1457,18 +1553,20 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
   );
 
   it(
-    'known tools cannot execute or prompt until their exact input schema has been inspected',
+    'an uninspected tool call is blocked once, then executes once on the re-send',
     { timeout: 90_000 },
     async () => {
       echoCalls.length = 0;
       opaqueTurnCaptures.length = 0;
       let permissionCount = 0;
+      const sessionId = 'mcp-itest-uninspected-first-call';
       const { permissionAsked, requestBodies } = await runOneTurn(
         'ask',
         async (req) => {
           permissionCount += 1;
           expect(req.kind).toBe('permission');
           if (req.kind === 'permission') {
+            // 首次调用即便未 inspect 也要按完整 gateway 工具身份过权限（分类只认解析成功）。
             expect(req.toolName).toBe('mcp__cindy_echo__echo');
             expect(req.input).toEqual({ text: 'hello-pi' });
           }
@@ -1476,14 +1574,56 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
         },
         'local',
         'call without schema inspection',
+        // localHostOnly 占位：本用例只要会话隔离，不要 local host 工具配置。
+        false,
+        sessionId,
       );
 
       expect(permissionAsked).toBe(true);
+      // 剧本：首次盲调在权限询问**之前**就被披露门拦下（不弹权限框、不执行工具，只回
+      // 一条指名路标的错误），模型照路标补 list_tools 后重发；重发时已披露，正常过一次
+      // 权限门才真正落到 MCP。
       expect(permissionCount).toBe(1);
       expect(echoCalls).toEqual([{ text: 'hello-pi' }]);
-      expect(requestBodies[1]).toContain('Inspect this tool before execution');
-      expect(requestBodies[2]).toContain('inputSchema');
-      await waitFor(() => opaqueTurnCaptures.length === 1);
+      expect(requestBodies.some((body) => body.includes('Inspect this tool before execution'))).toBe(true);
+      // 披露记录已按当前 schema 写入，模型随后补的 list_tools 仍返回 schema。
+      expect(requestBodies.some((body) => body.includes('inputSchema'))).toBe(true);
+      await waitFor(() => opaqueTurnCaptures.length >= 1);
+      expect(opaqueTurnCaptures[0]).toMatchObject({
+        sessionId,
+        provider: 'pi',
+      });
+    },
+  );
+
+  it(
+    'parallel uninspected calls are both gated: neither asks permission nor executes',
+    { timeout: 90_000 },
+    async () => {
+      echoCalls.length = 0;
+      opaqueTurnCaptures.length = 0;
+      let permissionCount = 0;
+      const sessionId = 'mcp-itest-parallel-uninspected';
+      const { requestBodies } = await runOneTurn(
+        'ask',
+        async (req) => {
+          // TOCTOU 回归：两个 hook 都看到未披露、都跳过权限；第二个 execute 不得
+          // 因为「此时已披露」而在没问过用户的情况下直接执行。
+          permissionCount += 1;
+          return { kind: 'permission', behavior: 'allow' };
+        },
+        'local',
+        'parallel uninspected double call',
+        false,
+        sessionId,
+      );
+
+      expect(permissionCount).toBe(0);
+      expect(echoCalls).toEqual([]);
+      // 两次 execute 都回同一条指名路标的错误。
+      const signposts = requestBodies.filter((body) => body.includes('Inspect this tool before execution'));
+      expect(signposts.length).toBeGreaterThanOrEqual(1);
+      await waitFor(() => opaqueTurnCaptures.length >= 1);
     },
   );
 

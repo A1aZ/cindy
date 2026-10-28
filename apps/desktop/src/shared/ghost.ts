@@ -1483,6 +1483,8 @@ export interface GhostManifest {
   name: string;
   /** 版本字符串(不强制 semver,仅展示用)。 */
   version: string;
+  /** 包内本版本完整更新说明；旧包可省略。 */
+  releaseNotes?: string;
   /** 安装此 Release 所需的最低 Cindy 客户端 SemVer；缺省表示不限制。 */
   minCindyVersion?: string;
   /** 作者展示名(仅展示用)。 */
@@ -1694,8 +1696,18 @@ export function isGhostInstallApprovalToken(value: unknown): value is string {
   );
 }
 
+/** Public attribution requires a server projection; other installs retain their package attribution. */
+export function ghostFallbackDisplayAuthor(ghost: Pick<InstalledGhost, 'manifest' | 'publishingSource'>): string | null {
+  return ghost.publishingSource?.kind === 'public-market' ? null : ghost.manifest.author ?? null;
+}
+
 /** 已装入主机的插件(批准清单 + 安装位置 + 启用态)。 */
 export interface InstalledGhost {
+  /** Read-only Host provenance, not authorship or publication permission. Missing is unknown. */
+  publishingSource?:
+    | { kind: 'local'; source: 'manual' | 'agent-forge' }
+    | { kind: 'public-market'; pluginId: string }
+    | { kind: 'unavailable' };
   /** Host retirement projection; never supplied by plugin authors. */
   retirement?: import('./featureRetirements').InstalledFeatureRetirement;
   /** Host receipt fact, not a manifest declaration. Missing means tasks need confirmation. */
@@ -3061,6 +3073,7 @@ const GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS = new Set([
   'id',
   'name',
   'version',
+  'releaseNotes',
   'minCindyVersion',
   'author',
   'locales',
@@ -3969,6 +3982,9 @@ function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boo
     raw.version.length > 32
   ) {
     return { ok: false, reason: 'version 必须是 1–32 字符的非空字符串' };
+  }
+  if (raw.releaseNotes !== undefined && typeof raw.releaseNotes !== 'string') {
+    return { ok: false, reason: 'releaseNotes 必须是纯文本字符串' };
   }
   if (raw.minCindyVersion !== undefined && !isValidCindyVersion(raw.minCindyVersion)) {
     return { ok: false, reason: 'minCindyVersion 必须是合法的 SemVer 字符串' };
@@ -6203,6 +6219,7 @@ function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boo
       id: raw.id,
       name: raw.name,
       version: raw.version,
+      ...(raw.releaseNotes !== undefined ? { releaseNotes: raw.releaseNotes as string } : {}),
       ...(raw.minCindyVersion !== undefined
         ? { minCindyVersion: raw.minCindyVersion as string }
         : {}),
@@ -6400,6 +6417,8 @@ export function ghostManifestToAuthorFormat(manifest: GhostManifest): Record<str
  *     当前 Agent tool-call 带严格在途 callId 时复用 Agent 授权；其它调用
  *     须声明 network 域名详单。凭证只按声明注入,意识永不经手。
  *   - pick-request:pick 槽——请主机弹系统级选文件夹窗口(用户亲选即授权)。
+ *   - model-picker-request:打开宿主统一模型选择器，返回 PluginTaskRoute；无需能力声明，
+ *     不修改任何默认或执行任务。协议见 shared/pluginModelPicker.ts 与 FORGE_GUIDE §4.0.3a。
  *   - preview-request:preview 槽——请主机在右侧栏内置浏览器开预览标签页
  *     (URL 必须命中身份卡 preview.hosts 白名单)。
  *   - schedule-request:agent 槽 schedule 加档——请主机**打开自动化创建面板并预填**
@@ -6949,7 +6968,7 @@ export type GhostPipePreviewResult =
  * 主机落到台前任务,插件据此把自己的业务状态(如设备)绑定到该任务。
  */
 export type GhostPipeTaskViewResult =
-  | { ok: true; sessionId: string }
+  | { ok: true; sessionId: string; focusRequested?: true }
   | {
       ok: false;
       errorCode: 'PERMISSION_DENIED' | 'INVALID_REQUEST' | 'HOST_NOT_READY' | 'INTERNAL';
@@ -8932,6 +8951,7 @@ export type GhostPipeFetchResult =
 /** 工具调用的结构化失败分类(与 cindy-tools 的 CindyGhostCallErrorCode 同构)。 */
 export type GhostToolCallErrorCode =
   | 'GHOST_NOT_FOUND'
+  | 'GHOST_NAMESPACE_MISMATCH'
   | 'GHOST_ASLEEP'
   | 'GHOST_DISABLED_IN_WORKDIR'
   | 'TOOL_NOT_FOUND'
@@ -8944,6 +8964,7 @@ export type GhostToolCallErrorCode =
 /** 主机错误码不能被插件结果覆盖；其余格式合法的码作为业务错误码透传。 */
 const GHOST_HOST_ERROR_CODES: ReadonlySet<string> = new Set([
   'GHOST_NOT_FOUND',
+  'GHOST_NAMESPACE_MISMATCH',
   'GHOST_ASLEEP',
   'GHOST_DISABLED_IN_WORKDIR',
   'TOOL_NOT_FOUND',

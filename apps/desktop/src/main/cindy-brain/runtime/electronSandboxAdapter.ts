@@ -270,6 +270,10 @@ export function setGhostMediaModelsProvider(
 }
 
 let ghostAgentModelsProvider: ((ghostId: string) => Promise<GhostAgentModelsResult>) | null = null;
+let ghostModelPickerProvider: ((id: string, options: unknown, current: () => boolean, signal: AbortSignal) => Promise<import('../../../shared/pluginModelPicker.js').PluginModelPickerResult>) | null = null;
+export function setGhostModelPickerProvider(provider: NonNullable<typeof ghostModelPickerProvider>): void {
+  ghostModelPickerProvider = provider;
+}
 export function setGhostAgentModelsProvider(
   provider: (ghostId: string) => Promise<GhostAgentModelsResult>,
 ): void {
@@ -569,6 +573,24 @@ function registerGhostProtocol(
             'Cache-Control': 'no-cache',
           },
         });
+      }
+      if (url.pathname === '/model-picker') {
+        const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+        if (request.method !== 'POST') return new Response(null, { status: 405, headers });
+        if (url.search) return new Response(null, { status: 400, headers });
+        if (!ghostModelPickerProvider) return new Response(null, { status: 503, headers });
+        let options: unknown;
+        try {
+          const body = await readBoundedBodyText(request);
+          if (body.length > 4096) return new Response(null, { status: 400, headers });
+          options = JSON.parse(body || '{}');
+        } catch { return new Response(null, { status: 400, headers }); }
+        // Page authors cannot choose a different phone or impersonate a logic request.
+        if (!options || typeof options !== 'object' || Array.isArray(options) ||
+            Object.keys(options).some(key => key !== 'initial')) return new Response(null, { status: 400, headers });
+        const result = await ghostModelPickerProvider(storagePart, options, isRegistrationCurrent, request.signal);
+        if (!isRegistrationCurrent()) return new Response(null, { status: 403, headers });
+        return new Response(JSON.stringify(result), { status: 200, headers });
       }
       if (url.pathname === '/agent-models') {
         const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
@@ -911,6 +933,10 @@ async function serveGhostGallery(storagePart: string, protocolHost: string): Pro
 
 class ElectronSandboxHandle implements SandboxHandle {
   private win: BrowserWindow | null;
+  // 建窗时记下:窗口可能先于 destroy() 被外部销毁(更新重启的 forceQuit 会逐个
+  // destroy 全部 BrowserWindow),那时再读 win.webContents 会抛 Object has been
+  // destroyed,打断 destroyAll 让后续沙箱与 Node runtime 都收不掉。
+  private readonly logicWebContentsId: number;
   private goneCb: ((details: { reason: string }) => void) | null = null;
   private destroyed = false;
 
@@ -937,8 +963,9 @@ class ElectronSandboxHandle implements SandboxHandle {
         devTools: !ghostSandboxDevToolsDisabled,
       },
     });
-    ghostWebContentsIds.add(this.win.webContents.id);
-    logicWebContentsToGhost.set(this.win.webContents.id, installedGhostStoragePart(ghost));
+    this.logicWebContentsId = this.win.webContents.id;
+    ghostWebContentsIds.add(this.logicWebContentsId);
+    logicWebContentsToGhost.set(this.logicWebContentsId, installedGhostStoragePart(ghost));
     this.win.webContents.on('render-process-gone', (_event, details) => {
       if (this.destroyed) return;
       // 延迟一拍再收尸:不在 Chromium 事件分发中途销毁窗口(重入风险)。
@@ -959,10 +986,8 @@ class ElectronSandboxHandle implements SandboxHandle {
     this.destroyed = true;
     const win = this.win;
     this.win = null;
-    if (win) {
-      logicWebContentsToGhost.delete(win.webContents.id);
-      if (!win.isDestroyed()) win.destroy();
-    }
+    logicWebContentsToGhost.delete(this.logicWebContentsId);
+    if (win && !win.isDestroyed()) win.destroy();
   }
 
   crashForTest(): void {

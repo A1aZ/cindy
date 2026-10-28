@@ -128,6 +128,10 @@ const STOP_WAIT_REFINEMENT_FAILSAFE_MS = 90_000;
 const START_READY_STOP_TIMEOUT_MS = 10_000;
 const INLINE_ERROR_AUTO_DISMISS_MS = 8_000;
 
+// Hooks in a main-group and a topic share one WebContents mute lease. Only
+// the latest recording may restore it, including while an older mute IPC waits.
+let systemAudioMuteOwner: symbol | null = null;
+
 export type VoiceInputRefinementSnapshot = {
   basedOnText: string;
   refinedText: string;
@@ -218,6 +222,7 @@ export function useVoiceInput(
   const engineRef = useRef<WebMicAudioEngine | null>(null);
   const runIdRef = useRef<string | null>(null);
   const systemAudioMutedRef = useRef(false);
+  const systemAudioMuteOwnerRef = useRef<symbol | null>(null);
   // The mute IPC takes 50-150ms (osascript on macOS). Recording start fires it
   // and forgets, so a fast stop may race with mute completion. Tracking the
   // in-flight promise lets restoreSystemAudioForRecording await it before
@@ -472,15 +477,16 @@ export function useVoiceInput(
     if (!supportsSystemAudioMute()) {
       return Promise.resolve();
     }
-    if (systemAudioMutedRef.current) {
-      return pendingSystemAudioMutePromiseRef.current ?? Promise.resolve();
-    }
-    if (pendingSystemAudioMutePromiseRef.current) {
-      return pendingSystemAudioMutePromiseRef.current;
-    }
+    const owner = Symbol('dictation-system-audio');
+    systemAudioMuteOwner = owner;
+    systemAudioMuteOwnerRef.current = owner;
+    systemAudioMutedRef.current = false;
     const mutePromise = feedback.catch(() => undefined)
-      .then(() => window.electronAPI.voiceInput.muteSystemAudio())
+      .then(() => systemAudioMuteOwner === owner
+        ? window.electronAPI.voiceInput.muteSystemAudio()
+        : null)
       .then((result) => {
+        if (!result || systemAudioMuteOwnerRef.current !== owner || systemAudioMuteOwner !== owner) return;
         if (result.ok) {
           systemAudioMutedRef.current = true;
         } else {
@@ -501,10 +507,19 @@ export function useVoiceInput(
 
   const restoreSystemAudioForRecording = useCallback(async () => {
     if (!supportsSystemAudioMute()) return;
+    const owner = systemAudioMuteOwnerRef.current;
+    if (!owner) return;
     // Await any in-flight mute so we never skip a restore for a mute that
     // hadn't yet flipped systemAudioMutedRef when restore began.
     const pendingMute = pendingSystemAudioMutePromiseRef.current;
     if (pendingMute) await pendingMute;
+    if (systemAudioMuteOwnerRef.current !== owner) return;
+    systemAudioMuteOwnerRef.current = null;
+    if (systemAudioMuteOwner !== owner) {
+      systemAudioMutedRef.current = false;
+      return;
+    }
+    systemAudioMuteOwner = null;
     if (!systemAudioMutedRef.current) return;
     systemAudioMutedRef.current = false;
     try {
@@ -536,7 +551,7 @@ export function useVoiceInput(
 
     await stopEngine();
     try {
-      await window.electronAPI.voiceInput.cancel(runId ? { runId } : undefined);
+      if (runId) await window.electronAPI.voiceInput.cancel({ runId });
     } finally {
       await restoreSystemAudioForRecording();
       commitUsageStats();
@@ -1712,13 +1727,17 @@ export function useVoiceInput(
   const cancel = useCallback(async () => {
     const runId = ownedRunIdRef.current ?? runIdRef.current;
     invalidateStartAttempt();
+    const cancelledAttempt = startAttemptIdRef.current;
     resolveStopCompletion();
     await stopEngine();
     try {
-      await window.electronAPI.voiceInput.cancel(runId ? { runId } : undefined);
+      // A pending start is invalidated above and cleaned by its late runId.
+      // An unscoped cancel could instead target another composer's new run.
+      if (runId) await window.electronAPI.voiceInput.cancel({ runId });
     } finally {
       await restoreSystemAudioForRecording();
     }
+    if (startAttemptIdRef.current !== cancelledAttempt) return;
     commitUsageStats();
     setDraftText('');
     setDraftSource(null);
@@ -1732,6 +1751,7 @@ export function useVoiceInput(
   }, [commitUsageStats, invalidateStartAttempt, resolveStopCompletion, restoreEditorFocusAfterVoiceInput, restoreSystemAudioForRecording, setVoiceState, stopEngine]);
 
   const stop = useCallback(async (options?: VoiceInputStopOptions) => {
+    const attemptId = startAttemptIdRef.current;
     const currentState = stateRef.current;
     if (currentState === 'submitting' || currentState === 'refining') {
       await waitForBusyCompletion(Boolean(options?.waitForRefinement));
@@ -1746,6 +1766,7 @@ export function useVoiceInput(
     // Include the final worklet sub-chunk before deciding there was no sound.
     // A silent recording must not wait for a pending cloud start or final text.
     await drainAndStopEngine();
+    if (!isActiveStartAttempt(attemptId)) return;
     if (stateRef.current === 'error') {
       throw new Error(lastErrorRef.current ?? 'Voice input failed.');
     }
@@ -1765,6 +1786,7 @@ export function useVoiceInput(
       restorePromise = restoreSystemAudioAndNotifyEndCue(options);
       if (startReady) {
         const startResult = await waitForStartReadyWhileStopping(startReady);
+        if (!isActiveStartAttempt(attemptId)) return;
         if (!startResult.ok) {
           invalidateStartAttempt();
           await restorePromise;
@@ -1787,11 +1809,7 @@ export function useVoiceInput(
         await drainQueuedAudioToMain();
       } else {
         invalidateStartAttempt();
-        try {
-          await window.electronAPI.voiceInput.cancel();
-        } finally {
-          await restorePromise;
-        }
+        await restorePromise;
         commitUsageStats();
         setDraftText('');
         setDraftSource(null);
@@ -1807,6 +1825,7 @@ export function useVoiceInput(
     } else {
       await drainAndStopEngine();
     }
+    if (!isActiveStartAttempt(attemptId) || ownedRunIdRef.current !== runId) return;
     runIdRef.current = null;
     restorePromise ??= restoreSystemAudioAndNotifyEndCue(options);
 
@@ -1842,7 +1861,7 @@ export function useVoiceInput(
       setVoiceState('done');
       restoreEditorFocusAfterVoiceInput();
     }
-  }, [cancel, notifyReadyForEndCue, commitUsageStats, dismissInlineError, drainAndStopEngine, drainQueuedAudioToMain, formatVoiceInputStartError, invalidateStartAttempt, reportVoiceInputError, resolveStopCompletion, restoreEditorFocusAfterVoiceInput, restoreSystemAudioAndNotifyEndCue, setVoiceState, waitForBusyCompletion, waitForStartReadyWhileStopping]);
+  }, [cancel, notifyReadyForEndCue, commitUsageStats, dismissInlineError, drainAndStopEngine, drainQueuedAudioToMain, formatVoiceInputStartError, invalidateStartAttempt, isActiveStartAttempt, reportVoiceInputError, resolveStopCompletion, restoreEditorFocusAfterVoiceInput, restoreSystemAudioAndNotifyEndCue, setVoiceState, waitForBusyCompletion, waitForStartReadyWhileStopping]);
 
   const stopWithGate = useCallback(async (options?: VoiceInputStopOptions) => {
     if (stopInFlightPromiseRef.current) return stopInFlightPromiseRef.current;

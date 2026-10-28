@@ -302,11 +302,14 @@ Chat Server 声明 `capabilities.groupSingleSpeaker: 1` 时，服务器群按下
 听写及提交／润色期间关闭 @ 候选并禁止选择改写草稿，处理结束后恢复候选；避免点名操作取消正在进行的听写。
 主群与话题同时打开时，一次只录一份草稿。关闭话题、切换群或账号后，迟到的识别结果不写入另一个草稿；
 关闭未录音的输入框不影响另一个输入框的录音。全局浮窗入口保留。
+连接尚未完成时关闭话题并立即在主群开始听写，同一窗口的启动、停止和取消按顺序执行，替换前完成旧连接的释放。
+排队及释放等待期间账号或窗口失效，旧启动不得继续分配或登记连接；迟到的停止、取消及系统声音恢复只能处理原录音，不能影响新录音。
 识别或连接出错后释放本次录音及其快捷键占用，保留错误提示；后续关闭或切群不会误取消另一份录音。
 启动返回前收到的认证过期事件仍显示已有的重新登录提示；语音插入与润色保留未被替换的已选 @ 身份。
 语音输入沿用各输入框的字数规则：主群保留超限文字供编辑，并由现有字数提示阻止发送；
 话题的语音提交或润色若使正文超过上限，保留本次替换前的草稿，不截断正文，每次录音至多提示一次字数限制。
-实现见 `BotGroupComposer.tsx`、`useBotGroupVoiceInput.ts`；回归见 `useBotGroupVoiceInput.test.tsx`。
+实现见 `BotGroupComposer.tsx`、`useBotGroupVoiceInput.ts`、`voice-input/index.ts`、`VoiceInputOperationQueue.ts`；
+回归见 `useBotGroupVoiceInput.test.tsx`、`voiceInputLifecycle.test.ts`、`VoiceInputOperationQueue.test.ts`。
 
 ## 6. 本地旧群的限制（服务器群见第 10 节）
 

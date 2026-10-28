@@ -11,7 +11,8 @@ import type { VoiceInputShortcut } from '@/voice-input/shortcut';
 const mocks = vi.hoisted(() => ({
   t: (key: string) => key,
   expired: vi.fn(),
-  settings: { language: 'auto', refinementEnabled: true, fastActivationEnabled: false, shortcut: null as VoiceInputShortcut | null, dictionaryEntries: [], refinementInstructions: '' },
+  settings: { language: 'auto', refinementEnabled: true, fastActivationEnabled: false, muteSystemAudio: false, shortcut: null as VoiceInputShortcut | null, dictionaryEntries: [], refinementInstructions: '' },
+  captureEngine: null as { stop: () => Promise<void>; drainBufferedAudio: () => Promise<void> } | null,
   guards: vi.fn(),
   owner: { dataOwnerId: 'test-owner', generation: 1 },
 }));
@@ -33,7 +34,8 @@ vi.mock('@/voice-input/WebMicAudioEngine', () => ({
 }));
 vi.mock('@/voice-input/startGuards', () => ({ resolveVoiceInputStartGuards: mocks.guards }));
 vi.mock('@/voice-input/captureSession', () => ({
-  startVoiceInputCaptureSession: async (input: { onSoundDetected: () => void }) => {
+  startVoiceInputCaptureSession: async (input: { onSoundDetected: () => void; setEngine: (engine: unknown) => void }) => {
+    if (mocks.captureEngine) { input.setEngine(mocks.captureEngine); mocks.captureEngine = null; }
     input.onSoundDetected();
     return { ok: true, drainPendingChunks: () => {} };
   },
@@ -52,6 +54,7 @@ import { Tooltip } from '@/components/ui/tooltip';
 import { toast } from '@/lib/toast';
 import { BOT_GROUP_MESSAGE_MAX_CHARS } from '../../../../shared/botGroupChat';
 import { armDetachedVoiceDraftPersist, clearArmedDetachedVoiceDraft, hasArmedDetachedVoiceDraft } from '@/components/new-chat/composerSendOwnership';
+import { VoiceInputOperationQueue } from '../../../../main/voice-input/VoiceInputOperationQueue';
 
 type Trigger = { id: string; phase?: 'start' | 'tap' | 'end' };
 const events = new Set<(event: VoiceInputRendererEvent) => void>();
@@ -64,6 +67,7 @@ const api = {
   claimGlobalShortcutTrigger: vi.fn(),
   prewarm: vi.fn().mockResolvedValue({ ok: true }),
   start: vi.fn(), stop: vi.fn(), cancel: vi.fn(), drainAudioQueue: vi.fn().mockResolvedValue(undefined),
+  muteSystemAudio: vi.fn().mockResolvedValue({ ok: true }), restoreSystemAudio: vi.fn().mockResolvedValue({ ok: true }),
 };
 const segment = { id: 'segment', source: 'mic' as const, status: 'submitted' as const, text: 'spoken', updatedAt: 1 };
 function submit(runId = 'run') {
@@ -83,6 +87,7 @@ function Harness({ id, initial = '', disabled = false }: { id: string; initial?:
     <output data-testid={`${id}-state`}>{voice.state}</output>
     <button onClick={() => voice.start()}>start {id}</button>
     <button onClick={() => { void voice.stop(); }}>stop {id}</button>
+    <button onClick={() => { void voice.cancel(); }}>cancel {id}</button>
   </div>;
 }
 const input = (id: string) => screen.getByRole('textbox', { name: id }) as HTMLTextAreaElement;
@@ -93,6 +98,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.owner.generation = 1;
   mocks.settings.shortcut = null;
+  mocks.settings.muteSystemAudio = false;
+  mocks.captureEngine = null;
+  api.muteSystemAudio.mockReset().mockResolvedValue({ ok: true });
+  api.restoreSystemAudio.mockReset().mockResolvedValue({ ok: true });
   mocks.guards.mockResolvedValue({ ok: true, permission: { ok: true }, readiness: { ok: true } });
   api.start.mockResolvedValue({ ok: true, runId: 'run' });
   api.cancel.mockResolvedValue({ ok: true });
@@ -102,6 +111,91 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clearArmedDetachedVoiceDraft(); events.clear(); shortcuts.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('group textarea dictation ownership (#6650)', () => {
+  // Reviewer follow-up: the old hook can resume after its audio drain and after
+  // the replacement has started. Whole fake IPC calls are observable here;
+  // registered-main tests separately cover actual routing and mute restoration.
+  it.each(['stop', 'cancel'])('does not send a late unowned %s after a pending topic is closed', async operation => {
+    let finishEngine!: () => void;
+    let finishStart!: (value: { ok: true; runId: string }) => void;
+    const engineGate = new Promise<void>(resolve => { finishEngine = resolve; });
+    const startGate = new Promise<{ ok: true; runId: string }>(resolve => { finishStart = resolve; });
+    mocks.captureEngine = { stop: () => engineGate, drainBufferedAudio: () => engineGate };
+    api.start.mockReturnValueOnce(startGate);
+    const view = render(<><Harness key="group" id="group" /><Harness key="thread" id="thread" /></>);
+    await start('thread');
+    act(() => { fireEvent.click(screen.getByText(`${operation} thread`)); });
+    view.rerender(<Harness key="group" id="group" />);
+    await start('group');
+    expect(api.start).toHaveBeenCalledTimes(2);
+    await act(async () => { finishEngine(); finishStart({ ok: true, runId: 'thread-run' }); });
+    expect(api.cancel.mock.calls.every(([payload]) => Boolean(payload?.runId))).toBe(true);
+    expect(api.stop).not.toHaveBeenCalled();
+    expect(screen.getByTestId('group-state').textContent).toBe('listening');
+  });
+
+  it('does not restore a replacement audio lease when an old topic mute resolves late', async () => {
+    mocks.settings.muteSystemAudio = true;
+    let finishMute!: (value: { ok: true }) => void;
+    api.muteSystemAudio.mockReturnValueOnce(new Promise(resolve => { finishMute = resolve; }));
+    const view = render(<><Harness key="group" id="group" /><Harness key="thread" id="thread" /></>);
+    await start('thread');
+    expect(api.muteSystemAudio).toHaveBeenCalledOnce();
+    view.rerender(<Harness key="group" id="group" />);
+    await start('group');
+    expect(api.muteSystemAudio).toHaveBeenCalledTimes(2);
+    await act(async () => { finishMute({ ok: true }); });
+    expect(api.restoreSystemAudio).not.toHaveBeenCalled();
+    expect(screen.getByTestId('group-state').textContent).toBe('listening');
+  });
+
+  it('closes a topic during provider startup and starts the main-group run without losing either cleanup or draft ownership', async () => {
+    // Real renderer hooks + the main lifecycle queue; providers/IPC are in-memory.
+    // Delay both connects to reproduce the reviewer path without network or clocks.
+    const queue = new VoiceInputOperationQueue();
+    let finishThread!: () => void;
+    let finishGroup!: () => void;
+    const threadConnect = new Promise<void>(resolve => { finishThread = resolve; });
+    const groupConnect = new Promise<void>(resolve => { finishGroup = resolve; });
+    const disposed: string[] = [];
+    let active: string | null = null;
+    const connect = vi.fn(async (runId: string, ready: Promise<void>) => {
+      if (active) disposed.push(active);
+      active = null;
+      await ready;
+      active = runId;
+      return { ok: true as const, runId };
+    });
+    api.start
+      .mockImplementationOnce(() => queue.run(1, () => connect('thread-run', threadConnect)))
+      .mockImplementationOnce(() => queue.run(1, () => connect('run', groupConnect)));
+    api.cancel.mockImplementation((payload?: { runId?: string }) => queue.run(1, async () => {
+      if (active && (!payload?.runId || payload.runId === active)) {
+        disposed.push(active);
+        active = null;
+      }
+      return { ok: true };
+    }));
+    const view = render(<><Harness key="group" id="group" initial="main draft" /><Harness key="thread" id="thread" /></>);
+    await start('thread');
+    expect(connect).toHaveBeenCalledTimes(1);
+    view.rerender(<Harness key="group" id="group" initial="main draft" />);
+    input('group').setSelectionRange('main draft'.length, 'main draft'.length);
+    await start('group');
+    expect(api.start).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(1);
+    await act(async () => { finishThread(); });
+    expect(disposed).toEqual(['thread-run']);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(api.cancel).toHaveBeenCalledWith({ runId: 'thread-run' });
+    await act(async () => { finishGroup(); });
+    expect(active).toBe('run');
+    expect(disposed).toEqual(['thread-run']);
+    act(() => { submit('thread-run'); });
+    expect(screen.getByTestId('group-saved').textContent).toBe('main draft');
+    act(() => { submit(); emit({ type: 'state', runId: 'run', state: 'done' }); });
+    expect(screen.getByTestId('group-saved').textContent).toBe('main draftspoken');
+  });
+
   // PR #6656: prior tests lacked DOM/native duplicate delivery and error
   // before disposal. Real hook, fake 450ms keys and error -> switch/unmount;
   // unit tier with native IPC faked, no device/cloud or real waits.

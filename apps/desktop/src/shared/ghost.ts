@@ -12,6 +12,7 @@ import {
   type GhostManifestLocales,
 } from '@cindy/plugin-protocol';
 import { PLUGIN_STORAGE_PART_RE } from './pluginStoragePartPattern.js';
+import { PLUGIN_TASK_PERMISSION_MODES } from './pluginTasks.js';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './locale';
 
 /**
@@ -197,9 +198,8 @@ export interface GhostCardNeeds {
  * agent 在**插件专属 errand 会话**里跑一轮,并把最终回复文字取回。与
  * background 同为高风险加档,插件详情中单列。安全边界(全部主机代码强制):
  * - 任务文本只进普通 user 消息,绝不进 system prompt(与 agent-request 同纪律);
- * - errand 会话默认跑在专属对话目录、权限档默认 plan(只读);用户可在
- *   设置里按插件放开到 acceptEdits/auto,**永不提供 bypassPermissions**
- *   (2026-07-31 Lizi 定案);
+ * - errand 会话默认跑在专属对话目录、保留历史缺省 plan 及原 Agent 行为;
+ *   用户可在插件设置选择 ask/auto/bypassPermissions，插件请求不能自报授权;
  * - errand 会话在侧边栏可见、可旁观、可随时停,不存在隐身会话(errand 不支持
  *   隐藏;普通任务的后台隐藏只经 `tasks` + `hiddenTasks` 声明,见下);
  * - 每插件同时最多 1 单在途,任务表在内存(重启即丢,查询按"查无此单、
@@ -1547,7 +1547,7 @@ export interface GhostManifest {
    * 页用它避免抖动)。须与 settingsHtml 成对声明。
    */
   settingsHeight?: number;
-  /** 是否显示宿主「模型与任务」默认配置卡；缺省或 true 显示，false 仅隐藏卡片。 */
+  /** 本插件是否使用宿主默认配置卡；缺省/true 启用，false 隐藏且不读取该插件的卡片配置。 */
   showTaskPreferences?: boolean;
   /**
    * 卡片能力；空对象表示基础卡片渲染。
@@ -6547,8 +6547,8 @@ export type GhostPipeAgentResult =
  * 交给插件**专属 errand 会话**里的 agent 跑一轮,最终回复文字取回给插件。
  * 须声明 'agent' 卡槽 + `agent.errand: true`(插件详情高风险能力单列)。
  * agent/模型/effort/fast/供应商/权限档/工作目录由用户在插件详情页配置
- * (缺省跟随新建草稿偏好;权限档默认 plan 只读,永不提供 bypassPermissions,
- * 2026-07-31 Lizi 定案);任务文本只进普通 user 消息,绝不进 system prompt。 */
+ * (缺省跟随新建草稿偏好;保留历史缺省 plan，用户可选择 ask/auto/bypassPermissions);
+ * 任务文本只进普通 user 消息,绝不进 system prompt。 */
 
 /** 任务描述上限(与 agent-request 的最终消息同量级)。 */
 export const GHOST_ERRAND_MAX_TASK_CHARS = 32_768;
@@ -6566,11 +6566,10 @@ export const GHOST_ERRAND_MIN_INTERVAL_MS = 10_000;
 export const GHOST_ERRAND_SESSION_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
- * 插件创建普通任务使用 ask；plan 仅保留旧配置兼容，其执行语义由原 Agent 决定。
- * acceptEdits / auto 由用户显式选择。**bypassPermissions 刻意不在此列**(2026-07-31 定案:
- * 被骗的插件配上不设防会话 = 无人看守的用户全权,风险不可接受)。
+ * 插件新建任务与普通任务使用同一三档；启用卡片时受本插件设置上限约束，隐藏时不读取卡片。
+ * plan / acceptEdits 仅保留旧配置及旧接口兼容，不自动升权或丢弃历史选择。
  */
-export const GHOST_ERRAND_PERMISSION_MODES = ['ask', 'plan', 'acceptEdits', 'auto'] as const;
+export const GHOST_ERRAND_PERMISSION_MODES = [...PLUGIN_TASK_PERMISSION_MODES, 'plan', 'acceptEdits'] as const;
 export type GhostErrandPermissionMode = (typeof GHOST_ERRAND_PERMISSION_MODES)[number];
 
 /** 上行:派活提交与取件查询。 */
@@ -7062,7 +7061,7 @@ export interface GhostAppContextResult {
   };
 }
 
-/** Read-only local agent routes. No credentials or provider configuration. */
+/** Read-only agent routes. No credentials or provider configuration. */
 export type GhostAgentModelsResult =
   | {
       ok: true;
@@ -7076,6 +7075,8 @@ export type GhostAgentModelsResult =
         efforts: string[];
         defaultEffort: string | null;
       }>;
+      agentDeviceId?: string;
+      locations?: Array<{ agentDeviceId: string; name: string }>;
     }
   | { ok: false; errorCode: 'PERMISSION_DENIED' | 'NOT_AVAILABLE'; message: string };
 

@@ -136,11 +136,14 @@ Library 请求同时绑定迁移代次和安装批准，根解析、排队及开
   但当前 Host 不展示、不授权、也不因此阻止安装或发布。
   未来 Host 识别该字段后，才按正常的能力展示和运行时守门链路启用。不能把
   未知字段猜成现有权限，也不能让它意外获得能力。
-- 顶层 `showTaskPreferences?: boolean` 仅控制宿主「模型与任务」默认配置卡的显示。
-  省略或 `true` 沿用原有能力条件；`false` 隐藏 Desktop 和手机上的该卡，由插件提供自己的配置界面。
-  任务 API、已有配置的读取和执行规则、权限检查及安装确认均不改变。此字段不是能力授权，
-  无相应能力时设为 `true` 也不会新增卡片。旧客户端不识别时仍显示原卡片。
-  实现见 `ghostPluginViewModel.ts`、`mobilePageService.ts`；作者用法见 `FORGE_GUIDE` §4.8。
+- 顶层 `showTaskPreferences?: boolean` 由每个插件在自己的 manifest 声明。
+  省略或 `true` 保持该插件的卡片配置、权限限制和执行规则；`false` 隐藏该插件的 Desktop/手机卡片，
+  且运行期不读取、不使用、不回写其模型、目录和权限配置。旧数据保留，重新启用后恢复。
+  此选择仅影响声明它的插件，不影响其它插件或全局设置。隐藏字段本身不授予宿主能力，
+  能力批准、账号、任务归属、目录与 Session/Plan 校验继续执行。
+  隐藏插件的新任务权限由插件参数决定，包括完全访问；不增加独立权限上限或逐次宿主确认。
+  旧 Host 可能只隐藏 UI；依赖停用语义须使用实现此契约的 Host。
+  实现见 `getPluginTaskDefaults`、`ghostPluginViewModel.ts`、`mobilePageService.ts`；作者用法见 `FORGE_GUIDE` §4.8。
 - `agent.tasks` 另需 Host receipt 的显式任务能力批准事实；旧 receipt 没有该事实时，
   只在首次任务能力调用通过既有宿主权限界面确认，原插件的启用态、其它能力、凭证和
   设置保持不变。拒绝、窗口不可用、账号或安装版本变化均不授予任务权限；同能力更新
@@ -213,7 +216,7 @@ Library 请求同时绑定迁移代次和安装批准，根解析、排队及开
 
 ### 3.1 安装与自动更新
 
-插件普通任务创建的 Worker 目录由宿主校验：允许当前任务目录及解析符号链接后仍在其中的子目录、插件 AI 配置目录、用户通过目录选择器授权的确切目录。Library 绑定本身不授予 Agent 工作目录权限，协同计划也不构成目录授权。登记计划和实际创建 Worker 均复核授权；账号、配置或任务归属发生变化时拒绝继续创建。
+插件普通任务创建的 Worker 目录由宿主校验：允许当前任务目录及解析符号链接后仍在其中的子目录、已启用默认卡的插件 AI 配置目录、用户通过目录选择器授权的确切目录。Library 绑定本身不授予 Agent 工作目录权限，协同计划也不构成目录授权。登记计划和实际创建 Worker 均复核授权；账号、配置或任务归属发生变化时拒绝继续创建。
 这些目录授权只标识任务所在电脑的资源，不授权另一台电脑的同名目录。插件自有 Lead 不支持通过 `executionDeviceId` 新建跨设备 Worker：有无团队计划均在目录探测、槽位预留和远端创建之前拒绝。普通用户任务的跨设备 Worker 及插件既有 Worker 路径不变；不新增插件批准、配置或迁移。
 同一次 Worker 创建沿用最初的账号与任务归属，在启动 Session、续租完成后、写入 Worker 前再次复核。
 复核失败沿用既有尽力清理路径（关闭、移除运行缓存、归档 Session 与释放预留），不派发初始任务；新团队沿用创建失败收尾。
@@ -487,12 +490,18 @@ Library 请求同时绑定迁移代次和安装批准，根解析、排队及开
   缺省从宿主验证的发起任务继承，面板无发起任务则使用当前新任务的完整选择，不优先翻找 Claude Code 的历史草稿。模型选择不授予权限或目录。
   保存、新建和插件派发前复用普通独立任务的模型／供应商／Agent 准入，不另建目录或选择器。
   连接状态不等于额度、网络及远端参数一定可用；执行失败如实返回，不静默换型号或账号。
-- 插件新建普通任务的权限仅来自用户的插件设置或既有宿主确认流程，默认普通任务的 `ask`，允许
-  用户显式选择 `acceptEdits`／`auto`，不新增 `bypassPermissions`；不继承发起任务的权限。
-  旧 errand 适配器保留历史缺省 `plan` 与原 Agent 行为；已有任务及显式历史设置不自动改权。
+- 已启用默认卡的插件新建普通任务，其权限沿用用户插件设置或既有宿主确认流程，默认普通任务的 `ask`，允许
+  用户显式选择默认权限（`ask`）／自动审批（`auto`）／完全访问（`bypassPermissions`）；不继承发起任务的权限。
+  这类插件的 `tasks.create` 与 project 的 `targets.send` 可选 `permissionMode`，仅在当前用户插件权限上限内
+  选择本次新任务的 ask／auto／bypassPermissions；参数本身不授予权限、不写插件默认设置。
+  完全访问须来自用户在插件设置中的选择；旧 `requestWriteAccess` 仍只支持 acceptEdits／auto，
+  不增加完全访问确认弹窗，也不因复用该流程降低用户已授权的上限。
+  Main 在创建前及异步准备后复核；省略参数保持旧行为，已有任务／伙伴投递不接受权限覆盖。
+  旧 errand 适配器保留历史缺省 `plan` 与原 Agent 行为；历史 plan／acceptEdits 配置保留，但不列入新建接口和设置页的新选项。已有任务不自动改权。
   不把历史 `plan` 值宣称为跨 Agent 的只读保证，也不为它改造各 Agent 的权限引擎。
   旧存储文件名、键及 IPC 保持兼容，升级不丢配置、不重批权限。来源优先级、复用和恢复
   详见 [插件普通任务接口](plugin-task-api-implementation.md#模型配置与创建来源)。
+  隐藏卡片的插件不读取该上限，可通过已批准任务能力的创建参数自行选择；权限确认只改变目标 Session，不写回停用卡片。
 - 附件、媒体、目录和保存路径通过归属校验后的 grant／deposit／ledger 交接，**禁止把
   宿主绝对路径或不必要的字节暴露给沙箱**。媒体字节须走
   [`media-storage-and-protocols.md`](media-storage-and-protocols.md) 的统一入库。
@@ -925,13 +934,18 @@ IPC 时追加对应专项规则要求的验证。
 ### 只读 Agent 模型目录
 
 插件自己的同源 `GET /agent-models` 面向 settings、panel、mainView 与电子脑。
-无需新增 manifest 权限，不改变存量批准状态。仅投影已连接来源中可用于新任务的本机
-`id/name/agent/providerId/providerName/efforts/defaultEffort/visible`，来源级强度不能被跨来源合并。
-visible 复用当前账号模型选择器的用户开关与目录默认值；隐藏项保留供显式展开，偏好未就绪不伪造默认。
-使用 ProviderService 的 `allowSideEffects:false` 读取，不主动发现或认领凭证，不调用模型。
-不暴露 ProviderView、auth、账号 identity 或 endpoint；响应 no-store、仅 GET、无参数，
-检查插件在装启用与 owner 归属，异步返回前复核。旧 Host 404 时插件应明确提示升级。
-此端点不覆盖远程 SSH 模型，执行前仍需核验真实路由。
+无需新增 manifest 权限，不改变存量批准状态。无参时投影已连接来源中可用于新任务的本机
+`id/name/agent/providerId/providerName/efforts/defaultEffort/visible`，并追加 `locations`
+（同账号其他电脑与生效中的供应商分享，不含本机；读失败则省略）。可选查询参数只有
+`agent_device_id`：带上后读那台允许远程调用的来源并回显 `agentDeviceId`，不查 `locations`。
+来源级强度不能被跨来源合并。无参 visible 复用当前账号模型选择器的用户开关与目录默认值；
+带参 visible 只用模型目录默认值，不套本机开关。隐藏项保留供显式展开，偏好未就绪不伪造默认。
+使用 ProviderService 的 `allowSideEffects:false` 读取本机清单；带参经 `readDeviceProviderViews`
+跨设备读取。不主动发现或认领凭证，不调用模型。不暴露 ProviderView、auth、账号 identity 或 endpoint；
+响应 no-store、仅 GET。其他参数、重复参数、空或超过 128 字符的 id 返回 400；格式合法但读不到
+（离线、未知、没开远程控制）返回 503 且 `errorCode` 为 `NOT_AVAILABLE`，响应里没有本机条目。
+旧 Host 带任何参数都返回 400。检查插件在装启用与 owner 归属，异步返回前复核。
+旧 Host 404 时插件应明确提示升级。此端点不覆盖远程 SSH 模型，执行前仍需核验真实路由。
 
 ### 宿主统一模型选择器（新增接口，尚未发布）
 
